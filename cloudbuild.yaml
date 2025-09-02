@@ -1,0 +1,31 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', '${_AR_REPO}/order-collector:${SHORT_SHA}', '.']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '${_AR_REPO}/order-collector:${SHORT_SHA}']
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      [
+        'run','deploy','${_SERVICE_NAME}',
+        '--image','${_AR_REPO}/order-collector:${SHORT_SHA}',
+        '--region','${_REGION}',
+        '--platform','managed',
+        '--port','8080',
+        '--allow-unauthenticated',
+        '--set-env-vars','IRRAKIDS_STORE_DOMAIN=${_IRRAKIDS_STORE_DOMAIN},SHOPIFY_PASSWORD=${_SHOPIFY_PASSWORD},SHOPIFY_API_KEY=${_SHOPIFY_API_KEY},SHOPIFY_API_VERSION=2025-01'
+      ]
+
+substitutions:
+  _AR_REPO: 'europe-west1-docker.pkg.dev/PROJECT/REPO'
+  _SERVICE_NAME: 'order-collector'
+  _REGION: 'europe-west1'
+  _IRRAKIDS_STORE_DOMAIN: 'yourstore.myshopify.com'
+  _SHOPIFY_PASSWORD: 'shpat_or_private_app_password'
+  _SHOPIFY_API_KEY: ''
+
+images:
+  - '${_AR_REPO}/order-collector:${SHORT_SHA}'
+

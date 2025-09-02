@@ -1,0 +1,33 @@
+name: Deploy to Cloud Run
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-and-deploy:
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: 'google-github-actions/auth@v2'
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
+          service_account: ${{ secrets.GCP_RUN_SA_EMAIL }}
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+      - name: Build & Push
+        run: |
+          gcloud builds submit --tag ${{ secrets.GCP_ARTIFACT_REPO }}/order-collector:${{ github.sha }}
+      - name: Deploy
+        run: |
+          gcloud run deploy order-collector \
+            --image ${{ secrets.GCP_ARTIFACT_REPO }}/order-collector:${{ github.sha }} \
+            --region europe-west1 \
+            --platform managed \
+            --port 8080 \
+            --allow-unauthenticated \
+            --set-env-vars IRRAKIDS_STORE_DOMAIN=${{ secrets.IRRAKIDS_STORE_DOMAIN }},SHOPIFY_PASSWORD=${{ secrets.SHOPIFY_PASSWORD }},SHOPIFY_API_KEY=${{ secrets.SHOPIFY_API_KEY }},SHOPIFY_API_VERSION=2025-01
+
