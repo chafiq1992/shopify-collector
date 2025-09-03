@@ -150,7 +150,10 @@ export default function App(){
       .filter(v => selected.includes(v.id))
       .map(v => v.title || v.sku || "")
       .join(", ");
-    await API.appendNote(order.id, `OUT: ${titles}`);
+    await Promise.all([
+      API.appendNote(order.id, `OUT: ${titles}`),
+      API.addTag(order.id, "out"),
+    ]);
     setSelectedOutMap(prev => ({ ...prev, [order.id]: new Set() }));
     gotoNext();
   }
