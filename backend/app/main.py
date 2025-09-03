@@ -102,16 +102,24 @@ class OrderDTO(BaseModel):
     variants: List[OrderVariant] = []
 
 # ---------- Helpers ----------
-def build_query_string(base_query: str, status_filter: Optional[str], tag_filter: Optional[str], search: Optional[str]) -> str:
+def build_query_string(base_query: str, status_filter: Optional[str], tag_filter: Optional[str], search: Optional[str], cod_date: Optional[str]) -> str:
     q = base_query.strip() if base_query else ""
-    # Status filter based on 'pc' tag presence
-    if status_filter == "untagged":
-        q += " -tag:pc"
-    elif status_filter == "tagged_pc":
-        q += " tag:pc"
+    # New filter modes
+    if status_filter == "collect":
+        # unfulfilled and NOT tagged with pc
+        q += " fulfillment_status:unfulfilled -tag:pc"
+    elif status_filter == "verification":
+        # unfulfilled and tagged with pc
+        q += " fulfillment_status:unfulfilled tag:pc"
     # Tag chip filter
     if tag_filter:
         q += f" tag:{tag_filter}"
+    # Optional COD date tag: expect dd/mm/yy, add as tag:"cod DD/MM/YY"
+    if cod_date:
+        tag_val = cod_date.strip()
+        if tag_val:
+            # quote because of space
+            q += f' tag:"cod {tag_val}"'
     # Search: try to search by order name if numeric, else client filters by SKU
     if search:
         s = search.strip().lstrip("#")
@@ -151,14 +159,15 @@ async def health():
 async def list_orders(
     limit: int = Query(25, ge=1, le=100),
     cursor: Optional[str] = None,
-    status_filter: Optional[str] = Query(None, pattern="^(all|untagged|tagged_pc)$"),
+    status_filter: Optional[str] = Query(None, pattern="^(all|collect|verification)$"),
     tag_filter: Optional[str] = None,
     search: Optional[str] = None,
+    cod_date: Optional[str] = Query(None, description="Date for COD tag in format DD/MM/YY"),
 ):
     if not SHOP_DOMAIN or not SHOP_PASSWORD:
         return JSONResponse({"orders": [], "pageInfo": {"hasNextPage": False}, "error": "Shopify env not configured"}, status_code=200)
 
-    q = build_query_string("", status_filter, tag_filter, search)
+    q = build_query_string("", status_filter, tag_filter, search, cod_date)
 
     query = """
     query Orders($first: Int!, $after: String, $query: String) {

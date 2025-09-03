@@ -34,7 +34,8 @@ export default function App(){
   const [tags, setTags] = useState([]);
   const [index, setIndex] = useState(0);
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all"); // all|untagged|tagged_pc
+  const [statusFilter, setStatusFilter] = useState("collect"); // collect|verification
+  const [codDate, setCodDate] = useState(""); // format YYYY-MM-DD from input
   const [tagFilter, setTagFilter] = useState(null);
   const [loading, setLoading] = useState(false);
   const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
@@ -44,11 +45,18 @@ export default function App(){
 
   async function load(){
     setLoading(true);
+    // convert selected date to DD/MM/YY for tag
+    const ddmmyy = codDate ? (()=>{
+      const [y,m,d] = codDate.split("-");
+      if (!y||!m||!d) return "";
+      return `${d}/${m}/${y.slice(-2)}`;
+    })() : "";
     const data = await API.getOrders({
       limit: 25,
-      status_filter: statusFilter === "all" ? "" : statusFilter,
+      status_filter: statusFilter,
       tag_filter: tagFilter || "",
-      search: search || ""
+      search: search || "",
+      cod_date: ddmmyy || ""
     });
     setOrders(data.orders || []);
     setTags(data.tags || []);
@@ -145,9 +153,17 @@ export default function App(){
             />
           </div>
           <div className="flex items-center gap-2 flex-wrap md:col-span-3">
-            <Chip label="All" active={statusFilter === "all"} onClick={()=>setStatusFilter("all")} />
-            <Chip label="Untagged" active={statusFilter === "untagged"} onClick={()=>setStatusFilter("untagged")} />
-            <Chip label="Tagged PC" active={statusFilter === "tagged_pc"} onClick={()=>setStatusFilter("tagged_pc")} />
+            <Chip label="Collect" active={statusFilter === "collect"} onClick={()=>setStatusFilter("collect")} />
+            <Chip label="Verification" active={statusFilter === "verification"} onClick={()=>setStatusFilter("verification")} />
+            <div className="flex items-center gap-2 ml-2">
+              <span className="text-xs uppercase tracking-wide text-gray-400">COD date</span>
+              <input
+                type="date"
+                value={codDate}
+                onChange={(e)=>setCodDate(e.target.value)}
+                className="text-sm border border-gray-300 rounded px-2 py-1"
+              />
+            </div>
             <span className="mx-2 text-xs uppercase tracking-wide text-gray-400">Tags</span>
             {tags.map(t => (
               <Chip key={t} label={t} active={tagFilter === t} onClick={()=>setTagFilter(tagFilter === t ? null : t)} />
