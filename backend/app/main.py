@@ -148,10 +148,8 @@ def build_query_string(
 
 def map_order_node(node: Dict[str, Any]) -> OrderDTO:
     variants: List[OrderVariant] = []
-    # Prefer unfulfilledLineItems if present; fallback to all lineItems
-    li_edges = (node.get("unfulfilledLineItems", {}) or {}).get("edges", [])
-    if not li_edges:
-        li_edges = node.get("lineItems", {}).get("edges", [])
+    # Use all lineItems; Shopify 2025-01 removed unfulfilledLineItems on Order
+    li_edges = node.get("lineItems", {}).get("edges", [])
     for edge in li_edges:
         li = edge["node"]
         img = None
@@ -229,20 +227,6 @@ async def list_orders(
             customer { displayName }
             currentTotalPriceSet { shopMoney { amount currencyCode } }
             totalPriceSet { shopMoney { amount currencyCode } }
-            unfulfilledLineItems(first: 50) {
-              edges {
-                node {
-                  quantity
-                  sku
-                  variant {
-                    id
-                    title
-                    image { url }
-                    product { id }
-                  }
-                }
-              }
-            }
             lineItems(first: 50) {
               edges {
                 node {
