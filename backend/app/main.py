@@ -286,7 +286,8 @@ async def list_orders(
         def product_keys_for_order(o: OrderDTO) -> List[str]:
             keys = []
             for v in o.variants:
-                key = (getattr(v, "product_id", None) or "").strip() or (v.sku or "").strip() or (v.id or "").strip() or (v.title or "").strip()
+                # Strictly prefer product_id; fallback to variant title only if product_id missing
+                key = (getattr(v, "product_id", None) or "").strip() or (v.title or "").strip()
                 if key:
                     keys.append(key)
             return list({k for k in keys})
