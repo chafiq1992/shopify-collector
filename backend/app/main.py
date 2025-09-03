@@ -32,12 +32,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve the built React app (frontend/dist) at /
-STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
-if os.path.isdir(STATIC_DIR):
-    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
-else:
-    print(f"[WARN] Static directory not found at {STATIC_DIR}. Build the frontend first.")
+# NOTE: Static mount is added AFTER API routes to avoid shadowing /api paths.
 
 # ---------- WebSocket Manager ----------
 class ConnectionManager:
@@ -260,4 +255,9 @@ async def append_note(order_gid: str, payload: AppendNotePayload):
     return {"ok": True, "result": data2}
 
 
-
+# --------- Static frontend (mounted last) ---------
+STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+if os.path.isdir(STATIC_DIR):
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+else:
+    print(f"[WARN] Static directory not found at {STATIC_DIR}. Build the frontend first.")
