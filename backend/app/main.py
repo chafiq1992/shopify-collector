@@ -106,11 +106,11 @@ def build_query_string(base_query: str, status_filter: Optional[str], tag_filter
     q = base_query.strip() if base_query else ""
     # New filter modes
     if status_filter == "collect":
-        # unfulfilled and NOT tagged with pc
-        q += " fulfillment_status:unfulfilled -tag:pc"
+        # open, unfulfilled and NOT tagged with pc
+        q += " status:open fulfillment_status:unfulfilled -tag:pc"
     elif status_filter == "verification":
-        # unfulfilled and tagged with pc
-        q += " fulfillment_status:unfulfilled tag:pc"
+        # open, unfulfilled and tagged with pc
+        q += " status:open fulfillment_status:unfulfilled tag:pc"
     # Tag chip filter
     if tag_filter:
         q += f" tag:{tag_filter}"

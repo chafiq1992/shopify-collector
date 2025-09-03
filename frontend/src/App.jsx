@@ -40,6 +40,7 @@ export default function App(){
   const [loading, setLoading] = useState(false);
   const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
   const [selectedOutMap, setSelectedOutMap] = useState({}); // orderId -> Set<variantId>
+  const [showDatePicker, setShowDatePicker] = useState(false);
 
   const wsRef = useRef(null);
 
@@ -56,7 +57,7 @@ export default function App(){
       status_filter: statusFilter,
       tag_filter: tagFilter || "",
       search: search || "",
-      cod_date: ddmmyy || ""
+      cod_date: statusFilter === "collect" ? (ddmmyy || "") : ""
     });
     setOrders(data.orders || []);
     setTags(data.tags || []);
@@ -65,7 +66,7 @@ export default function App(){
     setLoading(false);
   }
 
-  useEffect(() => { load(); }, [statusFilter, tagFilter]);
+  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate]);
 
   // Debounced search
   useEffect(() => {
@@ -142,7 +143,7 @@ export default function App(){
             <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-sm font-medium">{loading ? "…" : total}</span>
           </div>
         </div>
-        <div className="max-w-5xl mx-auto px-4 pb-3 grid grid-cols-1 md:grid-cols-4 gap-2">
+        <div className="max-w-5xl mx-auto px-4 pb-3 flex flex-col gap-2">
           <div className="flex items-center gap-2 bg-gray-100 rounded-xl px-3 py-2">
             <Search className="w-4 h-4 text-gray-500" />
             <input
@@ -152,26 +153,33 @@ export default function App(){
               className="bg-transparent outline-none w-full text-sm"
             />
           </div>
-          <div className="flex items-center gap-2 flex-wrap md:col-span-3">
-            <Chip label="Collect" active={statusFilter === "collect"} onClick={()=>setStatusFilter("collect")} />
-            <Chip label="Verification" active={statusFilter === "verification"} onClick={()=>setStatusFilter("verification")} />
-            <div className="flex items-center gap-2 ml-2">
-              <span className="text-xs uppercase tracking-wide text-gray-400">COD date</span>
+          <div className="flex items-center gap-2">
+            <Chip
+              label="Collect"
+              active={statusFilter === "collect"}
+              onClick={()=>{ setStatusFilter("collect"); setShowDatePicker(true); }}
+            />
+            <Chip
+              label="Verification"
+              active={statusFilter === "verification"}
+              onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); }}
+            />
+          </div>
+          {showDatePicker && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs uppercase tracking-wide text-gray-400">Date</span>
               <input
                 type="date"
                 value={codDate}
-                onChange={(e)=>setCodDate(e.target.value)}
+                onChange={(e)=>{ setCodDate(e.target.value); setShowDatePicker(false); }}
                 className="text-sm border border-gray-300 rounded px-2 py-1"
               />
+              <button
+                className="text-xs text-gray-500 underline"
+                onClick={()=>{ setCodDate(""); setShowDatePicker(false); }}
+              >Clear</button>
             </div>
-            <span className="mx-2 text-xs uppercase tracking-wide text-gray-400">Tags</span>
-            {tags.map(t => (
-              <Chip key={t} label={t} active={tagFilter === t} onClick={()=>setTagFilter(tagFilter === t ? null : t)} />
-            ))}
-            {tagFilter && (
-              <button onClick={()=>setTagFilter(null)} className="text-xs text-blue-600 underline">Clear tag filter</button>
-            )}
-          </div>
+          )}
         </div>
       </header>
 
