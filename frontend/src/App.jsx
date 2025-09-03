@@ -3,7 +3,7 @@ import { CheckCircle, PackageSearch, PackageCheck, Tag, StickyNote, XCircle, Che
 
 // Types (JSDoc only)
 /**
- * @typedef {{ id?: string, image?: string|null, sku?: string|null, title?: string|null, qty: number }} Variant
+ * @typedef {{ id?: string, image?: string|null, sku?: string|null, title?: string|null, qty: number, status?: ('fulfilled'|'unfulfilled'|'removed'|'unknown') }} Variant
  * @typedef {{ id: string, number: string, customer?: string|null, shipping_city?: string|null, variants: Variant[], note?: string|null, tags: string[] }} Order
  */
 
@@ -301,6 +301,11 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                   <div className="flex items-center justify-center w-full h-full text-gray-400"><ImageIcon className="w-8 h-8"/></div>
                 )}
               </div>
+              {v.status && (
+                <span className={`absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-medium shadow
+                  ${v.status === 'fulfilled' ? 'bg-green-600 text-white' : v.status === 'removed' ? 'bg-gray-400 text-white' : v.status === 'unfulfilled' ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-800'}`}
+                >{v.status}</span>
+              )}
               <div className="p-3 flex items-center gap-2">
                 <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
                 <span className="font-mono text-xs bg-gray-50 px-2 py-1 rounded border border-gray-200">{v.sku}</span>

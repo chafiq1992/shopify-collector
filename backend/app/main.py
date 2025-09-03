@@ -94,6 +94,7 @@ class OrderVariant(BaseModel):
     sku: Optional[str] = None
     title: Optional[str] = None
     qty: int
+    status: Optional[str] = None  # fulfilled | unfulfilled | removed | unknown
 
 class OrderDTO(BaseModel):
     id: str
@@ -164,13 +165,27 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         var = li.get("variant")
         if var and var.get("image"):
             img = var["image"].get("url")
+        qty = li.get("quantity", 0) or 0
+        unfulfilled_qty = li.get("unfulfilledQuantity")
+        status_val = "unknown"
+        try:
+            if int(qty) <= 0:
+                status_val = "removed"
+            else:
+                if unfulfilled_qty is None:
+                    status_val = "unfulfilled"
+                else:
+                    status_val = "fulfilled" if int(unfulfilled_qty) == 0 else "unfulfilled"
+        except Exception:
+            status_val = "unknown"
         variants.append(OrderVariant(
             id=(var or {}).get("id"),
             product_id=((var or {}).get("product") or {}).get("id"),
             image=img,
             sku=li.get("sku"),
             title=(var or {}).get("title"),
-            qty=li.get("quantity", 0),
+            qty=qty,
+            status=status_val,
         ))
     # Prefer currentTotalPriceSet if available, else totalPriceSet
     price = 0.0
@@ -243,6 +258,7 @@ async def list_orders(
               edges {
                 node {
                   quantity
+                  unfulfilledQuantity
                   sku
                   variant {
                     id
