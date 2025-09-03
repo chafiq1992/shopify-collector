@@ -114,6 +114,7 @@ def build_query_string(
     collect_prefix: Optional[str] = None,
     collect_exclude_tag: Optional[str] = None,
     verification_include_tag: Optional[str] = None,
+    exclude_out: bool = False,
 ) -> str:
     q = base_query.strip() if base_query else ""
     # New filter modes
@@ -132,6 +133,9 @@ def build_query_string(
     # Tag chip filter
     if tag_filter:
         q += f" tag:{tag_filter}"
+    # Global OUT exclusion
+    if exclude_out:
+        q += " -tag:out"
     # Optional COD date tag: expect dd/mm/yy, add as tag:"cod DD/MM/YY"
     if cod_date:
         tag_val = cod_date.strip()
@@ -199,6 +203,7 @@ async def list_orders(
     collect_prefix: Optional[str] = Query(None, description="Prefix for COD tag, e.g. 'cod'"),
     collect_exclude_tag: Optional[str] = Query(None, description="Exclude tag for collect filter, e.g. 'pc'"),
     verification_include_tag: Optional[str] = Query(None, description="Include tag for verification filter, e.g. 'pc'"),
+    exclude_out: bool = Query(False, description="Exclude orders tagged with 'out'"),
 ):
     if not SHOP_DOMAIN or not SHOP_PASSWORD:
         return JSONResponse({"orders": [], "pageInfo": {"hasNextPage": False}, "error": "Shopify env not configured"}, status_code=200)
@@ -212,6 +217,7 @@ async def list_orders(
         collect_prefix,
         collect_exclude_tag,
         verification_include_tag,
+        exclude_out,
     )
 
     query = """

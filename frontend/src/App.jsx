@@ -46,6 +46,7 @@ export default function App(){
   const [tagFilter, setTagFilter] = useState(null);
   const [loading, setLoading] = useState(false);
   const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
+  const [excludeOut, setExcludeOut] = useState(false);
   const [selectedOutMap, setSelectedOutMap] = useState({}); // orderId -> Set<variantId>
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -78,6 +79,7 @@ export default function App(){
       collect_prefix: preset.collectPrefix,
       collect_exclude_tag: preset.collectExcludeTag,
       verification_include_tag: preset.verificationIncludeTag,
+      exclude_out: excludeOut,
     });
     setOrders(data.orders || []);
     setTags(data.tags || []);
@@ -87,7 +89,7 @@ export default function App(){
     setTotalCount(data.totalCount || (data.orders || []).length);
   }
 
-  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate]);
+  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut]);
 
   // Debounced search
   useEffect(() => {
@@ -189,6 +191,11 @@ export default function App(){
               label="Verification"
               active={statusFilter === "verification"}
               onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); }}
+            />
+            <Chip
+              label="Exclude OUT"
+              active={excludeOut}
+              onClick={()=> setExcludeOut(v => !v)}
             />
           </div>
           {showDatePicker && (
