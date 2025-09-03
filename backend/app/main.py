@@ -261,3 +261,16 @@ if os.path.isdir(STATIC_DIR):
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 else:
     print(f"[WARN] Static directory not found at {STATIC_DIR}. Build the frontend first.")
+
+# Log routes on startup to verify ordering and presence
+@app.on_event("startup")
+async def _log_routes():
+    try:
+        print("[ROUTES] Registered routes in order:")
+        for r in app.router.routes:
+            path = getattr(r, "path", getattr(getattr(r, "router", None), "path", "?"))
+            name = getattr(r, "name", getattr(getattr(r, "app", None), "name", ""))
+            route_type = r.__class__.__name__
+            print(f" - {route_type}: {path} ({name})")
+    except Exception as e:
+        print(f"[ROUTES] Failed to list routes: {e}")
