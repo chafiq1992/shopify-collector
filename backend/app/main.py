@@ -101,6 +101,7 @@ class OrderDTO(BaseModel):
     tags: List[str] = []
     note: Optional[str] = None
     variants: List[OrderVariant] = []
+    total_price: float = 0.0
 
 # ---------- Helpers ----------
 def build_query_string(
@@ -159,6 +160,15 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             title=(var or {}).get("title"),
             qty=li.get("quantity", 0),
         ))
+    # Prefer currentTotalPriceSet if available, else totalPriceSet
+    price = 0.0
+    try:
+        ctps = (node.get("currentTotalPriceSet") or {}).get("shopMoney") or {}
+        tps = (node.get("totalPriceSet") or {}).get("shopMoney") or {}
+        amt = ctps.get("amount") or tps.get("amount") or 0
+        price = float(amt)
+    except Exception:
+        price = 0.0
     return OrderDTO(
         id=node["id"],
         number=node["name"],
@@ -166,6 +176,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         tags=node.get("tags") or [],
         note=node.get("note"),
         variants=variants,
+        total_price=price,
     )
 
 # ---------- Routes ----------
@@ -210,6 +221,8 @@ async def list_orders(
             tags
             note
             customer { displayName }
+            currentTotalPriceSet { shopMoney { amount currencyCode } }
+            totalPriceSet { shopMoney { amount currencyCode } }
             lineItems(first: 50) {
               edges {
                 node {
@@ -239,6 +252,41 @@ async def list_orders(
     if search and not search.strip().lstrip("#").isdigit():
         ss = search.lower().strip()
         items = [o for o in items if any((v.sku or "").lower().find(ss) >= 0 for v in o.variants) or ss in o.number.lower()]
+
+    # Sorting for collect filter:
+    # - Group by the most common product across orders (by SKU, else variant id, else title)
+    # - Within same product group: highest total price first
+    # - Then orders tagged with 'urgent' (case-insensitive)
+    if status_filter == "collect" and items:
+        # Build frequency of products across orders
+        def product_keys_for_order(o: OrderDTO) -> List[str]:
+            keys = []
+            for v in o.variants:
+                key = (v.sku or "").strip() or (v.id or "").strip() or (v.title or "").strip()
+                if key:
+                    keys.append(key)
+            # unique per order to avoid double counting the same product within one order
+            return list({k for k in keys})
+
+        product_freq: Dict[str, int] = {}
+        for o in items:
+            for k in product_keys_for_order(o):
+                product_freq[k] = product_freq.get(k, 0) + 1
+
+        def max_product_frequency(o: OrderDTO) -> int:
+            ks = product_keys_for_order(o)
+            if not ks:
+                return 0
+            return max(product_freq.get(k, 0) for k in ks)
+
+        def has_urgent_tag(o: OrderDTO) -> bool:
+            return any((t or "").lower() == "urgent" for t in (o.tags or []))
+
+        items.sort(key=lambda o: (
+            -max_product_frequency(o),
+            -float(o.total_price or 0.0),
+            -int(has_urgent_tag(o)),
+        ))
 
     # Gather unique tags for chips
     unique_tags = sorted({t for o in items for t in (o.tags or [])})
