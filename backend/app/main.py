@@ -297,22 +297,31 @@ async def list_orders(
             for k in product_keys_for_order(o):
                 product_freq[k] = product_freq.get(k, 0) + 1
 
-        def max_product_frequency(o: OrderDTO) -> int:
+        def representative_key_for_order(o: OrderDTO) -> str:
             ks = product_keys_for_order(o)
             if not ks:
-                return 0
-            return max(product_freq.get(k, 0) for k in ks)
+                return "__misc__"
+            # choose the product key with highest global frequency, tie-break by key
+            return sorted(ks, key=lambda k: (-product_freq.get(k, 0), k))[0]
 
-        def has_urgent_tag(o: OrderDTO) -> bool:
-            return any((t or "").lower() == "urgent" for t in (o.tags or []))
+        # Group orders by chosen product key
+        groups: Dict[str, List[OrderDTO]] = {}
+        for o in all_items:
+            rk = representative_key_for_order(o)
+            groups.setdefault(rk, []).append(o)
 
-        all_items.sort(key=lambda o: (
-            -max_product_frequency(o),
-            -float(o.total_price or 0.0),
-            -int(has_urgent_tag(o)),
-        ))
+        # Sort groups by frequency desc (misc last), then flatten each group by price desc
+        sorted_group_keys = sorted([k for k in groups.keys() if k != "__misc__"], key=lambda k: (-product_freq.get(k, 0), k))
+        if "__misc__" in groups:
+            sorted_group_keys.append("__misc__")
 
-        items = all_items[:limit]
+        flattened: List[OrderDTO] = []
+        for k in sorted_group_keys:
+            grp = groups[k]
+            grp.sort(key=lambda o: -float(o.total_price or 0.0))
+            flattened.extend(grp)
+
+        items = flattened[:limit]
         # Gather unique tags for chips and return with computed page info
         unique_tags = sorted({t for o in items for t in (o.tags or [])})
         total_count_val = 0
