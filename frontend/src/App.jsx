@@ -289,11 +289,6 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
           ))}
         </div>
       </div>
-      {order.shipping_city && (
-        <div className="px-4 py-2 border-b bg-gray-50 text-sm text-gray-600">
-          {order.shipping_city}
-        </div>
-      )}
 
       <div className="p-4">
         <div className="flex gap-4 overflow-x-auto snap-x snap-mandatory pb-2">
@@ -328,6 +323,7 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
 
       <div className="px-4 pb-2 flex items-center gap-2 text-sm text-gray-600">
         <StickyNote className="w-4 h-4"/>
+        {order.shipping_city && <span>{order.shipping_city}</span>}
         <span className="truncate">{order.note || "No notes"}</span>
       </div>
 
