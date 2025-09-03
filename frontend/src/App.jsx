@@ -4,7 +4,7 @@ import { CheckCircle, PackageSearch, PackageCheck, Tag, StickyNote, XCircle, Che
 // Types (JSDoc only)
 /**
  * @typedef {{ id?: string, image?: string|null, sku?: string|null, title?: string|null, qty: number, status?: ('fulfilled'|'unfulfilled'|'removed'|'unknown') }} Variant
- * @typedef {{ id: string, number: string, customer?: string|null, shipping_city?: string|null, variants: Variant[], note?: string|null, tags: string[] }} Order
+ * @typedef {{ id: string, number: string, customer?: string|null, shipping_city?: string|null, variants: Variant[], note?: string|null, tags: string[], considered_fulfilled?: boolean }} Order
  */
 
 const API = {
@@ -81,7 +81,11 @@ export default function App(){
       verification_include_tag: preset.verificationIncludeTag,
       exclude_out: excludeOut,
     });
-    setOrders(data.orders || []);
+    let ords = data.orders || [];
+    if (statusFilter === "collect" || statusFilter === "urgent"){
+      ords = ords.filter(o => !(o.considered_fulfilled));
+    }
+    setOrders(ords);
     setTags(data.tags || []);
     setPageInfo(data.pageInfo || { hasNextPage: false });
     setIndex(0);
@@ -236,6 +240,8 @@ export default function App(){
               onMarkOut={()=>handleMarkOut(current)}
               onPrev={gotoPrev}
               onNext={gotoNext}
+              position={index + 1}
+              total={total}
             />
           </div>
         ) : (
@@ -267,9 +273,8 @@ function Chip({ label, active, onClick }){
   );
 }
 
-function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext }){
-  const [confirmCollected, setConfirmCollected] = useState(false);
-  const [confirmOut, setConfirmOut] = useState(false);
+function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total }){
+  const [showConfirm, setShowConfirm] = useState(null); // 'collected' | 'out' | null
   const [confirmNext, setConfirmNext] = useState(false);
 
   function twoTap(confirmFlag, setConfirmFlag, action){
@@ -330,15 +335,18 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
         <StickyNote className="w-4 h-4"/>
         {order.shipping_city && <span>{order.shipping_city}</span>}
         <span className="truncate">{order.note || "No notes"}</span>
+        <span className="ml-auto inline-flex items-center px-2 py-0.5 rounded-full bg-blue-600 text-white text-xs font-semibold">
+          {position}/{total}
+        </span>
       </div>
 
       <div className="px-4 pb-4">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <button onClick={()=>twoTap(confirmCollected, setConfirmCollected, onMarkCollected)} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl text-white bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
-            <CheckCircle className="w-5 h-5"/> <span className="font-semibold">{confirmCollected ? "Confirm Collected" : "Collected (Add tag pc)"}</span>
+          <button onClick={()=>setShowConfirm('collected')} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl text-white bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
+            <CheckCircle className="w-5 h-5"/> <span className="font-semibold">Collected</span>
           </button>
-          <button onClick={()=>twoTap(confirmOut, setConfirmOut, onMarkOut)} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl text-white bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
-            <XCircle className="w-5 h-5"/> <span className="font-semibold">{confirmOut ? "Confirm OUT" : "OUT (append titles to note)"}</span>
+          <button onClick={()=>setShowConfirm('out')} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl text-white bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
+            <XCircle className="w-5 h-5"/> <span className="font-semibold">OUT</span>
           </button>
           <div className="grid grid-cols-2 gap-3">
             <button onClick={()=>twoTap(confirmNext, setConfirmNext, onPrev)} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-gray-200 text-gray-900 hover:bg-gray-300 active:scale-[.98] shadow-sm">
@@ -349,7 +357,23 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
             </button>
           </div>
         </div>
-        
+        {showConfirm && (
+          <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center">
+            <div className="w-full max-w-sm rounded-2xl bg-white shadow-lg border border-gray-200 p-4">
+              <h3 className="text-lg font-semibold mb-2">Confirm {showConfirm === 'collected' ? 'Collected' : 'OUT'}</h3>
+              <p className="text-sm text-gray-600 mb-4">
+                {showConfirm === 'collected' ? 'Mark this order as Collected and add tag pc?' : 'Append selected OUT titles to note and add tag out?'}
+              </p>
+              <div className="flex justify-end gap-2">
+                <button onClick={()=>setShowConfirm(null)} className="px-3 py-1 rounded border text-sm">Cancel</button>
+                <button
+                  onClick={()=>{ const act = showConfirm === 'collected' ? onMarkCollected : onMarkOut; setShowConfirm(null); act(); }}
+                  className={`px-3 py-1 rounded text-white text-sm ${showConfirm === 'collected' ? 'bg-green-600' : 'bg-red-600'}`}
+                >Confirm</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

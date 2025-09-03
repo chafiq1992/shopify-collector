@@ -105,6 +105,7 @@ class OrderDTO(BaseModel):
     note: Optional[str] = None
     variants: List[OrderVariant] = []
     total_price: float = 0.0
+    considered_fulfilled: bool = False
 
 # ---------- Helpers ----------
 def build_query_string(
@@ -196,6 +197,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         price = float(amt)
     except Exception:
         price = 0.0
+    considered_fulfilled = any((getattr(v, "status", None) or "") == "fulfilled" for v in variants)
     return OrderDTO(
         id=node["id"],
         number=node["name"],
@@ -205,6 +207,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         note=node.get("note"),
         variants=variants,
         total_price=price,
+        considered_fulfilled=considered_fulfilled,
     )
 
 # ---------- Routes ----------
