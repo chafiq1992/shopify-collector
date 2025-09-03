@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
-import { CheckCircle, PackageSearch, PackageCheck, Tag, StickyNote, XCircle, ChevronUp, ChevronDown, Search, Image as ImageIcon } from "lucide-react";
+import { CheckCircle, PackageSearch, PackageCheck, Tag, StickyNote, XCircle, ChevronLeft, ChevronRight, Search, Image as ImageIcon, Settings } from "lucide-react";
 
 // Types (JSDoc only)
 /**
- * @typedef {{ id?: string, image?: string|null, sku?: string|null, qty: number }} Variant
+ * @typedef {{ id?: string, image?: string|null, sku?: string|null, title?: string|null, qty: number }} Variant
  * @typedef {{ id: string, number: string, customer?: string|null, variants: Variant[], note?: string|null, tags: string[] }} Order
  */
 
@@ -15,6 +15,13 @@ const API = {
   },
   async addTag(orderId, tag) {
     await fetch(`/api/orders/${encodeURIComponent(orderId)}/add-tag`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ tag })
+    });
+  },
+  async removeTag(orderId, tag) {
+    await fetch(`/api/orders/${encodeURIComponent(orderId)}/remove-tag`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ tag })
@@ -41,6 +48,7 @@ export default function App(){
   const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
   const [selectedOutMap, setSelectedOutMap] = useState({}); // orderId -> Set<variantId>
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showTagEditor, setShowTagEditor] = useState(false);
 
   const wsRef = useRef(null);
 
@@ -82,7 +90,7 @@ export default function App(){
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === "order.tag_added" || msg.type === "order.note_updated"){
+        if (msg.type === "order.tag_added" || msg.type === "order.tag_removed" || msg.type === "order.note_updated"){
           load();
         }
       } catch {}
@@ -98,6 +106,9 @@ export default function App(){
 
   function gotoNext(){
     setIndex(i => (i + 1) % Math.max(1, total || 1));
+  }
+  function gotoPrev(){
+    setIndex(i => (i - 1 + Math.max(1, total || 1)) % Math.max(1, total || 1));
   }
 
   function toggleVariantOut(orderId, variantId){
@@ -125,12 +136,23 @@ export default function App(){
     gotoNext();
   }
 
-  // Swipe handling
+  // Swipe handling (left/right for prev/next)
+  const startX = useRef(null);
   const startY = useRef(null);
+  const deltaX = useRef(0);
   const deltaY = useRef(0);
-  const onTouchStart = (e) => { startY.current = e.touches[0].clientY; deltaY.current = 0; };
-  const onTouchMove  = (e) => { if (startY.current !== null) deltaY.current = e.touches[0].clientY - startY.current; };
-  const onTouchEnd   = () => { if (startY.current !== null && deltaY.current < -80) gotoNext(); startY.current = null; deltaY.current = 0; };
+  const onTouchStart = (e) => { startX.current = e.touches[0].clientX; startY.current = e.touches[0].clientY; deltaX.current = 0; deltaY.current = 0; };
+  const onTouchMove  = (e) => { if (startX.current !== null) { deltaX.current = e.touches[0].clientX - startX.current; deltaY.current = e.touches[0].clientY - startY.current; } };
+  const onTouchEnd   = () => {
+    if (startX.current !== null) {
+      const absX = Math.abs(deltaX.current);
+      const absY = Math.abs(deltaY.current);
+      if (absX > 80 && absX > absY * 1.5) {
+        if (deltaX.current < 0) gotoNext(); else gotoPrev();
+      }
+    }
+    startX.current = null; startY.current = null; deltaX.current = 0; deltaY.current = 0;
+  };
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900">
@@ -139,6 +161,9 @@ export default function App(){
           <PackageSearch className="w-6 h-6" />
           <h1 className="text-xl font-semibold">Order Collector</h1>
           <div className="ml-auto flex items-center gap-2">
+            <button aria-label="Settings" onClick={()=>setShowTagEditor(true)} disabled={!current} className="p-2 rounded-full hover:bg-gray-100 disabled:opacity-50">
+              <Settings className="w-5 h-5" />
+            </button>
             <span className="text-sm text-gray-600">Orders</span>
             <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-sm font-medium">{loading ? "…" : total}</span>
           </div>
@@ -193,11 +218,13 @@ export default function App(){
               onToggleVariant={(vid)=>toggleVariantOut(current.id, vid)}
               onMarkCollected={()=>handleMarkCollected(current)}
               onMarkOut={()=>handleMarkOut(current)}
+              onPrev={gotoPrev}
               onNext={gotoNext}
             />
-            <div className="mt-3 flex justify-center items-center text-gray-500 text-xs">
-              <ChevronUp className="w-4 h-4" />
-              <span>Swipe up for next order</span>
+            <div className="mt-3 flex justify-center items-center gap-2 text-gray-500 text-xs">
+              <ChevronLeft className="w-4 h-4" />
+              <span>Swipe left/right to change order</span>
+              <ChevronRight className="w-4 h-4" />
             </div>
           </div>
         ) : (
@@ -207,6 +234,14 @@ export default function App(){
           </div>
         )}
       </main>
+      {showTagEditor && current && (
+        <TagEditorModal
+          order={current}
+          onClose={()=>setShowTagEditor(false)}
+          onAdd={async (tag)=>{ await API.addTag(current.id, tag); load(); }}
+          onRemove={async (tag)=>{ await API.removeTag(current.id, tag); load(); }}
+        />
+      )}
     </div>
   );
 }
@@ -222,7 +257,15 @@ function Chip({ label, active, onClick }){
   );
 }
 
-function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onNext }){
+function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext }){
+  const [confirmCollected, setConfirmCollected] = useState(false);
+  const [confirmOut, setConfirmOut] = useState(false);
+  const [confirmNext, setConfirmNext] = useState(false);
+
+  function twoTap(confirmFlag, setConfirmFlag, action){
+    if (confirmFlag){ setConfirmFlag(false); action(); }
+    else { setConfirmFlag(true); setTimeout(()=>setConfirmFlag(false), 2000); }
+  }
   return (
     <div className="rounded-2xl shadow-sm border border-gray-200 bg-white overflow-hidden">
       <div className="flex items-center gap-2 px-4 py-3 border-b bg-gray-50">
@@ -237,32 +280,35 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
         </div>
       </div>
 
-      <div className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {order.variants.map((v, i) => (
-          <div key={v.id || i} className={`group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
-            <div className="aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
-              {v.image ? (
-                <img src={v.image} alt={v.sku || ""} className="w-full h-full object-cover" />
-              ) : (
-                <div className="flex items-center justify-center w-full h-full text-gray-400"><ImageIcon className="w-8 h-8"/></div>
-              )}
+      <div className="p-4">
+        <div className="flex gap-4 overflow-x-auto snap-x snap-mandatory pb-2">
+          {order.variants.map((v, i) => (
+            <div key={v.id || i} className={`min-w-[260px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
+              <div className="aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
+                {v.image ? (
+                  <img src={v.image} alt={v.sku || ""} className="w-full h-full object-cover" />
+                ) : (
+                  <div className="flex items-center justify-center w-full h-full text-gray-400"><ImageIcon className="w-8 h-8"/></div>
+                )}
+              </div>
+              <div className="p-3 flex items-center gap-2">
+                <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
+                <span className="font-mono text-xs bg-gray-50 px-2 py-1 rounded border border-gray-200">{v.sku}</span>
+                {v.title && <span className="text-xs text-gray-700 truncate">· {v.title}</span>}
+                <span className="ml-auto text-[10px] uppercase tracking-wide text-gray-500">Qty</span>
+                <span className="text-2xl font-bold">{v.qty}</span>
+              </div>
+              <button
+                onClick={()=>onToggleVariant(v.id)}
+                className={`absolute top-2 right-2 px-2 py-1 rounded-full text-xs font-medium shadow ${selectedOut.has(v.id) ? "bg-red-600 text-white" : "bg-white text-gray-800"}`}
+                aria-pressed={selectedOut.has(v.id)}
+                title={selectedOut.has(v.id) ? "Selected as OUT" : "Mark this variant as missing"}
+              >
+                {selectedOut.has(v.id) ? "OUT" : "Select OUT"}
+              </button>
             </div>
-            <div className="p-3 flex items-center gap-2">
-              <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
-              <span className="font-mono text-xs bg-gray-50 px-2 py-1 rounded border border-gray-200">{v.sku}</span>
-              <span className="ml-auto text-[10px] uppercase tracking-wide text-gray-500">Qty</span>
-              <span className="text-lg font-bold">{v.qty}</span>
-            </div>
-            <button
-              onClick={()=>onToggleVariant(v.id)}
-              className={`absolute top-2 right-2 px-2 py-1 rounded-full text-xs font-medium shadow ${selectedOut.has(v.id) ? "bg-red-600 text-white" : "bg-white text-gray-800"}`}
-              aria-pressed={selectedOut.has(v.id)}
-              title={selectedOut.has(v.id) ? "Selected as OUT" : "Mark this variant as missing"}
-            >
-              {selectedOut.has(v.id) ? "OUT" : "Select OUT"}
-            </button>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
 
       <div className="px-4 pb-2 flex items-center gap-2 text-sm text-gray-600">
@@ -272,17 +318,51 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
 
       <div className="px-4 pb-4">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <button onClick={onMarkCollected} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl text-white bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
-            <CheckCircle className="w-5 h-5"/> <span className="font-semibold">Collected (Add tag pc)</span>
+          <button onClick={()=>twoTap(confirmCollected, setConfirmCollected, onMarkCollected)} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl text-white bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
+            <CheckCircle className="w-5 h-5"/> <span className="font-semibold">{confirmCollected ? "Confirm Collected" : "Collected (Add tag pc)"}</span>
           </button>
-          <button onClick={onMarkOut} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl text-white bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
-            <XCircle className="w-5 h-5"/> <span className="font-semibold">OUT (append SKUs to note)</span>
+          <button onClick={()=>twoTap(confirmOut, setConfirmOut, onMarkOut)} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl text-white bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
+            <XCircle className="w-5 h-5"/> <span className="font-semibold">{confirmOut ? "Confirm OUT" : "OUT (append SKUs to note)"}</span>
           </button>
-          <button onClick={onNext} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-gray-900 text-white hover:bg:black active:scale-[.98] shadow-sm">
-            <ChevronDown className="w-5 h-5"/> <span className="font-semibold">Next order</span>
-          </button>
+          <div className="grid grid-cols-2 gap-3">
+            <button onClick={()=>twoTap(confirmNext, setConfirmNext, onPrev)} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-gray-200 text-gray-900 hover:bg-gray-300 active:scale-[.98] shadow-sm">
+              <ChevronLeft className="w-5 h-5"/> <span className="font-semibold">{confirmNext ? "Confirm Prev" : "Prev order"}</span>
+            </button>
+            <button onClick={()=>twoTap(confirmNext, setConfirmNext, onNext)} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-gray-900 text-white hover:bg:black active:scale-[.98] shadow-sm">
+              <ChevronRight className="w-5 h-5"/> <span className="font-semibold">{confirmNext ? "Confirm Next" : "Next order"}</span>
+            </button>
+          </div>
         </div>
-        <p className="text-xs text-gray-500 mt-2">Tip: swipe up on the card to advance.</p>
+        <p className="text-xs text-gray-500 mt-2">Tip: swipe left/right or use buttons to navigate.</p>
+      </div>
+    </div>
+  );
+}
+
+function TagEditorModal({ order, onClose, onAdd, onRemove }){
+  const [newTag, setNewTag] = useState("");
+  return (
+    <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center">
+      <div className="w-full max-w-md rounded-2xl bg-white shadow-lg border border-gray-200 p-4">
+        <div className="flex items-center mb-3">
+          <h2 className="text-lg font-semibold">Edit Tags · {order.number}</h2>
+          <button onClick={onClose} className="ml-auto text-sm text-gray-600 underline">Close</button>
+        </div>
+        <div className="flex flex-wrap gap-2 mb-3">
+          {(order.tags || []).map(t => (
+            <span key={t} className="inline-flex items-center gap-2 text-xs px-2 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+              <Tag className="w-3 h-3"/>{t}
+              <button className="text-red-600" onClick={()=>onRemove(t)}>×</button>
+            </span>
+          ))}
+          {(!order.tags || order.tags.length === 0) && (
+            <span className="text-xs text-gray-500">No tags</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <input value={newTag} onChange={(e)=>setNewTag(e.target.value)} placeholder="Add tag" className="flex-1 border border-gray-300 rounded px-2 py-1 text-sm" />
+          <button onClick={()=>{ if(newTag.trim()){ onAdd(newTag.trim()); setNewTag(""); } }} className="px-3 py-1 rounded bg-blue-600 text-white text-sm">Add</button>
+        </div>
       </div>
     </div>
   );

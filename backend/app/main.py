@@ -91,6 +91,7 @@ class OrderVariant(BaseModel):
     id: Optional[str] = None
     image: Optional[str] = None
     sku: Optional[str] = None
+    title: Optional[str] = None
     qty: int
 
 class OrderDTO(BaseModel):
@@ -139,6 +140,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             id=(var or {}).get("id"),
             image=img,
             sku=li.get("sku"),
+            title=(var or {}).get("title"),
             qty=li.get("quantity", 0),
         ))
     return OrderDTO(
@@ -187,6 +189,7 @@ async def list_orders(
                   sku
                   variant {
                     id
+                    title
                     image { url }
                   }
                 }
@@ -231,6 +234,19 @@ async def add_tag(order_gid: str, payload: TagPayload):
     """
     data = await shopify_graphql(mutation, {"id": order_gid, "tags": [payload.tag]})
     await manager.broadcast({"type": "order.tag_added", "id": order_gid, "tag": payload.tag})
+    return {"ok": True, "result": data}
+
+@app.post("/api/orders/{order_gid}/remove-tag")
+async def remove_tag(order_gid: str, payload: TagPayload):
+    mutation = """
+    mutation RemoveTag($id: ID!, $tags: [String!]!) {
+      tagsRemove(id: $id, tags: $tags) {
+        userErrors { field message }
+      }
+    }
+    """
+    data = await shopify_graphql(mutation, {"id": order_gid, "tags": [payload.tag]})
+    await manager.broadcast({"type": "order.tag_removed", "id": order_gid, "tag": payload.tag})
     return {"ok": True, "result": data}
 
 class AppendNotePayload(BaseModel):
