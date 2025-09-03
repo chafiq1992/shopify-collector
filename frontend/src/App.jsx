@@ -144,8 +144,11 @@ export default function App(){
       alert("Select the missing variant(s) before marking OUT.");
       return;
     }
-    const skus = order.variants.filter(v => selected.includes(v.id)).map(v => v.sku).join(", ");
-    await API.appendNote(order.id, `OUT: ${skus}`);
+    const titles = order.variants
+      .filter(v => selected.includes(v.id))
+      .map(v => v.title || v.sku || "")
+      .join(", ");
+    await API.appendNote(order.id, `OUT: ${titles}`);
     setSelectedOutMap(prev => ({ ...prev, [order.id]: new Set() }));
     gotoNext();
   }
@@ -314,7 +317,7 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
             <CheckCircle className="w-5 h-5"/> <span className="font-semibold">{confirmCollected ? "Confirm Collected" : "Collected (Add tag pc)"}</span>
           </button>
           <button onClick={()=>twoTap(confirmOut, setConfirmOut, onMarkOut)} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl text-white bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
-            <XCircle className="w-5 h-5"/> <span className="font-semibold">{confirmOut ? "Confirm OUT" : "OUT (append SKUs to note)"}</span>
+            <XCircle className="w-5 h-5"/> <span className="font-semibold">{confirmOut ? "Confirm OUT" : "OUT (append titles to note)"}</span>
           </button>
           <div className="grid grid-cols-2 gap-3">
             <button onClick={()=>twoTap(confirmNext, setConfirmNext, onPrev)} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-gray-200 text-gray-900 hover:bg-gray-300 active:scale-[.98] shadow-sm">
