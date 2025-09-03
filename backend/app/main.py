@@ -99,6 +99,7 @@ class OrderDTO(BaseModel):
     id: str
     number: str
     customer: Optional[str] = None
+    shipping_city: Optional[str] = None
     tags: List[str] = []
     note: Optional[str] = None
     variants: List[OrderVariant] = []
@@ -184,6 +185,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         id=node["id"],
         number=node["name"],
         customer=(node.get("customer") or {}).get("displayName"),
+        shipping_city=((node.get("shippingAddress") or {}) or {}).get("city"),
         tags=node.get("tags") or [],
         note=node.get("note"),
         variants=variants,
@@ -233,6 +235,7 @@ async def list_orders(
             name
             tags
             note
+            shippingAddress { city }
             customer { displayName }
             currentTotalPriceSet { shopMoney { amount currencyCode } }
             totalPriceSet { shopMoney { amount currencyCode } }

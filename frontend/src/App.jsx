@@ -4,7 +4,7 @@ import { CheckCircle, PackageSearch, PackageCheck, Tag, StickyNote, XCircle, Che
 // Types (JSDoc only)
 /**
  * @typedef {{ id?: string, image?: string|null, sku?: string|null, title?: string|null, qty: number }} Variant
- * @typedef {{ id: string, number: string, customer?: string|null, variants: Variant[], note?: string|null, tags: string[] }} Order
+ * @typedef {{ id: string, number: string, customer?: string|null, shipping_city?: string|null, variants: Variant[], note?: string|null, tags: string[] }} Order
  */
 
 const API = {
@@ -289,6 +289,11 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
           ))}
         </div>
       </div>
+      {order.shipping_city && (
+        <div className="px-4 py-2 border-b bg-gray-50 text-sm text-gray-600">
+          {order.shipping_city}
+        </div>
+      )}
 
       <div className="p-4">
         <div className="flex gap-4 overflow-x-auto snap-x snap-mandatory pb-2">
