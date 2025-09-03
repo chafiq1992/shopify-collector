@@ -103,15 +103,30 @@ class OrderDTO(BaseModel):
     variants: List[OrderVariant] = []
 
 # ---------- Helpers ----------
-def build_query_string(base_query: str, status_filter: Optional[str], tag_filter: Optional[str], search: Optional[str], cod_date: Optional[str]) -> str:
+def build_query_string(
+    base_query: str,
+    status_filter: Optional[str],
+    tag_filter: Optional[str],
+    search: Optional[str],
+    cod_date: Optional[str],
+    collect_prefix: Optional[str] = None,
+    collect_exclude_tag: Optional[str] = None,
+    verification_include_tag: Optional[str] = None,
+) -> str:
     q = base_query.strip() if base_query else ""
     # New filter modes
     if status_filter == "collect":
         # open, unfulfilled and NOT tagged with pc
-        q += " status:open fulfillment_status:unfulfilled -tag:pc"
+        q += " status:open fulfillment_status:unfulfilled"
+        ex = (collect_exclude_tag or "pc").strip()
+        if ex:
+            q += f" -tag:{ex}"
     elif status_filter == "verification":
         # open, unfulfilled and tagged with pc
-        q += " status:open fulfillment_status:unfulfilled tag:pc"
+        q += " status:open fulfillment_status:unfulfilled"
+        inc = (verification_include_tag or "pc").strip()
+        if inc:
+            q += f" tag:{inc}"
     # Tag chip filter
     if tag_filter:
         q += f" tag:{tag_filter}"
@@ -120,7 +135,8 @@ def build_query_string(base_query: str, status_filter: Optional[str], tag_filter
         tag_val = cod_date.strip()
         if tag_val:
             # quote because of space
-            q += f' tag:"cod {tag_val}"'
+            prefix = (collect_prefix or "cod").strip()
+            q += f' tag:"{prefix} {tag_val}"'
     # Search: try to search by order name if numeric, else client filters by SKU
     if search:
         s = search.strip().lstrip("#")
@@ -165,11 +181,23 @@ async def list_orders(
     tag_filter: Optional[str] = None,
     search: Optional[str] = None,
     cod_date: Optional[str] = Query(None, description="Date for COD tag in format DD/MM/YY"),
+    collect_prefix: Optional[str] = Query(None, description="Prefix for COD tag, e.g. 'cod'"),
+    collect_exclude_tag: Optional[str] = Query(None, description="Exclude tag for collect filter, e.g. 'pc'"),
+    verification_include_tag: Optional[str] = Query(None, description="Include tag for verification filter, e.g. 'pc'"),
 ):
     if not SHOP_DOMAIN or not SHOP_PASSWORD:
         return JSONResponse({"orders": [], "pageInfo": {"hasNextPage": False}, "error": "Shopify env not configured"}, status_code=200)
 
-    q = build_query_string("", status_filter, tag_filter, search, cod_date)
+    q = build_query_string(
+        "",
+        status_filter,
+        tag_filter,
+        search,
+        cod_date,
+        collect_prefix,
+        collect_exclude_tag,
+        verification_include_tag,
+    )
 
     query = """
     query Orders($first: Int!, $after: String, $query: String) {
@@ -199,6 +227,7 @@ async def list_orders(
         }
         pageInfo { hasNextPage }
       }
+      ordersCount(query: $query)
     }
     """
     variables = {"first": limit, "after": cursor, "query": q or None}
@@ -217,7 +246,8 @@ async def list_orders(
     return {
         "orders": [json.loads(o.json()) for o in items],
         "pageInfo": ords["pageInfo"],
-        "tags": unique_tags
+        "tags": unique_tags,
+        "totalCount": data.get("ordersCount", len(items)),
     }
 
 class TagPayload(BaseModel):

@@ -48,7 +48,16 @@ export default function App(){
   const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
   const [selectedOutMap, setSelectedOutMap] = useState({}); // orderId -> Set<variantId>
   const [showDatePicker, setShowDatePicker] = useState(false);
-  const [showTagEditor, setShowTagEditor] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [preset, setPreset] = useState(() => {
+    try {
+      const raw = localStorage.getItem("orderCollectorPreset");
+      return raw ? JSON.parse(raw) : { collectPrefix: "cod", collectExcludeTag: "pc", verificationIncludeTag: "pc" };
+    } catch { return { collectPrefix: "cod", collectExcludeTag: "pc", verificationIncludeTag: "pc" }; }
+  });
+  useEffect(()=>{
+    try { localStorage.setItem("orderCollectorPreset", JSON.stringify(preset)); } catch {}
+  }, [preset]);
 
   const wsRef = useRef(null);
 
@@ -65,13 +74,17 @@ export default function App(){
       status_filter: statusFilter,
       tag_filter: tagFilter || "",
       search: search || "",
-      cod_date: statusFilter === "collect" ? (ddmmyy || "") : ""
+      cod_date: statusFilter === "collect" ? (ddmmyy || "") : "",
+      collect_prefix: preset.collectPrefix,
+      collect_exclude_tag: preset.collectExcludeTag,
+      verification_include_tag: preset.verificationIncludeTag,
     });
     setOrders(data.orders || []);
     setTags(data.tags || []);
     setPageInfo(data.pageInfo || { hasNextPage: false });
     setIndex(0);
     setLoading(false);
+    setTotalCount(data.totalCount || (data.orders || []).length);
   }
 
   useEffect(() => { load(); }, [statusFilter, tagFilter, codDate]);
@@ -101,6 +114,7 @@ export default function App(){
     return () => ws.close();
   }, []);
 
+  const [totalCount, setTotalCount] = useState(0);
   const total = orders.length;
   const current = orders[index] || null;
 
@@ -161,11 +175,11 @@ export default function App(){
           <PackageSearch className="w-6 h-6" />
           <h1 className="text-xl font-semibold">Order Collector</h1>
           <div className="ml-auto flex items-center gap-2">
-            <button aria-label="Settings" onClick={()=>setShowTagEditor(true)} disabled={!current} className="p-2 rounded-full hover:bg-gray-100 disabled:opacity-50">
+            <button aria-label="Settings" onClick={()=>setShowSettings(true)} className="p-2 rounded-full hover:bg-gray-100">
               <Settings className="w-5 h-5" />
             </button>
             <span className="text-sm text-gray-600">Orders</span>
-            <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-sm font-medium">{loading ? "…" : total}</span>
+            <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-sm font-medium">{loading ? "…" : totalCount}</span>
           </div>
         </div>
         <div className="max-w-5xl mx-auto px-4 pb-3 flex flex-col gap-2">
@@ -234,12 +248,11 @@ export default function App(){
           </div>
         )}
       </main>
-      {showTagEditor && current && (
-        <TagEditorModal
-          order={current}
-          onClose={()=>setShowTagEditor(false)}
-          onAdd={async (tag)=>{ await API.addTag(current.id, tag); load(); }}
-          onRemove={async (tag)=>{ await API.removeTag(current.id, tag); load(); }}
+      {showSettings && (
+        <PresetSettingsModal
+          preset={preset}
+          onClose={()=>setShowSettings(false)}
+          onSave={(p)=>{ setPreset(p); setShowSettings(false); load(); }}
         />
       )}
     </div>
@@ -339,29 +352,33 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
   );
 }
 
-function TagEditorModal({ order, onClose, onAdd, onRemove }){
-  const [newTag, setNewTag] = useState("");
+function PresetSettingsModal({ preset, onClose, onSave }){
+  const [local, setLocal] = useState(preset);
   return (
     <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center">
       <div className="w-full max-w-md rounded-2xl bg-white shadow-lg border border-gray-200 p-4">
         <div className="flex items-center mb-3">
-          <h2 className="text-lg font-semibold">Edit Tags · {order.number}</h2>
+          <h2 className="text-lg font-semibold">Preset Settings</h2>
           <button onClick={onClose} className="ml-auto text-sm text-gray-600 underline">Close</button>
         </div>
-        <div className="flex flex-wrap gap-2 mb-3">
-          {(order.tags || []).map(t => (
-            <span key={t} className="inline-flex items-center gap-2 text-xs px-2 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-              <Tag className="w-3 h-3"/>{t}
-              <button className="text-red-600" onClick={()=>onRemove(t)}>×</button>
-            </span>
-          ))}
-          {(!order.tags || order.tags.length === 0) && (
-            <span className="text-xs text-gray-500">No tags</span>
-          )}
+        <div className="space-y-3">
+          <div>
+            <label className="block text-sm text-gray-700 mb-1">Collect: Tag prefix before date</label>
+            <input value={local.collectPrefix} onChange={(e)=>setLocal({...local, collectPrefix: e.target.value})} className="w-full border border-gray-300 rounded px-2 py-1 text-sm" />
+            <p className="text-xs text-gray-500 mt-1">Resulting tag: "{local.collectPrefix || 'cod'} DD/MM/YY"</p>
+          </div>
+          <div>
+            <label className="block text-sm text-gray-700 mb-1">Collect: Exclude tag</label>
+            <input value={local.collectExcludeTag} onChange={(e)=>setLocal({...local, collectExcludeTag: e.target.value})} className="w-full border border-gray-300 rounded px-2 py-1 text-sm" />
+          </div>
+          <div>
+            <label className="block text-sm text-gray-700 mb-1">Verification: Include tag</label>
+            <input value={local.verificationIncludeTag} onChange={(e)=>setLocal({...local, verificationIncludeTag: e.target.value})} className="w-full border border-gray-300 rounded px-2 py-1 text-sm" />
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <input value={newTag} onChange={(e)=>setNewTag(e.target.value)} placeholder="Add tag" className="flex-1 border border-gray-300 rounded px-2 py-1 text-sm" />
-          <button onClick={()=>{ if(newTag.trim()){ onAdd(newTag.trim()); setNewTag(""); } }} className="px-3 py-1 rounded bg-blue-600 text-white text-sm">Add</button>
+        <div className="mt-4 flex gap-2 justify-end">
+          <button onClick={onClose} className="px-3 py-1 rounded border text-sm">Cancel</button>
+          <button onClick={()=>onSave(local)} className="px-3 py-1 rounded bg-blue-600 text-white text-sm">Save</button>
         </div>
       </div>
     </div>
