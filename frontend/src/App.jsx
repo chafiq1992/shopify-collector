@@ -150,23 +150,7 @@ export default function App(){
     gotoNext();
   }
 
-  // Swipe handling (left/right for prev/next)
-  const startX = useRef(null);
-  const startY = useRef(null);
-  const deltaX = useRef(0);
-  const deltaY = useRef(0);
-  const onTouchStart = (e) => { startX.current = e.touches[0].clientX; startY.current = e.touches[0].clientY; deltaX.current = 0; deltaY.current = 0; };
-  const onTouchMove  = (e) => { if (startX.current !== null) { deltaX.current = e.touches[0].clientX - startX.current; deltaY.current = e.touches[0].clientY - startY.current; } };
-  const onTouchEnd   = () => {
-    if (startX.current !== null) {
-      const absX = Math.abs(deltaX.current);
-      const absY = Math.abs(deltaY.current);
-      if (absX > 80 && absX > absY * 1.5) {
-        if (deltaX.current < 0) gotoNext(); else gotoPrev();
-      }
-    }
-    startX.current = null; startY.current = null; deltaX.current = 0; deltaY.current = 0;
-  };
+  // Swipe navigation removed; use buttons below instead
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900">
@@ -224,7 +208,7 @@ export default function App(){
 
       <main className="max-w-5xl mx-auto px-4 py-6">
         {current ? (
-          <div className="relative" onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
+          <div className="relative">
             <OrderCard
               key={current.id}
               order={current}
@@ -235,11 +219,6 @@ export default function App(){
               onPrev={gotoPrev}
               onNext={gotoNext}
             />
-            <div className="mt-3 flex justify-center items-center gap-2 text-gray-500 text-xs">
-              <ChevronLeft className="w-4 h-4" />
-              <span>Swipe left/right to change order</span>
-              <ChevronRight className="w-4 h-4" />
-            </div>
           </div>
         ) : (
           <div className="text-center py-24 text-gray-500">
@@ -346,7 +325,7 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
             </button>
           </div>
         </div>
-        <p className="text-xs text-gray-500 mt-2">Tip: swipe left/right or use buttons to navigate.</p>
+        
       </div>
     </div>
   );

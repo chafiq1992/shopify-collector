@@ -89,6 +89,7 @@ async def shopify_graphql(query: str, variables: Dict[str, Any] | None = None) -
 # ---------- Schemas ----------
 class OrderVariant(BaseModel):
     id: Optional[str] = None
+    product_id: Optional[str] = None
     image: Optional[str] = None
     sku: Optional[str] = None
     title: Optional[str] = None
@@ -155,6 +156,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             img = var["image"].get("url")
         variants.append(OrderVariant(
             id=(var or {}).get("id"),
+            product_id=((var or {}).get("product") or {}).get("id"),
             image=img,
             sku=li.get("sku"),
             title=(var or {}).get("title"),
@@ -232,6 +234,7 @@ async def list_orders(
                     id
                     title
                     image { url }
+                    product { id }
                   }
                 }
               }
@@ -253,23 +256,43 @@ async def list_orders(
         ss = search.lower().strip()
         items = [o for o in items if any((v.sku or "").lower().find(ss) >= 0 for v in o.variants) or ss in o.number.lower()]
 
-    # Sorting for collect filter:
-    # - Group by the most common product across orders (by SKU, else variant id, else title)
-    # - Within same product group: highest total price first
-    # - Then orders tagged with 'urgent' (case-insensitive)
-    if status_filter == "collect" and items:
-        # Build frequency of products across orders
+    # Collect: compute ranking globally across a larger window of orders
+    if status_filter == "collect":
+        target_window = 200
+        chunk = 50
+        accumulated_edges = []
+        after_cursor = None
+        # Always try to use a wider window irrespective of incoming limit
+        while len(accumulated_edges) < target_window:
+            variables2 = {"first": min(chunk, target_window - len(accumulated_edges)), "after": after_cursor, "query": q or None}
+            page = await shopify_graphql(query, variables2)
+            ords2 = page["orders"]
+            edges2 = ords2.get("edges") or []
+            if not edges2:
+                break
+            accumulated_edges.extend(edges2)
+            if not (ords2.get("pageInfo") or {}).get("hasNextPage"):
+                break
+            after_cursor = edges2[-1].get("cursor")
+
+        all_items: List[OrderDTO] = [map_order_node(e["node"]) for e in accumulated_edges] or items
+
+        # Optional client-side SKU filter if search is non-numeric
+        if search and not search.strip().lstrip("#").isdigit():
+            ss = search.lower().strip()
+            all_items = [o for o in all_items if any((v.sku or "").lower().find(ss) >= 0 for v in o.variants) or ss in o.number.lower()]
+
+        # Build frequency of products across orders (prefer product_id)
         def product_keys_for_order(o: OrderDTO) -> List[str]:
             keys = []
             for v in o.variants:
-                key = (v.sku or "").strip() or (v.id or "").strip() or (v.title or "").strip()
+                key = (getattr(v, "product_id", None) or "").strip() or (v.sku or "").strip() or (v.id or "").strip() or (v.title or "").strip()
                 if key:
                     keys.append(key)
-            # unique per order to avoid double counting the same product within one order
             return list({k for k in keys})
 
         product_freq: Dict[str, int] = {}
-        for o in items:
+        for o in all_items:
             for k in product_keys_for_order(o):
                 product_freq[k] = product_freq.get(k, 0) + 1
 
@@ -282,11 +305,26 @@ async def list_orders(
         def has_urgent_tag(o: OrderDTO) -> bool:
             return any((t or "").lower() == "urgent" for t in (o.tags or []))
 
-        items.sort(key=lambda o: (
+        all_items.sort(key=lambda o: (
             -max_product_frequency(o),
             -float(o.total_price or 0.0),
             -int(has_urgent_tag(o)),
         ))
+
+        items = all_items[:limit]
+        # Gather unique tags for chips and return with computed page info
+        unique_tags = sorted({t for o in items for t in (o.tags or [])})
+        total_count_val = 0
+        try:
+            total_count_val = int((data.get("ordersCount") or {}).get("count") or 0)
+        except Exception:
+            total_count_val = len(all_items)
+        return {
+            "orders": [json.loads(o.json()) for o in items],
+            "pageInfo": {"hasNextPage": len(all_items) > limit},
+            "tags": unique_tags,
+            "totalCount": total_count_val,
+        }
 
     # Gather unique tags for chips
     unique_tags = sorted({t for o in items for t in (o.tags or [])})
