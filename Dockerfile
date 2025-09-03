@@ -4,7 +4,7 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci || npm install
 COPY frontend/ ./
-RUN npm run build
+RUN node node_modules/vite/bin/vite.js build
 
 # --------- Backend runtime ---------
 FROM python:3.11-slim AS runtime
