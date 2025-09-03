@@ -372,7 +372,7 @@ async def list_orders(
 class TagPayload(BaseModel):
     tag: str
 
-@app.post("/api/orders/{order_gid}/add-tag")
+@app.post("/api/orders/{order_gid:path}/add-tag")
 async def add_tag(order_gid: str, payload: TagPayload):
     mutation = """
     mutation AddTag($id: ID!, $tags: [String!]!) {
@@ -385,7 +385,7 @@ async def add_tag(order_gid: str, payload: TagPayload):
     await manager.broadcast({"type": "order.tag_added", "id": order_gid, "tag": payload.tag})
     return {"ok": True, "result": data}
 
-@app.post("/api/orders/{order_gid}/remove-tag")
+@app.post("/api/orders/{order_gid:path}/remove-tag")
 async def remove_tag(order_gid: str, payload: TagPayload):
     mutation = """
     mutation RemoveTag($id: ID!, $tags: [String!]!) {
@@ -401,7 +401,7 @@ async def remove_tag(order_gid: str, payload: TagPayload):
 class AppendNotePayload(BaseModel):
     append: str
 
-@app.post("/api/orders/{order_gid}/append-note")
+@app.post("/api/orders/{order_gid:path}/append-note")
 async def append_note(order_gid: str, payload: AppendNotePayload):
     # Fetch current note
     q = """
