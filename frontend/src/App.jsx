@@ -196,6 +196,11 @@ export default function App(){
               onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); }}
             />
             <Chip
+              label="Urgent"
+              active={statusFilter === "urgent"}
+              onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); }}
+            />
+            <Chip
               label="Exclude OUT"
               active={excludeOut}
               onClick={()=> setExcludeOut(v => !v)}

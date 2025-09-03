@@ -130,6 +130,9 @@ def build_query_string(
         inc = (verification_include_tag or "pc").strip()
         if inc:
             q += f" tag:{inc}"
+    elif status_filter == "urgent":
+        # open, unfulfilled and tagged urgent
+        q += " status:open fulfillment_status:unfulfilled tag:urgent"
     # Tag chip filter
     if tag_filter:
         q += f" tag:{tag_filter}"
@@ -196,7 +199,7 @@ async def health():
 async def list_orders(
     limit: int = Query(25, ge=1, le=100),
     cursor: Optional[str] = None,
-    status_filter: Optional[str] = Query(None, pattern="^(all|collect|verification)$"),
+    status_filter: Optional[str] = Query(None, pattern="^(all|collect|verification|urgent)$"),
     tag_filter: Optional[str] = None,
     search: Optional[str] = None,
     cod_date: Optional[str] = Query(None, description="Date for COD tag in format DD/MM/YY"),
