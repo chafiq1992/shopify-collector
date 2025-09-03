@@ -227,7 +227,7 @@ async def list_orders(
         }
         pageInfo { hasNextPage }
       }
-      ordersCount(query: $query)
+      ordersCount(query: $query) { count }
     }
     """
     variables = {"first": limit, "after": cursor, "query": q or None}
@@ -243,11 +243,16 @@ async def list_orders(
     # Gather unique tags for chips
     unique_tags = sorted({t for o in items for t in (o.tags or [])})
 
+    total_count_val = 0
+    try:
+        total_count_val = int((data.get("ordersCount") or {}).get("count") or 0)
+    except Exception:
+        total_count_val = len(items)
     return {
         "orders": [json.loads(o.json()) for o in items],
         "pageInfo": ords["pageInfo"],
         "tags": unique_tags,
-        "totalCount": data.get("ordersCount", len(items)),
+        "totalCount": total_count_val,
     }
 
 class TagPayload(BaseModel):
