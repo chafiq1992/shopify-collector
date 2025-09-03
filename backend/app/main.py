@@ -148,7 +148,11 @@ def build_query_string(
 
 def map_order_node(node: Dict[str, Any]) -> OrderDTO:
     variants: List[OrderVariant] = []
-    for edge in node.get("lineItems", {}).get("edges", []):
+    # Prefer unfulfilledLineItems if present; fallback to all lineItems
+    li_edges = (node.get("unfulfilledLineItems", {}) or {}).get("edges", [])
+    if not li_edges:
+        li_edges = node.get("lineItems", {}).get("edges", [])
+    for edge in li_edges:
         li = edge["node"]
         img = None
         var = li.get("variant")
@@ -225,6 +229,20 @@ async def list_orders(
             customer { displayName }
             currentTotalPriceSet { shopMoney { amount currencyCode } }
             totalPriceSet { shopMoney { amount currencyCode } }
+            unfulfilledLineItems(first: 50) {
+              edges {
+                node {
+                  quantity
+                  sku
+                  variant {
+                    id
+                    title
+                    image { url }
+                    product { id }
+                  }
+                }
+              }
+            }
             lineItems(first: 50) {
               edges {
                 node {
