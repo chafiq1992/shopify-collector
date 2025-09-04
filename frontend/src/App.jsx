@@ -225,7 +225,7 @@ export default function App(){
   // Swipe navigation removed; use buttons below instead
 
   return (
-    <div className="min-h-screen w-full bg-gray-50 text-gray-900">
+    <div className="min-h-screen w-full bg-gray-50 text-gray-900 overflow-hidden">
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur border-b border-gray-200">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center gap-3">
           <PackageSearch className="w-6 h-6" />
@@ -246,7 +246,7 @@ export default function App(){
             <button aria-label="Settings" onClick={()=>setShowSettings(true)} className="p-2 rounded-full hover:bg-gray-100">
               <Settings className="w-5 h-5" />
             </button>
-            <span className="text-sm text-gray-600">Orders</span>
+            <PackageCheck className="w-4 h-4 text-gray-600" />
             <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-sm font-medium">{loading ? "…" : totalCount}</span>
           </div>
         </div>
@@ -304,16 +304,18 @@ export default function App(){
                   active={statusFilter === "urgent"}
                   onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); setTimeout(()=>load(), 0); }}
                 />
-                <Chip
-                  label="Exclude OUT"
-                  active={excludeOut}
-                  onClick={()=> { setExcludeOut(v => !v); setTimeout(()=>load(), 0); }}
-                />
-                <Chip
-                  label="Exclude btis/en att b"
-                  active={excludeStockTags}
-                  onClick={()=> { setExcludeStockTags(v => !v); setTimeout(()=>load(), 0); }}
-                />
+                <div className="flex flex-col gap-1">
+                  <SmallChip
+                    label="Exclude OUT"
+                    active={excludeOut}
+                    onClick={()=> { setExcludeOut(v => !v); setTimeout(()=>load(), 0); }}
+                  />
+                  <SmallChip
+                    label="Exclude btis/en att b"
+                    active={excludeStockTags}
+                    onClick={()=> { setExcludeStockTags(v => !v); setTimeout(()=>load(), 0); }}
+                  />
+                </div>
               </>
             )}
           </div>
@@ -359,7 +361,7 @@ export default function App(){
         )}
       </main>
       <div className="fixed bottom-0 inset-x-0 z-40 border-t border-gray-200 bg-white/90 backdrop-blur">
-        <div className="max-w-5xl mx-auto px-4 py-3">
+        <div className="max-w-5xl mx-auto px-4 py-5">
           <div className="grid grid-cols-2 gap-3">
             <button onClick={()=>setShowConfirm('collected')} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
               <CheckCircle className="w-5 h-5"/> <span className="font-semibold">Collected</span>
@@ -419,6 +421,17 @@ function Chip({ label, active, onClick }){
     <button
       onClick={onClick}
       className={`px-3 py-1 rounded-full text-sm border transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function SmallChip({ label, active, onClick }){
+  return (
+    <button
+      onClick={onClick}
+      className={`px-2 py-0.5 rounded-full text-xs border transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
     >
       {label}
     </button>
@@ -488,7 +501,7 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                   <span className="font-mono text-xs bg-gray-50 px-2 py-1 rounded border border-gray-200">{v.sku}</span>
                   {v.title && <span className="text-xs text-gray-700 truncate">· {v.title}</span>}
                   <span className="ml-auto text-[10px] uppercase tracking-wide text-gray-500">Qty</span>
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-blue-600 text-white text-sm font-semibold">{v.qty}</span>
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-red-600 text-white text-sm font-semibold">{v.qty}</span>
                 </div>
                 <button
                   onClick={()=>onToggleVariant(v.id)}
