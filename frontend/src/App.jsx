@@ -272,22 +272,22 @@ export default function App(){
                 <Chip
                   label="Collect"
                   active={statusFilter === "collect"}
-                  onClick={()=>{ setStatusFilter("collect"); setShowDatePicker(true); }}
+                  onClick={()=>{ setStatusFilter("collect"); setShowDatePicker(true); setTimeout(()=>load(), 0); }}
                 />
                 <Chip
                   label="Verification"
                   active={statusFilter === "verification"}
-                  onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); }}
+                  onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); setTimeout(()=>load(), 0); }}
                 />
                 <Chip
                   label="Urgent"
                   active={statusFilter === "urgent"}
-                  onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); }}
+                  onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); setTimeout(()=>load(), 0); }}
                 />
                 <Chip
                   label="Exclude OUT"
                   active={excludeOut}
-                  onClick={()=> { setExcludeOut(v => !v); }}
+                  onClick={()=> { setExcludeOut(v => !v); setTimeout(()=>load(), 0); }}
                 />
               </>
             )}
@@ -373,10 +373,10 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
   }
   return (
     <div className="rounded-2xl shadow-sm border border-gray-200 bg-white overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-3 border-b bg-gray-50">
+      <div className="flex items-center gap-2 px-4 h-14 border-b bg-gray-50">
         <span className="text-sm font-semibold">{order.number}</span>
         {order.customer && <span className="text-sm text-gray-500">· {order.customer}</span>}
-        <div className="ml-auto flex items-center gap-1 flex-wrap">
+        <div className="ml-auto flex items-center gap-1 overflow-x-auto whitespace-nowrap">
           {(order.tags || []).map(t => (
             <span key={t} className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
               <Tag className="w-3 h-3"/>{t}
