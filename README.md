@@ -23,6 +23,14 @@ Copy the **Admin API access token** and set env vars below.
 - `SHOPIFY_API_KEY` — optional; if set with `SHOPIFY_PASSWORD`, basic auth is used
 - `SHOPIFY_API_VERSION` — default `2025-01`
 
+Multi-store (optional):
+
+- `IRRAKIDS_SHOPIFY_PASSWORD`, `IRRAKIDS_SHOPIFY_API_KEY` — overrides for Irrakids, if different
+- `IRRANOVA_STORE_DOMAIN` — e.g., `your-second-store.myshopify.com`
+- `IRRANOVA_SHOPIFY_PASSWORD`, `IRRANOVA_SHOPIFY_API_KEY` — credentials for Irranova
+
+If per-store passwords are not set, the app will fall back to `SHOPIFY_PASSWORD`/`SHOPIFY_API_KEY`.
+
 ## 3) Local development
 
 ```bash
@@ -39,6 +47,10 @@ pip install -r requirements.txt
 # setx SHOPIFY_PASSWORD "shpat_or_private_app_password"
 # setx SHOPIFY_API_KEY ""
 # setx SHOPIFY_API_VERSION "2025-01"
+# Optionally set Irranova envs as well:
+# setx IRRANOVA_STORE_DOMAIN "your-second-store.myshopify.com"
+# setx IRRANOVA_SHOPIFY_PASSWORD "shpat_or_private_app_password_for_irranova"
+# setx IRRANOVA_SHOPIFY_API_KEY ""
 # Then restart terminal to load env vars
 uvicorn backend.app.main:app --reload
 # Open http://localhost:8000 once you build production bundle below
@@ -57,6 +69,9 @@ docker run -p 8080:8080 \
   -e SHOPIFY_PASSWORD=shpat_or_private_app_password \
   -e SHOPIFY_API_KEY= \
   -e SHOPIFY_API_VERSION=2025-01 \
+  -e IRRANOVA_STORE_DOMAIN=your-second-store.myshopify.com \
+  -e IRRANOVA_SHOPIFY_PASSWORD= \
+  -e IRRANOVA_SHOPIFY_API_KEY= \
   order-collector:local
 # Open http://localhost:8080
 ```

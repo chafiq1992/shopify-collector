@@ -1,24 +1,43 @@
 import os
 import json
-from typing import List, Optional, Dict, Any
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from typing import List, Optional, Dict, Any, Tuple
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 import httpx
 from pydantic import BaseModel
 
-# ---------- Settings ----------
-# Preferred envs per user request
-SHOP_DOMAIN = os.environ.get("IRRAKIDS_STORE_DOMAIN", "").strip()  # e.g. myshop.myshopify.com
-SHOP_PASSWORD = os.environ.get("SHOPIFY_PASSWORD", "").strip()     # Private app password or Admin token
-SHOP_API_KEY = os.environ.get("SHOPIFY_API_KEY", "").strip()        # Optional if using basic auth in URL
+# ---------- Settings (multi-store) ----------
 SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2025-01").strip()
 
-if not SHOP_DOMAIN:
-    print("[WARN] IRRAKIDS_STORE_DOMAIN is not set.")
-if not SHOP_PASSWORD:
-    print("[WARN] SHOPIFY_PASSWORD is not set.")
+# Back-compat defaults (irrakids-only) while supporting per-store overrides
+DEFAULT_DOMAIN = os.environ.get("IRRAKIDS_STORE_DOMAIN", "").strip()
+DEFAULT_PASSWORD = os.environ.get("SHOPIFY_PASSWORD", "").strip()
+DEFAULT_API_KEY = os.environ.get("SHOPIFY_API_KEY", "").strip()
+
+def resolve_store_settings(store: Optional[str]) -> Tuple[str, str, str]:
+    """Return (domain, password, api_key) for the requested store.
+
+    - store == 'irranova' → IRRANOVA_* vars
+    - store == 'irrakids' or None → IRRAKIDS_* or global fallbacks
+    """
+    key = (store or "irrakids").strip().lower()
+    if key not in ("irrakids", "irranova"):
+        # Unknown store → treat as irrakids to keep backward compatibility
+        key = "irrakids"
+
+    if key == "irranova":
+        domain = os.environ.get("IRRANOVA_STORE_DOMAIN", "").strip()
+        password = os.environ.get("IRRANOVA_SHOPIFY_PASSWORD", "").strip() or DEFAULT_PASSWORD
+        api_key = os.environ.get("IRRANOVA_SHOPIFY_API_KEY", "").strip() or DEFAULT_API_KEY
+    else:
+        # irrakids
+        domain = os.environ.get("IRRAKIDS_STORE_DOMAIN", DEFAULT_DOMAIN).strip()
+        password = os.environ.get("IRRAKIDS_SHOPIFY_PASSWORD", "").strip() or DEFAULT_PASSWORD
+        api_key = os.environ.get("IRRAKIDS_SHOPIFY_API_KEY", "").strip() or DEFAULT_API_KEY
+
+    return (domain, password, api_key)
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Order Collector API", version="1.0.0")
@@ -64,22 +83,25 @@ async def ws_updates(websocket: WebSocket):
         manager.disconnect(websocket)
 
 # ---------- Shopify GraphQL helper ----------
-def _shopify_graphql_url() -> str:
+def _shopify_graphql_url(domain: str, password: str, api_key: str) -> str:
     # If API key is provided, support basic auth style URL
-    if SHOP_API_KEY and SHOP_PASSWORD:
-        return f"https://{SHOP_API_KEY}:{SHOP_PASSWORD}@{SHOP_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
-    return f"https://{SHOP_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    if api_key and password:
+        return f"https://{api_key}:{password}@{domain}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    return f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
 
-async def shopify_graphql(query: str, variables: Dict[str, Any] | None = None) -> Dict[str, Any]:
+async def shopify_graphql(query: str, variables: Dict[str, Any] | None, *, store: Optional[str]) -> Dict[str, Any]:
+    domain, password, api_key = resolve_store_settings(store)
+    if not domain or not password:
+        raise HTTPException(status_code=400, detail="Shopify credentials not configured for selected store")
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     # If not using basic auth in URL, send token/password header
-    if not (SHOP_API_KEY and SHOP_PASSWORD):
-        headers["X-Shopify-Access-Token"] = SHOP_PASSWORD
+    if not (api_key and password):
+        headers["X-Shopify-Access-Token"] = password
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(_shopify_graphql_url(), headers=headers, json={"query": query, "variables": variables or {}})
+        r = await client.post(_shopify_graphql_url(domain, password, api_key), headers=headers, json={"query": query, "variables": variables or {}})
         r.raise_for_status()
         data = r.json()
         if "errors" in data:
@@ -228,8 +250,10 @@ async def list_orders(
     verification_include_tag: Optional[str] = Query(None, description="Include tag for verification filter, e.g. 'pc'"),
     exclude_out: bool = Query(False, description="Exclude orders tagged with 'out'"),
     base_query: Optional[str] = Query(None, description="Raw Shopify query prefix to start from"),
+    store: Optional[str] = Query(None, description="Select store: 'irrakids' (default) or 'irranova'"),
 ):
-    if not SHOP_DOMAIN or not SHOP_PASSWORD:
+    domain, password, _ = resolve_store_settings(store)
+    if not domain or not password:
         return JSONResponse({"orders": [], "pageInfo": {"hasNextPage": False}, "error": "Shopify env not configured"}, status_code=200)
 
     q = build_query_string(
@@ -281,7 +305,7 @@ async def list_orders(
     }
     """
     variables = {"first": limit, "after": cursor, "query": q or None}
-    data = await shopify_graphql(query, variables)
+    data = await shopify_graphql(query, variables, store=store)
     ords = data["orders"]
     items: List[OrderDTO] = [map_order_node(e["node"]) for e in ords["edges"]]
 
@@ -389,7 +413,7 @@ class TagPayload(BaseModel):
     tag: str
 
 @app.post("/api/orders/{order_gid:path}/add-tag")
-async def add_tag(order_gid: str, payload: TagPayload):
+async def add_tag(order_gid: str, payload: TagPayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
     mutation = """
     mutation AddTag($id: ID!, $tags: [String!]!) {
       tagsAdd(id: $id, tags: $tags) {
@@ -397,12 +421,12 @@ async def add_tag(order_gid: str, payload: TagPayload):
       }
     }
     """
-    data = await shopify_graphql(mutation, {"id": order_gid, "tags": [payload.tag]})
+    data = await shopify_graphql(mutation, {"id": order_gid, "tags": [payload.tag]}, store=store)
     await manager.broadcast({"type": "order.tag_added", "id": order_gid, "tag": payload.tag})
     return {"ok": True, "result": data}
 
 @app.post("/api/orders/{order_gid:path}/remove-tag")
-async def remove_tag(order_gid: str, payload: TagPayload):
+async def remove_tag(order_gid: str, payload: TagPayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
     mutation = """
     mutation RemoveTag($id: ID!, $tags: [String!]!) {
       tagsRemove(id: $id, tags: $tags) {
@@ -410,7 +434,7 @@ async def remove_tag(order_gid: str, payload: TagPayload):
       }
     }
     """
-    data = await shopify_graphql(mutation, {"id": order_gid, "tags": [payload.tag]})
+    data = await shopify_graphql(mutation, {"id": order_gid, "tags": [payload.tag]}, store=store)
     await manager.broadcast({"type": "order.tag_removed", "id": order_gid, "tag": payload.tag})
     return {"ok": True, "result": data}
 
@@ -418,7 +442,7 @@ class AppendNotePayload(BaseModel):
     append: str
 
 @app.post("/api/orders/{order_gid:path}/append-note")
-async def append_note(order_gid: str, payload: AppendNotePayload):
+async def append_note(order_gid: str, payload: AppendNotePayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
     # Fetch current note
     q = """
     query One($id: ID!) {
@@ -427,7 +451,7 @@ async def append_note(order_gid: str, payload: AppendNotePayload):
       }
     }
     """
-    data = await shopify_graphql(q, {"id": order_gid})
+    data = await shopify_graphql(q, {"id": order_gid}, store=store)
     node = data["node"]
     current_note = (node or {}).get("note") or ""
     new_note = (current_note + ("\n" if current_note and not current_note.endswith("\n") else "") + payload.append).strip()
@@ -440,7 +464,7 @@ async def append_note(order_gid: str, payload: AppendNotePayload):
       }
     }
     """
-    data2 = await shopify_graphql(mutation, {"input": {"id": order_gid, "note": new_note}})
+    data2 = await shopify_graphql(mutation, {"input": {"id": order_gid, "note": new_note}}, store=store)
     await manager.broadcast({"type": "order.note_updated", "id": order_gid, "note": new_note})
     return {"ok": True, "result": data2}
 

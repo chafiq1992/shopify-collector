@@ -13,22 +13,25 @@ const API = {
     const res = await fetch(`/api/orders?${q}`);
     return res.json();
   },
-  async addTag(orderId, tag) {
-    await fetch(`/api/orders/${encodeURIComponent(orderId)}/add-tag`, {
+  async addTag(orderId, tag, store) {
+    const qs = store ? `?store=${encodeURIComponent(store)}` : "";
+    await fetch(`/api/orders/${encodeURIComponent(orderId)}/add-tag${qs}`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ tag })
     });
   },
-  async removeTag(orderId, tag) {
-    await fetch(`/api/orders/${encodeURIComponent(orderId)}/remove-tag`, {
+  async removeTag(orderId, tag, store) {
+    const qs = store ? `?store=${encodeURIComponent(store)}` : "";
+    await fetch(`/api/orders/${encodeURIComponent(orderId)}/remove-tag${qs}`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ tag })
     });
   },
-  async appendNote(orderId, append) {
-    await fetch(`/api/orders/${encodeURIComponent(orderId)}/append-note`, {
+  async appendNote(orderId, append, store) {
+    const qs = store ? `?store=${encodeURIComponent(store)}` : "";
+    await fetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ append })
@@ -59,6 +62,9 @@ export default function App(){
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showProfilePicker, setShowProfilePicker] = useState(false);
+  const [store, setStore] = useState(() => {
+    try { return localStorage.getItem("orderCollectorStore") || "irrakids"; } catch { return "irrakids"; }
+  });
   const [profile, setProfile] = useState(() => {
     try {
       const raw = localStorage.getItem("orderCollectorProfile");
@@ -86,6 +92,9 @@ export default function App(){
   useEffect(()=>{
     try { localStorage.setItem("orderCollectorStockFilter", stockFilter); } catch {}
   }, [stockFilter]);
+  useEffect(()=>{
+    try { localStorage.setItem("orderCollectorStore", store); } catch {}
+  }, [store]);
 
   const wsRef = useRef(null);
 
@@ -119,20 +128,18 @@ export default function App(){
       verification_include_tag: preset.verificationIncludeTag,
       exclude_out: usingStockProfile ? false : excludeOut,
       base_query: baseQuery,
+      store,
     });
     let ords = data.orders || [];
-    if (statusFilter === "collect" || statusFilter === "urgent"){
-      ords = ords.filter(o => !(o.considered_fulfilled));
-    }
     setOrders(ords);
     setTags(data.tags || []);
     setPageInfo(data.pageInfo || { hasNextPage: false });
     setIndex(0);
     setLoading(false);
-    setTotalCount((statusFilter === "collect" || statusFilter === "urgent") ? ords.length : (data.totalCount || ords.length));
+    setTotalCount(data.totalCount || ords.length);
   }
 
-  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut, profile, stockFilter]);
+  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut, profile, stockFilter, store]);
 
   // Debounced search
   useEffect(() => {
@@ -181,7 +188,7 @@ export default function App(){
   }
 
   async function handleMarkCollected(order){
-    await API.addTag(order.id, "pc");
+    await API.addTag(order.id, "pc", store);
     vibrate(20);
     gotoNext();
   }
@@ -197,8 +204,8 @@ export default function App(){
       .map(v => v.title || v.sku || "")
       .join(", ");
     await Promise.all([
-      API.appendNote(order.id, `OUT: ${titles}`),
-      API.addTag(order.id, "out"),
+      API.appendNote(order.id, `OUT: ${titles}`, store),
+      API.addTag(order.id, "out", store),
     ]);
     setSelectedOutMap(prev => ({ ...prev, [order.id]: new Set() }));
     vibrate(30);
@@ -213,6 +220,16 @@ export default function App(){
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center gap-3">
           <PackageSearch className="w-6 h-6" />
           <h1 className="text-xl font-semibold">Order Collector</h1>
+          <div className="ml-4 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
+            <button
+              onClick={()=>setStore('irrakids')}
+              className={`px-3 py-1 rounded-lg text-sm font-medium ${store === 'irrakids' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
+            >Irrakids</button>
+            <button
+              onClick={()=>setStore('irranova')}
+              className={`px-3 py-1 rounded-lg text-sm font-medium ${store === 'irranova' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
+            >Irranova</button>
+          </div>
           <div className="ml-auto flex items-center gap-2">
             <ProfileBadge profile={profile} onClick={()=>setShowProfilePicker(true)} />
             <button aria-label="Settings" onClick={()=>setShowSettings(true)} className="p-2 rounded-full hover:bg-gray-100">
