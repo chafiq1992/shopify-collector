@@ -58,6 +58,7 @@ export default function App(){
   const [loading, setLoading] = useState(false);
   const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
   const [excludeOut, setExcludeOut] = useState(false);
+  const [excludeStockTags, setExcludeStockTags] = useState(false);
   const [selectedOutMap, setSelectedOutMap] = useState({}); // orderId -> Set<variantId>
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -135,6 +136,11 @@ export default function App(){
     });
     if (reqId !== requestIdRef.current) return; // stale response
     let ords = data.orders || [];
+    // Client-side exclusion for specific tags when enabled (non-Stock profile)
+    if (!usingStockProfile && excludeStockTags){
+      const disallowed = new Set(["btis", "en att b"]);
+      ords = ords.filter(o => !((o.tags || []).some(t => disallowed.has(String(t).toLowerCase()))));
+    }
     setOrders(ords);
     setTags(data.tags || []);
     setPageInfo(data.pageInfo || { hasNextPage: false });
@@ -143,7 +149,7 @@ export default function App(){
     setTotalCount(data.totalCount || ords.length);
   }
 
-  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut, profile, stockFilter, store]);
+  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut, excludeStockTags, profile, stockFilter, store]);
 
   // Debounced search
   useEffect(() => {
@@ -303,6 +309,11 @@ export default function App(){
                   active={excludeOut}
                   onClick={()=> { setExcludeOut(v => !v); setTimeout(()=>load(), 0); }}
                 />
+                <Chip
+                  label="Exclude btis/en att b"
+                  active={excludeStockTags}
+                  onClick={()=> { setExcludeStockTags(v => !v); setTimeout(()=>load(), 0); }}
+                />
               </>
             )}
           </div>
@@ -414,6 +425,16 @@ function Chip({ label, active, onClick }){
   );
 }
 
+function tagPillClasses(tag){
+  const t = String(tag || '').toLowerCase();
+  if (t === 'out') return 'bg-red-100 text-red-700 ring-red-200';
+  if (t === 'pc' || t === 'collected') return 'bg-green-100 text-green-700 ring-green-200';
+  if (t === 'urgent') return 'bg-amber-100 text-amber-700 ring-amber-200';
+  if (t === 'btis') return 'bg-purple-100 text-purple-700 ring-purple-200';
+  if (t === 'en att b') return 'bg-amber-100 text-amber-700 ring-amber-200';
+  return 'bg-gray-100 text-gray-700 ring-gray-200';
+}
+
 function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total }){
   return (
     <div className="rounded-2xl shadow-sm border border-gray-200 bg-white overflow-hidden">
@@ -422,58 +443,64 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
         {order.customer && <span className="text-sm text-gray-500">· {order.customer}</span>}
         <div className="ml-auto flex items-center gap-2 flex-wrap">
           {(order.tags || []).map(t => (
-            <span key={t} className="text-xs text-gray-700">{t}</span>
+            <span key={t} className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset ${tagPillClasses(t)}`}>{t}</span>
           ))}
         </div>
       </div>
 
       <div className="p-4">
         <div className="flex gap-4 overflow-x-auto snap-x snap-mandatory pb-2">
-          {order.variants.map((v, i) => {
-            const rawStatus = (v.status ?? '').toString();
-            const statusLower = rawStatus.toLowerCase();
-            const normalizedStatus = statusLower.includes('removed')
-              ? 'removed'
-              : statusLower.includes('unfulfilled')
-                ? 'unfulfilled'
-                : statusLower.includes('fulfilled')
-                  ? 'fulfilled'
-                  : (rawStatus ? statusLower : '');
-            const normalizedLabel = normalizedStatus
-              ? normalizedStatus.slice(0,1).toUpperCase() + normalizedStatus.slice(1)
-              : '';
-            return (
-            <div key={v.id || i} className={`min-w-[260px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
-              <div className="aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
-                {v.image ? (
-                  <img src={v.image} alt={v.sku || ""} className="w-full h-full object-cover" />
-                ) : (
-                  <div className="flex items-center justify-center w-full h-full text-gray-400"><ImageIcon className="w-8 h-8"/></div>
+          {(() => {
+            const normalizedVariants = (order.variants || []).map(v => {
+              const rawStatus = (v.status ?? '').toString();
+              const statusLower = rawStatus.toLowerCase();
+              const normalizedStatus = statusLower.includes('removed')
+                ? 'removed'
+                : statusLower.includes('unfulfilled')
+                  ? 'unfulfilled'
+                  : statusLower.includes('fulfilled')
+                    ? 'fulfilled'
+                    : (rawStatus ? statusLower : '');
+              const normalizedLabel = normalizedStatus
+                ? normalizedStatus.slice(0,1).toUpperCase() + normalizedStatus.slice(1)
+                : '';
+              return { ...v, __normalizedStatus: normalizedStatus, __normalizedLabel: normalizedLabel };
+            });
+            const variantsForDisplay = (normalizedVariants.length === 2 && normalizedVariants.some(v => v.__normalizedStatus === 'removed'))
+              ? normalizedVariants.filter(v => v.__normalizedStatus !== 'removed')
+              : normalizedVariants;
+            return variantsForDisplay.map((v, i) => (
+              <div key={v.id || i} className={`min-w-[260px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
+                <div className="aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
+                  {v.image ? (
+                    <img src={v.image} alt={v.sku || ""} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="flex items-center justify-center w-full h-full text-gray-400"><ImageIcon className="w-8 h-8"/></div>
+                  )}
+                </div>
+                {v.__normalizedStatus && (
+                  <span className={`absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-medium shadow
+                    ${v.__normalizedStatus === 'fulfilled' ? 'bg-green-600 text-white' : v.__normalizedStatus === 'removed' ? 'bg-gray-500 text-white' : v.__normalizedStatus === 'unfulfilled' ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-800'}`}
+                  >{v.__normalizedLabel}</span>
                 )}
+                <div className="p-3 flex items-center gap-2">
+                  <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
+                  <span className="font-mono text-xs bg-gray-50 px-2 py-1 rounded border border-gray-200">{v.sku}</span>
+                  {v.title && <span className="text-xs text-gray-700 truncate">· {v.title}</span>}
+                  <span className="ml-auto text-[10px] uppercase tracking-wide text-gray-500">Qty</span>
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-blue-600 text-white text-sm font-semibold">{v.qty}</span>
+                </div>
+                <button
+                  onClick={()=>onToggleVariant(v.id)}
+                  className={`absolute top-2 right-2 px-2 py-1 rounded-full text-xs font-medium shadow ${selectedOut.has(v.id) ? "bg-red-600 text-white" : "bg-white text-gray-800"}`}
+                  aria-pressed={selectedOut.has(v.id)}
+                  title={selectedOut.has(v.id) ? "Selected as OUT" : "Mark this variant as missing"}
+                >
+                  {selectedOut.has(v.id) ? "OUT" : "Select OUT"}
+                </button>
               </div>
-              {normalizedStatus && (
-                <span className={`absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-medium shadow
-                  ${normalizedStatus === 'fulfilled' ? 'bg-green-600 text-white' : normalizedStatus === 'removed' ? 'bg-gray-500 text-white' : normalizedStatus === 'unfulfilled' ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-800'}`}
-                >{normalizedLabel}</span>
-              )}
-              <div className="p-3 flex items-center gap-2">
-                <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
-                <span className="font-mono text-xs bg-gray-50 px-2 py-1 rounded border border-gray-200">{v.sku}</span>
-                {v.title && <span className="text-xs text-gray-700 truncate">· {v.title}</span>}
-                <span className="ml-auto text-[10px] uppercase tracking-wide text-gray-500">Qty</span>
-                <span className="text-2xl font-bold">{v.qty}</span>
-              </div>
-              <button
-                onClick={()=>onToggleVariant(v.id)}
-                className={`absolute top-2 right-2 px-2 py-1 rounded-full text-xs font-medium shadow ${selectedOut.has(v.id) ? "bg-red-600 text-white" : "bg-white text-gray-800"}`}
-                aria-pressed={selectedOut.has(v.id)}
-                title={selectedOut.has(v.id) ? "Selected as OUT" : "Mark this variant as missing"}
-              >
-                {selectedOut.has(v.id) ? "OUT" : "Select OUT"}
-              </button>
-            </div>
-            );
-          })}
+            ));
+          })()}
         </div>
       </div>
 
