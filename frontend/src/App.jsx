@@ -90,7 +90,7 @@ export default function App(){
     setPageInfo(data.pageInfo || { hasNextPage: false });
     setIndex(0);
     setLoading(false);
-    setTotalCount(data.totalCount || (data.orders || []).length);
+    setTotalCount((statusFilter === "collect" || statusFilter === "urgent") ? ords.length : (data.totalCount || ords.length));
   }
 
   useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut]);
@@ -364,11 +364,11 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
               <p className="text-sm text-gray-600 mb-4">
                 {showConfirm === 'collected' ? 'Mark this order as Collected and add tag pc?' : 'Append selected OUT titles to note and add tag out?'}
               </p>
-              <div className="flex justify-end gap-2">
-                <button onClick={()=>setShowConfirm(null)} className="px-3 py-1 rounded border text-sm">Cancel</button>
+              <div className="flex justify-end gap-3">
+                <button onClick={()=>setShowConfirm(null)} className="px-4 py-2 rounded-xl border border-gray-300 text-sm font-medium hover:bg-gray-50">Cancel</button>
                 <button
                   onClick={()=>{ const act = showConfirm === 'collected' ? onMarkCollected : onMarkOut; setShowConfirm(null); act(); }}
-                  className={`px-3 py-1 rounded text-white text-sm ${showConfirm === 'collected' ? 'bg-green-600' : 'bg-red-600'}`}
+                  className={`px-4 py-2 rounded-xl text-white text-sm font-semibold ${showConfirm === 'collected' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}`}
                 >Confirm</button>
               </div>
             </div>
