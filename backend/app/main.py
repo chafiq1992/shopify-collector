@@ -270,7 +270,7 @@ async def list_orders(
 
     # Build GraphQL query based on store capabilities
     if (store or "irrakids").strip().lower() == "irranova":
-        # Avoid PII (customer) and product variant fields for limited scopes
+        # Avoid PII (customer, shippingAddress) but keep variant fields
         query = """
         query Orders($first: Int!, $after: String, $query: String) {
           orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: true) {
@@ -289,6 +289,12 @@ async def list_orders(
                       quantity
                       unfulfilledQuantity
                       sku
+                      variant {
+                        id
+                        title
+                        image { url }
+                        product { id }
+                      }
                     }
                   }
                 }

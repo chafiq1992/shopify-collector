@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { CheckCircle, PackageSearch, PackageCheck, Tag, StickyNote, XCircle, ChevronLeft, ChevronRight, Search, Image as ImageIcon, Settings } from "lucide-react";
+import { CheckCircle, PackageSearch, PackageCheck, Tag, StickyNote, XCircle, ChevronLeft, ChevronRight, Search, Image as ImageIcon, Settings, Boxes } from "lucide-react";
 
 // Types (JSDoc only)
 /**
@@ -219,7 +219,6 @@ export default function App(){
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur border-b border-gray-200">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center gap-3">
           <PackageSearch className="w-6 h-6" />
-          <h1 className="text-xl font-semibold">Order Collector</h1>
           <div className="ml-4 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
             <button
               onClick={()=>setStore('irrakids')}
@@ -231,7 +230,9 @@ export default function App(){
             >Irranova</button>
           </div>
           <div className="ml-auto flex items-center gap-2">
-            <ProfileBadge profile={profile} onClick={()=>setShowProfilePicker(true)} />
+            <button aria-label="Choose profile" onClick={()=>setShowProfilePicker(true)} className="p-2 rounded-full hover:bg-gray-100">
+              <Boxes className={`w-5 h-5 ${profile?.id === 'stock' ? 'text-blue-600' : 'text-gray-700'}`} />
+            </button>
             <button aria-label="Settings" onClick={()=>setShowSettings(true)} className="p-2 rounded-full hover:bg-gray-100">
               <Settings className="w-5 h-5" />
             </button>
