@@ -38,11 +38,9 @@ const API = {
 
 // Profiles configuration
 const PROFILES = {
-  btissam: {
-    id: "btissam",
-    label: "Btissam",
-    // Open, unfulfilled, has tag btis and tag "en att b"
-    baseQuery: 'status:open fulfillment_status:unfulfilled tag:btis tag:"en att b"',
+  stock: {
+    id: "stock",
+    label: "Stock",
   },
 };
 
@@ -67,6 +65,12 @@ export default function App(){
       return raw ? JSON.parse(raw) : null;
     } catch { return null; }
   });
+  // Subfilter for Stock profile: 'btis' or 'en att b'
+  const [stockFilter, setStockFilter] = useState(() => {
+    try {
+      return localStorage.getItem("orderCollectorStockFilter") || "btis";
+    } catch { return "btis"; }
+  });
   const [preset, setPreset] = useState(() => {
     try {
       const raw = localStorage.getItem("orderCollectorPreset");
@@ -79,6 +83,9 @@ export default function App(){
   useEffect(()=>{
     try { localStorage.setItem("orderCollectorProfile", JSON.stringify(profile)); } catch {}
   }, [profile]);
+  useEffect(()=>{
+    try { localStorage.setItem("orderCollectorStockFilter", stockFilter); } catch {}
+  }, [stockFilter]);
 
   const wsRef = useRef(null);
 
@@ -90,18 +97,24 @@ export default function App(){
       if (!y||!m||!d) return "";
       return `${d}/${m}/${y.slice(-2)}`;
     })() : "";
-    const usingProfileBase = !!(profile && profile.baseQuery);
+    const usingStockProfile = !!(profile && profile.id === 'stock');
+    // Build base query from Stock subfilter, else empty
+    const baseQuery = usingStockProfile
+      ? (stockFilter === 'btis'
+          ? 'status:open fulfillment_status:unfulfilled tag:btis'
+          : 'status:open fulfillment_status:unfulfilled tag:"en att b"')
+      : '';
     const data = await API.getOrders({
       limit: 25,
-      status_filter: usingProfileBase ? "all" : statusFilter,
+      status_filter: (usingStockProfile ? "all" : statusFilter),
       tag_filter: tagFilter || "",
       search: search || "",
-      cod_date: (!usingProfileBase && statusFilter === "collect") ? (ddmmyy || "") : "",
+      cod_date: (!usingStockProfile && statusFilter === "collect") ? (ddmmyy || "") : "",
       collect_prefix: preset.collectPrefix,
       collect_exclude_tag: preset.collectExcludeTag,
       verification_include_tag: preset.verificationIncludeTag,
-      exclude_out: excludeOut,
-      base_query: usingProfileBase ? profile.baseQuery : "",
+      exclude_out: usingStockProfile ? false : excludeOut,
+      base_query: baseQuery,
     });
     let ords = data.orders || [];
     if (statusFilter === "collect" || statusFilter === "urgent"){
@@ -115,7 +128,7 @@ export default function App(){
     setTotalCount((statusFilter === "collect" || statusFilter === "urgent") ? ords.length : (data.totalCount || ords.length));
   }
 
-  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut, profile]);
+  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut, profile, stockFilter]);
 
   // Debounced search
   useEffect(() => {
@@ -212,28 +225,45 @@ export default function App(){
             />
           </div>
           <div className="flex items-center gap-2">
-            <Chip
-              label="Collect"
-              active={statusFilter === "collect"}
-              onClick={()=>{ setStatusFilter("collect"); setShowDatePicker(true); }}
-            />
-            <Chip
-              label="Verification"
-              active={statusFilter === "verification"}
-              onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); }}
-            />
-            <Chip
-              label="Urgent"
-              active={statusFilter === "urgent"}
-              onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); }}
-            />
-            <Chip
-              label="Exclude OUT"
-              active={excludeOut}
-              onClick={()=> setExcludeOut(v => !v)}
-            />
+            {profile && profile.id === 'stock' ? (
+              <>
+                <Chip
+                  label="btis"
+                  active={stockFilter === 'btis'}
+                  onClick={()=>{ setStockFilter('btis'); setShowDatePicker(false); }}
+                />
+                <Chip
+                  label="en att b"
+                  active={stockFilter === 'en att b'}
+                  onClick={()=>{ setStockFilter('en att b'); setShowDatePicker(false); }}
+                />
+              </>
+            ) : (
+              <>
+                <Chip
+                  label="Collect"
+                  active={statusFilter === "collect"}
+                  onClick={()=>{ setStatusFilter("collect"); setShowDatePicker(true); }}
+                />
+                <Chip
+                  label="Verification"
+                  active={statusFilter === "verification"}
+                  onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); }}
+                />
+                <Chip
+                  label="Urgent"
+                  active={statusFilter === "urgent"}
+                  onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); }}
+                />
+                <Chip
+                  label="Exclude OUT"
+                  active={excludeOut}
+                  onClick={()=> setExcludeOut(v => !v)}
+                />
+              </>
+            )}
           </div>
-          {showDatePicker && (
+          {showDatePicker && (!profile || profile.id !== 'stock') && (
             <div className="flex items-center gap-2">
               <span className="text-xs uppercase tracking-wide text-gray-400">Date</span>
               <input
