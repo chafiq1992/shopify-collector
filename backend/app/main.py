@@ -361,7 +361,7 @@ async def list_orders(
         # Always try to use a wider window irrespective of incoming limit
         while len(accumulated_edges) < target_window:
             variables2 = {"first": min(chunk, target_window - len(accumulated_edges)), "after": after_cursor, "query": q or None}
-            page = await shopify_graphql(query, variables2)
+            page = await shopify_graphql(query, variables2, store=store)
             ords2 = page["orders"]
             edges2 = ords2.get("edges") or []
             if not edges2:

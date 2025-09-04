@@ -269,22 +269,22 @@ export default function App(){
                 <Chip
                   label="Collect"
                   active={statusFilter === "collect"}
-                  onClick={()=>{ setStatusFilter("collect"); setShowDatePicker(true); }}
+                  onClick={()=>{ setStatusFilter("collect"); setShowDatePicker(true); setTimeout(()=>load(), 0); }}
                 />
                 <Chip
                   label="Verification"
                   active={statusFilter === "verification"}
-                  onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); }}
+                  onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); setTimeout(()=>load(), 0); }}
                 />
                 <Chip
                   label="Urgent"
                   active={statusFilter === "urgent"}
-                  onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); }}
+                  onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); setTimeout(()=>load(), 0); }}
                 />
                 <Chip
                   label="Exclude OUT"
                   active={excludeOut}
-                  onClick={()=> setExcludeOut(v => !v)}
+                  onClick={()=> { setExcludeOut(v => !v); setTimeout(()=>load(), 0); }}
                 />
               </>
             )}
