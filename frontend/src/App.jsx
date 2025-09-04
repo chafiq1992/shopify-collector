@@ -97,12 +97,14 @@ export default function App(){
   }, [store]);
 
   const wsRef = useRef(null);
+  const requestIdRef = useRef(0);
 
   function vibrate(ms = 20){
     try { if (navigator && typeof navigator.vibrate === 'function') navigator.vibrate(ms); } catch {}
   }
 
   async function load(){
+    const reqId = ++requestIdRef.current;
     setLoading(true);
     // convert selected date to DD/MM/YY for tag
     const ddmmyy = codDate ? (()=>{
@@ -130,6 +132,7 @@ export default function App(){
       base_query: baseQuery,
       store,
     });
+    if (reqId !== requestIdRef.current) return; // stale response
     let ords = data.orders || [];
     setOrders(ords);
     setTags(data.tags || []);
@@ -269,22 +272,22 @@ export default function App(){
                 <Chip
                   label="Collect"
                   active={statusFilter === "collect"}
-                  onClick={()=>{ setStatusFilter("collect"); setShowDatePicker(true); setTimeout(()=>load(), 0); }}
+                  onClick={()=>{ setStatusFilter("collect"); setShowDatePicker(true); }}
                 />
                 <Chip
                   label="Verification"
                   active={statusFilter === "verification"}
-                  onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); setTimeout(()=>load(), 0); }}
+                  onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); }}
                 />
                 <Chip
                   label="Urgent"
                   active={statusFilter === "urgent"}
-                  onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); setTimeout(()=>load(), 0); }}
+                  onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); }}
                 />
                 <Chip
                   label="Exclude OUT"
                   active={excludeOut}
-                  onClick={()=> { setExcludeOut(v => !v); setTimeout(()=>load(), 0); }}
+                  onClick={()=> { setExcludeOut(v => !v); }}
                 />
               </>
             )}
