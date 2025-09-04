@@ -62,6 +62,8 @@ export default function App(){
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showProfilePicker, setShowProfilePicker] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(null); // 'collected' | 'out' | null
+  const [confirmNav, setConfirmNav] = useState(false);
   const [store, setStore] = useState(() => {
     try { return localStorage.getItem("orderCollectorStore") || "irrakids"; } catch { return "irrakids"; }
   });
@@ -310,7 +312,7 @@ export default function App(){
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-4">
+      <main className="max-w-5xl mx-auto px-4 py-4 pb-36">
         {current ? (
           <div className="relative">
             <OrderCard
@@ -333,6 +335,43 @@ export default function App(){
           </div>
         )}
       </main>
+      <div className="fixed bottom-0 inset-x-0 z-40 border-t border-gray-200 bg-white/90 backdrop-blur">
+        <div className="max-w-5xl mx-auto px-4 py-3">
+          <div className="grid grid-cols-2 gap-3">
+            <button onClick={()=>setShowConfirm('collected')} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
+              <CheckCircle className="w-5 h-5"/> <span className="font-semibold">Collected</span>
+            </button>
+            <button onClick={()=>setShowConfirm('out')} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
+              <XCircle className="w-5 h-5"/> <span className="font-semibold">OUT</span>
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-3 mt-3">
+            <button onClick={()=>{ if (confirmNav) { setConfirmNav(false); try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; gotoPrev(); } else { setConfirmNav(true); setTimeout(()=>setConfirmNav(false), 2000); } }} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-gray-200 text-gray-900 hover:bg-gray-300 active:scale-[.98] shadow-sm">
+              <ChevronLeft className="w-5 h-5"/> <span className="font-semibold">{confirmNav ? "Confirm Prev" : "Prev order"}</span>
+            </button>
+            <button onClick={()=>{ if (confirmNav) { setConfirmNav(false); try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; gotoNext(); } else { setConfirmNav(true); setTimeout(()=>setConfirmNav(false), 2000); } }} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-gray-900 text-white hover:bg:black active:scale-[.98] shadow-sm">
+              <ChevronRight className="w-5 h-5"/> <span className="font-semibold">{confirmNav ? "Confirm Next" : "Next order"}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+      {showConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center">
+          <div className="w-full max-w-sm rounded-2xl bg-white shadow-lg border border-gray-200 p-4">
+            <h3 className="text-lg font-semibold mb-2">Confirm {showConfirm === 'collected' ? 'Collected' : 'OUT'}</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              {showConfirm === 'collected' ? 'Mark this order as Collected and add tag pc?' : 'Append selected OUT titles to note and add tag out?'}
+            </p>
+            <div className="flex justify-end gap-3">
+              <button onClick={()=>setShowConfirm(null)} className="px-4 py-2 rounded-xl border border-gray-300 text-sm font-medium hover:bg-gray-50">Cancel</button>
+              <button
+                onClick={()=>{ const act = showConfirm === 'collected' ? ()=>handleMarkCollected(current) : ()=>handleMarkOut(current); setShowConfirm(null); act(); }}
+                className={`px-4 py-2 rounded-xl text-white text-sm font-semibold ${showConfirm === 'collected' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}`}
+              >Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
       {showSettings && (
         <PresetSettingsModal
           preset={preset}
@@ -364,13 +403,6 @@ function Chip({ label, active, onClick }){
 }
 
 function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total }){
-  const [showConfirm, setShowConfirm] = useState(null); // 'collected' | 'out' | null
-  const [confirmNext, setConfirmNext] = useState(false);
-
-  function twoTap(confirmFlag, setConfirmFlag, action){
-    if (confirmFlag){ setConfirmFlag(false); action(); }
-    else { setConfirmFlag(true); setTimeout(()=>setConfirmFlag(false), 2000); }
-  }
   return (
     <div className="rounded-2xl shadow-sm border border-gray-200 bg-white overflow-hidden">
       <div className="flex items-center gap-2 px-4 h-14 border-b bg-gray-50">
@@ -387,7 +419,20 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
 
       <div className="p-4">
         <div className="flex gap-4 overflow-x-auto snap-x snap-mandatory pb-2">
-          {order.variants.map((v, i) => (
+          {order.variants.map((v, i) => {
+            const rawStatus = (v.status ?? '').toString();
+            const statusLower = rawStatus.toLowerCase();
+            const normalizedStatus = statusLower.includes('removed')
+              ? 'removed'
+              : statusLower.includes('unfulfilled')
+                ? 'unfulfilled'
+                : statusLower.includes('fulfilled')
+                  ? 'fulfilled'
+                  : (rawStatus ? statusLower : '');
+            const normalizedLabel = normalizedStatus
+              ? normalizedStatus.slice(0,1).toUpperCase() + normalizedStatus.slice(1)
+              : '';
+            return (
             <div key={v.id || i} className={`min-w-[260px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
               <div className="aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
                 {v.image ? (
@@ -396,10 +441,10 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                   <div className="flex items-center justify-center w-full h-full text-gray-400"><ImageIcon className="w-8 h-8"/></div>
                 )}
               </div>
-              {v.status && (
+              {normalizedStatus && (
                 <span className={`absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-medium shadow
-                  ${v.status === 'fulfilled' ? 'bg-green-600 text-white' : v.status === 'removed' ? 'bg-gray-400 text-white' : v.status === 'unfulfilled' ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-800'}`}
-                >{v.status}</span>
+                  ${normalizedStatus === 'fulfilled' ? 'bg-green-600 text-white' : normalizedStatus === 'removed' ? 'bg-gray-500 text-white' : normalizedStatus === 'unfulfilled' ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-800'}`}
+                >{normalizedLabel}</span>
               )}
               <div className="p-3 flex items-center gap-2">
                 <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
@@ -417,7 +462,8 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                 {selectedOut.has(v.id) ? "OUT" : "Select OUT"}
               </button>
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
@@ -428,42 +474,6 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
         <span className="ml-auto inline-flex items-center px-2 py-0.5 rounded-full bg-blue-600 text-white text-xs font-semibold">
           {position}/{total}
         </span>
-      </div>
-
-      <div className="px-4 pb-3">
-        <div className="grid grid-cols-2 gap-3">
-          <button onClick={()=>setShowConfirm('collected')} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
-            <CheckCircle className="w-5 h-5"/> <span className="font-semibold">Collected</span>
-          </button>
-          <button onClick={()=>setShowConfirm('out')} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
-            <XCircle className="w-5 h-5"/> <span className="font-semibold">OUT</span>
-          </button>
-        </div>
-        <div className="grid grid-cols-2 gap-3 mt-3">
-          <button onClick={()=>twoTap(confirmNext, setConfirmNext, ()=>{ try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; onPrev(); })} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-gray-200 text-gray-900 hover:bg-gray-300 active:scale-[.98] shadow-sm">
-            <ChevronLeft className="w-5 h-5"/> <span className="font-semibold">{confirmNext ? "Confirm Prev" : "Prev order"}</span>
-          </button>
-          <button onClick={()=>twoTap(confirmNext, setConfirmNext, ()=>{ try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; onNext(); })} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-gray-900 text-white hover:bg:black active:scale-[.98] shadow-sm">
-            <ChevronRight className="w-5 h-5"/> <span className="font-semibold">{confirmNext ? "Confirm Next" : "Next order"}</span>
-          </button>
-        </div>
-        {showConfirm && (
-          <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center">
-            <div className="w-full max-w-sm rounded-2xl bg-white shadow-lg border border-gray-200 p-4">
-              <h3 className="text-lg font-semibold mb-2">Confirm {showConfirm === 'collected' ? 'Collected' : 'OUT'}</h3>
-              <p className="text-sm text-gray-600 mb-4">
-                {showConfirm === 'collected' ? 'Mark this order as Collected and add tag pc?' : 'Append selected OUT titles to note and add tag out?'}
-              </p>
-              <div className="flex justify-end gap-3">
-                <button onClick={()=>setShowConfirm(null)} className="px-4 py-2 rounded-xl border border-gray-300 text-sm font-medium hover:bg-gray-50">Cancel</button>
-                <button
-                  onClick={()=>{ const act = showConfirm === 'collected' ? onMarkCollected : onMarkOut; setShowConfirm(null); act(); }}
-                  className={`px-4 py-2 rounded-xl text-white text-sm font-semibold ${showConfirm === 'collected' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}`}
-                >Confirm</button>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
