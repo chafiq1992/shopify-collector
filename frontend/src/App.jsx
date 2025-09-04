@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { CheckCircle, PackageSearch, PackageCheck, Tag, StickyNote, XCircle, ChevronLeft, ChevronRight, Search, Image as ImageIcon, Settings, Boxes } from "lucide-react";
+import { CheckCircle, PackageSearch, PackageCheck, StickyNote, XCircle, ChevronLeft, ChevronRight, Search, Image as ImageIcon, Settings, Boxes } from "lucide-react";
 
 // Types (JSDoc only)
 /**
@@ -273,7 +273,20 @@ export default function App(){
                 <Chip
                   label="Collect"
                   active={statusFilter === "collect"}
-                  onClick={()=>{ setStatusFilter("collect"); setShowDatePicker(true); setTimeout(()=>load(), 0); }}
+                  onClick={()=>{
+                    setStatusFilter("collect");
+                    setShowDatePicker(true);
+                    if (!codDate) {
+                      try {
+                        const now = new Date();
+                        const yyyy = now.getFullYear();
+                        const mm = String(now.getMonth()+1).padStart(2,'0');
+                        const dd = String(now.getDate()).padStart(2,'0');
+                        setCodDate(`${yyyy}-${mm}-${dd}`);
+                      } catch {}
+                    }
+                    setTimeout(()=>load(), 0);
+                  }}
                 />
                 <Chip
                   label="Verification"
@@ -404,14 +417,12 @@ function Chip({ label, active, onClick }){
 function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total }){
   return (
     <div className="rounded-2xl shadow-sm border border-gray-200 bg-white overflow-hidden">
-      <div className="flex items-center gap-2 px-4 h-14 border-b bg-gray-50">
+      <div className="flex items-center gap-2 px-4 py-3 border-b bg-gray-50">
         <span className="text-sm font-semibold">{order.number}</span>
         {order.customer && <span className="text-sm text-gray-500">· {order.customer}</span>}
-        <div className="ml-auto flex items-center gap-1 overflow-x-auto whitespace-nowrap">
+        <div className="ml-auto flex items-center gap-2 flex-wrap">
           {(order.tags || []).map(t => (
-            <span key={t} className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-              <Tag className="w-3 h-3"/>{t}
-            </span>
+            <span key={t} className="text-xs text-gray-700">{t}</span>
           ))}
         </div>
       </div>
