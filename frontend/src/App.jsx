@@ -63,7 +63,6 @@ export default function App(){
   const [showSettings, setShowSettings] = useState(false);
   const [showProfilePicker, setShowProfilePicker] = useState(false);
   const [showConfirm, setShowConfirm] = useState(null); // 'collected' | 'out' | null
-  const [confirmNav, setConfirmNav] = useState(false);
   const [store, setStore] = useState(() => {
     try { return localStorage.getItem("orderCollectorStore") || "irrakids"; } catch { return "irrakids"; }
   });
@@ -346,11 +345,11 @@ export default function App(){
             </button>
           </div>
           <div className="grid grid-cols-2 gap-3 mt-3">
-            <button onClick={()=>{ if (confirmNav) { setConfirmNav(false); try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; gotoPrev(); } else { setConfirmNav(true); setTimeout(()=>setConfirmNav(false), 2000); } }} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-gray-200 text-gray-900 hover:bg-gray-300 active:scale-[.98] shadow-sm">
-              <ChevronLeft className="w-5 h-5"/> <span className="font-semibold">{confirmNav ? "Confirm Prev" : "Prev order"}</span>
+            <button onClick={()=>{ try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; gotoPrev(); }} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-gray-200 text-gray-900 hover:bg-gray-300 active:scale-[.98] shadow-sm">
+              <ChevronLeft className="w-5 h-5"/> <span className="font-semibold">Prev order</span>
             </button>
-            <button onClick={()=>{ if (confirmNav) { setConfirmNav(false); try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; gotoNext(); } else { setConfirmNav(true); setTimeout(()=>setConfirmNav(false), 2000); } }} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-gray-900 text-white hover:bg:black active:scale-[.98] shadow-sm">
-              <ChevronRight className="w-5 h-5"/> <span className="font-semibold">{confirmNav ? "Confirm Next" : "Next order"}</span>
+            <button onClick={()=>{ try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; gotoNext(); }} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-gray-900 text-white hover:bg:black active:scale-[.98] shadow-sm">
+              <ChevronRight className="w-5 h-5"/> <span className="font-semibold">Next order</span>
             </button>
           </div>
         </div>
