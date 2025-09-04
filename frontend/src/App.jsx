@@ -59,6 +59,7 @@ export default function App(){
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showProfilePicker, setShowProfilePicker] = useState(false);
+  const [toasts, setToasts] = useState([]);
   const [profile, setProfile] = useState(() => {
     try {
       const raw = localStorage.getItem("orderCollectorProfile");
@@ -88,6 +89,17 @@ export default function App(){
   }, [stockFilter]);
 
   const wsRef = useRef(null);
+
+  function vibrate(ms = 20){
+    try { if (navigator && typeof navigator.vibrate === 'function') navigator.vibrate(ms); } catch {}
+  }
+  function notify(message, type = 'info'){
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+    setToasts(t => [...t, { id, message, type }]);
+    setTimeout(() => {
+      setToasts(t => t.filter(x => x.id !== id));
+    }, 2000);
+  }
 
   async function load(){
     setLoading(true);
@@ -161,9 +173,13 @@ export default function App(){
 
   function gotoNext(){
     setIndex(i => (i + 1) % Math.max(1, total || 1));
+    vibrate(10);
+    notify("Next order");
   }
   function gotoPrev(){
     setIndex(i => (i - 1 + Math.max(1, total || 1)) % Math.max(1, total || 1));
+    vibrate(10);
+    notify("Previous order");
   }
 
   function toggleVariantOut(orderId, variantId){
@@ -176,6 +192,8 @@ export default function App(){
 
   async function handleMarkCollected(order){
     await API.addTag(order.id, "pc");
+    vibrate(20);
+    notify("Marked as Collected", 'success');
     gotoNext();
   }
 
@@ -194,6 +212,8 @@ export default function App(){
       API.addTag(order.id, "out"),
     ]);
     setSelectedOutMap(prev => ({ ...prev, [order.id]: new Set() }));
+    vibrate(30);
+    notify("Marked as OUT", 'warn');
     gotoNext();
   }
 
@@ -281,7 +301,7 @@ export default function App(){
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-6">
+      <main className="max-w-5xl mx-auto px-4 py-4">
         {current ? (
           <div className="relative">
             <OrderCard
@@ -295,6 +315,7 @@ export default function App(){
               onNext={gotoNext}
               position={index + 1}
               total={total}
+              notify={notify}
             />
           </div>
         ) : (
@@ -319,6 +340,14 @@ export default function App(){
           onSelect={(p)=>{ setProfile(p); setShowProfilePicker(false); }}
         />
       )}
+      {/* Toasts */}
+      <div className="fixed top-3 right-3 z-50 space-y-2">
+        {toasts.map(t => (
+          <div key={t.id} className={`px-3 py-2 rounded-lg shadow text-sm border bg-white ${t.type === 'success' ? 'border-green-300' : t.type === 'warn' ? 'border-amber-300' : 'border-gray-200'}`}>
+            {t.message}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -334,7 +363,7 @@ function Chip({ label, active, onClick }){
   );
 }
 
-function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total }){
+function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total, notify }){
   const [showConfirm, setShowConfirm] = useState(null); // 'collected' | 'out' | null
   const [confirmNext, setConfirmNext] = useState(false);
 
@@ -401,19 +430,21 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
         </span>
       </div>
 
-      <div className="px-4 pb-4">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <button onClick={()=>setShowConfirm('collected')} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl text-white bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
-            <CheckCircle className="w-5 h-5"/> <span className="font-semibold">Collected</span>
-          </button>
-          <button onClick={()=>setShowConfirm('out')} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl text-white bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
-            <XCircle className="w-5 h-5"/> <span className="font-semibold">OUT</span>
-          </button>
+      <div className="px-4 pb-3">
+        <div className="grid grid-cols-2 gap-3 items-stretch">
+          <div className="grid grid-cols-1 gap-3">
+            <button onClick={()=>setShowConfirm('collected')} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
+              <CheckCircle className="w-5 h-5"/> <span className="font-semibold">Collected</span>
+            </button>
+            <button onClick={()=>setShowConfirm('out')} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
+              <XCircle className="w-5 h-5"/> <span className="font-semibold">OUT</span>
+            </button>
+          </div>
           <div className="grid grid-cols-2 gap-3">
-            <button onClick={()=>twoTap(confirmNext, setConfirmNext, onPrev)} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-gray-200 text-gray-900 hover:bg-gray-300 active:scale-[.98] shadow-sm">
+            <button onClick={()=>twoTap(confirmNext, setConfirmNext, ()=>{ try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; notify && notify('Previous order'); onPrev(); })} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-gray-200 text-gray-900 hover:bg-gray-300 active:scale-[.98] shadow-sm">
               <ChevronLeft className="w-5 h-5"/> <span className="font-semibold">{confirmNext ? "Confirm Prev" : "Prev order"}</span>
             </button>
-            <button onClick={()=>twoTap(confirmNext, setConfirmNext, onNext)} className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-gray-900 text-white hover:bg:black active:scale-[.98] shadow-sm">
+            <button onClick={()=>twoTap(confirmNext, setConfirmNext, ()=>{ try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; notify && notify('Next order'); onNext(); })} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-gray-900 text-white hover:bg:black active:scale-[.98] shadow-sm">
               <ChevronRight className="w-5 h-5"/> <span className="font-semibold">{confirmNext ? "Confirm Next" : "Next order"}</span>
             </button>
           </div>
