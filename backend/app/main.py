@@ -268,42 +268,74 @@ async def list_orders(
         exclude_out,
     )
 
-    query = """
-    query Orders($first: Int!, $after: String, $query: String) {
-      orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: true) {
-        edges {
-          cursor
-          node {
-            id
-            name
-            tags
-            note
-            shippingAddress { city }
-            customer { displayName }
-            currentTotalPriceSet { shopMoney { amount currencyCode } }
-            totalPriceSet { shopMoney { amount currencyCode } }
-            lineItems(first: 50) {
-              edges {
-                node {
-                  quantity
-                  unfulfilledQuantity
-                  sku
-                  variant {
-                    id
-                    title
-                    image { url }
-                    product { id }
+    # Build GraphQL query based on store capabilities
+    if (store or "irrakids").strip().lower() == "irranova":
+        # Avoid PII (customer) and product variant fields for limited scopes
+        query = """
+        query Orders($first: Int!, $after: String, $query: String) {
+          orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: true) {
+            edges {
+              cursor
+              node {
+                id
+                name
+                tags
+                note
+                currentTotalPriceSet { shopMoney { amount currencyCode } }
+                totalPriceSet { shopMoney { amount currencyCode } }
+                lineItems(first: 50) {
+                  edges {
+                    node {
+                      quantity
+                      unfulfilledQuantity
+                      sku
+                    }
                   }
                 }
               }
             }
+            pageInfo { hasNextPage }
           }
+          ordersCount(query: $query) { count }
         }
-        pageInfo { hasNextPage }
-      }
-      ordersCount(query: $query) { count }
-    }
-    """
+        """
+    else:
+        query = """
+        query Orders($first: Int!, $after: String, $query: String) {
+          orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: true) {
+            edges {
+              cursor
+              node {
+                id
+                name
+                tags
+                note
+                shippingAddress { city }
+                customer { displayName }
+                currentTotalPriceSet { shopMoney { amount currencyCode } }
+                totalPriceSet { shopMoney { amount currencyCode } }
+                lineItems(first: 50) {
+                  edges {
+                    node {
+                      quantity
+                      unfulfilledQuantity
+                      sku
+                      variant {
+                        id
+                        title
+                        image { url }
+                        product { id }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            pageInfo { hasNextPage }
+          }
+          ordersCount(query: $query) { count }
+        }
+        """
     variables = {"first": limit, "after": cursor, "query": q or None}
     data = await shopify_graphql(query, variables, store=store)
     ords = data["orders"]
