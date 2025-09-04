@@ -227,12 +227,13 @@ async def list_orders(
     collect_exclude_tag: Optional[str] = Query(None, description="Exclude tag for collect filter, e.g. 'pc'"),
     verification_include_tag: Optional[str] = Query(None, description="Include tag for verification filter, e.g. 'pc'"),
     exclude_out: bool = Query(False, description="Exclude orders tagged with 'out'"),
+    base_query: Optional[str] = Query(None, description="Raw Shopify query prefix to start from"),
 ):
     if not SHOP_DOMAIN or not SHOP_PASSWORD:
         return JSONResponse({"orders": [], "pageInfo": {"hasNextPage": False}, "error": "Shopify env not configured"}, status_code=200)
 
     q = build_query_string(
-        "",
+        (base_query or ""),
         status_filter,
         tag_filter,
         search,

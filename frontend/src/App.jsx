@@ -36,6 +36,16 @@ const API = {
   }
 };
 
+// Profiles configuration
+const PROFILES = {
+  btissam: {
+    id: "btissam",
+    label: "Btissam",
+    // Open, unfulfilled, has tag btis and tag "en att b"
+    baseQuery: 'status:open fulfillment_status:unfulfilled tag:btis tag:"en att b"',
+  },
+};
+
 export default function App(){
   const [orders, setOrders] = useState([]);
   const [tags, setTags] = useState([]);
@@ -50,6 +60,13 @@ export default function App(){
   const [selectedOutMap, setSelectedOutMap] = useState({}); // orderId -> Set<variantId>
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showProfilePicker, setShowProfilePicker] = useState(false);
+  const [profile, setProfile] = useState(() => {
+    try {
+      const raw = localStorage.getItem("orderCollectorProfile");
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  });
   const [preset, setPreset] = useState(() => {
     try {
       const raw = localStorage.getItem("orderCollectorPreset");
@@ -59,6 +76,9 @@ export default function App(){
   useEffect(()=>{
     try { localStorage.setItem("orderCollectorPreset", JSON.stringify(preset)); } catch {}
   }, [preset]);
+  useEffect(()=>{
+    try { localStorage.setItem("orderCollectorProfile", JSON.stringify(profile)); } catch {}
+  }, [profile]);
 
   const wsRef = useRef(null);
 
@@ -70,16 +90,18 @@ export default function App(){
       if (!y||!m||!d) return "";
       return `${d}/${m}/${y.slice(-2)}`;
     })() : "";
+    const usingProfileBase = !!(profile && profile.baseQuery);
     const data = await API.getOrders({
       limit: 25,
-      status_filter: statusFilter,
+      status_filter: usingProfileBase ? "all" : statusFilter,
       tag_filter: tagFilter || "",
       search: search || "",
-      cod_date: statusFilter === "collect" ? (ddmmyy || "") : "",
+      cod_date: (!usingProfileBase && statusFilter === "collect") ? (ddmmyy || "") : "",
       collect_prefix: preset.collectPrefix,
       collect_exclude_tag: preset.collectExcludeTag,
       verification_include_tag: preset.verificationIncludeTag,
       exclude_out: excludeOut,
+      base_query: usingProfileBase ? profile.baseQuery : "",
     });
     let ords = data.orders || [];
     if (statusFilter === "collect" || statusFilter === "urgent"){
@@ -93,7 +115,7 @@ export default function App(){
     setTotalCount((statusFilter === "collect" || statusFilter === "urgent") ? ords.length : (data.totalCount || ords.length));
   }
 
-  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut]);
+  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut, profile]);
 
   // Debounced search
   useEffect(() => {
@@ -171,6 +193,7 @@ export default function App(){
           <PackageSearch className="w-6 h-6" />
           <h1 className="text-xl font-semibold">Order Collector</h1>
           <div className="ml-auto flex items-center gap-2">
+            <ProfileBadge profile={profile} onClick={()=>setShowProfilePicker(true)} />
             <button aria-label="Settings" onClick={()=>setShowSettings(true)} className="p-2 rounded-full hover:bg-gray-100">
               <Settings className="w-5 h-5" />
             </button>
@@ -256,6 +279,14 @@ export default function App(){
           preset={preset}
           onClose={()=>setShowSettings(false)}
           onSave={(p)=>{ setPreset(p); setShowSettings(false); load(); }}
+        />
+      )}
+      {showProfilePicker && (
+        <ProfilePickerModal
+          profiles={PROFILES}
+          current={profile}
+          onClose={()=>setShowProfilePicker(false)}
+          onSelect={(p)=>{ setProfile(p); setShowProfilePicker(false); }}
         />
       )}
     </div>
@@ -406,6 +437,49 @@ function PresetSettingsModal({ preset, onClose, onSave }){
         <div className="mt-4 flex gap-2 justify-end">
           <button onClick={onClose} className="px-3 py-1 rounded border text-sm">Cancel</button>
           <button onClick={()=>onSave(local)} className="px-3 py-1 rounded bg-blue-600 text-white text-sm">Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProfileBadge({ profile, onClick }){
+  return (
+    <button onClick={onClick} className="flex items-center gap-2 px-2 py-1 rounded-xl border border-gray-300 text-sm hover:bg-gray-50">
+      <span className="inline-flex w-6 h-6 items-center justify-center rounded-full bg-blue-600 text-white text-xs font-semibold">
+        {(profile?.label || "?").slice(0,1).toUpperCase()}
+      </span>
+      <span className="text-gray-800">{profile?.label || "Choose profile"}</span>
+    </button>
+  );
+}
+
+function ProfilePickerModal({ profiles, current, onClose, onSelect }){
+  const keys = Object.keys(profiles);
+  return (
+    <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center">
+      <div className="w-full max-w-sm rounded-2xl bg-white shadow-lg border border-gray-200 p-4">
+        <div className="flex items-center mb-3">
+          <h2 className="text-lg font-semibold">Choose profile</h2>
+          <button onClick={onClose} className="ml-auto text-sm text-gray-600 underline">Close</button>
+        </div>
+        <div className="space-y-2">
+          {keys.map(k => {
+            const p = profiles[k];
+            const active = current && current.id === p.id;
+            return (
+              <button key={k} onClick={()=>onSelect(p)} className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl border ${active ? 'border-blue-600 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`}>
+                <span className="inline-flex w-8 h-8 items-center justify-center rounded-full bg-blue-600 text-white text-sm font-semibold">{p.label.slice(0,1).toUpperCase()}</span>
+                <div className="text-left">
+                  <div className="text-sm font-semibold">{p.label}</div>
+                  <div className="text-xs text-gray-500 truncate">Custom filter applied</div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        <div className="mt-3 flex justify-end">
+          <button onClick={()=>onSelect(null)} className="px-3 py-1 rounded-xl border border-gray-300 text-sm">Use default view</button>
         </div>
       </div>
     </div>
