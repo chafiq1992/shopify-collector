@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import { CheckCircle, PackageSearch, PackageCheck, StickyNote, XCircle, ChevronLeft, ChevronRight, Search, Image as ImageIcon, Settings, Boxes } from "lucide-react";
+import { CheckCircle, PackageSearch, PackageCheck, StickyNote, XCircle, ChevronLeft, ChevronRight, Search, Image as ImageIcon, Settings, Boxes, Printer } from "lucide-react";
+import { printOrdersLocally } from "./lib/localPrintClient";
 
 // Types (JSDoc only)
 /**
@@ -85,6 +86,9 @@ export default function App(){
       return raw ? JSON.parse(raw) : { collectPrefix: "cod", collectExcludeTag: "pc", verificationIncludeTag: "pc" };
     } catch { return { collectPrefix: "cod", collectExcludeTag: "pc", verificationIncludeTag: "pc" }; }
   });
+  const [selectedOrderNumbers, setSelectedOrderNumbers] = useState(() => new Set());
+  const [printBusy, setPrintBusy] = useState(false);
+  const [printMsg, setPrintMsg] = useState(null);
   useEffect(()=>{
     try { localStorage.setItem("orderCollectorPreset", JSON.stringify(preset)); } catch {}
   }, [preset]);
@@ -187,6 +191,31 @@ export default function App(){
   function gotoPrev(){
     setIndex(i => (i - 1 + Math.max(1, total || 1)) % Math.max(1, total || 1));
     vibrate(10);
+  }
+
+  function toggleOrderSelected(orderNumber){
+    setSelectedOrderNumbers(prev => {
+      const next = new Set(prev);
+      if (next.has(orderNumber)) next.delete(orderNumber); else next.add(orderNumber);
+      return next;
+    });
+  }
+
+  async function handlePrintSelected(){
+    if (!selectedOrderNumbers || selectedOrderNumbers.size === 0){
+      alert("No orders selected");
+      return;
+    }
+    setPrintBusy(true);
+    setPrintMsg(null);
+    const list = Array.from(selectedOrderNumbers);
+    const res = await printOrdersLocally(list, 1);
+    setPrintBusy(false);
+    if (res.ok){
+      setPrintMsg(`Printed ${res.results?.length ?? list.length} order(s)`);
+    } else {
+      setPrintMsg(`Print failed: ${res.error || 'unknown error'}`);
+    }
   }
 
   function toggleVariantOut(orderId, variantId){
@@ -351,6 +380,8 @@ export default function App(){
               onNext={gotoNext}
               position={index + 1}
               total={total}
+              selectedForPrint={selectedOrderNumbers.has(current.number)}
+              onToggleSelectOrder={()=>toggleOrderSelected(current.number)}
             />
           </div>
         ) : (
@@ -362,6 +393,12 @@ export default function App(){
       </main>
       <div className="fixed bottom-0 inset-x-0 z-40 border-t border-gray-200 bg-white/90 backdrop-blur">
         <div className="max-w-5xl mx-auto px-4 py-5">
+          <div className="grid grid-cols-1 gap-2 mb-3">
+            <button onClick={handlePrintSelected} disabled={printBusy} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm disabled:opacity-60">
+              <Printer className="w-5 h-5"/> <span className="font-semibold">{printBusy ? 'Printing…' : 'Print'}</span>
+            </button>
+            {printMsg && <div className="text-sm text-gray-600 text-center">{printMsg}</div>}
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <button onClick={()=>setShowConfirm('collected')} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
               <CheckCircle className="w-5 h-5"/> <span className="font-semibold">Collected</span>
@@ -448,11 +485,14 @@ function tagPillClasses(tag){
   return 'bg-gray-100 text-gray-700 ring-gray-200';
 }
 
-function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total }){
+function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total, selectedForPrint, onToggleSelectOrder }){
   return (
     <div className="rounded-2xl shadow-sm border border-gray-200 bg-white overflow-hidden">
       <div className="flex items-center gap-2 px-4 py-3 border-b bg-gray-50">
-        <span className="text-sm font-semibold">{order.number}</span>
+        <label className="inline-flex items-center gap-2">
+          <input type="checkbox" className="w-4 h-4 accent-blue-600" checked={!!selectedForPrint} onChange={onToggleSelectOrder} />
+          <span className="text-sm font-semibold">{order.number}</span>
+        </label>
         {order.customer && <span className="text-sm text-gray-500">· {order.customer}</span>}
         <div className="ml-auto flex items-center gap-2 flex-wrap">
           {(order.tags || []).map(t => (
