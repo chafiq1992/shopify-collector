@@ -1,6 +1,5 @@
 {
-  "relayUrl": "",
-  "relayApiKey": "",
-  "relayPcId": ""
+  "relayUrl": "https://shopify-collector-985002633728.europe-west1.run.app",
+  "relayApiKey": "i45678r99876543211234a567899k87654d",
+  "relayPcId": "pc-lab-1"
 }
-
