@@ -319,7 +319,7 @@ async def health():
 
 @app.get("/api/orders")
 async def list_orders(
-    limit: int = Query(25, ge=1, le=100),
+    limit: int = Query(25, ge=1, le=250),
     cursor: Optional[str] = None,
     status_filter: Optional[str] = Query(None, pattern="^(all|collect|verification|urgent)$"),
     tag_filter: Optional[str] = None,

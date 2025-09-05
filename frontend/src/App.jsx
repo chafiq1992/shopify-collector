@@ -127,7 +127,7 @@ export default function App(){
           : 'status:open fulfillment_status:unfulfilled tag:"en att b"')
       : '';
     const data = await API.getOrders({
-      limit: 25,
+      limit: 100,
       status_filter: (usingStockProfile ? "all" : statusFilter),
       tag_filter: tagFilter || "",
       search: search || "",
@@ -403,27 +403,27 @@ export default function App(){
         )}
       </main>
       <div className="fixed bottom-0 inset-x-0 z-40 border-t border-gray-200 bg-white/90 backdrop-blur">
-        <div className="max-w-5xl mx-auto px-4 py-5">
-          <div className="grid grid-cols-1 gap-2 mb-3">
-            <button onClick={handlePrintSelected} disabled={printBusy} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm disabled:opacity-60">
-              <Printer className="w-5 h-5"/> <span className="font-semibold">{printBusy ? 'Printing…' : 'Print'}</span>
+        <div className="max-w-5xl mx-auto px-4 py-3">
+          <div className="grid grid-cols-1 gap-2 mb-2">
+            <button onClick={handlePrintSelected} disabled={printBusy} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm disabled:opacity-60">
+              <Printer className="w-4 h-4"/> <span className="font-semibold">{printBusy ? 'Printing…' : 'Print'}</span>
             </button>
             {printMsg && <div className="text-sm text-gray-600 text-center">{printMsg}</div>}
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <button onClick={()=>setShowConfirm('collected')} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
-              <CheckCircle className="w-5 h-5"/> <span className="font-semibold">Collected</span>
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={()=>setShowConfirm('collected')} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
+              <CheckCircle className="w-4 h-4"/> <span className="font-semibold">Collected</span>
             </button>
-            <button onClick={()=>setShowConfirm('out')} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
-              <XCircle className="w-5 h-5"/> <span className="font-semibold">OUT</span>
+            <button onClick={()=>setShowConfirm('out')} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
+              <XCircle className="w-4 h-4"/> <span className="font-semibold">OUT</span>
             </button>
           </div>
-          <div className="grid grid-cols-2 gap-3 mt-3">
-            <button onClick={()=>{ try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; gotoPrev(); }} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-gray-200 text-gray-900 hover:bg-gray-300 active:scale-[.98] shadow-sm">
-              <ChevronLeft className="w-5 h-5"/> <span className="font-semibold">Prev order</span>
+          <div className="grid grid-cols-2 gap-2 mt-2">
+            <button onClick={()=>{ try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; gotoPrev(); }} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl bg-gray-200 text-gray-900 text-sm hover:bg-gray-300 active:scale-[.98] shadow-sm">
+              <ChevronLeft className="w-4 h-4"/> <span className="font-semibold">Prev order</span>
             </button>
-            <button onClick={()=>{ try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; gotoNext(); }} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-gray-900 text-white hover:bg:black active:scale-[.98] shadow-sm">
-              <ChevronRight className="w-5 h-5"/> <span className="font-semibold">Next order</span>
+            <button onClick={()=>{ try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; gotoNext(); }} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl bg-gray-900 text-white text-sm hover:bg:black active:scale-[.98] shadow-sm">
+              <ChevronRight className="w-4 h-4"/> <span className="font-semibold">Next order</span>
             </button>
           </div>
         </div>
@@ -499,7 +499,7 @@ function tagPillClasses(tag){
 function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total, selectedForPrint, onToggleSelectOrder }){
   return (
     <div className="rounded-2xl shadow-sm border border-gray-200 bg-white overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-3 border-b bg-gray-50">
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b bg-gray-50">
         <label className="inline-flex items-center gap-2">
           <input type="checkbox" className="w-4 h-4 accent-blue-600" checked={!!selectedForPrint} onChange={onToggleSelectOrder} />
           <span className="text-sm font-semibold">{order.number}</span>
@@ -513,7 +513,7 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
       </div>
 
       <div className="p-4">
-        <div className="flex gap-4 overflow-x-auto snap-x snap-mandatory pb-2">
+        <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-2">
           {(() => {
             const normalizedVariants = (order.variants || []).map(v => {
               const rawStatus = (v.status ?? '').toString();
@@ -534,8 +534,8 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
               ? normalizedVariants.filter(v => v.__normalizedStatus !== 'removed')
               : normalizedVariants;
             return variantsForDisplay.map((v, i) => (
-              <div key={v.id || i} className={`min-w-[260px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
-                <div className="aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
+              <div key={v.id || i} className={`min-w-[220px] sm:min-w-[260px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
+                <div className="aspect-[3/2] sm:aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
                   {v.image ? (
                     <img src={v.image} alt={v.sku || ""} className="w-full h-full object-cover" />
                   ) : (
@@ -547,7 +547,7 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                     ${v.__normalizedStatus === 'fulfilled' ? 'bg-green-600 text-white' : v.__normalizedStatus === 'removed' ? 'bg-gray-500 text-white' : v.__normalizedStatus === 'unfulfilled' ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-800'}`}
                   >{v.__normalizedLabel}</span>
                 )}
-                <div className="p-3 flex items-center gap-2">
+                <div className="p-2 flex items-center gap-2">
                   <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
                   <span className="font-mono text-xs bg-gray-50 px-2 py-1 rounded border border-gray-200">{v.sku}</span>
                   {v.title && <span className="text-xs text-gray-700 truncate">· {v.title}</span>}
