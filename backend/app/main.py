@@ -53,6 +53,86 @@ app.add_middleware(
 
 # NOTE: Static mount is added AFTER API routes to avoid shadowing /api paths.
 
+# ---------- Lightweight Print Relay (in-memory) ----------
+# This lets the same Cloud Run service act as the relay for phone → PC printing.
+
+RELAY_API_KEY = os.environ.get("API_KEY", "CHANGE_ME_API_KEY").strip()
+
+def _load_pcs_from_env() -> Dict[str, str]:
+    pcs: Dict[str, str] = {}
+    # Look for pairs like PC_ID_1 / PC_SECRET_1, PC_ID_2 / PC_SECRET_2, ...
+    for i in range(1, 11):
+        pid = os.environ.get(f"PC_ID_{i}")
+        sec = os.environ.get(f"PC_SECRET_{i}")
+        if pid and sec:
+            pcs[pid] = sec
+    # Back-compat: allow single pair PC_ID / PC_SECRET
+    pid = os.environ.get("PC_ID")
+    sec = os.environ.get("PC_SECRET")
+    if pid and sec:
+        pcs[pid] = sec
+    return pcs
+
+PCS: Dict[str, str] = _load_pcs_from_env() or {
+    "pc-lab-1": "SECRET1",
+}
+
+# In-memory queue: { pc_id -> [ { job_id, ts, orders, copies, pdf_url? } ] }
+JOBS: Dict[str, list] = {}
+
+class EnqueueBody(BaseModel):
+    pc_id: str
+    orders: List[str] = []
+    copies: int = 1
+    pdf_url: Optional[str] = None
+
+class AckBody(BaseModel):
+    pc_id: str
+    secret: str
+    job_id: str
+
+def _require_api_key(x_api_key: Optional[str]):
+    if RELAY_API_KEY and x_api_key != RELAY_API_KEY:
+        raise HTTPException(status_code=401, detail="bad api key")
+
+def _require_pc(pc_id: str, secret: str):
+    expect = PCS.get(pc_id)
+    if not expect or secret != expect:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+@app.post("/enqueue")
+async def enqueue(job: EnqueueBody, x_api_key: Optional[str] = None):
+    _require_api_key(x_api_key)
+    if job.pc_id not in PCS:
+        raise HTTPException(status_code=404, detail="unknown pc_id")
+    import time, uuid
+    jid = str(uuid.uuid4())
+    payload = {
+        "job_id": jid,
+        "ts": int(time.time()),
+        "orders": [str(o).lstrip("#") for o in (job.orders or [])],
+        "copies": max(1, job.copies),
+        "pdf_url": job.pdf_url or None,
+    }
+    JOBS.setdefault(job.pc_id, []).append(payload)
+    return {"ok": True, "job_id": jid, "queued": len(JOBS[job.pc_id])}
+
+@app.get("/pull")
+async def pull(pc_id: str, secret: str, max_items: int = 5):
+    _require_pc(pc_id, secret)
+    q = JOBS.get(pc_id, [])
+    if not q:
+        return {"ok": True, "jobs": []}
+    out = q[:max_items]
+    JOBS[pc_id] = q[max_items:]
+    return {"ok": True, "jobs": out}
+
+@app.post("/ack")
+async def ack(b: AckBody):
+    _require_pc(b.pc_id, b.secret)
+    # In-memory queue removes on pull; ack is a no-op here
+    return {"ok": True}
+
 # ---------- WebSocket Manager ----------
 class ConnectionManager:
     def __init__(self):
