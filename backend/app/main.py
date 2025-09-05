@@ -1,7 +1,7 @@
 import os
 import json
 from typing import List, Optional, Dict, Any, Tuple
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
@@ -101,7 +101,7 @@ def _require_pc(pc_id: str, secret: str):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 @app.post("/enqueue")
-async def enqueue(job: EnqueueBody, x_api_key: Optional[str] = None):
+async def enqueue(job: EnqueueBody, x_api_key: Optional[str] = Header(default=None)):
     _require_api_key(x_api_key)
     if job.pc_id not in PCS:
         raise HTTPException(status_code=404, detail="unknown pc_id")
