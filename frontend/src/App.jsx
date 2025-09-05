@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { CheckCircle, PackageSearch, PackageCheck, StickyNote, XCircle, ChevronLeft, ChevronRight, Search, Image as ImageIcon, Settings, Boxes, Printer } from "lucide-react";
 import { printOrdersLocally } from "./lib/localPrintClient";
+import { enqueueOrdersToRelay, isRelayConfigured } from "./lib/printRelayClient";
 
 // Types (JSDoc only)
 /**
@@ -209,12 +210,22 @@ export default function App(){
     setPrintBusy(true);
     setPrintMsg(null);
     const list = Array.from(selectedOrderNumbers);
-    const res = await printOrdersLocally(list, 1);
-    setPrintBusy(false);
-    if (res.ok){
-      setPrintMsg(`Printed ${res.results?.length ?? list.length} order(s)`);
+    if (isRelayConfigured()){
+      const r = await enqueueOrdersToRelay(list, 1);
+      setPrintBusy(false);
+      if (r.ok){
+        setPrintMsg(`Queued ${r.queued ?? list.length} order(s) for printing`);
+      } else {
+        setPrintMsg(`Print queue failed: ${r.error || 'unknown error'}`);
+      }
     } else {
-      setPrintMsg(`Print failed: ${res.error || 'unknown error'}`);
+      const res = await printOrdersLocally(list, 1);
+      setPrintBusy(false);
+      if (res.ok){
+        setPrintMsg(`Printed ${res.results?.length ?? list.length} order(s)`);
+      } else {
+        setPrintMsg(`Print failed: ${res.error || 'unknown error'}`);
+      }
     }
   }
 
