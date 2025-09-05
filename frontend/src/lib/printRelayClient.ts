@@ -1,6 +1,18 @@
 // Prefer explicit env; else use current origin so production Cloud Run works without extra config
 const RELAY_BASE = (import.meta.env.VITE_PRINT_RELAY_URL as string) || (typeof window !== 'undefined' ? window.location.origin : "");
-const API_KEY = import.meta.env.VITE_PRINT_RELAY_API_KEY || "";
+
+function getRelayApiKey(): string {
+  const fromEnv = (import.meta.env.VITE_PRINT_RELAY_API_KEY as string) || "";
+  if (fromEnv) return fromEnv;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return window.localStorage.getItem('relayApiKey') || "";
+    }
+  } catch {}
+  return "";
+}
+
+const API_KEY = getRelayApiKey();
 const DEFAULT_PC_ID = (import.meta.env.VITE_PRINT_RELAY_PC_ID as string) || "pc-lab-1";
 
 export type EnqueueResponse = { ok: boolean; job_id?: string; queued?: number; error?: string };
