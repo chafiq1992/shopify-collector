@@ -27,17 +27,50 @@ const DEFAULT_PC_ID = getRelayPcId();
 
 export type EnqueueResponse = { ok: boolean; job_id?: string; queued?: number; error?: string };
 
+type PublicConfig = { relayUrl?: string; relayApiKey?: string; relayPcId?: string };
+let cachedConfig: PublicConfig | null = null;
+
+async function getRelayConfig(): Promise<{ base: string; apiKey: string; pcId: string }>{
+  // Start with env + localStorage fallbacks
+  let base = RELAY_BASE || "";
+  let apiKey = API_KEY || "";
+  let pcId = DEFAULT_PC_ID || "";
+
+  if (!cachedConfig) {
+    try {
+      const r = await fetch('/app-config.json', { cache: 'no-store' });
+      if (r.ok) {
+        cachedConfig = await r.json();
+        // Optionally persist into localStorage for future loads
+        try {
+          if (cachedConfig?.relayApiKey) localStorage.setItem('relayApiKey', cachedConfig.relayApiKey);
+          if (cachedConfig?.relayPcId) localStorage.setItem('relayPcId', cachedConfig.relayPcId);
+        } catch {}
+      } else {
+        cachedConfig = {};
+      }
+    } catch { cachedConfig = {}; }
+  }
+
+  if (!base && cachedConfig?.relayUrl) base = cachedConfig.relayUrl;
+  if (!apiKey && cachedConfig?.relayApiKey) apiKey = cachedConfig.relayApiKey;
+  if (!pcId && cachedConfig?.relayPcId) pcId = cachedConfig.relayPcId;
+
+  return { base, apiKey, pcId };
+}
+
 export async function enqueueOrdersToRelay(orders: string[], copies = 1, pcId?: string): Promise<EnqueueResponse> {
-  if (!RELAY_BASE) return { ok: false, error: "Relay URL not configured" };
-  const pc_id = pcId || DEFAULT_PC_ID;
+  const cfg = await getRelayConfig();
+  if (!cfg.base) return { ok: false, error: "Relay URL not configured" };
+  const pc_id = pcId || cfg.pcId;
   if (!pc_id) return { ok: false, error: "pc_id not configured" };
 
   try {
-    const r = await fetch(`${RELAY_BASE}/enqueue`, {
+    const r = await fetch(`${cfg.base}/enqueue`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(API_KEY ? { "x-api-key": API_KEY } : {}),
+        ...(cfg.apiKey ? { "x-api-key": cfg.apiKey } : {}),
       },
       body: JSON.stringify({ pc_id, orders, copies }),
       mode: "cors",
