@@ -4,6 +4,13 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci || npm install
 COPY frontend/ ./
+# Accept Vite envs as build args and expose as env so Vite embeds them
+ARG VITE_PRINT_RELAY_URL
+ARG VITE_PRINT_RELAY_API_KEY
+ARG VITE_PRINT_RELAY_PC_ID
+ENV VITE_PRINT_RELAY_URL=${VITE_PRINT_RELAY_URL}
+ENV VITE_PRINT_RELAY_API_KEY=${VITE_PRINT_RELAY_API_KEY}
+ENV VITE_PRINT_RELAY_PC_ID=${VITE_PRINT_RELAY_PC_ID}
 RUN node node_modules/vite/bin/vite.js build
 
 # --------- Backend runtime ---------

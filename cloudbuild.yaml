@@ -1,6 +1,14 @@
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', '${_AR_REPO}/order-collector:${SHORT_SHA}', '.']
+    args:
+      [
+        'build',
+        '--build-arg','VITE_PRINT_RELAY_URL=${_VITE_PRINT_RELAY_URL}',
+        '--build-arg','VITE_PRINT_RELAY_API_KEY=${_VITE_PRINT_RELAY_API_KEY}',
+        '--build-arg','VITE_PRINT_RELAY_PC_ID=${_VITE_PRINT_RELAY_PC_ID}',
+        '-t','${_AR_REPO}/order-collector:${SHORT_SHA}',
+        '.'
+      ]
 
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', '${_AR_REPO}/order-collector:${SHORT_SHA}']
@@ -15,7 +23,7 @@ steps:
         '--platform','managed',
         '--port','8080',
         '--allow-unauthenticated',
-        '--set-env-vars','IRRAKIDS_STORE_DOMAIN=${_IRRAKIDS_STORE_DOMAIN},SHOPIFY_PASSWORD=${_SHOPIFY_PASSWORD},SHOPIFY_API_KEY=${_SHOPIFY_API_KEY},SHOPIFY_API_VERSION=2025-01'
+        '--set-env-vars','IRRAKIDS_STORE_DOMAIN=${_IRRAKIDS_STORE_DOMAIN},SHOPIFY_PASSWORD=${_SHOPIFY_PASSWORD},SHOPIFY_API_KEY=${_SHOPIFY_API_KEY},SHOPIFY_API_VERSION=2025-01,API_KEY=${_API_KEY},PC_ID_1=${_PC_ID_1},PC_SECRET_1=${_PC_SECRET_1}'
       ]
 
 substitutions:
@@ -25,6 +33,12 @@ substitutions:
   _IRRAKIDS_STORE_DOMAIN: 'yourstore.myshopify.com'
   _SHOPIFY_PASSWORD: 'shpat_or_private_app_password'
   _SHOPIFY_API_KEY: ''
+  _VITE_PRINT_RELAY_URL: ''
+  _VITE_PRINT_RELAY_API_KEY: ''
+  _VITE_PRINT_RELAY_PC_ID: ''
+  _API_KEY: 'CHANGE_ME_API_KEY'
+  _PC_ID_1: 'pc-lab-1'
+  _PC_SECRET_1: 'SOME_LONG_SECRET'
 
 images:
   - '${_AR_REPO}/order-collector:${SHORT_SHA}'
