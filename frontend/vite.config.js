@@ -11,6 +11,18 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
+      '/enqueue': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/pull': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/ack': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
       '/ws': {
         target: 'ws://localhost:8000',
         ws: true,

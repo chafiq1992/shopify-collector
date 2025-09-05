@@ -1,4 +1,5 @@
-const RELAY_BASE = import.meta.env.VITE_PRINT_RELAY_URL || "";
+// Prefer explicit env; else use current origin so production Cloud Run works without extra config
+const RELAY_BASE = (import.meta.env.VITE_PRINT_RELAY_URL as string) || (typeof window !== 'undefined' ? window.location.origin : "");
 const API_KEY = import.meta.env.VITE_PRINT_RELAY_API_KEY || "";
 const DEFAULT_PC_ID = import.meta.env.VITE_PRINT_RELAY_PC_ID || "";
 
