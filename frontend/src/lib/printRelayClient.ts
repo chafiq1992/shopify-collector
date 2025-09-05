@@ -13,7 +13,17 @@ function getRelayApiKey(): string {
 }
 
 const API_KEY = getRelayApiKey();
-const DEFAULT_PC_ID = (import.meta.env.VITE_PRINT_RELAY_PC_ID as string) || "pc-lab-1";
+function getRelayPcId(): string {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const fromLs = window.localStorage.getItem('relayPcId');
+      if (fromLs) return fromLs;
+    }
+  } catch {}
+  return (import.meta.env.VITE_PRINT_RELAY_PC_ID as string) || 'pc-lab-1';
+}
+
+const DEFAULT_PC_ID = getRelayPcId();
 
 export type EnqueueResponse = { ok: boolean; job_id?: string; queued?: number; error?: string };
 
