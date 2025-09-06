@@ -26,6 +26,7 @@ class EnqueueBody(BaseModel):
     orders: List[str] = []
     copies: int = 1
     pdf_url: Optional[str] = None
+    store: Optional[str] = None
 
 
 class AckBody(BaseModel):
@@ -64,6 +65,7 @@ def enqueue(job: EnqueueBody, x_api_key: Optional[str] = Header(default=None)):
         "orders": [str(o).lstrip("#") for o in (job.orders or [])],
         "copies": max(1, job.copies),
         "pdf_url": job.pdf_url or None,
+        "store": (job.store or None),
     }
     JOBS.setdefault(job.pc_id, []).append(payload)
     return {"ok": True, "job_id": jid, "queued": len(JOBS[job.pc_id])}

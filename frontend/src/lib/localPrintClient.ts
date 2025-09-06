@@ -8,7 +8,7 @@ export type PrintOrdersResponse = {
   error?: string;
 };
 
-export async function printOrdersLocally(orderNames: string[], copies = 1): Promise<PrintOrdersResponse> {
+export async function printOrdersLocally(orderNames: string[], copies = 1, store?: string): Promise<PrintOrdersResponse> {
   const orders = orderNames.map(n => String(n).replace(/^#/, ""));
 
   const ctrl = new AbortController();
@@ -21,7 +21,7 @@ export async function printOrdersLocally(orderNames: string[], copies = 1): Prom
         "Content-Type": "application/json",
         ...(SECRET ? { "x-secret": SECRET } : {})
       },
-      body: JSON.stringify({ orders, copies }),
+      body: JSON.stringify({ orders, copies, ...(store ? { store } : {}) }),
       mode: "cors",
       signal: ctrl.signal
     });

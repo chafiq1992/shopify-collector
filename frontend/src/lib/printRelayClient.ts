@@ -59,7 +59,7 @@ async function getRelayConfig(): Promise<{ base: string; apiKey: string; pcId: s
   return { base, apiKey, pcId };
 }
 
-export async function enqueueOrdersToRelay(orders: string[], copies = 1, pcId?: string): Promise<EnqueueResponse> {
+export async function enqueueOrdersToRelay(orders: string[], copies = 1, pcId?: string, store?: string): Promise<EnqueueResponse> {
   const cfg = await getRelayConfig();
   if (!cfg.base) return { ok: false, error: "Relay URL not configured" };
   const pc_id = pcId || cfg.pcId;
@@ -72,7 +72,7 @@ export async function enqueueOrdersToRelay(orders: string[], copies = 1, pcId?: 
         "Content-Type": "application/json",
         ...(cfg.apiKey ? { "x-api-key": cfg.apiKey } : {}),
       },
-      body: JSON.stringify({ pc_id, orders, copies }),
+      body: JSON.stringify({ pc_id, orders, copies, ...(store ? { store } : {}) }),
       mode: "cors",
     });
     const data = await r.json().catch(() => ({}));

@@ -55,7 +55,15 @@ export default function App(){
   const [index, setIndex] = useState(0);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("collect"); // collect|verification
-  const [codDate, setCodDate] = useState(""); // format YYYY-MM-DD from input
+  const [codDate, setCodDate] = useState(() => {
+    try {
+      const now = new Date();
+      const yyyy = now.getFullYear();
+      const mm = String(now.getMonth()+1).padStart(2,'0');
+      const dd = String(now.getDate()).padStart(2,'0');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch { return ""; }
+  }); // format YYYY-MM-DD from input
   const [tagFilter, setTagFilter] = useState(null);
   const [loading, setLoading] = useState(false);
   const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
@@ -90,6 +98,7 @@ export default function App(){
   const [selectedOrderNumbers, setSelectedOrderNumbers] = useState(() => new Set());
   const [printBusy, setPrintBusy] = useState(false);
   const [printMsg, setPrintMsg] = useState(null);
+  const [reloadCounter, setReloadCounter] = useState(0);
   useEffect(()=>{
     try { localStorage.setItem("orderCollectorPreset", JSON.stringify(preset)); } catch {}
   }, [preset]);
@@ -154,7 +163,7 @@ export default function App(){
     setTotalCount(data.totalCount || ords.length);
   }
 
-  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut, excludeStockTags, profile, stockFilter, store]);
+  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut, excludeStockTags, profile, stockFilter, store, reloadCounter]);
 
   // Debounced search
   useEffect(() => {
@@ -207,7 +216,7 @@ export default function App(){
     setPrintBusy(true);
     setPrintMsg(null);
     if (isRelayConfigured()){
-      const r = await enqueueOrdersToRelay(list, 1);
+      const r = await enqueueOrdersToRelay(list, 1, undefined, store);
       setPrintBusy(false);
       if (r.ok){
         setPrintMsg(`Queued ${r.queued ?? list.length} order(s) for printing`);
@@ -215,7 +224,7 @@ export default function App(){
         setPrintMsg(`Print queue failed: ${r.error || 'unknown error'}`);
       }
     } else {
-      const res = await printOrdersLocally(list, 1);
+      const res = await printOrdersLocally(list, 1, store);
       setPrintBusy(false);
       if (res.ok){
         setPrintMsg(`Printed ${res.results?.length ?? list.length} order(s)`);
@@ -318,38 +327,37 @@ export default function App(){
                   onClick={()=>{
                     setStatusFilter("collect");
                     setShowDatePicker(true);
-                    if (!codDate) {
-                      try {
-                        const now = new Date();
-                        const yyyy = now.getFullYear();
-                        const mm = String(now.getMonth()+1).padStart(2,'0');
-                        const dd = String(now.getDate()).padStart(2,'0');
-                        setCodDate(`${yyyy}-${mm}-${dd}`);
-                      } catch {}
-                    }
-                    setTimeout(()=>load(), 0);
+                    try {
+                      const now = new Date();
+                      const yyyy = now.getFullYear();
+                      const mm = String(now.getMonth()+1).padStart(2,'0');
+                      const dd = String(now.getDate()).padStart(2,'0');
+                      setCodDate(`${yyyy}-${mm}-${dd}`);
+                    } catch {}
+                    // Force refresh even if filters didn't change
+                    setReloadCounter(c => c + 1);
                   }}
                 />
                 <Chip
                   label="Verification"
                   active={statusFilter === "verification"}
-                  onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); setTimeout(()=>load(), 0); }}
+                  onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); }}
                 />
                 <Chip
                   label="Urgent"
                   active={statusFilter === "urgent"}
-                  onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); setTimeout(()=>load(), 0); }}
+                  onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); }}
                 />
                 <div className="flex flex-col gap-1">
                   <SmallChip
                     label="Exclude OUT"
                     active={excludeOut}
-                    onClick={()=> { setExcludeOut(v => !v); setTimeout(()=>load(), 0); }}
+                    onClick={()=> { setExcludeOut(v => !v); }}
                   />
                   <SmallChip
                     label="Exclude btis/en att b"
                     active={excludeStockTags}
-                    onClick={()=> { setExcludeStockTags(v => !v); setTimeout(()=>load(), 0); }}
+                    onClick={()=> { setExcludeStockTags(v => !v); }}
                   />
                 </div>
               </>
