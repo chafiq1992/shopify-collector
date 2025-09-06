@@ -278,27 +278,27 @@ export default function App(){
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900 overflow-hidden">
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur border-b border-gray-200">
-        <div className="max-w-5xl mx-auto px-4 py-2 flex items-center gap-3">
-          <PackageSearch className="w-6 h-6" />
-          <div className="ml-4 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
+        <div className="max-w-5xl mx-auto px-4 py-1 flex items-center gap-2">
+          <PackageSearch className="w-5 h-5" />
+          <div className="ml-3 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
             <button
               onClick={()=>setStore('irrakids')}
-              className={`px-3 py-1 rounded-lg text-sm font-medium ${store === 'irrakids' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
+              className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === 'irrakids' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
             >Irrakids</button>
             <button
               onClick={()=>setStore('irranova')}
-              className={`px-3 py-1 rounded-lg text-sm font-medium ${store === 'irranova' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
+              className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === 'irranova' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
             >Irranova</button>
           </div>
           <div className="ml-auto flex items-center gap-2">
-            <button aria-label="Choose profile" onClick={()=>setShowProfilePicker(true)} className="p-2 rounded-full hover:bg-gray-100">
-              <Boxes className={`w-5 h-5 ${profile?.id === 'stock' ? 'text-blue-600' : 'text-gray-700'}`} />
+            <button aria-label="Choose profile" onClick={()=>setShowProfilePicker(true)} className="p-1.5 rounded-full hover:bg-gray-100">
+              <Boxes className={`w-4 h-4 ${profile?.id === 'stock' ? 'text-blue-600' : 'text-gray-700'}`} />
             </button>
-            <button aria-label="Settings" onClick={()=>setShowSettings(true)} className="p-2 rounded-full hover:bg-gray-100">
-              <Settings className="w-5 h-5" />
+            <button aria-label="Settings" onClick={()=>setShowSettings(true)} className="p-1.5 rounded-full hover:bg-gray-100">
+              <Settings className="w-4 h-4" />
             </button>
             <PackageCheck className="w-4 h-4 text-gray-600" />
-            <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-sm font-medium">{loading ? "…" : totalCount}</span>
+            <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-xs font-medium">{loading ? "…" : totalCount}</span>
           </div>
         </div>
         <div className="max-w-5xl mx-auto px-4 pb-1 flex flex-col gap-1">
@@ -308,7 +308,7 @@ export default function App(){
               value={search}
               onChange={(e)=>setSearch(e.target.value)}
               placeholder="Search order # or SKU"
-              className="bg-transparent outline-none w-full text-sm"
+              className="bg-transparent outline-none w-full text-xs"
             />
           </div>
           <div className="flex items-center gap-1">
@@ -354,7 +354,7 @@ export default function App(){
                   active={statusFilter === "urgent"}
                   onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); }}
                 />
-                <div className="flex flex-col gap-1">
+                <div className="flex items-center gap-1">
                   <SmallChip
                     label="Exclude OUT"
                     active={excludeOut}
@@ -371,15 +371,15 @@ export default function App(){
           </div>
           {showDatePicker && (!profile || profile.id !== 'stock') && (
             <div className="flex items-center gap-2">
-              <span className="text-xs uppercase tracking-wide text-gray-400">Date</span>
+              <span className="text-[11px] uppercase tracking-wide text-gray-400">Date</span>
               <input
                 type="date"
                 value={codDate}
                 onChange={(e)=>{ setCodDate(e.target.value); setShowDatePicker(false); }}
-                className="text-sm border border-gray-300 rounded px-2 py-1"
+                className="text-xs border border-gray-300 rounded px-2 py-0.5"
               />
               <button
-                className="text-xs text-gray-500 underline"
+                className="text-[11px] text-gray-500 underline"
                 onClick={()=>{ setCodDate(""); setShowDatePicker(false); }}
               >Clear</button>
             </div>
@@ -548,7 +548,7 @@ function Chip({ label, active, onClick }){
   return (
     <button
       onClick={onClick}
-      className={`px-3 py-1 rounded-full text-sm border transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
+      className={`px-2 py-0.5 rounded-full text-xs border transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
     >
       {label}
     </button>
@@ -559,7 +559,7 @@ function SmallChip({ label, active, onClick }){
   return (
     <button
       onClick={onClick}
-      className={`px-2 py-0.5 rounded-full text-xs border transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
+      className={`px-2 py-0.5 rounded-full text-[11px] border transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
     >
       {label}
     </button>
@@ -579,7 +579,7 @@ function tagPillClasses(tag){
 function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total, selectedForPrint, onToggleSelectOrder }){
   return (
     <div className="rounded-2xl shadow-sm border border-gray-200 bg-white overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-2.5 border-b bg-gray-50">
+      <div className="flex items-center gap-2 px-3 py-2 border-b bg-gray-50">
         <label className="inline-flex items-center gap-2">
           <input type="checkbox" className="w-4 h-4 accent-blue-600" checked={!!selectedForPrint} onChange={onToggleSelectOrder} />
           <span className="text-sm font-semibold">{order.number}</span>
@@ -587,12 +587,12 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
         {order.customer && <span className="text-sm text-gray-500">· {order.customer}</span>}
         <div className="ml-auto flex items-center gap-2 flex-wrap">
           {(order.tags || []).map(t => (
-            <span key={t} className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset ${tagPillClasses(t)}`}>{t}</span>
+            <span key={t} className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium ring-1 ring-inset ${tagPillClasses(t)}`}>{t}</span>
           ))}
         </div>
       </div>
 
-      <div className="p-4">
+      <div className="p-3">
         <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-2">
           {(() => {
             const normalizedVariants = (order.variants || []).map(v => {
@@ -614,7 +614,7 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
               ? normalizedVariants.filter(v => v.__normalizedStatus !== 'removed')
               : normalizedVariants;
             return variantsForDisplay.map((v, i) => (
-              <div key={v.id || i} className={`min-w-[220px] sm:min-w-[260px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
+              <div key={v.id || i} className={`min-w-[210px] sm:min-w-[240px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
                 <div className="aspect-[3/2] sm:aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
                   {v.image ? (
                     <img src={v.image} alt={v.sku || ""} className="w-full h-full object-cover" />
@@ -627,12 +627,12 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                     ${v.__normalizedStatus === 'fulfilled' ? 'bg-green-600 text-white' : v.__normalizedStatus === 'removed' ? 'bg-gray-500 text-white' : v.__normalizedStatus === 'unfulfilled' ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-800'}`}
                   >{v.__normalizedLabel}</span>
                 )}
-                <div className="p-2 flex items-center gap-2">
+                <div className="p-1.5 flex items-center gap-2">
                   <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
-                  <span className="font-mono text-xs bg-gray-50 px-2 py-1 rounded border border-gray-200">{v.sku}</span>
-                  {v.title && <span className="text-xs text-gray-700 truncate">· {v.title}</span>}
+                  <span className="font-mono text-[11px] bg-gray-50 px-2 py-0.5 rounded border border-gray-200">{v.sku}</span>
+                  {v.title && <span className="text-[11px] text-gray-700 truncate">· {v.title}</span>}
                   <span className="ml-auto text-[10px] uppercase tracking-wide text-gray-500">Qty</span>
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-red-600 text-white text-sm font-semibold">{v.qty}</span>
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-red-600 text-white text-xs font-semibold">{v.qty}</span>
                 </div>
                 <button
                   onClick={()=>onToggleVariant(v.id)}
@@ -648,11 +648,11 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
         </div>
       </div>
 
-      <div className="px-4 pb-2 flex items-center gap-2 text-sm text-gray-600">
+      <div className="px-3 pb-2 flex items-center gap-2 text-xs text-gray-600">
         <StickyNote className="w-4 h-4"/>
         {order.shipping_city && <span>{order.shipping_city}</span>}
         <span className="truncate">{order.note || "No notes"}</span>
-        <span className="ml-auto inline-flex items-center px-2 py-0.5 rounded-full bg-blue-600 text-white text-xs font-semibold">
+        <span className="ml-auto inline-flex items-center px-2 py-0.5 rounded-full bg-blue-600 text-white text-[11px] font-semibold">
           {position}/{total}
         </span>
       </div>
