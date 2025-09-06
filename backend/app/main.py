@@ -92,6 +92,8 @@ RECENT_ENQUEUED_ORDERS: Dict[str, int] = {}
 
 # In-memory queue: { pc_id -> [ { job_id, ts, orders, copies, pdf_url? } ] }
 JOBS: Dict[str, list] = {}
+# In-memory minimal customer override cache: { order_no -> { customer, shippingAddress, phone, email, tags } }
+ORDER_OVERRIDES: Dict[str, Dict[str, Any]] = {}
 
 class EnqueueBody(BaseModel):
     pc_id: str
@@ -657,60 +659,52 @@ async def orders_update_webhook(
     x_shopify_hmac_sha256: Optional[str] = Header(default=None),
     x_shopify_shop_domain: Optional[str] = Header(default=None),
 ):
-    import time, uuid
+    import time
     raw = await request.body()
     secret = _secret_for_shop(x_shopify_shop_domain or "")
     if not _verify_shopify_hmac(raw, x_shopify_hmac_sha256 or "", secret):
         raise HTTPException(status_code=401, detail="bad hmac")
 
     data = await request.json()
-    tags_str = (data.get("tags") or "").strip()
-    tags = [t.strip().lower() for t in tags_str.split(",") if t.strip()]
-    # Require pc tag and ensure not already queued/printed
-    if "pc" in tags and ("pc-queued" not in tags) and ("pc-printed" not in tags):
-        # Optional created_at cutoff
-        created_at = (data.get("created_at") or data.get("createdAt") or "")
-        if not _created_at_passes_cutoff(created_at):
-            return {"ok": True, "skipped": True, "reason": "older_than_cutoff"}
-
+    # Only collect minimal customer info for overrides cache; do not enqueue here
+    try:
         order_name = (data.get("name") or "").strip()
         if order_name:
-            # In-memory dedupe window to avoid races
-            now_ts = int(time.time())
-            last = RECENT_ENQUEUED_ORDERS.get(order_name)
-            if last and (now_ts - last) < RECENT_ENQUEUE_SECONDS:
-                return {"ok": True, "skipped": True, "reason": "recently_enqueued"}
-
-            store_key = _store_key_for_shop_domain(x_shopify_shop_domain or "")
-            JOBS.setdefault(DEFAULT_PC_ID, []).append({
-                "job_id": str(uuid.uuid4()),
-                "ts": now_ts,
-                "orders": [order_name.lstrip("#")],
-                "copies": 1,
-                "pdf_url": None,
-                "store": store_key,
-            })
-            RECENT_ENQUEUED_ORDERS[order_name] = now_ts
-
-            # Attempt to add pc-queued tag to prevent future duplicates
-            try:
-                gid = (data.get("admin_graphql_api_id") or "").strip()
-                if gid:
-                    mutation = """
-                    mutation AddTag($id: ID!, $tags: [String!]!) {
-                      tagsAdd(id: $id, tags: $tags) { userErrors { field message } }
-                    }
-                    """
-                    await shopify_graphql(mutation, {"id": gid, "tags": ["pc-queued"]}, store=store_key)
-            except Exception:
-                # best-effort; ignore failures
-                pass
-
-            try:
-                await manager.broadcast({"type": "print.enqueued", "order": order_name, "pc_id": DEFAULT_PC_ID})
-            except Exception:
-                pass
+            key = order_name.lstrip("#")
+            customer = data.get("customer") or {}
+            shipping = data.get("shipping_address") or {}
+            overrides = {
+                "customer": {
+                    "displayName": (customer.get("first_name") or "").strip() + (" " + (customer.get("last_name") or "").strip() if customer.get("last_name") else ""),
+                    "email": customer.get("email") or data.get("email"),
+                    "phone": (customer.get("phone") or data.get("phone")),
+                },
+                "shippingAddress": {
+                    "name": (shipping.get("name") or "").strip(),
+                    "address1": shipping.get("address1"),
+                    "address2": shipping.get("address2"),
+                    "city": shipping.get("city"),
+                    "zip": shipping.get("zip") or shipping.get("postal_code"),
+                    "province": shipping.get("province"),
+                    "country": shipping.get("country"),
+                    "phone": shipping.get("phone"),
+                },
+                "email": data.get("email"),
+                "phone": data.get("phone"),
+                "tags": data.get("tags"),
+            }
+            ORDER_OVERRIDES[key] = overrides
+            # keep dedupe timestamps minimal to avoid growth
+            RECENT_ENQUEUED_ORDERS[key] = int(time.time())
+    except Exception:
+        pass
     return {"ok": True}
+
+@app.get("/api/overrides")
+async def get_overrides(orders: str = Query("")):
+    keys = [o.strip().lstrip("#") for o in (orders or "").split(",") if o.strip()]
+    out = {k: ORDER_OVERRIDES.get(k) for k in keys if k in ORDER_OVERRIDES}
+    return {"ok": True, "overrides": out}
 
 # --------- Static frontend (mounted last) ---------
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))

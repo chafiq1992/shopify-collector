@@ -6,6 +6,7 @@ RELAY_URL = os.getenv("RELAY_URL", "http://localhost:8080")
 PC_ID = os.getenv("PC_ID", "pc-lab-1")
 PC_SECRET = os.getenv("PC_SECRET", "SECRET1")
 LOCAL_PRINTER_URL = os.getenv("LOCAL_PRINTER_URL", "http://127.0.0.1:8787")
+API_KEY = os.getenv("API_KEY", "")
 
 PULL_INTERVAL_SEC = float(os.getenv("PULL_INTERVAL_SEC", "2"))
 
@@ -31,9 +32,20 @@ def ack_job(job_id: str):
 
 def print_locally(orders, copies):
     # Call your existing local receiver on this PC
+    # Try to pull overrides from backend to enrich customer data
+    overrides = {}
+    try:
+        joined = ",".join([str(o).lstrip("#") for o in orders])
+        headers = {"x-api-key": API_KEY} if API_KEY else {}
+        ro = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined}, headers=headers, timeout=10)
+        ro.raise_for_status()
+        overrides = (ro.json() or {}).get("overrides") or {}
+    except Exception:
+        overrides = {}
+
     r = requests.post(
         f"{LOCAL_PRINTER_URL}/print/orders",
-        json={"orders": orders, "copies": copies},
+        json={"orders": orders, "copies": copies, "overrides": overrides},
         timeout=30,
     )
     r.raise_for_status()
