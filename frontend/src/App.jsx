@@ -130,11 +130,17 @@ export default function App(){
     })() : "";
     const usingStockProfile = !!(profile && profile.id === 'stock');
     // Build base query from Stock subfilter, else empty
-    const baseQuery = usingStockProfile
+    const stockBase = usingStockProfile
       ? (stockFilter === 'btis'
           ? 'status:open fulfillment_status:unfulfilled tag:btis'
           : 'status:open fulfillment_status:unfulfilled tag:"en att b"')
       : '';
+    // When excludeStockTags is enabled (non-Stock profile), prepend NOT-tag filters for multiple tags
+    const excludedTags = ["btis", "en att b", "en att", "an att b2", "an att b3"];
+    const negativeTagQuery = (!usingStockProfile && excludeStockTags)
+      ? excludedTags.map(t => (t.includes(' ') ? ` -tag:"${t}"` : ` -tag:${t}`)).join('')
+      : '';
+    const baseQuery = `${stockBase}${negativeTagQuery}`.trim();
     const data = await API.getOrders({
       limit: 100,
       status_filter: (usingStockProfile ? "all" : statusFilter),
@@ -152,7 +158,7 @@ export default function App(){
     let ords = data.orders || [];
     // Client-side exclusion for specific tags when enabled (non-Stock profile)
     if (!usingStockProfile && excludeStockTags){
-      const disallowed = new Set(["btis", "en att b"]);
+      const disallowed = new Set(["btis", "en att b", "en att", "an att b2", "an att b3"]);
       ords = ords.filter(o => !((o.tags || []).some(t => disallowed.has(String(t).toLowerCase()))));
     }
     setOrders(ords);
@@ -272,7 +278,7 @@ export default function App(){
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900 overflow-hidden">
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur border-b border-gray-200">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center gap-3">
+        <div className="max-w-5xl mx-auto px-4 py-2 flex items-center gap-3">
           <PackageSearch className="w-6 h-6" />
           <div className="ml-4 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
             <button
@@ -295,8 +301,8 @@ export default function App(){
             <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-sm font-medium">{loading ? "…" : totalCount}</span>
           </div>
         </div>
-        <div className="max-w-5xl mx-auto px-4 pb-3 flex flex-col gap-2">
-          <div className="flex items-center gap-2 bg-gray-100 rounded-xl px-3 py-2">
+        <div className="max-w-5xl mx-auto px-4 pb-1 flex flex-col gap-1">
+          <div className="flex items-center gap-2 bg-gray-100 rounded-xl px-3 py-1">
             <Search className="w-4 h-4 text-gray-500" />
             <input
               value={search}
@@ -305,7 +311,7 @@ export default function App(){
               className="bg-transparent outline-none w-full text-sm"
             />
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
             {profile && profile.id === 'stock' ? (
               <>
                 <Chip
@@ -355,7 +361,7 @@ export default function App(){
                     onClick={()=> { setExcludeOut(v => !v); }}
                   />
                   <SmallChip
-                    label="Exclude btis/en att b"
+                    label="Exclude btis/en att/an att b2/b3"
                     active={excludeStockTags}
                     onClick={()=> { setExcludeStockTags(v => !v); }}
                   />
@@ -381,7 +387,7 @@ export default function App(){
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-4 pb-36">
+      <main className="max-w-5xl mx-auto px-4 py-4 pb-48">
         {current ? (
           <div className="relative">
             <OrderCard
@@ -510,7 +516,7 @@ export default function App(){
                   } else if (showConfirm === 'print'){
                     const nums = targets.map(o => o.number);
                     await handlePrintOrders(nums);
-                    if (selected.length > 0) setSelectedOrderNumbers(new Set());
+                    // Keep selections after printing; they will be cleared upon Collected
                   }
                 }}
                 className={`px-4 py-2 rounded-xl text-white text-sm font-semibold ${showConfirm === 'collected' ? 'bg-green-600 hover:bg-green-700' : showConfirm === 'out' ? 'bg-red-600 hover:bg-red-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}
