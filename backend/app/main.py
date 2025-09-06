@@ -707,55 +707,65 @@ async def orders_update_webhook(
 async def get_overrides(orders: str = Query(""), store: Optional[str] = Query(None)):
     keys = [o.strip().lstrip("#") for o in (orders or "").split(",") if o.strip()]
     out: Dict[str, Any] = {}
+
     # Return cached if present
     for k in keys:
         if k in ORDER_OVERRIDES:
             out[k] = ORDER_OVERRIDES[k]
 
-    # For Irranova, fetch live if missing
+    def _fetch_live_for_store(store_key: str):
+        try:
+            domain, password, api_key = resolve_store_settings(store_key)
+            if not domain or not password:
+                return
+            for k in keys:
+                if k in out:
+                    continue
+                try:
+                    name = _requests.utils.quote(f"#{k}")
+                    url = f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/orders.json?name={name}&status=any"
+                    headers = {"X-Shopify-Access-Token": password, "Accept": "application/json"}
+                    r = _requests.get(url, headers=headers, timeout=30)
+                    r.raise_for_status()
+                    js = r.json().get("orders", [])
+                    if not js:
+                        continue
+                    oid = js[0]["id"]
+                    r2 = _requests.get(f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/orders/{oid}.json", headers=headers, timeout=30)
+                    r2.raise_for_status()
+                    ord_full = (r2.json() or {}).get("order") or {}
+                    cust = (ord_full.get("customer") or {})
+                    shp = (ord_full.get("shipping_address") or {})
+                    ov = {
+                        "store": store_key,
+                        "customer": {
+                            "displayName": ((cust.get("first_name") or "").strip() + (" " + (cust.get("last_name") or "").strip() if cust.get("last_name") else "")).strip(),
+                            "email": cust.get("email"),
+                            "phone": cust.get("phone"),
+                        },
+                        "shippingAddress": {
+                            "name": (shp.get("name") or (str(shp.get("first_name") or "").strip() + " " + str(shp.get("last_name") or "").strip()).strip()),
+                            "address1": shp.get("address1"),
+                            "address2": shp.get("address2"),
+                            "city": shp.get("city"),
+                            "zip": shp.get("zip") or shp.get("postal_code"),
+                            "province": shp.get("province"),
+                            "country": shp.get("country"),
+                            "phone": shp.get("phone") or cust.get("phone"),
+                        },
+                    }
+                    out[k] = ov
+                except Exception:
+                    continue
+        except Exception:
+            return
+
     store_key = (store or "").strip().lower()
     if store_key == "irranova":
-        domain, password, api_key = resolve_store_settings(store_key)
-        for k in keys:
-            if k in out:
-                continue
-            try:
-                # REST: find by name then fetch order
-                name = _requests.utils.quote(f"#{k}")
-                url = f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/orders.json?name={name}&status=any"
-                headers = {"X-Shopify-Access-Token": password, "Accept": "application/json"}
-                r = _requests.get(url, headers=headers, timeout=30)
-                r.raise_for_status()
-                js = r.json().get("orders", [])
-                if not js:
-                    continue
-                oid = js[0]["id"]
-                r2 = _requests.get(f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/orders/{oid}.json", headers=headers, timeout=30)
-                r2.raise_for_status()
-                ord_full = (r2.json() or {}).get("order") or {}
-                cust = (ord_full.get("customer") or {})
-                shp = (ord_full.get("shipping_address") or {})
-                ov = {
-                    "store": store_key,
-                    "customer": {
-                        "displayName": ((cust.get("first_name") or "").strip() + (" " + (cust.get("last_name") or "").strip() if cust.get("last_name") else "")).strip(),
-                        "email": cust.get("email"),
-                        "phone": cust.get("phone"),
-                    },
-                    "shippingAddress": {
-                        "name": (shp.get("name") or (str(shp.get("first_name") or "").strip() + " " + str(shp.get("last_name") or "").strip()).strip()),
-                        "address1": shp.get("address1"),
-                        "address2": shp.get("address2"),
-                        "city": shp.get("city"),
-                        "zip": shp.get("zip") or shp.get("postal_code"),
-                        "province": shp.get("province"),
-                        "country": shp.get("country"),
-                        "phone": shp.get("phone") or cust.get("phone"),
-                    },
-                }
-                out[k] = ov
-            except Exception:
-                continue
+        _fetch_live_for_store("irranova")
+    elif not store_key:
+        # If store unknown, try Irranova live fetch to enrich missing keys
+        _fetch_live_for_store("irranova")
 
     return {"ok": True, "overrides": out}
 
