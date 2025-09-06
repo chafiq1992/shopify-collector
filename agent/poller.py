@@ -30,7 +30,7 @@ def ack_job(job_id: str):
     r.raise_for_status()
 
 
-def print_locally(orders, copies, store: str | None = None):
+def print_locally(orders, copies, store: str | None = None) -> bool:
     # Call your existing local receiver on this PC
     # Try to pull overrides from backend to enrich customer data only for irranova
     overrides = {}
@@ -50,6 +50,16 @@ def print_locally(orders, copies, store: str | None = None):
         timeout=30,
     )
     r.raise_for_status()
+    try:
+        data = r.json() or {}
+    except Exception:
+        data = {}
+    # Consider printed only if not explicitly skipped
+    if not data.get("ok", True):
+        return False
+    if data.get("skipped_all"):
+        return False
+    return True
 
 
 def main():
@@ -63,8 +73,14 @@ def main():
                     copies = int(job.get("copies", 1))
                     store = job.get("store")
                     print(f"Printing {orders} x{copies}")
-                    print_locally(orders, copies, store)
-                    ack_job(job.get("job_id"))
+                    printed = False
+                    try:
+                        printed = print_locally(orders, copies, store)
+                    except Exception as pe:
+                        print("Local print error:", pe)
+                        printed = False
+                    if printed:
+                        ack_job(job.get("job_id"))
             time.sleep(PULL_INTERVAL_SEC)
         except Exception as e:
             print("Error:", e)
