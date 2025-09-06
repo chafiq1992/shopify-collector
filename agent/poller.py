@@ -38,7 +38,8 @@ def print_locally(orders, copies, store: str | None = None) -> bool:
         try:
             joined = ",".join([str(o).lstrip("#") for o in orders])
             headers = {"x-api-key": API_KEY} if API_KEY else {}
-            ro = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined}, headers=headers, timeout=10)
+            params = {"orders": joined, **({"store": store} if store else {})}
+            ro = requests.get(f"{RELAY_URL}/api/overrides", params=params, headers=headers, timeout=10)
             ro.raise_for_status()
             overrides = (ro.json() or {}).get("overrides") or {}
         except Exception:
