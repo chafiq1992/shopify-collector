@@ -1,11 +1,13 @@
 import os
 import json
 from typing import List, Optional, Dict, Any, Tuple
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 import httpx
+import hmac, hashlib, base64
+from datetime import datetime, timezone
 from pydantic import BaseModel
 
 # ---------- Settings (multi-store) ----------
@@ -76,6 +78,17 @@ def _load_pcs_from_env() -> Dict[str, str]:
 PCS: Dict[str, str] = _load_pcs_from_env() or {
     "pc-lab-1": "SECRET1",
 }
+
+# Default routing and webhook secrets
+DEFAULT_PC_ID = os.environ.get("DEFAULT_PC_ID", next(iter(PCS.keys()), "pc-lab-1")).strip()
+SHOPIFY_WEBHOOK_SECRET_DEFAULT = os.environ.get("SHOPIFY_WEBHOOK_SECRET", "").strip()
+SHOPIFY_WEBHOOK_SECRET_IRRAKIDS = os.environ.get("IRRAKIDS_SHOPIFY_WEBHOOK_SECRET", "").strip()
+SHOPIFY_WEBHOOK_SECRET_IRRANOVA = os.environ.get("IRRANOVA_SHOPIFY_WEBHOOK_SECRET", "").strip()
+
+# Optional dedupe/cutoff controls
+PC_TAG_MIN_CREATED_AT = os.environ.get("PC_TAG_MIN_CREATED_AT", "").strip()  # ISO8601 e.g., 2025-01-01T00:00:00Z
+RECENT_ENQUEUE_SECONDS = int(os.environ.get("RECENT_ENQUEUE_SECONDS", "30").strip() or 30)
+RECENT_ENQUEUED_ORDERS: Dict[str, int] = {}
 
 # In-memory queue: { pc_id -> [ { job_id, ts, orders, copies, pdf_url? } ] }
 JOBS: Dict[str, list] = {}
@@ -588,6 +601,116 @@ async def append_note(order_gid: str, payload: AppendNotePayload, store: Optiona
     await manager.broadcast({"type": "order.note_updated", "id": order_gid, "note": new_note})
     return {"ok": True, "result": data2}
 
+
+# ---------- Shopify Webhook (orders/update) ----------
+def _secret_for_shop(shop_domain: str) -> str:
+    sd = (shop_domain or "").strip().lower()
+    if "irranova" in sd and SHOPIFY_WEBHOOK_SECRET_IRRANOVA:
+        return SHOPIFY_WEBHOOK_SECRET_IRRANOVA
+    if "irrakids" in sd and SHOPIFY_WEBHOOK_SECRET_IRRAKIDS:
+        return SHOPIFY_WEBHOOK_SECRET_IRRAKIDS
+    return SHOPIFY_WEBHOOK_SECRET_DEFAULT
+
+def _store_key_for_shop_domain(shop_domain: str) -> Optional[str]:
+    sd = (shop_domain or "").strip().lower()
+    if "irranova" in sd:
+        return "irranova"
+    if "irrakids" in sd:
+        return "irrakids"
+    return None
+
+def _verify_shopify_hmac(raw_body: bytes, recv_hmac: str, secret: str) -> bool:
+    if not secret:
+        return True
+    calc = base64.b64encode(hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).digest()).decode()
+    return hmac.compare_digest((recv_hmac or "").strip(), calc)
+
+def _parse_iso8601(s: str) -> Optional[datetime]:
+    try:
+        st = s.strip()
+        if st.endswith("Z"):
+            st = st[:-1] + "+00:00"
+        return datetime.fromisoformat(st)
+    except Exception:
+        return None
+
+def _created_at_passes_cutoff(created_at_str: Optional[str]) -> bool:
+    if not PC_TAG_MIN_CREATED_AT:
+        return True
+    try:
+        cutoff = _parse_iso8601(PC_TAG_MIN_CREATED_AT)
+        created = _parse_iso8601((created_at_str or "").strip())
+        if not cutoff or not created:
+            return True
+        # Normalize to UTC for compare
+        if not cutoff.tzinfo:
+            cutoff = cutoff.replace(tzinfo=timezone.utc)
+        if not created.tzinfo:
+            created = created.replace(tzinfo=timezone.utc)
+        return created >= cutoff
+    except Exception:
+        return True
+
+@app.post("/api/shopify/webhooks/orders/update")
+async def orders_update_webhook(
+    request: Request,
+    x_shopify_hmac_sha256: Optional[str] = Header(default=None),
+    x_shopify_shop_domain: Optional[str] = Header(default=None),
+):
+    import time, uuid
+    raw = await request.body()
+    secret = _secret_for_shop(x_shopify_shop_domain or "")
+    if not _verify_shopify_hmac(raw, x_shopify_hmac_sha256 or "", secret):
+        raise HTTPException(status_code=401, detail="bad hmac")
+
+    data = await request.json()
+    tags_str = (data.get("tags") or "").strip()
+    tags = [t.strip().lower() for t in tags_str.split(",") if t.strip()]
+    # Require pc tag and ensure not already queued/printed
+    if "pc" in tags and ("pc-queued" not in tags) and ("pc-printed" not in tags):
+        # Optional created_at cutoff
+        created_at = (data.get("created_at") or data.get("createdAt") or "")
+        if not _created_at_passes_cutoff(created_at):
+            return {"ok": True, "skipped": True, "reason": "older_than_cutoff"}
+
+        order_name = (data.get("name") or "").strip()
+        if order_name:
+            # In-memory dedupe window to avoid races
+            now_ts = int(time.time())
+            last = RECENT_ENQUEUED_ORDERS.get(order_name)
+            if last and (now_ts - last) < RECENT_ENQUEUE_SECONDS:
+                return {"ok": True, "skipped": True, "reason": "recently_enqueued"}
+
+            store_key = _store_key_for_shop_domain(x_shopify_shop_domain or "")
+            JOBS.setdefault(DEFAULT_PC_ID, []).append({
+                "job_id": str(uuid.uuid4()),
+                "ts": now_ts,
+                "orders": [order_name.lstrip("#")],
+                "copies": 1,
+                "pdf_url": None,
+                "store": store_key,
+            })
+            RECENT_ENQUEUED_ORDERS[order_name] = now_ts
+
+            # Attempt to add pc-queued tag to prevent future duplicates
+            try:
+                gid = (data.get("admin_graphql_api_id") or "").strip()
+                if gid:
+                    mutation = """
+                    mutation AddTag($id: ID!, $tags: [String!]!) {
+                      tagsAdd(id: $id, tags: $tags) { userErrors { field message } }
+                    }
+                    """
+                    await shopify_graphql(mutation, {"id": gid, "tags": ["pc-queued"]}, store=store_key)
+            except Exception:
+                # best-effort; ignore failures
+                pass
+
+            try:
+                await manager.broadcast({"type": "print.enqueued", "order": order_name, "pc_id": DEFAULT_PC_ID})
+            except Exception:
+                pass
+    return {"ok": True}
 
 # --------- Static frontend (mounted last) ---------
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
