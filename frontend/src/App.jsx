@@ -65,7 +65,7 @@ export default function App(){
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showProfilePicker, setShowProfilePicker] = useState(false);
-  const [showConfirm, setShowConfirm] = useState(null); // 'collected' | 'out' | null
+  const [showConfirm, setShowConfirm] = useState(null); // 'collected' | 'out' | 'print' | null
   const [store, setStore] = useState(() => {
     try { return localStorage.getItem("orderCollectorStore") || "irrakids"; } catch { return "irrakids"; }
   });
@@ -202,14 +202,10 @@ export default function App(){
     });
   }
 
-  async function handlePrintSelected(){
-    if (!selectedOrderNumbers || selectedOrderNumbers.size === 0){
-      alert("No orders selected");
-      return;
-    }
+  async function handlePrintOrders(orderNumbers){
+    const list = orderNumbers.map(n => String(n));
     setPrintBusy(true);
     setPrintMsg(null);
-    const list = Array.from(selectedOrderNumbers);
     if (isRelayConfigured()){
       const r = await enqueueOrdersToRelay(list, 1);
       setPrintBusy(false);
@@ -405,17 +401,27 @@ export default function App(){
       <div className="fixed bottom-0 inset-x-0 z-40 border-t border-gray-200 bg-white/90 backdrop-blur">
         <div className="max-w-5xl mx-auto px-4 py-3">
           <div className="grid grid-cols-1 gap-2 mb-2">
-            <button onClick={handlePrintSelected} disabled={printBusy} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm disabled:opacity-60">
-              <Printer className="w-4 h-4"/> <span className="font-semibold">{printBusy ? 'Printing…' : 'Print'}</span>
+            <button onClick={()=>setShowConfirm('print')} disabled={printBusy} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm disabled:opacity-60">
+              <Printer className="w-4 h-4"/> <span className="font-semibold">{printBusy ? 'Printing…' : `Print${selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}`}</span>
             </button>
             {printMsg && <div className="text-sm text-gray-600 text-center">{printMsg}</div>}
+            {selectedOrderNumbers.size > 0 && (
+              <div className="text-xs text-gray-700 text-center">
+                <span className="font-medium">Selected:</span> {selectedOrderNumbers.size} order{selectedOrderNumbers.size>1?'s':''}
+                <div className="mt-1 flex gap-1 flex-wrap justify-center">
+                  {Array.from(selectedOrderNumbers).map(n => (
+                    <span key={n} className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">{n}</span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
           <div className="grid grid-cols-2 gap-2">
             <button onClick={()=>setShowConfirm('collected')} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
-              <CheckCircle className="w-4 h-4"/> <span className="font-semibold">Collected</span>
+              <CheckCircle className="w-4 h-4"/> <span className="font-semibold">{`Collected${selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}`}</span>
             </button>
             <button onClick={()=>setShowConfirm('out')} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
-              <XCircle className="w-4 h-4"/> <span className="font-semibold">OUT</span>
+              <XCircle className="w-4 h-4"/> <span className="font-semibold">{`OUT${selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}`}</span>
             </button>
           </div>
           <div className="grid grid-cols-2 gap-2 mt-2">
@@ -431,15 +437,75 @@ export default function App(){
       {showConfirm && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center">
           <div className="w-full max-w-sm rounded-2xl bg-white shadow-lg border border-gray-200 p-4">
-            <h3 className="text-lg font-semibold mb-2">Confirm {showConfirm === 'collected' ? 'Collected' : 'OUT'}</h3>
-            <p className="text-sm text-gray-600 mb-4">
-              {showConfirm === 'collected' ? 'Mark this order as Collected and add tag pc?' : 'Append selected OUT titles to note and add tag out?'}
-            </p>
+            <h3 className="text-lg font-semibold mb-2">{showConfirm === 'collected' ? 'Confirm Collected' : showConfirm === 'out' ? 'Confirm OUT' : 'Confirm Print'}</h3>
+            {(() => {
+              const selected = Array.from(selectedOrderNumbers || []);
+              const targets = selected.length > 0 ? orders.filter(o => selected.includes(o.number)) : (current ? [current] : []);
+              const targetNumbers = targets.map(o => o.number);
+              const missingOut = showConfirm === 'out' ? targets.filter(o => !(selectedOutMap[o.id] && selectedOutMap[o.id].size > 0)).map(o => o.number) : [];
+              return (
+                <div className="text-sm text-gray-600 mb-4">
+                  {showConfirm === 'collected' && (
+                    <p>{`Mark ${targetNumbers.length} order${targetNumbers.length>1?'s':''} as Collected and add tag pc?`}</p>
+                  )}
+                  {showConfirm === 'out' && (
+                    <p>{`Append selected OUT titles to note and add tag out for ${targetNumbers.length} order${targetNumbers.length>1?'s':''}?`}</p>
+                  )}
+                  {showConfirm === 'print' && (
+                    <p>{`Print ${targetNumbers.length} order${targetNumbers.length>1?'s':''}?`}</p>
+                  )}
+                  {targetNumbers.length > 0 && (
+                    <div className="mt-2 flex gap-1 flex-wrap">
+                      {targetNumbers.map(n => (
+                        <span key={n} className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">{n}</span>
+                      ))}
+                    </div>
+                  )}
+                  {showConfirm === 'out' && missingOut.length > 0 && (
+                    <div className="mt-3 text-xs text-red-600">
+                      No OUT variants selected for: {missingOut.join(', ')}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             <div className="flex justify-end gap-3">
               <button onClick={()=>setShowConfirm(null)} className="px-4 py-2 rounded-xl border border-gray-300 text-sm font-medium hover:bg-gray-50">Cancel</button>
               <button
-                onClick={()=>{ const act = showConfirm === 'collected' ? ()=>handleMarkCollected(current) : ()=>handleMarkOut(current); setShowConfirm(null); act(); }}
-                className={`px-4 py-2 rounded-xl text-white text-sm font-semibold ${showConfirm === 'collected' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}`}
+                onClick={async ()=>{
+                  const selected = Array.from(selectedOrderNumbers || []);
+                  const targets = selected.length > 0 ? orders.filter(o => selected.includes(o.number)) : (current ? [current] : []);
+                  setShowConfirm(null);
+                  if (showConfirm === 'collected'){
+                    await Promise.all(targets.map(o => API.addTag(o.id, 'pc', store)));
+                    vibrate(20);
+                    if (selected.length === 0) gotoNext();
+                    if (selected.length > 0) setSelectedOrderNumbers(new Set());
+                  } else if (showConfirm === 'out'){
+                    // Only process orders with at least one selected variant
+                    const processable = targets.filter(o => (selectedOutMap[o.id] && selectedOutMap[o.id].size > 0));
+                    for (const o of processable){
+                      const sel = Array.from(selectedOutMap[o.id] || []);
+                      const titles = (o.variants || [])
+                        .filter(v => sel.includes(v.id))
+                        .map(v => v.title || v.sku || "")
+                        .join(", ");
+                      await Promise.all([
+                        API.appendNote(o.id, `OUT: ${titles}`, store),
+                        API.addTag(o.id, 'out', store),
+                      ]);
+                      setSelectedOutMap(prev => ({ ...prev, [o.id]: new Set() }));
+                    }
+                    vibrate(30);
+                    if (selected.length === 0) gotoNext();
+                    if (selected.length > 0) setSelectedOrderNumbers(new Set());
+                  } else if (showConfirm === 'print'){
+                    const nums = targets.map(o => o.number);
+                    await handlePrintOrders(nums);
+                    if (selected.length > 0) setSelectedOrderNumbers(new Set());
+                  }
+                }}
+                className={`px-4 py-2 rounded-xl text-white text-sm font-semibold ${showConfirm === 'collected' ? 'bg-green-600 hover:bg-green-700' : showConfirm === 'out' ? 'bg-red-600 hover:bg-red-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}
               >Confirm</button>
             </div>
           </div>
