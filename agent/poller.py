@@ -30,22 +30,23 @@ def ack_job(job_id: str):
     r.raise_for_status()
 
 
-def print_locally(orders, copies):
+def print_locally(orders, copies, store: str | None = None):
     # Call your existing local receiver on this PC
-    # Try to pull overrides from backend to enrich customer data
+    # Try to pull overrides from backend to enrich customer data only for irranova
     overrides = {}
-    try:
-        joined = ",".join([str(o).lstrip("#") for o in orders])
-        headers = {"x-api-key": API_KEY} if API_KEY else {}
-        ro = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined}, headers=headers, timeout=10)
-        ro.raise_for_status()
-        overrides = (ro.json() or {}).get("overrides") or {}
-    except Exception:
-        overrides = {}
+    if (store or "").strip().lower() == "irranova":
+        try:
+            joined = ",".join([str(o).lstrip("#") for o in orders])
+            headers = {"x-api-key": API_KEY} if API_KEY else {}
+            ro = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined}, headers=headers, timeout=10)
+            ro.raise_for_status()
+            overrides = (ro.json() or {}).get("overrides") or {}
+        except Exception:
+            overrides = {}
 
     r = requests.post(
         f"{LOCAL_PRINTER_URL}/print/orders",
-        json={"orders": orders, "copies": copies, "overrides": overrides},
+        json={"orders": orders, "copies": copies, **({"store": store} if store else {}), **({"overrides": overrides} if overrides else {})},
         timeout=30,
     )
     r.raise_for_status()
@@ -60,8 +61,9 @@ def main():
                 for job in jobs:
                     orders = job.get("orders", [])
                     copies = int(job.get("copies", 1))
+                    store = job.get("store")
                     print(f"Printing {orders} x{copies}")
-                    print_locally(orders, copies)
+                    print_locally(orders, copies, store)
                     ack_job(job.get("job_id"))
             time.sleep(PULL_INTERVAL_SEC)
         except Exception as e:
