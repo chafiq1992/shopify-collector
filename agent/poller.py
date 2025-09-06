@@ -44,6 +44,20 @@ def print_locally(orders, copies, store: str | None = None) -> bool:
             overrides = (ro.json() or {}).get("overrides") or {}
         except Exception:
             overrides = {}
+    else:
+        # Unknown store: first try without store, then retry with store=irranova if empty
+        try:
+            joined = ",".join([str(o).lstrip("#") for o in orders])
+            headers = {"x-api-key": API_KEY} if API_KEY else {}
+            ro = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined}, headers=headers, timeout=10)
+            ro.raise_for_status()
+            overrides = (ro.json() or {}).get("overrides") or {}
+            if not overrides:
+                ro2 = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined, "store": "irranova"}, headers=headers, timeout=10)
+                ro2.raise_for_status()
+                overrides = (ro2.json() or {}).get("overrides") or {}
+        except Exception:
+            overrides = {}
 
     r = requests.post(
         f"{LOCAL_PRINTER_URL}/print/orders",
