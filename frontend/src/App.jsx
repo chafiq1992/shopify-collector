@@ -610,9 +610,7 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                 : '';
               return { ...v, __normalizedStatus: normalizedStatus, __normalizedLabel: normalizedLabel };
             });
-            const variantsForDisplay = (normalizedVariants.length === 2 && normalizedVariants.some(v => v.__normalizedStatus === 'removed'))
-              ? normalizedVariants.filter(v => v.__normalizedStatus !== 'removed')
-              : normalizedVariants;
+            const variantsForDisplay = normalizedVariants.filter(v => v.__normalizedStatus === 'unfulfilled');
             return variantsForDisplay.map((v, i) => (
               <div key={v.id || i} className={`min-w-[210px] sm:min-w-[240px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
                 <div className="aspect-[3/2] sm:aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
