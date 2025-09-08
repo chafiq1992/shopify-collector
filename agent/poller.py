@@ -34,6 +34,17 @@ def print_locally(orders, copies, store: str | None = None) -> bool:
     # Call your existing local receiver on this PC
     # Try to pull overrides from backend to enrich customer data only for irranova
     overrides = {}
+    # Try to fetch print-friendly data (only unfulfilled items + current total) from backend if available
+    print_data = []
+    try:
+        joined = ",".join([str(o).lstrip("#") for o in orders])
+        params = {"numbers": joined, **({"store": store} if store else {})}
+        rpd = requests.get(f"{RELAY_URL}/api/print-data", params=params, timeout=15)
+        if rpd.ok:
+            js = rpd.json() or {}
+            print_data = js.get("orders") or []
+    except Exception:
+        print_data = []
     if (store or "").strip().lower() == "irranova":
         try:
             joined = ",".join([str(o).lstrip("#") for o in orders])
@@ -59,11 +70,14 @@ def print_locally(orders, copies, store: str | None = None) -> bool:
         except Exception:
             overrides = {}
 
-    r = requests.post(
-        f"{LOCAL_PRINTER_URL}/print/orders",
-        json={"orders": orders, "copies": copies, **({"store": store} if store else {}), **({"overrides": overrides} if overrides else {})},
-        timeout=30,
-    )
+    payload = {
+        "orders": orders,
+        "copies": copies,
+        **({"store": store} if store else {}),
+        **({"overrides": overrides} if overrides else {}),
+        **({"print_data": print_data} if print_data else {}),
+    }
+    r = requests.post(f"{LOCAL_PRINTER_URL}/print/orders", json=payload, timeout=30)
     r.raise_for_status()
     try:
         data = r.json() or {}
