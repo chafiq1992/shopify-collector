@@ -628,7 +628,7 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                 <div className="p-1.5 flex items-center gap-2">
                   <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
                   <span className="font-mono text-[11px] bg-gray-50 px-2 py-0.5 rounded border border-gray-200">{v.sku}</span>
-                  {v.title && <span className="text-[11px] text-gray-700 truncate">· {v.title}</span>}
+                  {v.title && <span className="text-[11px] text-gray-700 flex-1 whitespace-normal break-words">· {v.title}</span>}
                   <span className="ml-auto text-[10px] uppercase tracking-wide text-gray-500">Qty</span>
                   <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-red-600 text-white text-xs font-semibold">{v.qty}</span>
                 </div>
