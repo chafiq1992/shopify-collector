@@ -7,6 +7,8 @@ PC_ID = os.getenv("PC_ID", "pc-lab-1")
 PC_SECRET = os.getenv("PC_SECRET", "SECRET1")
 LOCAL_PRINTER_URL = os.getenv("LOCAL_PRINTER_URL", "http://127.0.0.1:8787")
 API_KEY = os.getenv("API_KEY", "")
+# Optional: override where print-friendly data is fetched from
+PRINT_DATA_URL = os.getenv("PRINT_DATA_URL") or RELAY_URL
 
 PULL_INTERVAL_SEC = float(os.getenv("PULL_INTERVAL_SEC", "2"))
 
@@ -39,7 +41,7 @@ def print_locally(orders, copies, store: str | None = None) -> bool:
     try:
         joined = ",".join([str(o).lstrip("#") for o in orders])
         params = {"numbers": joined, **({"store": store} if store else {})}
-        rpd = requests.get(f"{RELAY_URL}/api/print-data", params=params, timeout=15)
+        rpd = requests.get(f"{PRINT_DATA_URL}/api/print-data", params=params, timeout=15)
         if rpd.ok:
             js = rpd.json() or {}
             print_data = js.get("orders") or []
