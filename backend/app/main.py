@@ -215,6 +215,7 @@ class OrderVariant(BaseModel):
     title: Optional[str] = None
     qty: int
     status: Optional[str] = None  # fulfilled | unfulfilled | removed | unknown
+    unfulfilled_qty: Optional[int] = None
 
 class OrderDTO(BaseModel):
     id: str
@@ -307,6 +308,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             title=(var or {}).get("title"),
             qty=qty,
             status=status_val,
+            unfulfilled_qty=(None if unfulfilled_qty is None else int(unfulfilled_qty)),
         ))
     # Prefer currentTotalPriceSet if available, else totalPriceSet
     price = 0.0
@@ -768,6 +770,78 @@ async def get_overrides(orders: str = Query(""), store: Optional[str] = Query(No
         _fetch_live_for_store("irranova")
 
     return {"ok": True, "overrides": out}
+
+# Print-friendly data: only unfulfilled items and current total
+@app.get("/api/print-data")
+async def get_print_data(numbers: str = Query("", description="Comma-separated order names (e.g. #1234,#1235)"), store: Optional[str] = Query(None)):
+    # Normalize numbers
+    nums = [n.strip().lstrip("#") for n in (numbers or "").split(",") if n.strip()]
+    if not nums:
+        return {"ok": True, "orders": []}
+
+    # Query template: fetch minimal fields for mapping
+    query = """
+    query Orders($first: Int!, $after: String, $query: String) {
+      orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: true) {
+        edges {
+          cursor
+          node {
+            id
+            name
+            tags
+            note
+            currentTotalPriceSet { shopMoney { amount currencyCode } }
+            totalPriceSet { shopMoney { amount currencyCode } }
+            lineItems(first: 50) {
+              edges {
+                node {
+                  quantity
+                  unfulfilledQuantity
+                  sku
+                  variant { id title image { url } product { id } }
+                }
+              }
+            }
+          }
+        }
+        pageInfo { hasNextPage }
+      }
+    }
+    """
+
+    out = []
+    for n in nums:
+        try:
+            variables = {"first": 1, "after": None, "query": f"name:{n}"}
+            data = await shopify_graphql(query, variables, store=store)
+            edges = (data.get("orders") or {}).get("edges") or []
+            if not edges:
+                continue
+            dto = map_order_node(edges[0]["node"])
+            items = []
+            for v in (dto.variants or []):
+                st = (getattr(v, "status", None) or "").strip().lower()
+                if st != "unfulfilled":
+                    continue
+                uq = getattr(v, "unfulfilled_qty", None)
+                qv = int(uq) if (uq is not None and int(uq) > 0) else int(getattr(v, "qty", 0) or 0)
+                if qv <= 0:
+                    continue
+                items.append({
+                    "id": getattr(v, "id", None),
+                    "sku": getattr(v, "sku", None),
+                    "title": getattr(v, "title", None),
+                    "qty": qv,
+                })
+            out.append({
+                "number": dto.number,
+                "total_price": dto.total_price,
+                "variants": items,
+            })
+        except Exception:
+            continue
+
+    return {"ok": True, "orders": out}
 
 # --------- Static frontend (mounted last) ---------
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
