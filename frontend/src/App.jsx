@@ -514,6 +514,12 @@ export default function App(){
                     if (selected.length === 0) gotoNext();
                     if (selected.length > 0) setSelectedOrderNumbers(new Set());
                   } else if (showConfirm === 'print'){
+                    // Trigger webhook by tagging before printing so overrides get cached
+                    try {
+                      await Promise.all(targets.map(o => API.addTag(o.id, 'cod print', store)));
+                    } catch {}
+                    // Small delay to allow webhook to reach the server (best-effort)
+                    try { await new Promise(r => setTimeout(r, 400)); } catch {}
                     const nums = targets.map(o => o.number);
                     await handlePrintOrders(nums);
                     // Keep selections after printing; they will be cleared upon Collected
