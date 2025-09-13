@@ -63,7 +63,25 @@ export default function App(){
       const dd = String(now.getDate()).padStart(2,'0');
       return `${yyyy}-${mm}-${dd}`;
     } catch { return ""; }
-  }); // format YYYY-MM-DD from input
+  }); // legacy single date (YYYY-MM-DD)
+  const [codFromDate, setCodFromDate] = useState(() => {
+    try {
+      const now = new Date();
+      const yyyy = now.getFullYear();
+      const mm = String(now.getMonth()+1).padStart(2,'0');
+      const dd = String(now.getDate()).padStart(2,'0');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch { return ""; }
+  }); // YYYY-MM-DD
+  const [codToDate, setCodToDate] = useState(() => {
+    try {
+      const now = new Date();
+      const yyyy = now.getFullYear();
+      const mm = String(now.getMonth()+1).padStart(2,'0');
+      const dd = String(now.getDate()).padStart(2,'0');
+      return `${yyyy}-${mm}-${dd}`;
+    } catch { return ""; }
+  }); // YYYY-MM-DD
   const [tagFilter, setTagFilter] = useState(null);
   const [loading, setLoading] = useState(false);
   const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
@@ -122,12 +140,35 @@ export default function App(){
   async function load(){
     const reqId = ++requestIdRef.current;
     setLoading(true);
-    // convert selected date to DD/MM/YY for tag
+    // convert selected date(s) to DD/MM/YY for tag
     const ddmmyy = codDate ? (()=>{
       const [y,m,d] = codDate.split("-");
       if (!y||!m||!d) return "";
       return `${d}/${m}/${y.slice(-2)}`;
     })() : "";
+    const codDatesCSV = (()=>{
+      try {
+        const from = codFromDate;
+        const to = codToDate;
+        if (!from && !to) return "";
+        // if one missing, use the other
+        const [fy,fm,fd] = (from || to || "").split("-");
+        const [ty,tm,td] = (to || from || "").split("-");
+        const start = new Date(parseInt(fy), parseInt(fm)-1, parseInt(fd));
+        const end = new Date(parseInt(ty), parseInt(tm)-1, parseInt(td));
+        if (isNaN(start.getTime()) || isNaN(end.getTime())) return "";
+        const a = start <= end ? start : end;
+        const b = start <= end ? end : start;
+        const out = [];
+        for (let dt = new Date(a); dt <= b; dt.setDate(dt.getDate() + 1)){
+          const y = dt.getFullYear();
+          const m = String(dt.getMonth()+1).padStart(2,'0');
+          const d = String(dt.getDate()).padStart(2,'0');
+          out.push(`${d}/${m}/${String(y).slice(-2)}`);
+        }
+        return out.join(",");
+      } catch { return ""; }
+    })();
     const usingStockProfile = !!(profile && profile.id === 'stock');
     // Build base query from Stock subfilter, else empty
     const stockBase = usingStockProfile
@@ -146,7 +187,9 @@ export default function App(){
       status_filter: (usingStockProfile ? "all" : statusFilter),
       tag_filter: tagFilter || "",
       search: search || "",
-      cod_date: (!usingStockProfile && statusFilter === "collect") ? (ddmmyy || "") : "",
+      // Support both single date and range for collect/verification
+      cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
+      cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
       collect_prefix: preset.collectPrefix,
       collect_exclude_tag: preset.collectExcludeTag,
       verification_include_tag: preset.verificationIncludeTag,
@@ -169,7 +212,7 @@ export default function App(){
     setTotalCount(data.totalCount || ords.length);
   }
 
-  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, excludeOut, excludeStockTags, profile, stockFilter, store, reloadCounter]);
+  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, codFromDate, codToDate, excludeOut, excludeStockTags, profile, stockFilter, store, reloadCounter]);
 
   // Debounced search
   useEffect(() => {
@@ -339,6 +382,8 @@ export default function App(){
                       const mm = String(now.getMonth()+1).padStart(2,'0');
                       const dd = String(now.getDate()).padStart(2,'0');
                       setCodDate(`${yyyy}-${mm}-${dd}`);
+                      setCodFromDate(`${yyyy}-${mm}-${dd}`);
+                      setCodToDate(`${yyyy}-${mm}-${dd}`);
                     } catch {}
                     // Force refresh even if filters didn't change
                     setReloadCounter(c => c + 1);
@@ -347,7 +392,18 @@ export default function App(){
                 <Chip
                   label="Verification"
                   active={statusFilter === "verification"}
-                  onClick={()=>{ setStatusFilter("verification"); setShowDatePicker(true); }}
+                  onClick={()=>{ 
+                    setStatusFilter("verification"); 
+                    setShowDatePicker(true);
+                    try {
+                      const now = new Date();
+                      const yyyy = now.getFullYear();
+                      const mm = String(now.getMonth()+1).padStart(2,'0');
+                      const dd = String(now.getDate()).padStart(2,'0');
+                      setCodFromDate(`${yyyy}-${mm}-${dd}`);
+                      setCodToDate(`${yyyy}-${mm}-${dd}`);
+                    } catch {}
+                  }}
                 />
                 <Chip
                   label="Urgent"
@@ -371,17 +427,28 @@ export default function App(){
           </div>
           {showDatePicker && (!profile || profile.id !== 'stock') && (
             <div className="flex items-center gap-2">
-              <span className="text-[11px] uppercase tracking-wide text-gray-400">Date</span>
+              <span className="text-[11px] uppercase tracking-wide text-gray-400">From</span>
               <input
                 type="date"
-                value={codDate}
-                onChange={(e)=>{ setCodDate(e.target.value); setShowDatePicker(false); }}
+                value={codFromDate}
+                onChange={(e)=>{ setCodFromDate(e.target.value); }}
+                className="text-xs border border-gray-300 rounded px-2 py-0.5"
+              />
+              <span className="text-[11px] uppercase tracking-wide text-gray-400">To</span>
+              <input
+                type="date"
+                value={codToDate}
+                onChange={(e)=>{ setCodToDate(e.target.value); }}
                 className="text-xs border border-gray-300 rounded px-2 py-0.5"
               />
               <button
                 className="text-[11px] text-gray-500 underline"
-                onClick={()=>{ setCodDate(""); setShowDatePicker(false); }}
+                onClick={()=>{ setCodFromDate(""); setCodToDate(""); setCodDate(""); setShowDatePicker(false); }}
               >Clear</button>
+              <button
+                className="text-[11px] text-blue-600 underline"
+                onClick={()=>{ setShowDatePicker(false); setReloadCounter(c=>c+1); }}
+              >Apply</button>
             </div>
           )}
         </div>

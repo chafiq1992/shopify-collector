@@ -235,6 +235,7 @@ def build_query_string(
     tag_filter: Optional[str],
     search: Optional[str],
     cod_date: Optional[str],
+    cod_dates: Optional[str] = None,
     collect_prefix: Optional[str] = None,
     collect_exclude_tag: Optional[str] = None,
     verification_include_tag: Optional[str] = None,
@@ -263,13 +264,26 @@ def build_query_string(
     # Global OUT exclusion
     if exclude_out:
         q += " -tag:out"
-    # Optional COD date tag: expect dd/mm/yy, add as tag:"cod DD/MM/YY"
-    if cod_date:
-        tag_val = cod_date.strip()
-        if tag_val:
-            # quote because of space
-            prefix = (collect_prefix or "cod").strip()
-            q += f' tag:"{prefix} {tag_val}"'
+    # Optional COD date tag(s): expect dd/mm/yy
+    # If multiple provided (comma-separated), build an OR group across tags with the chosen prefix
+    prefix = (collect_prefix or "cod").strip()
+    dates_list: List[str] = []
+    if cod_dates:
+        try:
+            dates_list = [d.strip() for d in (cod_dates or "").split(",") if d and d.strip()]
+        except Exception:
+            dates_list = []
+    if dates_list:
+        parts = [f'tag:"{prefix} {d}"' for d in dates_list]
+        if parts:
+            q += " (" + " OR ".join(parts) + ")"
+    else:
+        # Single date fallback for backward compatibility
+        if cod_date:
+            tag_val = cod_date.strip()
+            if tag_val:
+                # quote because of space
+                q += f' tag:"{prefix} {tag_val}"'
     # Search: try to search by order name if numeric, else client filters by SKU
     if search:
         s = search.strip().lstrip("#")
@@ -345,6 +359,7 @@ async def list_orders(
     tag_filter: Optional[str] = None,
     search: Optional[str] = None,
     cod_date: Optional[str] = Query(None, description="Date for COD tag in format DD/MM/YY"),
+    cod_dates: Optional[str] = Query(None, description="Comma-separated dates (DD/MM/YY) for OR-matching COD tags"),
     collect_prefix: Optional[str] = Query(None, description="Prefix for COD tag, e.g. 'cod'"),
     collect_exclude_tag: Optional[str] = Query(None, description="Exclude tag for collect filter, e.g. 'pc'"),
     verification_include_tag: Optional[str] = Query(None, description="Include tag for verification filter, e.g. 'pc'"),
@@ -362,6 +377,7 @@ async def list_orders(
         tag_filter,
         search,
         cod_date,
+        cod_dates,
         collect_prefix,
         collect_exclude_tag,
         verification_include_tag,
