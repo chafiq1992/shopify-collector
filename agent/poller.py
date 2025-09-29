@@ -30,6 +30,22 @@ def ack_job(job_id: str):
     r.raise_for_status()
 
 
+def requeue_job(orders, copies, store: str | None = None):
+    try:
+        headers = {"x-api-key": API_KEY} if API_KEY else {}
+        payload = {
+            "pc_id": PC_ID,
+            "orders": [str(o).lstrip("#") for o in (orders or [])],
+            "copies": int(copies) if copies else 1,
+            **({"store": store} if store else {}),
+        }
+        r = requests.post(f"{RELAY_URL}/enqueue", json=payload, headers=headers, timeout=10)
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        print("Failed to re-enqueue job:", e)
+        return False
+
 def print_locally(orders, copies, store: str | None = None) -> bool:
     # Call your existing local receiver on this PC
     # Try to pull overrides from backend to enrich customer data only for irranova
@@ -45,14 +61,60 @@ def print_locally(orders, copies, store: str | None = None) -> bool:
             print_data = js.get("orders") or []
     except Exception:
         print_data = []
-    if (store or "").strip().lower() == "irranova":
+    def _is_complete(ov: dict | None) -> bool:
+        if not isinstance(ov, dict):
+            return False
         try:
-            joined = ",".join([str(o).lstrip("#") for o in orders])
+            cust = (ov.get("customer") or {})
+            shp = (ov.get("shippingAddress") or {})
+            name_ok = bool(((cust.get("displayName") or "").strip()) or ((shp.get("name") or "").strip()))
+            contact_ok = bool(((cust.get("email") or ov.get("email") or "").strip()) or ((cust.get("phone") or ov.get("phone") or (shp.get("phone") or "")).strip()))
+            return name_ok and contact_ok
+        except Exception:
+            return False
+
+    def _fetch_overrides(required_orders: list[str], force_live: bool) -> dict:
+        try:
+            joined = ",".join([str(o).lstrip("#") for o in required_orders])
             headers = {"x-api-key": API_KEY} if API_KEY else {}
-            params = {"orders": joined, **({"store": store} if store else {})}
-            ro = requests.get(f"{RELAY_URL}/api/overrides", params=params, headers=headers, timeout=10)
+            params = {"orders": joined, **({"store": store} if store else {}), **({"force_live": "1"} if force_live else {})}
+            ro = requests.get(f"{RELAY_URL}/api/overrides", params=params, headers=headers, timeout=15)
             ro.raise_for_status()
-            overrides = (ro.json() or {}).get("overrides") or {}
+            return (ro.json() or {}).get("overrides") or {}
+        except Exception:
+            return {}
+
+    # For irranova (or unknown store), ensure customer info is present before printing
+    should_require_overrides = (store or "").strip().lower() in ("irranova", "")
+    if should_require_overrides:
+        # Try up to 3 attempts: cached, then force_live twice with short backoff
+        attempts = [False, True, True]
+        wait_secs = [0.0, 1.0, 2.0]
+        overrides = {}
+        for idx, force in enumerate(attempts):
+            if idx > 0 and wait_secs[idx] > 0:
+                try:
+                    time.sleep(wait_secs[idx])
+                except Exception:
+                    pass
+            overrides = _fetch_overrides(orders, force)
+            all_ok = True
+            for o in orders:
+                k = str(o).lstrip("#")
+                if not _is_complete(overrides.get(k)):
+                    all_ok = False
+                    break
+            if all_ok:
+                break
+        # If still not complete, do not print
+        missing = [str(o).lstrip("#") for o in orders if not _is_complete(overrides.get(str(o).lstrip("#")))]
+        if missing:
+            print("Missing customer info for:", missing, "— re-enqueueing and skipping print")
+            return False
+    else:
+        # Non-irranova: best-effort fetch (no block)
+        try:
+            overrides = _fetch_overrides(orders, False)
         except Exception:
             overrides = {}
     else:
@@ -110,6 +172,11 @@ def main():
                         printed = False
                     if printed:
                         ack_job(job.get("job_id"))
+                    else:
+                        # If we couldn't print (e.g., missing customer info), re-enqueue for later
+                        requeued = requeue_job(orders, copies, store)
+                        if not requeued:
+                            print("Re-enqueue failed; will retry on next poll")
             time.sleep(PULL_INTERVAL_SEC)
         except Exception as e:
             print("Error:", e)

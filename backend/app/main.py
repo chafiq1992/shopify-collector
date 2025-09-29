@@ -802,11 +802,26 @@ async def orders_update_webhook(
     return {"ok": True}
 
 @app.get("/api/overrides")
-async def get_overrides(orders: str = Query(""), store: Optional[str] = Query(None)):
+async def get_overrides(
+    orders: str = Query(""),
+    store: Optional[str] = Query(None),
+    force_live: bool = Query(False, description="If true, attempt live fetch even if cached"),
+):
     keys = [o.strip().lstrip("#") for o in (orders or "").split(",") if o.strip()]
     out: Dict[str, Any] = {}
 
-    # Return cached if present
+    def _override_is_complete(ov: Dict[str, Any]) -> bool:
+        try:
+            cust = (ov.get("customer") or {})
+            shp = (ov.get("shippingAddress") or {})
+            # Minimal completeness: name present (from customer or shipping) AND at least one contact (email/phone)
+            name_ok = bool(((cust.get("displayName") or "").strip()) or ((shp.get("name") or "").strip()))
+            contact_ok = bool(((cust.get("email") or ov.get("email") or "").strip()) or ((cust.get("phone") or ov.get("phone") or (shp.get("phone") or "")).strip()))
+            return name_ok and contact_ok
+        except Exception:
+            return False
+
+    # Seed with cache if present
     for k in keys:
         if k in ORDER_OVERRIDES:
             out[k] = ORDER_OVERRIDES[k]
@@ -817,7 +832,8 @@ async def get_overrides(orders: str = Query(""), store: Optional[str] = Query(No
             if not domain or not password:
                 return
             for k in keys:
-                if k in out:
+                # Skip if we already have complete data and not forcing live
+                if (k in out) and _override_is_complete(out[k]) and not force_live:
                     continue
                 try:
                     name = _requests.utils.quote(f"#{k}")
@@ -834,12 +850,15 @@ async def get_overrides(orders: str = Query(""), store: Optional[str] = Query(No
                     ord_full = (r2.json() or {}).get("order") or {}
                     cust = (ord_full.get("customer") or {})
                     shp = (ord_full.get("shipping_address") or {})
+                    # Root-level contact fallbacks
+                    root_email = (ord_full.get("email") or "").strip()
+                    root_phone = (ord_full.get("phone") or "").strip()
                     ov = {
                         "store": store_key,
                         "customer": {
                             "displayName": ((cust.get("first_name") or "").strip() + (" " + (cust.get("last_name") or "").strip() if cust.get("last_name") else "")).strip(),
-                            "email": cust.get("email"),
-                            "phone": cust.get("phone"),
+                            "email": (cust.get("email") or root_email or None),
+                            "phone": (cust.get("phone") or root_phone or None),
                         },
                         "shippingAddress": {
                             "name": (shp.get("name") or (str(shp.get("first_name") or "").strip() + " " + str(shp.get("last_name") or "").strip()).strip()),
@@ -849,16 +868,22 @@ async def get_overrides(orders: str = Query(""), store: Optional[str] = Query(No
                             "zip": shp.get("zip") or shp.get("postal_code"),
                             "province": shp.get("province"),
                             "country": shp.get("country"),
-                            "phone": shp.get("phone") or cust.get("phone"),
+                            "phone": shp.get("phone") or cust.get("phone") or root_phone or None,
                         },
+                        # Keep convenience root-level contact copies too
+                        "email": (root_email or cust.get("email")),
+                        "phone": (root_phone or cust.get("phone")),
                     }
+                    # Save result
                     out[k] = ov
+                    ORDER_OVERRIDES[k] = ov
                 except Exception:
                     continue
         except Exception:
             return
 
     store_key = (store or "").strip().lower()
+    # For Irranova: always attempt live fetch on missing/incomplete; allow forcing via flag
     if store_key == "irranova":
         _fetch_live_for_store("irranova")
     elif not store_key:
