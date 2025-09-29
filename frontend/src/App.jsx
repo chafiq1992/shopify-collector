@@ -85,6 +85,8 @@ export default function App(){
   const [tagFilter, setTagFilter] = useState(null);
   const [loading, setLoading] = useState(false);
   const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
+  const [nextCursor, setNextCursor] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [excludeOut, setExcludeOut] = useState(false);
   const [excludeStockTags, setExcludeStockTags] = useState(false);
   const [selectedOutMap, setSelectedOutMap] = useState({}); // orderId -> Set<variantId>
@@ -183,7 +185,7 @@ export default function App(){
       : '';
     const baseQuery = `${stockBase}${negativeTagQuery}`.trim();
     const data = await API.getOrders({
-      limit: 100,
+      limit: 30,
       status_filter: (usingStockProfile ? "all" : statusFilter),
       tag_filter: tagFilter || "",
       search: search || "",
@@ -207,9 +209,58 @@ export default function App(){
     setOrders(ords);
     setTags(data.tags || []);
     setPageInfo(data.pageInfo || { hasNextPage: false });
+    setNextCursor(data.nextCursor || null);
     setIndex(0);
     setLoading(false);
     setTotalCount(data.totalCount || ords.length);
+  }
+
+  async function loadMore(){
+    if (loadingMore) return;
+    if (!pageInfo?.hasNextPage || !nextCursor) return;
+    setLoadingMore(true);
+    // Recompute filters to ensure consistency
+    const ddmmyy = codDate ? (()=>{ try { const [y,m,d] = codDate.split("-"); return `${d}/${m}/${y.slice(-2)}`; } catch { return ""; } })() : "";
+    const codDatesCSV = (()=>{ try {
+      const from = codFromDate; const to = codToDate; if (!from && !to) return "";
+      const [fy,fm,fd] = (from || to || "").split("-"); const [ty,tm,td] = (to || from || "").split("-");
+      const start = new Date(parseInt(fy), parseInt(fm)-1, parseInt(fd)); const end = new Date(parseInt(ty), parseInt(tm)-1, parseInt(td));
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) return ""; const a = start <= end ? start : end; const b = start <= end ? end : start; const out = [];
+      for (let dt = new Date(a); dt <= b; dt.setDate(dt.getDate() + 1)){ const y = dt.getFullYear(); const m = String(dt.getMonth()+1).padStart(2,'0'); const d = String(dt.getDate()).padStart(2,'0'); out.push(`${d}/${m}/${String(y).slice(-2)}`);} return out.join(",");
+    } catch { return ""; } })();
+    const usingStockProfile = !!(profile && profile.id === 'stock');
+    const stockBase = usingStockProfile
+      ? (stockFilter === 'btis'
+          ? 'status:open fulfillment_status:unfulfilled tag:btis'
+          : 'status:open fulfillment_status:unfulfilled tag:"en att b"')
+      : '';
+    const excludedTags = ["btis", "en att b", "en att", "an att b2", "an att b3"];
+    const negativeTagQuery = (!usingStockProfile && excludeStockTags)
+      ? excludedTags.map(t => (t.includes(' ') ? ` -tag:"${t}"` : ` -tag:${t}`)).join('')
+      : '';
+    const baseQuery = `${stockBase}${negativeTagQuery}`.trim();
+    try {
+      const data = await API.getOrders({
+        limit: 30,
+        cursor: nextCursor,
+        status_filter: (usingStockProfile ? "all" : statusFilter),
+        tag_filter: tagFilter || "",
+        search: search || "",
+        cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
+        cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
+        collect_prefix: preset.collectPrefix,
+        collect_exclude_tag: preset.collectExcludeTag,
+        verification_include_tag: preset.verificationIncludeTag,
+        exclude_out: usingStockProfile ? false : excludeOut,
+        base_query: baseQuery,
+        store,
+      });
+      const more = data.orders || [];
+      setOrders(prev => prev.concat(more));
+      setPageInfo(data.pageInfo || { hasNextPage: false });
+      setNextCursor(data.nextCursor || null);
+    } catch {}
+    setLoadingMore(false);
   }
 
   useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, codFromDate, codToDate, excludeOut, excludeStockTags, profile, stockFilter, store, reloadCounter]);
@@ -244,7 +295,16 @@ export default function App(){
   const current = orders[index] || null;
 
   function gotoNext(){
-    setIndex(i => (i + 1) % Math.max(1, total || 1));
+    setIndex(i => {
+      const next = (i + 1) % Math.max(1, total || 1);
+      // Prefetch when close to end of loaded orders
+      try {
+        if (orders && orders.length > 0 && (i >= orders.length - 5)){
+          if (pageInfo?.hasNextPage && nextCursor) { loadMore(); }
+        }
+      } catch {}
+      return next;
+    });
     vibrate(10);
   }
   function gotoPrev(){

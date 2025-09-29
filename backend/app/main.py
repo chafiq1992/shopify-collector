@@ -3,6 +3,7 @@ import json
 from typing import List, Optional, Dict, Any, Tuple
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 import httpx
@@ -54,6 +55,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Compress JSON responses to reduce payload sizes for large order lists
+app.add_middleware(GZipMiddleware, minimum_size=500)
+
 # NOTE: Static mount is added AFTER API routes to avoid shadowing /api paths.
 
 # ---------- Lightweight Print Relay (in-memory) ----------
@@ -95,6 +99,45 @@ RECENT_ENQUEUED_ORDERS: Dict[str, int] = {}
 JOBS: Dict[str, list] = {}
 # In-memory minimal customer override cache: { order_no -> { customer, shippingAddress, phone, email, tags } }
 ORDER_OVERRIDES: Dict[str, Dict[str, Any]] = {}
+
+# Lightweight in-memory cache for orders API responses, with TTL and basic LRU trimming
+from time import time as _now
+ORDERS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+ORDERS_CACHE_TTL_SECONDS = int(os.environ.get("ORDERS_CACHE_TTL_SECONDS", "5").strip() or 5)
+ORDERS_CACHE_MAX_KEYS = int(os.environ.get("ORDERS_CACHE_MAX_KEYS", "200").strip() or 200)
+
+def _orders_cache_key(payload: Dict[str, Any]) -> str:
+    try:
+        # Stable key using sorted JSON
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        return str(payload)
+
+def _orders_cache_get(key: str) -> Optional[Dict[str, Any]]:
+    try:
+        ts, val = ORDERS_CACHE.get(key, (0.0, None))
+        if not val:
+            return None
+        if (_now() - ts) > ORDERS_CACHE_TTL_SECONDS:
+            try: del ORDERS_CACHE[key]
+            except Exception: pass
+            return None
+        return val
+    except Exception:
+        return None
+
+def _orders_cache_set(key: str, val: Dict[str, Any]):
+    try:
+        ORDERS_CACHE[key] = (_now(), val)
+        # Trim oldest if above limit
+        if len(ORDERS_CACHE) > ORDERS_CACHE_MAX_KEYS:
+            try:
+                oldest_key = sorted(ORDERS_CACHE.items(), key=lambda kv: kv[1][0])[0][0]
+                del ORDERS_CACHE[oldest_key]
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 class EnqueueBody(BaseModel):
     pc_id: str
@@ -385,6 +428,27 @@ async def list_orders(
     )
 
     # Build GraphQL query based on store capabilities
+
+    # Cache key (includes resolved query) so repeated loads within a short window are instant
+    cache_key = _orders_cache_key({
+        "path": "/api/orders",
+        "q": q,
+        "limit": limit,
+        "cursor": cursor,
+        "status_filter": status_filter,
+        "tag_filter": tag_filter,
+        "search": search,
+        "cod_date": cod_date,
+        "cod_dates": cod_dates,
+        "collect_prefix": collect_prefix,
+        "collect_exclude_tag": collect_exclude_tag,
+        "verification_include_tag": verification_include_tag,
+        "exclude_out": exclude_out,
+        "store": (store or "").strip().lower(),
+    })
+    cached = _orders_cache_get(cache_key)
+    if cached is not None:
+        return cached
     if (store or "irrakids").strip().lower() == "irranova":
         # Avoid PII (customer, shippingAddress) but keep variant fields
         query = """
@@ -461,7 +525,8 @@ async def list_orders(
     variables = {"first": limit, "after": cursor, "query": q or None}
     data = await shopify_graphql(query, variables, store=store)
     ords = data["orders"]
-    items: List[OrderDTO] = [map_order_node(e["node"]) for e in ords["edges"]]
+    edges = ords.get("edges") or []
+    items: List[OrderDTO] = [map_order_node(e["node"]) for e in edges]
 
     # Optional client-side SKU filter if search is non-numeric
     if search and not search.strip().lstrip("#").isdigit():
@@ -470,7 +535,8 @@ async def list_orders(
 
     # Collect: compute ranking globally across a larger window of orders
     if status_filter == "collect":
-        target_window = 200
+        # Use a smaller window to reduce latency while maintaining good grouping quality
+        target_window = 120
         chunk = 50
         accumulated_edges = []
         after_cursor = None
@@ -541,12 +607,16 @@ async def list_orders(
             total_count_val = int((data.get("ordersCount") or {}).get("count") or 0)
         except Exception:
             total_count_val = len(all_items)
-        return {
+        resp = {
             "orders": [json.loads(o.json()) for o in items],
             "pageInfo": {"hasNextPage": len(all_items) > limit},
             "tags": unique_tags,
             "totalCount": total_count_val,
+            # Collect ranking does not support true cursor pagination; omit nextCursor
+            "nextCursor": None,
         }
+        _orders_cache_set(cache_key, resp)
+        return resp
 
     # Gather unique tags for chips
     unique_tags = sorted({t for o in items for t in (o.tags or [])})
@@ -556,12 +626,22 @@ async def list_orders(
         total_count_val = int((data.get("ordersCount") or {}).get("count") or 0)
     except Exception:
         total_count_val = len(items)
-    return {
+    next_cursor = None
+    try:
+        if edges:
+            next_cursor = edges[-1].get("cursor")
+    except Exception:
+        next_cursor = None
+
+    resp = {
         "orders": [json.loads(o.json()) for o in items],
         "pageInfo": ords["pageInfo"],
         "tags": unique_tags,
         "totalCount": total_count_val,
+        "nextCursor": next_cursor,
     }
+    _orders_cache_set(cache_key, resp)
+    return resp
 
 class TagPayload(BaseModel):
     tag: str
