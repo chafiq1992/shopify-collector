@@ -1,6 +1,7 @@
 import os
 import json
 from typing import List, Optional, Dict, Any, Tuple
+import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -160,6 +161,60 @@ def _require_pc(pc_id: str, secret: str):
     if not expect or secret != expect:
         raise HTTPException(status_code=401, detail="unauthorized")
 
+# ---------- Best-effort tagging to trigger webhook ----------
+async def _find_order_gid_by_number(number: str, store: Optional[str]) -> Optional[str]:
+    try:
+        q = """
+        query One($first: Int!, $query: String) {
+          orders(first: $first, query: $query, sortKey: UPDATED_AT, reverse: true) {
+            edges { node { id name } }
+          }
+        }
+        """
+        variables = {"first": 1, "query": f"name:{str(number).lstrip('#')}"}
+        data = await shopify_graphql(q, variables, store=store)
+        edges = (data.get("orders") or {}).get("edges") or []
+        if not edges:
+            return None
+        node = edges[0].get("node") or {}
+        return node.get("id")
+    except Exception:
+        return None
+
+async def _tag_orders_before_print(numbers: List[str], store: Optional[str]):
+    if not numbers:
+        return
+    # De-duplicate and limit to a small batch
+    try:
+        unique: List[str] = []
+        seen = set()
+        for n in numbers:
+            k = str(n).lstrip('#')
+            if k and k not in seen:
+                seen.add(k)
+                unique.append(k)
+        unique = unique[:20]
+    except Exception:
+        unique = [str(n).lstrip('#') for n in numbers if str(n).strip()][:20]
+
+    mutation = """
+    mutation AddTag($id: ID!, $tags: [String!]!) {
+      tagsAdd(id: $id, tags: $tags) { userErrors { field message } }
+    }
+    """
+    for num in unique:
+        try:
+            gid = await _find_order_gid_by_number(num, store)
+            if not gid:
+                continue
+            # Ignore errors; webhook firing is best-effort
+            try:
+                await shopify_graphql(mutation, {"id": gid, "tags": ["cod print"]}, store=store)
+            except Exception:
+                continue
+        except Exception:
+            continue
+
 @app.post("/enqueue")
 async def enqueue(job: EnqueueBody, x_api_key: Optional[str] = Header(default=None)):
     _require_api_key(x_api_key)
@@ -176,6 +231,12 @@ async def enqueue(job: EnqueueBody, x_api_key: Optional[str] = Header(default=No
         "store": (job.store or None),
     }
     JOBS.setdefault(job.pc_id, []).append(payload)
+    # Best-effort: tag orders with "cod print" to trigger webhook so overrides cache is populated
+    try:
+        if payload.get("orders"):
+            asyncio.create_task(_tag_orders_before_print(payload["orders"], payload.get("store")))
+    except Exception:
+        pass
     return {"ok": True, "job_id": jid, "queued": len(JOBS[job.pc_id])}
 
 @app.get("/pull")
