@@ -184,8 +184,12 @@ export default function App(){
       ? excludedTags.map(t => (t.includes(' ') ? ` -tag:"${t}"` : ` -tag:${t}`)).join('')
       : '';
     const baseQuery = `${stockBase}${negativeTagQuery}`.trim();
-    const data = await API.getOrders({
-      limit: 30,
+    const isBulkFilter = (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification"));
+    const perPage = isBulkFilter ? 250 : 30;
+
+    // First page
+    let data = await API.getOrders({
+      limit: perPage,
       status_filter: (usingStockProfile ? "all" : statusFilter),
       tag_filter: tagFilter || "",
       search: search || "",
@@ -201,6 +205,40 @@ export default function App(){
     });
     if (reqId !== requestIdRef.current) return; // stale response
     let ords = data.orders || [];
+    let totalCountFromApi = data.totalCount || ords.length;
+    // Auto-paginate for bulk filters to load ALL orders
+    if (isBulkFilter) {
+      try {
+        let next = data.nextCursor || null;
+        let hasNext = (data.pageInfo || {}).hasNextPage || false;
+        while (hasNext && next) {
+          const page = await API.getOrders({
+            limit: perPage,
+            cursor: next,
+            status_filter: (usingStockProfile ? "all" : statusFilter),
+            tag_filter: tagFilter || "",
+            search: search || "",
+            cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
+            cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
+            collect_prefix: preset.collectPrefix,
+            collect_exclude_tag: preset.collectExcludeTag,
+            verification_include_tag: preset.verificationIncludeTag,
+            exclude_out: usingStockProfile ? false : excludeOut,
+            base_query: baseQuery,
+            store,
+          });
+          if (reqId !== requestIdRef.current) return; // stale response
+          const more = page.orders || [];
+          ords = ords.concat(more);
+          totalCountFromApi = page.totalCount || totalCountFromApi;
+          hasNext = (page.pageInfo || {}).hasNextPage || false;
+          next = page.nextCursor || null;
+        }
+        // Since we loaded all, disable further paging
+        data.pageInfo = { hasNextPage: false };
+        data.nextCursor = null;
+      } catch {}
+    }
     // Client-side exclusion for specific tags when enabled (non-Stock profile)
     if (!usingStockProfile && excludeStockTags){
       const disallowed = new Set(["btis", "en att b", "en att", "an att b2", "an att b3"]);
@@ -212,7 +250,7 @@ export default function App(){
     setNextCursor(data.nextCursor || null);
     setIndex(0);
     setLoading(false);
-    setTotalCount(data.totalCount || ords.length);
+    setTotalCount(totalCountFromApi || ords.length);
   }
 
   async function loadMore(){
@@ -240,8 +278,10 @@ export default function App(){
       : '';
     const baseQuery = `${stockBase}${negativeTagQuery}`.trim();
     try {
+      const isBulkFilter = (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification"));
+      const perPage = isBulkFilter ? 250 : 30;
       const data = await API.getOrders({
-        limit: 30,
+        limit: perPage,
         cursor: nextCursor,
         status_filter: (usingStockProfile ? "all" : statusFilter),
         tag_filter: tagFilter || "",
