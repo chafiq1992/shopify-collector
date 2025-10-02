@@ -84,53 +84,52 @@ def print_locally(orders, copies, store: str | None = None) -> bool:
         except Exception:
             return {}
 
-    # For irranova (or unknown store), ensure customer info is present before printing
-    should_require_overrides = (store or "").strip().lower() in ("irranova", "")
-    if should_require_overrides:
-        # Try up to 3 attempts: cached, then force_live twice with short backoff
-        attempts = [False, True, True]
-        wait_secs = [0.0, 1.0, 2.0]
-        overrides = {}
-        for idx, force in enumerate(attempts):
-            if idx > 0 and wait_secs[idx] > 0:
-                try:
-                    time.sleep(wait_secs[idx])
-                except Exception:
-                    pass
-            overrides = _fetch_overrides(orders, force)
-            all_ok = True
-            for o in orders:
-                k = str(o).lstrip("#")
-                if not _is_complete(overrides.get(k)):
-                    all_ok = False
-                    break
-            if all_ok:
-                break
-        # If still not complete, do not print
-        missing = [str(o).lstrip("#") for o in orders if not _is_complete(overrides.get(str(o).lstrip("#")))]
-        if missing:
-            print("Missing customer info for:", missing, "— re-enqueueing and skipping print")
-            return False
-    else:
-        # Non-irranova: best-effort fetch (no block)
-        try:
-            overrides = _fetch_overrides(orders, False)
-        except Exception:
-            overrides = {}
-    else:
-        # Unknown store: first try without store, then retry with store=irranova if empty
-        try:
-            joined = ",".join([str(o).lstrip("#") for o in orders])
-            headers = {"x-api-key": API_KEY} if API_KEY else {}
-            ro = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined}, headers=headers, timeout=10)
-            ro.raise_for_status()
-            overrides = (ro.json() or {}).get("overrides") or {}
-            if not overrides:
-                ro2 = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined, "store": "irranova"}, headers=headers, timeout=10)
-                ro2.raise_for_status()
-                overrides = (ro2.json() or {}).get("overrides") or {}
-        except Exception:
-            overrides = {}
+	# For irranova (or unknown store), ensure customer info is present before printing
+	store_key = (store or "").strip().lower()
+	require_overrides = (store_key == "irranova" or store_key == "")
+	if require_overrides:
+		# Try up to 3 attempts: cached, then force_live twice with short backoff
+		attempts = [False, True, True]
+		wait_secs = [0.0, 1.0, 2.0]
+		overrides = {}
+		for idx, force in enumerate(attempts):
+			if idx > 0 and wait_secs[idx] > 0:
+				try:
+					time.sleep(wait_secs[idx])
+				except Exception:
+					pass
+			overrides = _fetch_overrides(orders, force)
+			all_ok = True
+			for o in orders:
+				k = str(o).lstrip("#")
+				if not _is_complete(overrides.get(k)):
+					all_ok = False
+					break
+			if all_ok:
+				break
+		# If still missing and store is unknown, try explicit Irranova fallback once
+		missing = [str(o).lstrip("#") for o in orders if not _is_complete(overrides.get(str(o).lstrip("#")))]
+		if missing and store_key == "":
+			try:
+				joined = ",".join([str(o).lstrip("#") for o in missing])
+				headers = {"x-api-key": API_KEY} if API_KEY else {}
+				ro2 = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined, "store": "irranova", "force_live": "1"}, headers=headers, timeout=12)
+				ro2.raise_for_status()
+				ov2 = (ro2.json() or {}).get("overrides") or {}
+				overrides.update(ov2)
+			except Exception:
+				pass
+		# Final check: if still not complete, do not print
+		missing = [str(o).lstrip("#") for o in orders if not _is_complete(overrides.get(str(o).lstrip("#")))]
+		if missing:
+			print("Missing customer info for:", missing, "— re-enqueueing and skipping print")
+			return False
+	else:
+		# Non-irranova: best-effort fetch (no block)
+		try:
+			overrides = _fetch_overrides(orders, False)
+		except Exception:
+			overrides = {}
 
     payload = {
         "orders": orders,
