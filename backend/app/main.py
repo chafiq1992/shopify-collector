@@ -331,6 +331,7 @@ class OrderDTO(BaseModel):
     variants: List[OrderVariant] = []
     total_price: float = 0.0
     considered_fulfilled: bool = False
+    created_at: Optional[str] = None
 
 # ---------- Helpers ----------
 def build_query_string(
@@ -407,6 +408,8 @@ def build_query_string(
             else:
                 # Fallback to substring match on raw value (less reliable)
                 q += f" line_item.product_id:{pid}"
+        # Force open + unfulfilled when product filter is active
+        q += " status:open fulfillment_status:unfulfilled"
     return q.strip()
 
 def map_order_node(node: Dict[str, Any]) -> OrderDTO:
@@ -462,6 +465,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         variants=variants,
         total_price=price,
         considered_fulfilled=considered_fulfilled,
+        created_at=node.get("createdAt"),
     )
 
 # ---------- Routes ----------
@@ -537,6 +541,7 @@ async def list_orders(
               node {
                 id
                 name
+                createdAt
                 tags
                 note
                 currentTotalPriceSet { shopMoney { amount currencyCode } }
@@ -572,6 +577,7 @@ async def list_orders(
               node {
                 id
                 name
+                createdAt
                 tags
                 note
                 shippingAddress { city }
@@ -610,6 +616,13 @@ async def list_orders(
     if search and not search.strip().lstrip("#").isdigit():
         ss = search.lower().strip()
         items = [o for o in items if any((v.sku or "").lower().find(ss) >= 0 for v in o.variants) or ss in o.number.lower()]
+
+    # Product mode: present oldest first within current page window
+    if (product_id or "").strip():
+        try:
+            items.sort(key=lambda o: (getattr(o, "created_at", None) or ""))
+        except Exception:
+            pass
 
     # Collect: compute ranking globally across a larger window of orders
     if status_filter == "collect":

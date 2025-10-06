@@ -174,6 +174,7 @@ export default function App(){
       } catch { return ""; }
     })();
     const usingStockProfile = !!(profile && profile.id === 'stock');
+    const usingProductFilter = !!((productIdFilter || '').trim());
     // Build base query from Stock subfilter, else empty
     const stockBase = usingStockProfile
       ? (stockFilter === 'btis'
@@ -182,17 +183,17 @@ export default function App(){
       : '';
     // When excludeStockTags is enabled (non-Stock profile), prepend NOT-tag filters for multiple tags
     const excludedTags = ["btis", "en att b", "en att", "an att b2", "an att b3"];
-    const negativeTagQuery = (!usingStockProfile && excludeStockTags)
+    const negativeTagQuery = (!usingStockProfile && excludeStockTags && !usingProductFilter)
       ? excludedTags.map(t => (t.includes(' ') ? ` -tag:"${t}"` : ` -tag:${t}`)).join('')
       : '';
-    const baseQuery = `${stockBase}${negativeTagQuery}`.trim();
+    const baseQuery = usingProductFilter ? '' : `${stockBase}${negativeTagQuery}`.trim();
     const isBulkFilter = (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification"));
     const perPage = isBulkFilter ? 250 : 30;
 
     // First page
     let data = await API.getOrders({
       limit: perPage,
-      status_filter: (usingStockProfile ? "all" : statusFilter),
+      status_filter: (usingProductFilter ? "all" : (usingStockProfile ? "all" : statusFilter)),
       tag_filter: tagFilter || "",
       search: search || "",
       product_id: (productIdFilter || ""),
@@ -202,7 +203,7 @@ export default function App(){
       collect_prefix: preset.collectPrefix,
       collect_exclude_tag: preset.collectExcludeTag,
       verification_include_tag: preset.verificationIncludeTag,
-      exclude_out: usingStockProfile ? false : excludeOut,
+      exclude_out: usingProductFilter ? false : (usingStockProfile ? false : excludeOut),
       base_query: baseQuery,
       store,
     });
@@ -218,7 +219,7 @@ export default function App(){
           const page = await API.getOrders({
             limit: perPage,
             cursor: next,
-            status_filter: (usingStockProfile ? "all" : statusFilter),
+            status_filter: (usingProductFilter ? "all" : (usingStockProfile ? "all" : statusFilter)),
             tag_filter: tagFilter || "",
             search: search || "",
             product_id: (productIdFilter || ""),
@@ -227,7 +228,7 @@ export default function App(){
             collect_prefix: preset.collectPrefix,
             collect_exclude_tag: preset.collectExcludeTag,
             verification_include_tag: preset.verificationIncludeTag,
-            exclude_out: usingStockProfile ? false : excludeOut,
+            exclude_out: usingProductFilter ? false : (usingStockProfile ? false : excludeOut),
             base_query: baseQuery,
             store,
           });
@@ -286,23 +287,24 @@ export default function App(){
       for (let dt = new Date(a); dt <= b; dt.setDate(dt.getDate() + 1)){ const y = dt.getFullYear(); const m = String(dt.getMonth()+1).padStart(2,'0'); const d = String(dt.getDate()).padStart(2,'0'); out.push(`${d}/${m}/${String(y).slice(-2)}`);} return out.join(",");
     } catch { return ""; } })();
     const usingStockProfile = !!(profile && profile.id === 'stock');
+    const usingProductFilter = !!((productIdFilter || '').trim());
     const stockBase = usingStockProfile
       ? (stockFilter === 'btis'
           ? 'status:open fulfillment_status:unfulfilled tag:btis'
           : 'status:open fulfillment_status:unfulfilled tag:"en att b"')
       : '';
     const excludedTags = ["btis", "en att b", "en att", "an att b2", "an att b3"];
-    const negativeTagQuery = (!usingStockProfile && excludeStockTags)
+    const negativeTagQuery = (!usingStockProfile && excludeStockTags && !usingProductFilter)
       ? excludedTags.map(t => (t.includes(' ') ? ` -tag:"${t}"` : ` -tag:${t}`)).join('')
       : '';
-    const baseQuery = `${stockBase}${negativeTagQuery}`.trim();
+    const baseQuery = usingProductFilter ? '' : `${stockBase}${negativeTagQuery}`.trim();
     try {
       const isBulkFilter = (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification"));
       const perPage = isBulkFilter ? 250 : 30;
       const data = await API.getOrders({
         limit: perPage,
         cursor: nextCursor,
-        status_filter: (usingStockProfile ? "all" : statusFilter),
+        status_filter: (usingProductFilter ? "all" : (usingStockProfile ? "all" : statusFilter)),
         tag_filter: tagFilter || "",
         search: search || "",
         product_id: (productIdFilter || ""),
@@ -311,7 +313,7 @@ export default function App(){
         collect_prefix: preset.collectPrefix,
         collect_exclude_tag: preset.collectExcludeTag,
         verification_include_tag: preset.verificationIncludeTag,
-        exclude_out: usingStockProfile ? false : excludeOut,
+        exclude_out: usingProductFilter ? false : (usingStockProfile ? false : excludeOut),
         base_query: baseQuery,
         store,
       });
@@ -533,7 +535,20 @@ export default function App(){
               <Chip
                 label="Product"
                 active={showProductFilter}
-                onClick={()=>{ setShowProductFilter(v => !v); setShowDatePicker(false); }}
+                onClick={()=>{
+                  // Enter Product filter mode: clear other filters and only keep Product active
+                  setShowProductFilter(true);
+                  setShowDatePicker(false);
+                  setStatusFilter(null);
+                  setCodDate("");
+                  setCodFromDate("");
+                  setCodToDate("");
+                  setTagFilter(null);
+                  setExcludeOut(false);
+                  setExcludeStockTags(false);
+                  setProfile(null);
+                  setReloadCounter(c => c + 1);
+                }}
               />
                 <div className="flex items-center gap-1">
                   <SmallChip
@@ -550,7 +565,7 @@ export default function App(){
               </>
             )}
           </div>
-          {showDatePicker && (!profile || profile.id !== 'stock') && (
+          {showDatePicker && (!profile || profile.id !== 'stock') && !showProductFilter && (
             <div className="flex items-center gap-2">
               <span className="text-[11px] uppercase tracking-wide text-gray-400">From</span>
               <input
@@ -774,7 +789,7 @@ function Chip({ label, active, onClick }){
   return (
     <button
       onClick={onClick}
-      className={`px-2 py-0.5 rounded-full text-xs border transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
+      className={`inline-flex items-center justify-center h-8 min-w-[92px] px-3 rounded-full text-xs border font-medium transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
     >
       {label}
     </button>
@@ -785,7 +800,7 @@ function SmallChip({ label, active, onClick }){
   return (
     <button
       onClick={onClick}
-      className={`px-2 py-0.5 rounded-full text-[11px] border transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
+      className={`inline-flex items-center justify-center h-7 min-w-[120px] px-3 rounded-full text-[11px] border font-medium transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
     >
       {label}
     </button>
