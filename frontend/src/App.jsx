@@ -54,6 +54,8 @@ export default function App(){
   const [tags, setTags] = useState([]);
   const [index, setIndex] = useState(0);
   const [search, setSearch] = useState("");
+  const [productIdFilter, setProductIdFilter] = useState("");
+  const [showProductFilter, setShowProductFilter] = useState(false);
   const [statusFilter, setStatusFilter] = useState("collect"); // collect|verification
   const [codDate, setCodDate] = useState(() => {
     try {
@@ -193,6 +195,7 @@ export default function App(){
       status_filter: (usingStockProfile ? "all" : statusFilter),
       tag_filter: tagFilter || "",
       search: search || "",
+      product_id: (productIdFilter || ""),
       // Support both single date and range for collect/verification
       cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
       cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
@@ -218,6 +221,7 @@ export default function App(){
             status_filter: (usingStockProfile ? "all" : statusFilter),
             tag_filter: tagFilter || "",
             search: search || "",
+            product_id: (productIdFilter || ""),
             cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
             cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
             collect_prefix: preset.collectPrefix,
@@ -244,13 +248,28 @@ export default function App(){
       const disallowed = new Set(["btis", "en att b", "en att", "an att b2", "an att b3"]);
       ords = ords.filter(o => !((o.tags || []).some(t => disallowed.has(String(t).toLowerCase()))));
     }
+    // Client-side product id filter (matches Shopify GID or trailing numeric id)
+    const pidFilter = (productIdFilter || "").trim();
+    if (pidFilter){
+      const isNumeric = /^\d+$/.test(pidFilter);
+      const matchesPid = (pid) => {
+        if (!pid) return false;
+        const s = String(pid);
+        if (isNumeric){
+          const tail = (s.match(/(\d+)$/) || [])[1] || "";
+          return tail === pidFilter;
+        }
+        return s.toLowerCase().includes(pidFilter.toLowerCase());
+      };
+      ords = (ords || []).filter(o => (o.variants || []).some(v => matchesPid(v.product_id)));
+    }
     setOrders(ords);
     setTags(data.tags || []);
     setPageInfo(data.pageInfo || { hasNextPage: false });
     setNextCursor(data.nextCursor || null);
     setIndex(0);
     setLoading(false);
-    setTotalCount(totalCountFromApi || ords.length);
+    setTotalCount(pidFilter ? ords.length : (totalCountFromApi || ords.length));
   }
 
   async function loadMore(){
@@ -286,6 +305,7 @@ export default function App(){
         status_filter: (usingStockProfile ? "all" : statusFilter),
         tag_filter: tagFilter || "",
         search: search || "",
+        product_id: (productIdFilter || ""),
         cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
         cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
         collect_prefix: preset.collectPrefix,
@@ -510,6 +530,11 @@ export default function App(){
                   active={statusFilter === "urgent"}
                   onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); }}
                 />
+              <Chip
+                label="Product"
+                active={showProductFilter}
+                onClick={()=>{ setShowProductFilter(v => !v); setShowDatePicker(false); }}
+              />
                 <div className="flex items-center gap-1">
                   <SmallChip
                     label="Exclude OUT"
@@ -551,6 +576,25 @@ export default function App(){
               >Apply</button>
             </div>
           )}
+          {showProductFilter && (
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] uppercase tracking-wide text-gray-400">Product ID</span>
+              <input
+                value={productIdFilter}
+                onChange={(e)=>setProductIdFilter(e.target.value)}
+                placeholder="Paste Shopify GID or numeric ID"
+                className="text-xs border border-gray-300 rounded px-2 py-0.5 w-60"
+              />
+              <button
+                className="text-[11px] text-gray-500 underline"
+                onClick={()=>{ setProductIdFilter(""); setShowProductFilter(false); setReloadCounter(c=>c+1); }}
+              >Clear</button>
+              <button
+                className="text-[11px] text-blue-600 underline"
+                onClick={()=>{ setReloadCounter(c=>c+1); }}
+              >Apply</button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -570,6 +614,15 @@ export default function App(){
               total={total}
               selectedForPrint={selectedOrderNumbers.has(current.number)}
               onToggleSelectOrder={()=>toggleOrderSelected(current.number)}
+              onCopyProductId={async (pid)=>{
+                try {
+                  if (!pid) return;
+                  await navigator.clipboard.writeText(String(pid));
+                  setPrintMsg(`Copied product id`);
+                  try { setTimeout(() => setPrintMsg(null), 1500); } catch {}
+                  vibrate(20);
+                } catch {}
+              }}
             />
           </div>
         ) : (
@@ -749,7 +802,7 @@ function tagPillClasses(tag){
   return 'bg-gray-100 text-gray-700 ring-gray-200';
 }
 
-function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total, selectedForPrint, onToggleSelectOrder }){
+function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total, selectedForPrint, onToggleSelectOrder, onCopyProductId }){
   return (
     <div className="rounded-2xl shadow-sm border border-gray-200 bg-white overflow-hidden">
       <div className="flex items-center gap-2 px-3 py-2 border-b bg-gray-50">
@@ -784,9 +837,15 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
               return { ...v, __normalizedStatus: normalizedStatus, __normalizedLabel: normalizedLabel };
             });
             const variantsForDisplay = normalizedVariants.filter(v => v.__normalizedStatus === 'unfulfilled');
-            return variantsForDisplay.map((v, i) => (
+            return variantsForDisplay.map((v, i) => {
+              // Long-press handlers to copy product id
+              let timer = null;
+              const startPress = (e) => { try { e.preventDefault(); } catch {}; try { if (timer) clearTimeout(timer); } catch {}; timer = setTimeout(() => { try { onCopyProductId && onCopyProductId(v.product_id); } catch {}; timer = null; }, 550); };
+              const clearPress = () => { try { if (timer) clearTimeout(timer); } catch {}; timer = null; };
+              const preventContext = (e) => { try { e.preventDefault(); } catch {} };
+              return (
               <div key={v.id || i} className={`min-w-[210px] sm:min-w-[240px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
-                <div className="aspect-[3/2] sm:aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
+                <div className="aspect-[3/2] sm:aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden" onMouseDown={startPress} onMouseUp={clearPress} onMouseLeave={clearPress} onTouchStart={startPress} onTouchEnd={clearPress} onTouchCancel={clearPress} onContextMenu={preventContext}>
                   {v.image ? (
                     <img src={v.image} alt={v.sku || ""} className="w-full h-full object-cover" />
                   ) : (
@@ -814,7 +873,8 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                   {selectedOut.has(v.id) ? "OUT" : "Select OUT"}
                 </button>
               </div>
-            ));
+              );
+            });
           })()}
         </div>
       </div>

@@ -344,6 +344,7 @@ def build_query_string(
     collect_exclude_tag: Optional[str] = None,
     verification_include_tag: Optional[str] = None,
     exclude_out: bool = False,
+    product_id: Optional[str] = None,
 ) -> str:
     q = base_query.strip() if base_query else ""
     # New filter modes
@@ -393,6 +394,19 @@ def build_query_string(
         s = search.strip().lstrip("#")
         if s.isdigit():
             q += f" name:{s}"
+    # Filter by product id if provided (supports Shopify GID or numeric id)
+    if product_id:
+        pid = (product_id or "").strip()
+        if pid:
+            # Extract trailing digits if a GID is passed
+            import re
+            m = re.search(r"(\d+)$", pid)
+            numeric = m.group(1) if m else None
+            if numeric:
+                q += f" line_item.product_id:{numeric}"
+            else:
+                # Fallback to substring match on raw value (less reliable)
+                q += f" line_item.product_id:{pid}"
     return q.strip()
 
 def map_order_node(node: Dict[str, Any]) -> OrderDTO:
@@ -470,6 +484,7 @@ async def list_orders(
     exclude_out: bool = Query(False, description="Exclude orders tagged with 'out'"),
     base_query: Optional[str] = Query(None, description="Raw Shopify query prefix to start from"),
     store: Optional[str] = Query(None, description="Select store: 'irrakids' (default) or 'irranova'"),
+    product_id: Optional[str] = Query(None, description="Filter orders that contain this product id (Shopify GID or numeric)"),
 ):
     domain, password, _ = resolve_store_settings(store)
     if not domain or not password:
@@ -486,6 +501,7 @@ async def list_orders(
         collect_exclude_tag,
         verification_include_tag,
         exclude_out,
+        product_id,
     )
 
     # Build GraphQL query based on store capabilities
@@ -506,6 +522,7 @@ async def list_orders(
         "verification_include_tag": verification_include_tag,
         "exclude_out": exclude_out,
         "store": (store or "").strip().lower(),
+        "product_id": product_id,
     })
     cached = _orders_cache_get(cache_key)
     if cached is not None:
