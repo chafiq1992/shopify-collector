@@ -175,6 +175,22 @@ export default function App(){
     })();
     const usingStockProfile = !!(profile && profile.id === 'stock');
     const usingProductFilter = !!((productIdFilter || '').trim());
+    const productLast30CSV = (()=>{
+      if (!usingProductFilter) return "";
+      try {
+        const out = [];
+        const now = new Date();
+        for (let i = 29; i >= 0; i--) {
+          const dt = new Date(now);
+          dt.setDate(now.getDate() - i);
+          const y = dt.getFullYear();
+          const m = String(dt.getMonth()+1).padStart(2,'0');
+          const d = String(dt.getDate()).padStart(2,'0');
+          out.push(`${d}/${m}/${String(y).slice(-2)}`);
+        }
+        return out.join(",");
+      } catch { return ""; }
+    })();
     // Build base query from Stock subfilter, else empty
     const stockBase = usingStockProfile
       ? (stockFilter === 'btis'
@@ -197,9 +213,9 @@ export default function App(){
       tag_filter: tagFilter || "",
       search: search || "",
       product_id: (productIdFilter || ""),
-      // Support both single date and range for collect/verification
-      cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
-      cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
+      // Support date range
+      cod_date: (usingProductFilter ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : ""),
+      cod_dates: (usingProductFilter ? (productLast30CSV || "") : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : ""),
       collect_prefix: preset.collectPrefix,
       collect_exclude_tag: preset.collectExcludeTag,
       verification_include_tag: preset.verificationIncludeTag,
@@ -223,8 +239,8 @@ export default function App(){
             tag_filter: tagFilter || "",
             search: search || "",
             product_id: (productIdFilter || ""),
-            cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
-            cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
+            cod_date: (usingProductFilter ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : ""),
+            cod_dates: (usingProductFilter ? (productLast30CSV || "") : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : ""),
             collect_prefix: preset.collectPrefix,
             collect_exclude_tag: preset.collectExcludeTag,
             verification_include_tag: preset.verificationIncludeTag,
@@ -288,6 +304,22 @@ export default function App(){
     } catch { return ""; } })();
     const usingStockProfile = !!(profile && profile.id === 'stock');
     const usingProductFilter = !!((productIdFilter || '').trim());
+    const productLast30CSV = (()=>{
+      if (!usingProductFilter) return "";
+      try {
+        const out = [];
+        const now = new Date();
+        for (let i = 29; i >= 0; i--) {
+          const dt = new Date(now);
+          dt.setDate(now.getDate() - i);
+          const y = dt.getFullYear();
+          const m = String(dt.getMonth()+1).padStart(2,'0');
+          const d = String(dt.getDate()).padStart(2,'0');
+          out.push(`${d}/${m}/${String(y).slice(-2)}`);
+        }
+        return out.join(",");
+      } catch { return ""; }
+    })();
     const stockBase = usingStockProfile
       ? (stockFilter === 'btis'
           ? 'status:open fulfillment_status:unfulfilled tag:btis'
@@ -308,8 +340,8 @@ export default function App(){
         tag_filter: tagFilter || "",
         search: search || "",
         product_id: (productIdFilter || ""),
-        cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
-        cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
+        cod_date: (usingProductFilter ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : ""),
+        cod_dates: (usingProductFilter ? (productLast30CSV || "") : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : ""),
         collect_prefix: preset.collectPrefix,
         collect_exclude_tag: preset.collectExcludeTag,
         verification_include_tag: preset.verificationIncludeTag,
@@ -476,7 +508,7 @@ export default function App(){
               className="bg-transparent outline-none w-full text-xs"
             />
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 overflow-x-auto flex-nowrap -mx-4 px-4">
             {profile && profile.id === 'stock' ? (
               <>
                 <Chip
@@ -657,9 +689,9 @@ export default function App(){
             {selectedOrderNumbers.size > 0 && (
               <div className="text-xs text-gray-700 text-center">
                 <span className="font-medium">Selected:</span> {selectedOrderNumbers.size} order{selectedOrderNumbers.size>1?'s':''}
-                <div className="mt-1 flex gap-1 flex-wrap justify-center">
+                <div className="mt-1 overflow-x-auto whitespace-nowrap px-1">
                   {Array.from(selectedOrderNumbers).map(n => (
-                    <span key={n} className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">{n}</span>
+                    <span key={n} className="inline-block mr-1 px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">{n}</span>
                   ))}
                 </div>
               </div>
