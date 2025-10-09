@@ -174,23 +174,6 @@ export default function App(){
       } catch { return ""; }
     })();
     const usingStockProfile = !!(profile && profile.id === 'stock');
-    const usingProductFilter = !!((productIdFilter || '').trim());
-    const productLast30CSV = (()=>{
-      if (!usingProductFilter) return "";
-      try {
-        const out = [];
-        const now = new Date();
-        for (let i = 29; i >= 0; i--) {
-          const dt = new Date(now);
-          dt.setDate(now.getDate() - i);
-          const y = dt.getFullYear();
-          const m = String(dt.getMonth()+1).padStart(2,'0');
-          const d = String(dt.getDate()).padStart(2,'0');
-          out.push(`${d}/${m}/${String(y).slice(-2)}`);
-        }
-        return out.join(",");
-      } catch { return ""; }
-    })();
     // Build base query from Stock subfilter, else empty
     const stockBase = usingStockProfile
       ? (stockFilter === 'btis'
@@ -199,27 +182,27 @@ export default function App(){
       : '';
     // When excludeStockTags is enabled (non-Stock profile), prepend NOT-tag filters for multiple tags
     const excludedTags = ["btis", "en att b", "en att", "an att b2", "an att b3"];
-    const negativeTagQuery = (!usingStockProfile && excludeStockTags && !usingProductFilter)
+    const negativeTagQuery = (!usingStockProfile && excludeStockTags)
       ? excludedTags.map(t => (t.includes(' ') ? ` -tag:"${t}"` : ` -tag:${t}`)).join('')
       : '';
-    const baseQuery = usingProductFilter ? '' : `${stockBase}${negativeTagQuery}`.trim();
+    const baseQuery = `${stockBase}${negativeTagQuery}`.trim();
     const isBulkFilter = (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification"));
     const perPage = isBulkFilter ? 250 : 30;
 
     // First page
     let data = await API.getOrders({
       limit: perPage,
-      status_filter: (usingProductFilter ? "all" : (usingStockProfile ? "all" : statusFilter)),
+      status_filter: (usingStockProfile ? "all" : statusFilter),
       tag_filter: tagFilter || "",
       search: search || "",
       product_id: (productIdFilter || ""),
       // Support date range
-      cod_date: (usingProductFilter ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : ""),
-      cod_dates: (usingProductFilter ? (productLast30CSV || "") : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : ""),
+      cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
+      cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
       collect_prefix: preset.collectPrefix,
       collect_exclude_tag: preset.collectExcludeTag,
       verification_include_tag: preset.verificationIncludeTag,
-      exclude_out: usingProductFilter ? false : (usingStockProfile ? false : excludeOut),
+      exclude_out: (usingStockProfile ? false : excludeOut),
       base_query: baseQuery,
       store,
     });
@@ -235,16 +218,16 @@ export default function App(){
           const page = await API.getOrders({
             limit: perPage,
             cursor: next,
-            status_filter: (usingProductFilter ? "all" : (usingStockProfile ? "all" : statusFilter)),
+            status_filter: (usingStockProfile ? "all" : statusFilter),
             tag_filter: tagFilter || "",
             search: search || "",
             product_id: (productIdFilter || ""),
-            cod_date: (usingProductFilter ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : ""),
-            cod_dates: (usingProductFilter ? (productLast30CSV || "") : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : ""),
+            cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
+            cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
             collect_prefix: preset.collectPrefix,
             collect_exclude_tag: preset.collectExcludeTag,
             verification_include_tag: preset.verificationIncludeTag,
-            exclude_out: usingProductFilter ? false : (usingStockProfile ? false : excludeOut),
+            exclude_out: (usingStockProfile ? false : excludeOut),
             base_query: baseQuery,
             store,
           });
@@ -303,49 +286,32 @@ export default function App(){
       for (let dt = new Date(a); dt <= b; dt.setDate(dt.getDate() + 1)){ const y = dt.getFullYear(); const m = String(dt.getMonth()+1).padStart(2,'0'); const d = String(dt.getDate()).padStart(2,'0'); out.push(`${d}/${m}/${String(y).slice(-2)}`);} return out.join(",");
     } catch { return ""; } })();
     const usingStockProfile = !!(profile && profile.id === 'stock');
-    const usingProductFilter = !!((productIdFilter || '').trim());
-    const productLast30CSV = (()=>{
-      if (!usingProductFilter) return "";
-      try {
-        const out = [];
-        const now = new Date();
-        for (let i = 29; i >= 0; i--) {
-          const dt = new Date(now);
-          dt.setDate(now.getDate() - i);
-          const y = dt.getFullYear();
-          const m = String(dt.getMonth()+1).padStart(2,'0');
-          const d = String(dt.getDate()).padStart(2,'0');
-          out.push(`${d}/${m}/${String(y).slice(-2)}`);
-        }
-        return out.join(",");
-      } catch { return ""; }
-    })();
     const stockBase = usingStockProfile
       ? (stockFilter === 'btis'
           ? 'status:open fulfillment_status:unfulfilled tag:btis'
           : 'status:open fulfillment_status:unfulfilled tag:"en att b"')
       : '';
     const excludedTags = ["btis", "en att b", "en att", "an att b2", "an att b3"];
-    const negativeTagQuery = (!usingStockProfile && excludeStockTags && !usingProductFilter)
+    const negativeTagQuery = (!usingStockProfile && excludeStockTags)
       ? excludedTags.map(t => (t.includes(' ') ? ` -tag:"${t}"` : ` -tag:${t}`)).join('')
       : '';
-    const baseQuery = usingProductFilter ? '' : `${stockBase}${negativeTagQuery}`.trim();
+    const baseQuery = `${stockBase}${negativeTagQuery}`.trim();
     try {
       const isBulkFilter = (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification"));
       const perPage = isBulkFilter ? 250 : 30;
       const data = await API.getOrders({
         limit: perPage,
         cursor: nextCursor,
-        status_filter: (usingProductFilter ? "all" : (usingStockProfile ? "all" : statusFilter)),
+        status_filter: (usingStockProfile ? "all" : statusFilter),
         tag_filter: tagFilter || "",
         search: search || "",
         product_id: (productIdFilter || ""),
-        cod_date: (usingProductFilter ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : ""),
-        cod_dates: (usingProductFilter ? (productLast30CSV || "") : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : ""),
+        cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
+        cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
         collect_prefix: preset.collectPrefix,
         collect_exclude_tag: preset.collectExcludeTag,
         verification_include_tag: preset.verificationIncludeTag,
-        exclude_out: usingProductFilter ? false : (usingStockProfile ? false : excludeOut),
+        exclude_out: (usingStockProfile ? false : excludeOut),
         base_query: baseQuery,
         store,
       });
@@ -568,18 +534,14 @@ export default function App(){
                 label="Product"
                 active={showProductFilter}
                 onClick={()=>{
-                  // Enter Product filter mode: clear other filters and only keep Product active
-                  setShowProductFilter(true);
-                  setShowDatePicker(false);
-                  setStatusFilter(null);
-                  setCodDate("");
-                  setCodFromDate("");
-                  setCodToDate("");
-                  setTagFilter(null);
-                  setExcludeOut(false);
-                  setExcludeStockTags(false);
-                  setProfile(null);
-                  setReloadCounter(c => c + 1);
+                  if (showProductFilter){
+                    const hadProduct = !!(productIdFilter || '').trim();
+                    setShowProductFilter(false);
+                    if (hadProduct) setProductIdFilter("");
+                    setReloadCounter(c => c + 1);
+                  } else {
+                    setShowProductFilter(true);
+                  }
                 }}
               />
                 <div className="flex items-center gap-1">
@@ -597,7 +559,7 @@ export default function App(){
               </>
             )}
           </div>
-          {showDatePicker && (!profile || profile.id !== 'stock') && !showProductFilter && (
+          {showDatePicker && (!profile || profile.id !== 'stock') && (
             <div className="flex items-center gap-2">
               <span className="text-[11px] uppercase tracking-wide text-gray-400">From</span>
               <input
