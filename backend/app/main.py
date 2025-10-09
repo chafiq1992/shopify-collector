@@ -624,7 +624,7 @@ async def list_orders(
     # Collect: compute ranking globally across a larger window of orders
     if status_filter == "collect":
         # Use a smaller window to reduce latency while maintaining good grouping quality
-        target_window = 120
+        target_window = 250
         chunk = 50
         accumulated_edges = []
         after_cursor = None

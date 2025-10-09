@@ -174,6 +174,7 @@ export default function App(){
       } catch { return ""; }
     })();
     const usingStockProfile = !!(profile && profile.id === 'stock');
+    const isGlobalSearch = (!usingStockProfile && !statusFilter && (search || '').trim() && !showProductFilter);
     // Build base query from Stock subfilter, else empty
     const stockBase = usingStockProfile
       ? (stockFilter === 'btis'
@@ -182,27 +183,27 @@ export default function App(){
       : '';
     // When excludeStockTags is enabled (non-Stock profile), prepend NOT-tag filters for multiple tags
     const excludedTags = ["btis", "en att b", "en att", "an att b2", "an att b3"];
-    const negativeTagQuery = (!usingStockProfile && excludeStockTags)
+    const negativeTagQuery = (!usingStockProfile && excludeStockTags && !isGlobalSearch)
       ? excludedTags.map(t => (t.includes(' ') ? ` -tag:"${t}"` : ` -tag:${t}`)).join('')
       : '';
-    const baseQuery = `${stockBase}${negativeTagQuery}`.trim();
+    const baseQuery = (isGlobalSearch ? '' : `${stockBase}${negativeTagQuery}`).trim();
     const isBulkFilter = (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification"));
     const perPage = isBulkFilter ? 250 : 30;
 
     // First page
     let data = await API.getOrders({
       limit: perPage,
-      status_filter: (usingStockProfile ? "all" : statusFilter),
-      tag_filter: tagFilter || "",
+      status_filter: (usingStockProfile ? "all" : (statusFilter || "all")),
+      tag_filter: isGlobalSearch ? "" : (tagFilter || ""),
       search: search || "",
       product_id: (productIdFilter || ""),
       // Support date range
-      cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
-      cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
+      cod_date: (isGlobalSearch ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : ""),
+      cod_dates: (isGlobalSearch ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : ""),
       collect_prefix: preset.collectPrefix,
       collect_exclude_tag: preset.collectExcludeTag,
       verification_include_tag: preset.verificationIncludeTag,
-      exclude_out: (usingStockProfile ? false : excludeOut),
+      exclude_out: (isGlobalSearch ? false : (usingStockProfile ? false : excludeOut)),
       base_query: baseQuery,
       store,
     });
@@ -286,32 +287,33 @@ export default function App(){
       for (let dt = new Date(a); dt <= b; dt.setDate(dt.getDate() + 1)){ const y = dt.getFullYear(); const m = String(dt.getMonth()+1).padStart(2,'0'); const d = String(dt.getDate()).padStart(2,'0'); out.push(`${d}/${m}/${String(y).slice(-2)}`);} return out.join(",");
     } catch { return ""; } })();
     const usingStockProfile = !!(profile && profile.id === 'stock');
+    const isGlobalSearch = (!usingStockProfile && !statusFilter && (search || '').trim() && !showProductFilter);
     const stockBase = usingStockProfile
       ? (stockFilter === 'btis'
           ? 'status:open fulfillment_status:unfulfilled tag:btis'
           : 'status:open fulfillment_status:unfulfilled tag:"en att b"')
       : '';
     const excludedTags = ["btis", "en att b", "en att", "an att b2", "an att b3"];
-    const negativeTagQuery = (!usingStockProfile && excludeStockTags)
+    const negativeTagQuery = (!usingStockProfile && excludeStockTags && !isGlobalSearch)
       ? excludedTags.map(t => (t.includes(' ') ? ` -tag:"${t}"` : ` -tag:${t}`)).join('')
       : '';
-    const baseQuery = `${stockBase}${negativeTagQuery}`.trim();
+    const baseQuery = (isGlobalSearch ? '' : `${stockBase}${negativeTagQuery}`).trim();
     try {
       const isBulkFilter = (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification"));
       const perPage = isBulkFilter ? 250 : 30;
       const data = await API.getOrders({
         limit: perPage,
         cursor: nextCursor,
-        status_filter: (usingStockProfile ? "all" : statusFilter),
-        tag_filter: tagFilter || "",
+        status_filter: (usingStockProfile ? "all" : (statusFilter || "all")),
+        tag_filter: isGlobalSearch ? "" : (tagFilter || ""),
         search: search || "",
         product_id: (productIdFilter || ""),
-        cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
-        cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
+        cod_date: (isGlobalSearch ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : ""),
+        cod_dates: (isGlobalSearch ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : ""),
         collect_prefix: preset.collectPrefix,
         collect_exclude_tag: preset.collectExcludeTag,
         verification_include_tag: preset.verificationIncludeTag,
-        exclude_out: (usingStockProfile ? false : excludeOut),
+        exclude_out: (isGlobalSearch ? false : (usingStockProfile ? false : excludeOut)),
         base_query: baseQuery,
         store,
       });
@@ -494,16 +496,18 @@ export default function App(){
                   label="Collect"
                   active={statusFilter === "collect"}
                   onClick={()=>{
-                    setStatusFilter("collect");
+                    setStatusFilter(prev => prev === "collect" ? null : "collect");
                     setShowDatePicker(true);
                     try {
                       const now = new Date();
                       const yyyy = now.getFullYear();
                       const mm = String(now.getMonth()+1).padStart(2,'0');
                       const dd = String(now.getDate()).padStart(2,'0');
-                      setCodDate(`${yyyy}-${mm}-${dd}`);
-                      setCodFromDate(`${yyyy}-${mm}-${dd}`);
-                      setCodToDate(`${yyyy}-${mm}-${dd}`);
+                      if (!statusFilter || statusFilter !== 'collect'){
+                        setCodDate(`${yyyy}-${mm}-${dd}`);
+                        setCodFromDate(`${yyyy}-${mm}-${dd}`);
+                        setCodToDate(`${yyyy}-${mm}-${dd}`);
+                      }
                     } catch {}
                     // Force refresh even if filters didn't change
                     setReloadCounter(c => c + 1);
@@ -513,22 +517,24 @@ export default function App(){
                   label="Verification"
                   active={statusFilter === "verification"}
                   onClick={()=>{ 
-                    setStatusFilter("verification"); 
+                    setStatusFilter(prev => prev === "verification" ? null : "verification"); 
                     setShowDatePicker(true);
                     try {
                       const now = new Date();
                       const yyyy = now.getFullYear();
                       const mm = String(now.getMonth()+1).padStart(2,'0');
                       const dd = String(now.getDate()).padStart(2,'0');
-                      setCodFromDate(`${yyyy}-${mm}-${dd}`);
-                      setCodToDate(`${yyyy}-${mm}-${dd}`);
+                      if (!statusFilter || statusFilter !== 'verification'){
+                        setCodFromDate(`${yyyy}-${mm}-${dd}`);
+                        setCodToDate(`${yyyy}-${mm}-${dd}`);
+                      }
                     } catch {}
                   }}
                 />
                 <Chip
                   label="Urgent"
                   active={statusFilter === "urgent"}
-                  onClick={()=>{ setStatusFilter("urgent"); setShowDatePicker(false); }}
+                  onClick={()=>{ setStatusFilter(prev => prev === "urgent" ? null : "urgent"); setShowDatePicker(false); }}
                 />
               <Chip
                 label="Product"
