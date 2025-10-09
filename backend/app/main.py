@@ -286,9 +286,7 @@ async def ws_updates(websocket: WebSocket):
 
 # ---------- Shopify GraphQL helper ----------
 def _shopify_graphql_url(domain: str, password: str, api_key: str) -> str:
-    # If API key is provided, support basic auth style URL
-    if api_key and password:
-        return f"https://{api_key}:{password}@{domain}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    # Always use header token auth; do not embed credentials in URL
     return f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
 
 async def shopify_graphql(query: str, variables: Dict[str, Any] | None, *, store: Optional[str]) -> Dict[str, Any]:
@@ -299,9 +297,8 @@ async def shopify_graphql(query: str, variables: Dict[str, Any] | None, *, store
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    # If not using basic auth in URL, send token/password header
-    if not (api_key and password):
-        headers["X-Shopify-Access-Token"] = password
+    # Always use token/password header (custom/private app password)
+    headers["X-Shopify-Access-Token"] = password
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(_shopify_graphql_url(domain, password, api_key), headers=headers, json={"query": query, "variables": variables or {}})
         r.raise_for_status()
