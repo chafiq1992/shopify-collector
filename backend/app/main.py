@@ -12,6 +12,7 @@ import hmac, hashlib, base64
 from datetime import datetime, timezone
 import requests as _requests
 from pydantic import BaseModel
+import random
 
 # ---------- Settings (multi-store) ----------
 SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2025-01").strip()
@@ -299,19 +300,71 @@ async def shopify_graphql(query: str, variables: Dict[str, Any] | None, *, store
     }
     # Always use token/password header (custom/private app password)
     headers["X-Shopify-Access-Token"] = password
+
+    max_retries = 5
+    base_delay = 0.35
+    last_exc: Optional[Exception] = None
+    url = _shopify_graphql_url(domain, password, api_key)
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(_shopify_graphql_url(domain, password, api_key), headers=headers, json={"query": query, "variables": variables or {}})
-        r.raise_for_status()
-        data = r.json()
-        if "errors" in data:
-            raise RuntimeError(f"Shopify GraphQL errors: {data['errors']}")
-        return data["data"]
+        for attempt in range(max_retries):
+            try:
+                r = await client.post(url, headers=headers, json={"query": query, "variables": variables or {}})
+                # Handle HTTP throttling
+                if r.status_code in (429, 430, 503):
+                    # Respect Retry-After when present
+                    ra = r.headers.get("Retry-After")
+                    if attempt < max_retries - 1:
+                        try:
+                            wait = float(ra) if ra else (base_delay * (2 ** attempt) + random.uniform(0, 0.15))
+                        except Exception:
+                            wait = base_delay * (2 ** attempt) + random.uniform(0, 0.15)
+                        await asyncio.sleep(wait)
+                        continue
+                    else:
+                        raise HTTPException(status_code=429, detail="Shopify API is throttling requests. Please try again shortly.")
+
+                r.raise_for_status()
+                data = r.json()
+                # GraphQL-level errors
+                if "errors" in data:
+                    errs = data.get("errors") or []
+                    # If throttled at GraphQL layer, backoff and retry
+                    is_throttled = any(((e.get("extensions") or {}).get("code") or "").upper() == "THROTTLED" for e in errs)
+                    if is_throttled and attempt < max_retries - 1:
+                        wait = base_delay * (2 ** attempt) + random.uniform(0, 0.15)
+                        await asyncio.sleep(wait)
+                        continue
+                    # Non-throttling errors → surface as 502
+                    detail = f"Shopify GraphQL errors: {errs}"
+                    raise HTTPException(status_code=502, detail=detail)
+                return data["data"]
+            except HTTPException as he:
+                last_exc = he
+                # Only retry HTTPException if throttling and attempts remain (handled above). Others break.
+                break
+            except Exception as e:
+                last_exc = e
+                # Retry transient network failures with backoff
+                if attempt < max_retries - 1:
+                    wait = base_delay * (2 ** attempt) + random.uniform(0, 0.15)
+                    try:
+                        await asyncio.sleep(wait)
+                        continue
+                    except Exception:
+                        pass
+                break
+
+    # Final failure
+    if isinstance(last_exc, HTTPException):
+        raise last_exc
+    raise HTTPException(status_code=502, detail=f"Shopify request failed: {last_exc}")
 
 # ---------- Schemas ----------
 class OrderVariant(BaseModel):
     id: Optional[str] = None
     product_id: Optional[str] = None
     image: Optional[str] = None
+    barcode: Optional[str] = None
     sku: Optional[str] = None
     title: Optional[str] = None
     qty: int
@@ -419,6 +472,11 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         var = li.get("variant")
         if var and var.get("image"):
             img = var["image"].get("url")
+        if (not img) and var and ((var.get("product") or {}).get("featuredImage")):
+            try:
+                img = (var.get("product") or {}).get("featuredImage", {}).get("url")
+            except Exception:
+                img = img
         qty = li.get("quantity", 0) or 0
         unfulfilled_qty = li.get("unfulfilledQuantity")
         status_val = "unknown"
@@ -436,6 +494,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             id=(var or {}).get("id"),
             product_id=((var or {}).get("product") or {}).get("id"),
             image=img,
+            barcode=(var or {}).get("barcode"),
             sku=li.get("sku"),
             title=(var or {}).get("title"),
             qty=qty,
@@ -552,8 +611,9 @@ async def list_orders(
                       variant {
                         id
                         title
+                        barcode
                         image { url }
-                        product { id }
+                        product { id featuredImage { url } }
                       }
                     }
                   }
@@ -590,8 +650,9 @@ async def list_orders(
                       variant {
                         id
                         title
+                        barcode
                         image { url }
-                        product { id }
+                        product { id featuredImage { url } }
                       }
                     }
                   }
@@ -604,10 +665,31 @@ async def list_orders(
         }
         """
     variables = {"first": limit, "after": cursor, "query": q or None}
-    data = await shopify_graphql(query, variables, store=store)
+    try:
+        data = await shopify_graphql(query, variables, store=store)
+    except HTTPException as he:
+        # Surface throttling as an empty list with error field to avoid hard 500s in UI
+        if he.status_code in (429, 502, 503):
+            resp = {"orders": [], "pageInfo": {"hasNextPage": False}, "tags": [], "totalCount": 0, "nextCursor": None, "error": he.detail}
+            _orders_cache_set(cache_key, resp)
+            return resp
+        raise
     ords = data["orders"]
     edges = ords.get("edges") or []
     items: List[OrderDTO] = [map_order_node(e["node"]) for e in edges]
+
+    # For Irranova, backfill customer/shipping city from cached overrides when available
+    if (store or "irrakids").strip().lower() == "irranova":
+        try:
+            for o in items:
+                key = (o.number or "").lstrip("#")
+                ov = ORDER_OVERRIDES.get(key) or {}
+                if (not o.customer) and ((ov.get("customer") or {}).get("displayName")):
+                    o.customer = (ov.get("customer") or {}).get("displayName")
+                if (not o.shipping_city) and ((ov.get("shippingAddress") or {}).get("city")):
+                    o.shipping_city = (ov.get("shippingAddress") or {}).get("city")
+        except Exception:
+            pass
 
     # Optional client-side SKU filter if search is non-numeric
     if search and not search.strip().lstrip("#").isdigit():
@@ -631,7 +713,11 @@ async def list_orders(
         # Always try to use a wider window irrespective of incoming limit
         while len(accumulated_edges) < target_window:
             variables2 = {"first": min(chunk, target_window - len(accumulated_edges)), "after": after_cursor, "query": q or None}
-            page = await shopify_graphql(query, variables2, store=store)
+            try:
+                page = await shopify_graphql(query, variables2, store=store)
+            except HTTPException as he:
+                # Stop widening window on throttling, use what we have
+                break
             ords2 = page["orders"]
             edges2 = ords2.get("edges") or []
             if not edges2:
@@ -1007,7 +1093,7 @@ async def get_print_data(numbers: str = Query("", description="Comma-separated o
                   quantity
                   unfulfilledQuantity
                   sku
-                  variant { id title image { url } product { id } }
+                  variant { id title barcode image { url } product { id featuredImage { url } } }
                 }
               }
             }
