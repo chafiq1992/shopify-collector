@@ -6,3 +6,8 @@ html, body, #root { height: 100%; }
 /* Allow vertical scrolling on small screens while avoiding horizontal overflow */
 html, body { overflow-x: hidden; overflow-y: auto; }
 
+/* Indeterminate top progress bar */
+.progress-track { position: relative; height: 4px; background: transparent; overflow: hidden; }
+.progress-thumb { position: absolute; top: 0; bottom: 0; width: 35%; background: linear-gradient(90deg, rgba(59,130,246,0.15), rgba(59,130,246,0.5), rgba(59,130,246,0.15)); border-radius: 9999px; animation: indeterminate 1.2s infinite ease-in-out; }
+@keyframes indeterminate { 0% { left: -40%; } 50% { left: 45%; width: 25%; } 100% { left: 110%; } }
+

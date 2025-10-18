@@ -444,23 +444,30 @@ export default function App(){
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900 overflow-hidden">
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur border-b border-gray-200">
+        {loading && (
+          <div className="progress-track">
+            <div className="progress-thumb"></div>
+          </div>
+        )}
         <div className="max-w-5xl mx-auto px-4 py-1 flex items-center gap-2">
           <PackageSearch className="w-5 h-5" />
           <div className="ml-3 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
             <button
               onClick={()=>setStore('irrakids')}
+              onMouseDown={()=>vibrate(10)}
               className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === 'irrakids' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
             >Irrakids</button>
             <button
               onClick={()=>setStore('irranova')}
+              onMouseDown={()=>vibrate(10)}
               className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === 'irranova' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
             >Irranova</button>
           </div>
           <div className="ml-auto flex items-center gap-2">
-            <button aria-label="Choose profile" onClick={()=>setShowProfilePicker(true)} className="p-1.5 rounded-full hover:bg-gray-100">
+            <button aria-label="Choose profile" onClick={()=>{ vibrate(10); setShowProfilePicker(true); }} className="p-1.5 rounded-full hover:bg-gray-100">
               <Boxes className={`w-4 h-4 ${profile?.id === 'stock' ? 'text-blue-600' : 'text-gray-700'}`} />
             </button>
-            <button aria-label="Settings" onClick={()=>setShowSettings(true)} className="p-1.5 rounded-full hover:bg-gray-100">
+            <button aria-label="Settings" onClick={()=>{ vibrate(10); setShowSettings(true); }} className="p-1.5 rounded-full hover:bg-gray-100">
               <Settings className="w-4 h-4" />
             </button>
             <PackageCheck className="w-4 h-4 text-gray-600" />
@@ -587,12 +594,12 @@ export default function App(){
               </div>
               <div className="mt-2 flex items-center gap-3">
                 <button
-                  className="text-[11px] text-blue-600 underline"
-                  onClick={()=>{ setReloadCounter(c=>c+1); }}
+                  className="inline-flex items-center px-3 py-1 rounded-full text-[11px] font-semibold bg-blue-600 text-white active:scale-[.98]"
+                  onClick={()=>{ vibrate(15); setReloadCounter(c=>c+1); }}
                 >Apply</button>
                 <button
-                  className="text-[11px] text-gray-600 underline"
-                  onClick={()=>{ setCodFromDate(""); setCodToDate(""); setReloadCounter(c=>c+1); }}
+                  className="inline-flex items-center px-3 py-1 rounded-full text-[11px] font-semibold bg-gray-200 text-gray-800 active:scale-[.98]"
+                  onClick={()=>{ vibrate(15); setCodFromDate(""); setCodToDate(""); setReloadCounter(c=>c+1); }}
                 >Clear</button>
               </div>
             </div>
@@ -800,7 +807,7 @@ export default function App(){
 const Chip = React.memo(function Chip({ label, active, onClick }){
   return (
     <button
-      onClick={onClick}
+      onClick={()=>{ try { onClick && onClick(); } finally { try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {} } }}
       className={`inline-flex items-center justify-center h-8 min-w-[92px] px-3 rounded-full text-xs border font-medium transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
     >
       {label}
@@ -811,7 +818,7 @@ const Chip = React.memo(function Chip({ label, active, onClick }){
 const SmallChip = React.memo(function SmallChip({ label, active, onClick }){
   return (
     <button
-      onClick={onClick}
+      onClick={()=>{ try { onClick && onClick(); } finally { try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {} } }}
       className={`inline-flex items-center justify-center h-7 min-w-[120px] px-3 rounded-full text-[11px] border font-medium transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
     >
       {label}
