@@ -1,7 +1,11 @@
-import React, { useEffect, useRef, useState } from "react";
-import { CheckCircle, PackageSearch, PackageCheck, StickyNote, XCircle, ChevronLeft, ChevronRight, Search, Image as ImageIcon, Settings, Boxes, Printer } from "lucide-react";
+import React, { useEffect, useRef, useState, Suspense } from "react";
+import { CheckCircle, PackageSearch, PackageCheck, XCircle, ChevronLeft, ChevronRight, Search, Settings, Boxes, Printer } from "lucide-react";
 import { printOrdersLocally } from "./lib/localPrintClient";
 import { enqueueOrdersToRelay, isRelayConfigured } from "./lib/printRelayClient";
+
+const OrderCard = React.lazy(() => import('./components/OrderCard.jsx'));
+const PresetSettingsModal = React.lazy(() => import('./components/PresetSettingsModal.jsx'));
+const ProfilePickerModal = React.lazy(() => import('./components/ProfilePickerModal.jsx'));
 
 // Types (JSDoc only)
 /**
@@ -562,39 +566,35 @@ export default function App(){
               </>
             )}
           </div>
-          {/* Date range bar: always visible for non-Stock views */}
+          {/* Date range bar: compact layout without preview pill */}
           {(!profile || profile.id !== 'stock') && (
-            <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-xl px-3 py-2">
-              <span className="text-[11px] uppercase tracking-wide text-gray-400">Date range</span>
-              <input
-                type="date"
-                value={codFromDate}
-                onChange={(e)=>{ setCodFromDate(e.target.value); }}
-                className="text-xs border border-gray-300 rounded px-2 py-0.5"
-              />
-              <span className="text-[11px] uppercase tracking-wide text-gray-400">to</span>
-              <input
-                type="date"
-                value={codToDate}
-                onChange={(e)=>{ setCodToDate(e.target.value); }}
-                className="text-xs border border-gray-300 rounded px-2 py-0.5"
-              />
-              <button
-                className="text-[11px] text-blue-600 underline"
-                onClick={()=>{ setReloadCounter(c=>c+1); }}
-              >Apply</button>
-              {(codFromDate || codToDate) && (
-                <div className="ml-auto inline-flex items-center gap-2">
-                  <span className="inline-flex items-center gap-2 px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200 text-[11px]">
-                    {formatRangeLabel(codFromDate, codToDate)}
-                    <button
-                      aria-label="Clear date range"
-                      onClick={()=>{ setCodFromDate(""); setCodToDate(""); setReloadCounter(c=>c+1); }}
-                      className="ml-1 text-gray-500 hover:text-gray-700"
-                    >×</button>
-                  </span>
-                </div>
-              )}
+            <div className="bg-white border border-gray-200 rounded-xl px-3 py-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] uppercase tracking-wide text-gray-400">Date range</span>
+                <input
+                  type="date"
+                  value={codFromDate}
+                  onChange={(e)=>{ setCodFromDate(e.target.value); }}
+                  className="text-xs border border-gray-300 rounded px-2 py-0.5"
+                />
+                <span className="text-[11px] uppercase tracking-wide text-gray-400">to</span>
+                <input
+                  type="date"
+                  value={codToDate}
+                  onChange={(e)=>{ setCodToDate(e.target.value); }}
+                  className="text-xs border border-gray-300 rounded px-2 py-0.5"
+                />
+              </div>
+              <div className="mt-2 flex items-center gap-3">
+                <button
+                  className="text-[11px] text-blue-600 underline"
+                  onClick={()=>{ setReloadCounter(c=>c+1); }}
+                >Apply</button>
+                <button
+                  className="text-[11px] text-gray-600 underline"
+                  onClick={()=>{ setCodFromDate(""); setCodToDate(""); setReloadCounter(c=>c+1); }}
+                >Clear</button>
+              </div>
             </div>
           )}
           {showProductFilter && (
@@ -622,6 +622,7 @@ export default function App(){
       <main className="max-w-5xl mx-auto px-4 py-4 pb-48">
         {current ? (
           <div className="relative">
+            <Suspense fallback={<div className="text-center py-10 text-gray-500">Loading…</div>}>
             <OrderCard
               key={current.id}
               order={current}
@@ -645,6 +646,7 @@ export default function App(){
                 } catch {}
               }}
             />
+            </Suspense>
           </div>
         ) : (
           <div className="text-center py-24 text-gray-500">
@@ -773,25 +775,29 @@ export default function App(){
         </div>
       )}
       {showSettings && (
+        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center"><div className="rounded-xl bg-white px-4 py-3 shadow">Loading…</div></div>}>
         <PresetSettingsModal
           preset={preset}
           onClose={()=>setShowSettings(false)}
           onSave={(p)=>{ setPreset(p); setShowSettings(false); load(); }}
         />
+        </Suspense>
       )}
       {showProfilePicker && (
+        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center"><div className="rounded-xl bg-white px-4 py-3 shadow">Loading…</div></div>}>
         <ProfilePickerModal
           profiles={PROFILES}
           current={profile}
           onClose={()=>setShowProfilePicker(false)}
           onSelect={(p)=>{ setProfile(p); setShowProfilePicker(false); }}
         />
+        </Suspense>
       )}
     </div>
   );
 }
 
-function Chip({ label, active, onClick }){
+const Chip = React.memo(function Chip({ label, active, onClick }){
   return (
     <button
       onClick={onClick}
@@ -800,9 +806,9 @@ function Chip({ label, active, onClick }){
       {label}
     </button>
   );
-}
+});
 
-function SmallChip({ label, active, onClick }){
+const SmallChip = React.memo(function SmallChip({ label, active, onClick }){
   return (
     <button
       onClick={onClick}
@@ -811,7 +817,7 @@ function SmallChip({ label, active, onClick }){
       {label}
     </button>
   );
-}
+});
 
 function tagPillClasses(tag){
   const t = String(tag || '').toLowerCase();
@@ -868,7 +874,7 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
               <div key={v.id || i} className={`min-w-[210px] sm:min-w-[240px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
                 <div className="aspect-[3/2] sm:aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden" onMouseDown={startPress} onMouseUp={clearPress} onMouseLeave={clearPress} onTouchStart={startPress} onTouchEnd={clearPress} onTouchCancel={clearPress} onContextMenu={preventContext}>
                   {v.image ? (
-                    <img src={v.image} alt={v.sku || ""} className="w-full h-full object-cover" />
+                    <img src={v.image} alt={v.sku || ""} loading="lazy" className="w-full h-full object-cover" />
                   ) : (
                     <div className="flex items-center justify-center w-full h-full text-gray-400"><ImageIcon className="w-8 h-8"/></div>
                   )}

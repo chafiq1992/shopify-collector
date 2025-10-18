@@ -3,5 +3,6 @@
 @tailwind utilities;
 
 html, body, #root { height: 100%; }
-html, body { overflow: hidden; }
+/* Allow vertical scrolling on small screens while avoiding horizontal overflow */
+html, body { overflow-x: hidden; overflow-y: auto; }
 
