@@ -141,38 +141,42 @@ export default function App(){
     try { if (navigator && typeof navigator.vibrate === 'function') navigator.vibrate(ms); } catch {}
   }
 
+  function computeCodDatesCSV(from, to){
+    try {
+      if (!from && !to) return "";
+      const [fy,fm,fd] = (from || to || "").split("-");
+      const [ty,tm,td] = (to || from || "").split("-");
+      const start = new Date(parseInt(fy), parseInt(fm)-1, parseInt(fd));
+      const end = new Date(parseInt(ty), parseInt(tm)-1, parseInt(td));
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) return "";
+      const a = start <= end ? start : end;
+      const b = start <= end ? end : start;
+      const out = [];
+      for (let dt = new Date(a); dt <= b; dt.setDate(dt.getDate() + 1)){
+        const y = dt.getFullYear();
+        const m = String(dt.getMonth()+1).padStart(2,'0');
+        const d = String(dt.getDate()).padStart(2,'0');
+        out.push(`${d}/${m}/${String(y).slice(-2)}`);
+      }
+      return out.join(",");
+    } catch { return ""; }
+  }
+
+  function formatRangeLabel(from, to){
+    try {
+      if (!from && !to) return "";
+      const [fy,fm,fd] = (from || to || "").split("-");
+      const [ty,tm,td] = (to || from || "").split("-");
+      const a = `${fd}/${fm}/${String(fy).slice(-2)}`;
+      const b = `${td}/${tm}/${String(ty).slice(-2)}`;
+      return a === b ? a : `${a} — ${b}`;
+    } catch { return ""; }
+  }
+
   async function load(){
     const reqId = ++requestIdRef.current;
     setLoading(true);
-    // convert selected date(s) to DD/MM/YY for tag
-    const ddmmyy = codDate ? (()=>{
-      const [y,m,d] = codDate.split("-");
-      if (!y||!m||!d) return "";
-      return `${d}/${m}/${y.slice(-2)}`;
-    })() : "";
-    const codDatesCSV = (()=>{
-      try {
-        const from = codFromDate;
-        const to = codToDate;
-        if (!from && !to) return "";
-        // if one missing, use the other
-        const [fy,fm,fd] = (from || to || "").split("-");
-        const [ty,tm,td] = (to || from || "").split("-");
-        const start = new Date(parseInt(fy), parseInt(fm)-1, parseInt(fd));
-        const end = new Date(parseInt(ty), parseInt(tm)-1, parseInt(td));
-        if (isNaN(start.getTime()) || isNaN(end.getTime())) return "";
-        const a = start <= end ? start : end;
-        const b = start <= end ? end : start;
-        const out = [];
-        for (let dt = new Date(a); dt <= b; dt.setDate(dt.getDate() + 1)){
-          const y = dt.getFullYear();
-          const m = String(dt.getMonth()+1).padStart(2,'0');
-          const d = String(dt.getDate()).padStart(2,'0');
-          out.push(`${d}/${m}/${String(y).slice(-2)}`);
-        }
-        return out.join(",");
-      } catch { return ""; }
-    })();
+    const codDatesCSV = computeCodDatesCSV(codFromDate, codToDate);
     const usingStockProfile = !!(profile && profile.id === 'stock');
     const isGlobalSearch = (!usingStockProfile && !statusFilter && (search || '').trim() && !showProductFilter);
     // Build base query from Stock subfilter, else empty
@@ -197,9 +201,9 @@ export default function App(){
       tag_filter: isGlobalSearch ? "" : (tagFilter || ""),
       search: search || "",
       product_id: (productIdFilter || ""),
-      // Support date range
-      cod_date: (isGlobalSearch ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : ""),
-      cod_dates: (isGlobalSearch ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : ""),
+      // Apply date range to all non-Stock filters (collect, verification, product)
+      cod_date: "",
+      cod_dates: (isGlobalSearch || usingStockProfile) ? "" : (codDatesCSV || ""),
       collect_prefix: preset.collectPrefix,
       collect_exclude_tag: preset.collectExcludeTag,
       verification_include_tag: preset.verificationIncludeTag,
@@ -278,14 +282,7 @@ export default function App(){
     if (!pageInfo?.hasNextPage || !nextCursor) return;
     setLoadingMore(true);
     // Recompute filters to ensure consistency
-    const ddmmyy = codDate ? (()=>{ try { const [y,m,d] = codDate.split("-"); return `${d}/${m}/${y.slice(-2)}`; } catch { return ""; } })() : "";
-    const codDatesCSV = (()=>{ try {
-      const from = codFromDate; const to = codToDate; if (!from && !to) return "";
-      const [fy,fm,fd] = (from || to || "").split("-"); const [ty,tm,td] = (to || from || "").split("-");
-      const start = new Date(parseInt(fy), parseInt(fm)-1, parseInt(fd)); const end = new Date(parseInt(ty), parseInt(tm)-1, parseInt(td));
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) return ""; const a = start <= end ? start : end; const b = start <= end ? end : start; const out = [];
-      for (let dt = new Date(a); dt <= b; dt.setDate(dt.getDate() + 1)){ const y = dt.getFullYear(); const m = String(dt.getMonth()+1).padStart(2,'0'); const d = String(dt.getDate()).padStart(2,'0'); out.push(`${d}/${m}/${String(y).slice(-2)}`);} return out.join(",");
-    } catch { return ""; } })();
+    const codDatesCSV = computeCodDatesCSV(codFromDate, codToDate);
     const usingStockProfile = !!(profile && profile.id === 'stock');
     const isGlobalSearch = (!usingStockProfile && !statusFilter && (search || '').trim() && !showProductFilter);
     const stockBase = usingStockProfile
@@ -308,8 +305,8 @@ export default function App(){
         tag_filter: isGlobalSearch ? "" : (tagFilter || ""),
         search: search || "",
         product_id: (productIdFilter || ""),
-        cod_date: (isGlobalSearch ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : ""),
-        cod_dates: (isGlobalSearch ? "" : (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : ""),
+        cod_date: "",
+        cod_dates: (isGlobalSearch || usingStockProfile) ? "" : (codDatesCSV || ""),
         collect_prefix: preset.collectPrefix,
         collect_exclude_tag: preset.collectExcludeTag,
         verification_include_tag: preset.verificationIncludeTag,
@@ -325,7 +322,7 @@ export default function App(){
     setLoadingMore(false);
   }
 
-  useEffect(() => { load(); }, [statusFilter, tagFilter, codDate, codFromDate, codToDate, excludeOut, excludeStockTags, profile, stockFilter, store, reloadCounter]);
+  useEffect(() => { load(); }, [statusFilter, tagFilter, codFromDate, codToDate, excludeOut, excludeStockTags, profile, stockFilter, store, reloadCounter]);
 
   // Debounced search
   useEffect(() => {
@@ -565,16 +562,17 @@ export default function App(){
               </>
             )}
           </div>
-          {showDatePicker && (!profile || profile.id !== 'stock') && (
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] uppercase tracking-wide text-gray-400">From</span>
+          {/* Date range bar: always visible for non-Stock views */}
+          {(!profile || profile.id !== 'stock') && (
+            <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-xl px-3 py-2">
+              <span className="text-[11px] uppercase tracking-wide text-gray-400">Date range</span>
               <input
                 type="date"
                 value={codFromDate}
                 onChange={(e)=>{ setCodFromDate(e.target.value); }}
                 className="text-xs border border-gray-300 rounded px-2 py-0.5"
               />
-              <span className="text-[11px] uppercase tracking-wide text-gray-400">To</span>
+              <span className="text-[11px] uppercase tracking-wide text-gray-400">to</span>
               <input
                 type="date"
                 value={codToDate}
@@ -582,13 +580,21 @@ export default function App(){
                 className="text-xs border border-gray-300 rounded px-2 py-0.5"
               />
               <button
-                className="text-[11px] text-gray-500 underline"
-                onClick={()=>{ setCodFromDate(""); setCodToDate(""); setCodDate(""); setShowDatePicker(false); }}
-              >Clear</button>
-              <button
                 className="text-[11px] text-blue-600 underline"
-                onClick={()=>{ setShowDatePicker(false); setReloadCounter(c=>c+1); }}
+                onClick={()=>{ setReloadCounter(c=>c+1); }}
               >Apply</button>
+              {(codFromDate || codToDate) && (
+                <div className="ml-auto inline-flex items-center gap-2">
+                  <span className="inline-flex items-center gap-2 px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200 text-[11px]">
+                    {formatRangeLabel(codFromDate, codToDate)}
+                    <button
+                      aria-label="Clear date range"
+                      onClick={()=>{ setCodFromDate(""); setCodToDate(""); setReloadCounter(c=>c+1); }}
+                      className="ml-1 text-gray-500 hover:text-gray-700"
+                    >×</button>
+                  </span>
+                </div>
+              )}
             </div>
           )}
           {showProductFilter && (
