@@ -387,22 +387,23 @@ export default function App(){
     const list = orderNumbers.map(n => String(n));
     setPrintBusy(true);
     setPrintMsg(null);
-    if (isRelayConfigured()){
+    // Prefer relay path first so the agent can ensure customer info (Irranova)
+    try {
       const r = await enqueueOrdersToRelay(list, 1, undefined, store);
       setPrintBusy(false);
       if (r.ok){
         setPrintMsg(`Queued ${r.queued ?? list.length} order(s) for printing`);
-      } else {
-        setPrintMsg(`Print queue failed: ${r.error || 'unknown error'}`);
+        return;
       }
+      // Fall through to local on non-ok
+    } catch {}
+    // Fallback: direct local printing (no pre-checks)
+    const res = await printOrdersLocally(list, 1, store);
+    setPrintBusy(false);
+    if (res.ok){
+      setPrintMsg(`Printed ${res.results?.length ?? list.length} order(s)`);
     } else {
-      const res = await printOrdersLocally(list, 1, store);
-      setPrintBusy(false);
-      if (res.ok){
-        setPrintMsg(`Printed ${res.results?.length ?? list.length} order(s)`);
-      } else {
-        setPrintMsg(`Print failed: ${res.error || 'unknown error'}`);
-      }
+      setPrintMsg(`Print failed: ${res.error || 'unknown error'}`);
     }
   }
 
