@@ -231,8 +231,9 @@ export default function App(){
             tag_filter: tagFilter || "",
             search: search || "",
             product_id: (productIdFilter || ""),
-            cod_date: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (ddmmyy || "") : "",
-            cod_dates: (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification")) ? (codDatesCSV || "") : "",
+            // Always carry date range for non-Stock profiles (applies to collect/verification/product modes)
+            cod_date: "",
+            cod_dates: (!usingStockProfile && !isGlobalSearch) ? (codDatesCSV || "") : "",
             collect_prefix: preset.collectPrefix,
             collect_exclude_tag: preset.collectExcludeTag,
             verification_include_tag: preset.verificationIncludeTag,
@@ -310,7 +311,8 @@ export default function App(){
         search: search || "",
         product_id: (productIdFilter || ""),
         cod_date: "",
-        cod_dates: (isGlobalSearch || usingStockProfile) ? "" : (codDatesCSV || ""),
+        // Carry date range for non-Stock profiles in product/collect/verification modes
+        cod_dates: (!usingStockProfile && !isGlobalSearch) ? (codDatesCSV || "") : "",
         collect_prefix: preset.collectPrefix,
         collect_exclude_tag: preset.collectExcludeTag,
         verification_include_tag: preset.verificationIncludeTag,
