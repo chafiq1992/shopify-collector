@@ -95,6 +95,9 @@ export default function App(){
   const [loadingMore, setLoadingMore] = useState(false);
   const [excludeOut, setExcludeOut] = useState(false);
   const [excludeStockTags, setExcludeStockTags] = useState(false);
+  const [productSortOldToNew, setProductSortOldToNew] = useState(() => {
+    try { return localStorage.getItem("orderCollectorProductSortOldToNew") === '1'; } catch { return false; }
+  });
   const [selectedOutMap, setSelectedOutMap] = useState({}); // orderId -> Set<variantId>
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -158,6 +161,9 @@ export default function App(){
       }
     } catch {}
   }, [store]);
+  useEffect(()=>{
+    try { localStorage.setItem("orderCollectorProductSortOldToNew", productSortOldToNew ? '1' : '0'); } catch {}
+  }, [productSortOldToNew]);
 
   const wsRef = useRef(null);
   const requestIdRef = useRef(0);
@@ -216,13 +222,15 @@ export default function App(){
       ? excludedTags.map(t => (t.includes(' ') ? ` -tag:"${t}"` : ` -tag:${t}`)).join('')
       : '';
     const baseQuery = (isGlobalSearch ? '' : `${stockBase}${negativeTagQuery}`).trim();
-    const isBulkFilter = (!usingStockProfile && ((statusFilter === "collect" || statusFilter === "verification") || !!(productIdFilter || "").trim()));
+    const isProductMode = !!(productIdFilter || "").trim();
+    const isBulkFilter = (!usingStockProfile && ((statusFilter === "collect" || statusFilter === "verification") || isProductMode));
     const perPage = isBulkFilter ? 250 : 30;
 
     // First page
+    const effectiveStatusFilter = (usingStockProfile ? "all" : ((productSortOldToNew && isProductMode) ? "all" : (statusFilter || "all")));
     let data = await API.getOrders({
       limit: perPage,
-      status_filter: (usingStockProfile ? "all" : (statusFilter || "all")),
+      status_filter: effectiveStatusFilter,
       tag_filter: isGlobalSearch ? "" : (tagFilter || ""),
       search: search || "",
       product_id: (productIdFilter || ""),
@@ -248,7 +256,7 @@ export default function App(){
           const page = await API.getOrders({
             limit: perPage,
             cursor: next,
-            status_filter: (usingStockProfile ? "all" : statusFilter),
+            status_filter: (usingStockProfile ? "all" : ((productSortOldToNew && isProductMode) ? "all" : statusFilter)),
             tag_filter: tagFilter || "",
             search: search || "",
             product_id: (productIdFilter || ""),
@@ -294,6 +302,10 @@ export default function App(){
       };
       ords = (ords || []).filter(o => (o.variants || []).some(v => matchesPid(v.product_id)));
     }
+    // Optional product sort override: old -> new
+    if (productSortOldToNew && isProductMode){
+      try { ords.sort((a,b) => String(a.created_at||"").localeCompare(String(b.created_at||""))); } catch {}
+    }
     setOrders(ords);
     setTags(data.tags || []);
     setPageInfo(data.pageInfo || { hasNextPage: false });
@@ -324,10 +336,12 @@ export default function App(){
     try {
       const isBulkFilter = (!usingStockProfile && ((statusFilter === "collect" || statusFilter === "verification") || !!(productIdFilter || "").trim()));
       const perPage = isBulkFilter ? 250 : 30;
+      const isProductMode = !!(productIdFilter || "").trim();
+      const effectiveStatusFilter = (usingStockProfile ? "all" : ((productSortOldToNew && isProductMode) ? "all" : (statusFilter || "all")));
       const data = await API.getOrders({
         limit: perPage,
         cursor: nextCursor,
-        status_filter: (usingStockProfile ? "all" : (statusFilter || "all")),
+        status_filter: effectiveStatusFilter,
         tag_filter: isGlobalSearch ? "" : (tagFilter || ""),
         search: search || "",
         product_id: (productIdFilter || ""),
@@ -342,7 +356,13 @@ export default function App(){
         store,
       });
       const more = data.orders || [];
-      setOrders(prev => prev.concat(more));
+      setOrders(prev => {
+        const merged = prev.concat(more);
+        if (productSortOldToNew && isProductMode){
+          try { merged.sort((a,b) => String(a.created_at||"").localeCompare(String(b.created_at||""))); } catch {}
+        }
+        return merged;
+      });
       setPageInfo(data.pageInfo || { hasNextPage: false });
       setNextCursor(data.nextCursor || null);
     } catch {}
@@ -637,6 +657,14 @@ export default function App(){
                 placeholder="Paste Shopify GID or numeric ID"
                 className="text-xs border border-gray-300 rounded px-2 py-0.5 w-60"
               />
+              <label className="ml-2 inline-flex items-center gap-1 text-[11px] text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={productSortOldToNew}
+                  onChange={(e)=>{ setProductSortOldToNew(e.target.checked); setReloadCounter(c=>c+1); }}
+                />
+                <span>Sort old → new</span>
+              </label>
               <button
                 className="text-[11px] text-gray-500 underline"
                 onClick={()=>{ setProductIdFilter(""); setShowProductFilter(false); setReloadCounter(c=>c+1); }}
