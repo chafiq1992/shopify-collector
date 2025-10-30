@@ -543,6 +543,7 @@ async def list_orders(
     base_query: Optional[str] = Query(None, description="Raw Shopify query prefix to start from"),
     store: Optional[str] = Query(None, description="Select store: 'irrakids' (default) or 'irranova'"),
     product_id: Optional[str] = Query(None, description="Filter orders that contain this product id (Shopify GID or numeric)"),
+    disable_collect_ranking: bool = Query(False, description="If true, skip special collect ranking and return raw results"),
 ):
     domain, password, _ = resolve_store_settings(store)
     if not domain or not password:
@@ -581,6 +582,7 @@ async def list_orders(
         "exclude_out": exclude_out,
         "store": (store or "").strip().lower(),
         "product_id": product_id,
+        "disable_collect_ranking": bool(disable_collect_ranking),
     })
     cached = _orders_cache_get(cache_key)
     if cached is not None:
@@ -702,7 +704,7 @@ async def list_orders(
             pass
 
     # Collect: compute ranking globally across a larger window of orders
-    if status_filter == "collect":
+    if status_filter == "collect" and not disable_collect_ranking:
         # Use a smaller window to reduce latency while maintaining good grouping quality
         target_window = 250
         chunk = 50

@@ -227,7 +227,7 @@ export default function App(){
     const perPage = isBulkFilter ? 250 : 30;
 
     // First page
-    const effectiveStatusFilter = (usingStockProfile ? "all" : ((productSortOldToNew && isProductMode) ? "all" : (statusFilter || "all")));
+    const effectiveStatusFilter = (usingStockProfile ? "all" : (statusFilter || "all"));
     let data = await API.getOrders({
       limit: perPage,
       status_filter: effectiveStatusFilter,
@@ -243,6 +243,8 @@ export default function App(){
       exclude_out: (isGlobalSearch ? false : (usingStockProfile ? false : excludeOut)),
       base_query: baseQuery,
       store,
+      // Skip collect ranking when forcing product old->new sort
+      disable_collect_ranking: (!!(productIdFilter||"").trim() && productSortOldToNew) ? true : false,
     });
     if (reqId !== requestIdRef.current) return; // stale response
     let ords = data.orders || [];
@@ -256,7 +258,7 @@ export default function App(){
           const page = await API.getOrders({
             limit: perPage,
             cursor: next,
-            status_filter: (usingStockProfile ? "all" : ((productSortOldToNew && isProductMode) ? "all" : statusFilter)),
+            status_filter: (usingStockProfile ? "all" : statusFilter),
             tag_filter: tagFilter || "",
             search: search || "",
             product_id: (productIdFilter || ""),
@@ -269,6 +271,7 @@ export default function App(){
             exclude_out: (usingStockProfile ? false : excludeOut),
             base_query: baseQuery,
             store,
+            disable_collect_ranking: (isProductMode && productSortOldToNew) ? true : false,
           });
           if (reqId !== requestIdRef.current) return; // stale response
           const more = page.orders || [];
@@ -337,7 +340,7 @@ export default function App(){
       const isBulkFilter = (!usingStockProfile && ((statusFilter === "collect" || statusFilter === "verification") || !!(productIdFilter || "").trim()));
       const perPage = isBulkFilter ? 250 : 30;
       const isProductMode = !!(productIdFilter || "").trim();
-      const effectiveStatusFilter = (usingStockProfile ? "all" : ((productSortOldToNew && isProductMode) ? "all" : (statusFilter || "all")));
+      const effectiveStatusFilter = (usingStockProfile ? "all" : (statusFilter || "all"));
       const data = await API.getOrders({
         limit: perPage,
         cursor: nextCursor,
@@ -354,6 +357,7 @@ export default function App(){
         exclude_out: (isGlobalSearch ? false : (usingStockProfile ? false : excludeOut)),
         base_query: baseQuery,
         store,
+        disable_collect_ranking: (isProductMode && productSortOldToNew) ? true : false,
       });
       const more = data.orders || [];
       setOrders(prev => {
