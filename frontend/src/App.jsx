@@ -101,7 +101,17 @@ export default function App(){
   const [showProfilePicker, setShowProfilePicker] = useState(false);
   const [showConfirm, setShowConfirm] = useState(null); // 'collected' | 'out' | 'print' | null
   const [store, setStore] = useState(() => {
-    try { return localStorage.getItem("orderCollectorStore") || "irrakids"; } catch { return "irrakids"; }
+    // Prefer URL ?store=..., then sessionStorage; default to irrakids
+    try {
+      const params = new URLSearchParams(location.search);
+      const fromUrl = (params.get('store') || '').trim().toLowerCase();
+      if (fromUrl === 'irrakids' || fromUrl === 'irranova') return fromUrl;
+    } catch {}
+    try {
+      const fromSession = (sessionStorage.getItem('orderCollectorStore') || '').trim().toLowerCase();
+      if (fromSession === 'irrakids' || fromSession === 'irranova') return fromSession;
+    } catch {}
+    return 'irrakids';
   });
   const [profile, setProfile] = useState(() => {
     try {
@@ -135,7 +145,18 @@ export default function App(){
     try { localStorage.setItem("orderCollectorStockFilter", stockFilter); } catch {}
   }, [stockFilter]);
   useEffect(()=>{
-    try { localStorage.setItem("orderCollectorStore", store); } catch {}
+    // Persist store per-tab and reflect in URL to keep it stable across reloads
+    try { sessionStorage.setItem('orderCollectorStore', store); } catch {}
+    try {
+      const params = new URLSearchParams(location.search);
+      const prev = (params.get('store') || '').trim().toLowerCase();
+      if (prev !== store){
+        params.set('store', store);
+        const qs = params.toString();
+        const nextUrl = `${location.pathname}${qs ? `?${qs}` : ''}${location.hash || ''}`;
+        history.replaceState(null, '', nextUrl);
+      }
+    } catch {}
   }, [store]);
 
   const wsRef = useRef(null);
