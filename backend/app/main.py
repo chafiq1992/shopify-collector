@@ -458,8 +458,6 @@ def build_query_string(
             else:
                 # Fallback to substring match on raw value (less reliable)
                 q += f" line_item.product_id:{pid}"
-        # Force open + unfulfilled when product filter is active
-        q += " status:open fulfillment_status:unfulfilled"
     return q.strip()
 
 def map_order_node(node: Dict[str, Any]) -> OrderDTO:

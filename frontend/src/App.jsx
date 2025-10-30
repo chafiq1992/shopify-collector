@@ -195,7 +195,7 @@ export default function App(){
       ? excludedTags.map(t => (t.includes(' ') ? ` -tag:"${t}"` : ` -tag:${t}`)).join('')
       : '';
     const baseQuery = (isGlobalSearch ? '' : `${stockBase}${negativeTagQuery}`).trim();
-    const isBulkFilter = (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification"));
+    const isBulkFilter = (!usingStockProfile && ((statusFilter === "collect" || statusFilter === "verification") || !!(productIdFilter || "").trim()));
     const perPage = isBulkFilter ? 250 : 30;
 
     // First page
@@ -300,7 +300,7 @@ export default function App(){
       : '';
     const baseQuery = (isGlobalSearch ? '' : `${stockBase}${negativeTagQuery}`).trim();
     try {
-      const isBulkFilter = (!usingStockProfile && (statusFilter === "collect" || statusFilter === "verification"));
+      const isBulkFilter = (!usingStockProfile && ((statusFilter === "collect" || statusFilter === "verification") || !!(productIdFilter || "").trim()));
       const perPage = isBulkFilter ? 250 : 30;
       const data = await API.getOrders({
         limit: perPage,
