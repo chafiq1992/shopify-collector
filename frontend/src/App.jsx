@@ -6,6 +6,7 @@ import { enqueueOrdersToRelay, isRelayConfigured } from "./lib/printRelayClient"
 const OrderCard = React.lazy(() => import('./components/OrderCard.jsx'));
 const PresetSettingsModal = React.lazy(() => import('./components/PresetSettingsModal.jsx'));
 const ProfilePickerModal = React.lazy(() => import('./components/ProfilePickerModal.jsx'));
+const OrderTaggerPage = React.lazy(() => import('./pages/OrderTagger.jsx'));
 
 // Types (JSDoc only)
 /**
@@ -488,6 +489,17 @@ export default function App(){
   }
 
   // Swipe navigation removed; use buttons below instead
+
+  // Lightweight routing: render OrderTagger page when path matches
+  try {
+    if (typeof location !== 'undefined' && String(location.pathname || '').trim() === '/order-tagger'){
+      return (
+        <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
+          <OrderTaggerPage />
+        </Suspense>
+      );
+    }
+  } catch {}
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900 overflow-hidden">

@@ -143,3 +143,50 @@ jobs:
 - **Security:** Keep Admin token server-side only. Frontend calls your API.
 - **Styling:** Buttons and chips are large and high-contrast; tweak Tailwind classes to your brand (e.g., `#004AAD`).
 
+## 8) Auto-tag orders by delivery zone (Order Tagger)
+
+This service can automatically tag newly created Shopify orders based on their geocoded location and polygon zones you control.
+
+- Webhook: `POST /api/shopify/webhooks/orders/create`
+- HMAC: validated using the same per-store secrets as `orders/update`:
+  - `SHOPIFY_WEBHOOK_SECRET` (default)
+  - `IRRAKIDS_SHOPIFY_WEBHOOK_SECRET` (for `*.irrakids.*` shop domains)
+  - `IRRANOVA_SHOPIFY_WEBHOOK_SECRET` (for `*.irranova.*` shop domains)
+
+Environment variables:
+
+- `AUTO_TAGGING_ENABLED` — set to `1` to actually write tags; when unset/0, the service logs what it would tag but does not modify orders.
+- `GOOGLE_MAPS_API_KEY` — required for geocoding. Requests are sent with `region=ma` (Morocco).
+
+Endpoints:
+
+- `GET /api/order-tagger/status` — returns the feature flag and loaded zones summary.
+- Frontend page: open `/order-tagger` in the app to view status and basic instructions.
+
+Zones data:
+
+- File: `backend/app/zones.geojson`
+- Format: GeoJSON FeatureCollection with Features having `properties.tag` and `geometry` of type `Polygon` or `MultiPolygon` (coordinates are `[lng, lat]`).
+
+How to add a new zone:
+
+1. Edit `backend/app/zones.geojson`. Add a new Feature with `properties: { "name": "...", "tag": "..." }` and a valid `geometry` polygon/multipolygon. The first ring is treated as the outer boundary; subsequent rings are holes.
+2. Deploy/restart the backend. No code changes are required.
+3. Ensure `AUTO_TAGGING_ENABLED=1` in your environment to apply tags.
+
+Behavior:
+
+- On `orders/create`, the backend builds an address string from `address1, address2, city, province, zip, "Morocco"`. On geocode failure, it retries with `city + "Morocco"`.
+- If geocoding succeeds, the lat/lng is tested against loaded polygons. On first match, the order is tagged with that zone’s `properties.tag` (idempotent; skips if already present).
+- If geocoding fails or no zone contains the point, the order is skipped. Processing never blocks or fails the webhook.
+- Results are logged with: `order_id, order_name, address_string, lat, lng, corrected_city, matched_tag, status (tagged|skipped), reason`.
+- Geocoding responses are cached in-memory for 7 days to reduce API calls.
+
+Acceptance checks:
+
+- A Casablanca-area address outside the polygon → skipped with `reason=no_zone`.
+- A Rabat/Salé/Témara-area address inside the polygon → tagged once with `fast`.
+- Arabic-only or partial addresses should still geocode when within the polygon.
+- Invalid HMAC → HTTP 401; no processing is performed.
+- Replaying the same webhook does not duplicate tags.
+

@@ -137,6 +137,7 @@ def print_locally(orders, copies, store: str | None = None) -> bool:
         **({"store": store} if store else {}),
         **({"overrides": overrides} if overrides else {}),
         **({"print_data": print_data} if print_data else {}),
+        "qr_mode": True,
     }
     r = requests.post(f"{LOCAL_PRINTER_URL}/print/orders", json=payload, timeout=30)
     r.raise_for_status()

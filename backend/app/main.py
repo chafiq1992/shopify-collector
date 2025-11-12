@@ -13,6 +13,14 @@ from datetime import datetime, timezone
 import requests as _requests
 from pydantic import BaseModel
 import random
+from functools import lru_cache
+from io import BytesIO
+import qrcode
+from qrcode.constants import ERROR_CORRECT_M
+
+# Order Tagger imports
+from .geocode import geocode_order_address
+from .geo_zones import load_zones, find_zone_match
 
 # ---------- Settings (multi-store) ----------
 SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2025-01").strip()
@@ -91,6 +99,7 @@ DEFAULT_PC_ID = os.environ.get("DEFAULT_PC_ID", next(iter(PCS.keys()), "pc-lab-1
 SHOPIFY_WEBHOOK_SECRET_DEFAULT = os.environ.get("SHOPIFY_WEBHOOK_SECRET", "").strip()
 SHOPIFY_WEBHOOK_SECRET_IRRAKIDS = os.environ.get("IRRAKIDS_SHOPIFY_WEBHOOK_SECRET", "").strip()
 SHOPIFY_WEBHOOK_SECRET_IRRANOVA = os.environ.get("IRRANOVA_SHOPIFY_WEBHOOK_SECRET", "").strip()
+AUTO_TAGGING_ENABLED = os.environ.get("AUTO_TAGGING_ENABLED", "0").strip() in ("1", "true", "TRUE", "yes", "on")
 
 # Optional dedupe/cutoff controls
 PC_TAG_MIN_CREATED_AT = os.environ.get("PC_TAG_MIN_CREATED_AT", "").strip()  # ISO8601 e.g., 2025-01-01T00:00:00Z
@@ -140,6 +149,29 @@ def _orders_cache_set(key: str, val: Dict[str, Any]):
                 pass
     except Exception:
         pass
+
+@lru_cache(maxsize=4096)
+def _qr_png_b64(text: str, box_size: int = 8, border: int = 2) -> str:
+    """Generate a compact QR PNG (base64-encoded, ASCII) for the given text.
+
+    Cached in-memory to handle bursts efficiently.
+    """
+    try:
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=ERROR_CORRECT_M,
+            box_size=box_size,
+            border=border,
+        )
+        qr.add_data(text)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        # Fallback: return empty string on any unexpected issue
+        return ""
 
 class EnqueueBody(BaseModel):
     pc_id: str
@@ -255,6 +287,157 @@ async def ack(b: AckBody):
     _require_pc(b.pc_id, b.secret)
     # In-memory queue removes on pull; ack is a no-op here
     return {"ok": True}
+
+# ---------- Shopify Webhook (orders/create) for Auto-Tagging by zone ----------
+def _normalize_spaces(text: Optional[str]) -> str:
+    try:
+        import re as _re
+        return _re.sub(r"\s+", " ", (text or "").strip())
+    except Exception:
+        return (text or "").strip()
+
+def _parse_tags_from_webhook(val: Any) -> List[str]:
+    try:
+        if isinstance(val, list):
+            return [str(x).strip() for x in val if str(x).strip()]
+        if isinstance(val, str):
+            # Shopify webhooks often send tags as comma-separated string
+            parts = [p.strip() for p in val.split(",")]
+            return [p for p in parts if p]
+    except Exception:
+        pass
+    return []
+
+def _log_order_tagger(payload: Dict[str, Any]) -> None:
+    try:
+        print(json.dumps({"component": "order_tagger", **payload}, ensure_ascii=False))
+    except Exception:
+        try:
+            print({"component": "order_tagger", **payload})
+        except Exception:
+            pass
+
+@app.post("/api/shopify/webhooks/orders/create")
+async def orders_create_webhook(
+    request: Request,
+    x_shopify_hmac_sha256: Optional[str] = Header(default=None),
+    x_shopify_shop_domain: Optional[str] = Header(default=None),
+):
+    # Verify HMAC
+    raw = await request.body()
+    secret = _secret_for_shop(x_shopify_shop_domain or "")
+    if not _verify_shopify_hmac(raw, x_shopify_hmac_sha256 or "", secret):
+        raise HTTPException(status_code=401, detail="bad hmac")
+
+    data = await request.json()
+
+    # Extract shipping address
+    shipping = data.get("shipping_address") or {}
+    addr1 = _normalize_spaces(shipping.get("address1") or "")
+    addr2 = _normalize_spaces(shipping.get("address2") or "")
+    city_in = _normalize_spaces(shipping.get("city") or "")
+    province = _normalize_spaces((shipping.get("province") or shipping.get("province_code") or ""))
+    zip_code = _normalize_spaces((shipping.get("zip") or shipping.get("postal_code") or ""))
+
+    # Build and geocode (with fallback to city-only)
+    geo = await geocode_order_address(addr1, addr2, city_in, province, zip_code, api_key=None, region="ma", alias_map=None)
+
+    order_id_num = data.get("id")
+    order_name = (data.get("name") or "").strip()
+    tags_from_payload = _parse_tags_from_webhook(data.get("tags"))
+    corrected_city = geo.get("corrected_city")
+    lat = geo.get("lat")
+    lng = geo.get("lng")
+
+    matched_tag = None
+    status = "skipped"
+    reason = None
+
+    if geo.get("ok") and lat is not None and lng is not None:
+        try:
+            zones = load_zones()
+            match = find_zone_match(float(lng), float(lat), zones)
+            if match and isinstance(match, dict):
+                matched_tag = (match.get("tag") or match.get("properties", {}).get("tag") or "").strip() or None
+        except Exception:
+            matched_tag = None
+
+        if matched_tag:
+            # Idempotency: skip if tag already present
+            already_has = any((t or "").strip().lower() == matched_tag.lower() for t in (tags_from_payload or []))
+            if already_has:
+                status = "skipped"
+                reason = "already_tagged"
+            elif AUTO_TAGGING_ENABLED and order_id_num:
+                # GraphQL tagsAdd
+                mutation = """
+                mutation AddTag($id: ID!, $tags: [String!]!) {
+                  tagsAdd(id: $id, tags: $tags) { userErrors { field message } }
+                }
+                """
+                try:
+                    gid = f"gid://shopify/Order/{int(order_id_num)}"
+                except Exception:
+                    gid = None
+                if gid:
+                    try:
+                        store_key = _store_key_for_shop_domain(x_shopify_shop_domain or "") or None
+                        await shopify_graphql(mutation, {"id": gid, "tags": [matched_tag]}, store=store_key)
+                        status = "tagged"
+                        reason = None
+                    except Exception as e:
+                        status = "skipped"
+                        reason = "shopify_tags_add_failed"
+                else:
+                    status = "skipped"
+                    reason = "no_gid"
+            else:
+                # Feature disabled, log would-be tag
+                status = "skipped"
+                reason = "feature_disabled" if not AUTO_TAGGING_ENABLED else "no_order_id"
+        else:
+            status = "skipped"
+            reason = "no_zone"
+    else:
+        status = "skipped"
+        reason = "geocode_failed"
+
+    # Structured log
+    _log_order_tagger({
+        "order_id": order_id_num,
+        "order_name": order_name,
+        "address_string": geo.get("address_string"),
+        "lat": lat,
+        "lng": lng,
+        "corrected_city": corrected_city,
+        "matched_tag": matched_tag,
+        "status": status,
+        "reason": reason,
+        "shop": x_shopify_shop_domain,
+        "enabled": bool(AUTO_TAGGING_ENABLED),
+    })
+
+    # Do not block order processing
+    return {"ok": True}
+
+# ---------- Order Tagger status endpoint ----------
+@app.get("/api/order-tagger/status")
+async def order_tagger_status():
+    try:
+        zones = load_zones()
+        feats = (zones.get("features") or [])
+        summary = [{
+            "name": ((f.get("properties") or {}).get("name")),
+            "tag": ((f.get("properties") or {}).get("tag")),
+            "geometryType": (f.get("geometry") or {}).get("type"),
+        } for f in feats]
+    except Exception:
+        summary = []
+    return {
+        "ok": True,
+        "enabled": bool(AUTO_TAGGING_ENABLED),
+        "zones": summary,
+    }
 
 # ---------- WebSocket Manager ----------
 class ConnectionManager:
@@ -1132,6 +1315,9 @@ async def get_print_data(numbers: str = Query("", description="Comma-separated o
                 "number": dto.number,
                 "total_price": dto.total_price,
                 "variants": items,
+                # Include QR code data for reliable local rendering
+                "qr_text": f"ORDER:{dto.number}",
+                "qr_png_b64": _qr_png_b64(f"ORDER:{dto.number}"),
             })
         except Exception:
             continue
