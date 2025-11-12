@@ -99,6 +99,8 @@ DEFAULT_PC_ID = os.environ.get("DEFAULT_PC_ID", next(iter(PCS.keys()), "pc-lab-1
 SHOPIFY_WEBHOOK_SECRET_DEFAULT = os.environ.get("SHOPIFY_WEBHOOK_SECRET", "").strip()
 SHOPIFY_WEBHOOK_SECRET_IRRAKIDS = os.environ.get("IRRAKIDS_SHOPIFY_WEBHOOK_SECRET", "").strip()
 SHOPIFY_WEBHOOK_SECRET_IRRANOVA = os.environ.get("IRRANOVA_SHOPIFY_WEBHOOK_SECRET", "").strip()
+IRRAKIDS_STORE_DOMAIN = os.environ.get("IRRAKIDS_STORE_DOMAIN", "").strip().lower()
+IRRANOVA_STORE_DOMAIN = os.environ.get("IRRANOVA_STORE_DOMAIN", "").strip().lower()
 AUTO_TAGGING_ENABLED = os.environ.get("AUTO_TAGGING_ENABLED", "0").strip() in ("1", "true", "TRUE", "yes", "on")
 AUTO_TAGGING_ENABLED_IRRAKIDS = os.environ.get("AUTO_TAGGING_ENABLED_IRRAKIDS", "").strip()
 AUTO_TAGGING_ENABLED_IRRANOVA = os.environ.get("AUTO_TAGGING_ENABLED_IRRANOVA", "").strip()
@@ -392,9 +394,19 @@ async def orders_create_webhook(
                     gid = None
                 if gid:
                     try:
-                        await shopify_graphql(mutation, {"id": gid, "tags": [matched_tag]}, store=store_key)
-                        status = "tagged"
-                        reason = None
+                        resp = await shopify_graphql(mutation, {"id": gid, "tags": [matched_tag]}, store=store_key)
+                        # Check userErrors for true success
+                        ue = (((resp or {}).get("tagsAdd") or {}).get("userErrors")) or []
+                        if ue:
+                            status = "skipped"
+                            reason = "shopify_user_errors"
+                            try:
+                                _log_order_tagger({"order_id": order_id_num, "store": store_key, "action": "tagsAdd", "userErrors": ue})
+                            except Exception:
+                                pass
+                        else:
+                            status = "tagged"
+                            reason = None
                     except Exception as e:
                         status = "skipped"
                         reason = "shopify_tags_add_failed"
@@ -1082,6 +1094,12 @@ async def append_note(order_gid: str, payload: AppendNotePayload, store: Optiona
 # ---------- Shopify Webhook (orders/update) ----------
 def _secret_for_shop(shop_domain: str) -> str:
     sd = (shop_domain or "").strip().lower()
+    # Exact domain match has priority
+    if IRRANOVA_STORE_DOMAIN and sd == IRRANOVA_STORE_DOMAIN and SHOPIFY_WEBHOOK_SECRET_IRRANOVA:
+        return SHOPIFY_WEBHOOK_SECRET_IRRANOVA
+    if IRRAKIDS_STORE_DOMAIN and sd == IRRAKIDS_STORE_DOMAIN and SHOPIFY_WEBHOOK_SECRET_IRRAKIDS:
+        return SHOPIFY_WEBHOOK_SECRET_IRRAKIDS
+    # Fallback to substring match
     if "irranova" in sd and SHOPIFY_WEBHOOK_SECRET_IRRANOVA:
         return SHOPIFY_WEBHOOK_SECRET_IRRANOVA
     if "irrakids" in sd and SHOPIFY_WEBHOOK_SECRET_IRRAKIDS:
@@ -1090,6 +1108,12 @@ def _secret_for_shop(shop_domain: str) -> str:
 
 def _store_key_for_shop_domain(shop_domain: str) -> Optional[str]:
     sd = (shop_domain or "").strip().lower()
+    # Prefer explicit domain mapping
+    if IRRANOVA_STORE_DOMAIN and sd == IRRANOVA_STORE_DOMAIN:
+        return "irranova"
+    if IRRAKIDS_STORE_DOMAIN and sd == IRRAKIDS_STORE_DOMAIN:
+        return "irrakids"
+    # Fallback by substring
     if "irranova" in sd:
         return "irranova"
     if "irrakids" in sd:
