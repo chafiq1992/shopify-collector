@@ -100,6 +100,10 @@ SHOPIFY_WEBHOOK_SECRET_DEFAULT = os.environ.get("SHOPIFY_WEBHOOK_SECRET", "").st
 SHOPIFY_WEBHOOK_SECRET_IRRAKIDS = os.environ.get("IRRAKIDS_SHOPIFY_WEBHOOK_SECRET", "").strip()
 SHOPIFY_WEBHOOK_SECRET_IRRANOVA = os.environ.get("IRRANOVA_SHOPIFY_WEBHOOK_SECRET", "").strip()
 AUTO_TAGGING_ENABLED = os.environ.get("AUTO_TAGGING_ENABLED", "0").strip() in ("1", "true", "TRUE", "yes", "on")
+AUTO_TAGGING_ENABLED_IRRAKIDS = os.environ.get("AUTO_TAGGING_ENABLED_IRRAKIDS", "").strip()
+AUTO_TAGGING_ENABLED_IRRANOVA = os.environ.get("AUTO_TAGGING_ENABLED_IRRANOVA", "").strip()
+ZONES_FILE_IRRAKIDS = os.environ.get("IRRAKIDS_ZONES_FILE", "").strip()
+ZONES_FILE_IRRANOVA = os.environ.get("IRRANOVA_ZONES_FILE", "").strip()
 
 # Optional dedupe/cutoff controls
 PC_TAG_MIN_CREATED_AT = os.environ.get("PC_TAG_MIN_CREATED_AT", "").strip()  # ISO8601 e.g., 2025-01-01T00:00:00Z
@@ -330,6 +334,7 @@ async def orders_create_webhook(
         raise HTTPException(status_code=401, detail="bad hmac")
 
     data = await request.json()
+    store_key = _store_key_for_shop_domain(x_shopify_shop_domain or "") or None
 
     # Extract shipping address
     shipping = data.get("shipping_address") or {}
@@ -355,7 +360,13 @@ async def orders_create_webhook(
 
     if geo.get("ok") and lat is not None and lng is not None:
         try:
-            zones = load_zones()
+            # Select per-store zones file if provided
+            zones_path = None
+            if (store_key or "") == "irranova" and ZONES_FILE_IRRANOVA:
+                zones_path = ZONES_FILE_IRRANOVA
+            elif (store_key or "") == "irrakids" and ZONES_FILE_IRRAKIDS:
+                zones_path = ZONES_FILE_IRRAKIDS
+            zones = load_zones(zones_path)
             match = find_zone_match(float(lng), float(lat), zones)
             if match and isinstance(match, dict):
                 matched_tag = (match.get("tag") or match.get("properties", {}).get("tag") or "").strip() or None
@@ -368,7 +379,7 @@ async def orders_create_webhook(
             if already_has:
                 status = "skipped"
                 reason = "already_tagged"
-            elif AUTO_TAGGING_ENABLED and order_id_num:
+            elif _is_auto_tagging_enabled_for_store(store_key) and order_id_num:
                 # GraphQL tagsAdd
                 mutation = """
                 mutation AddTag($id: ID!, $tags: [String!]!) {
@@ -381,7 +392,6 @@ async def orders_create_webhook(
                     gid = None
                 if gid:
                     try:
-                        store_key = _store_key_for_shop_domain(x_shopify_shop_domain or "") or None
                         await shopify_graphql(mutation, {"id": gid, "tags": [matched_tag]}, store=store_key)
                         status = "tagged"
                         reason = None
@@ -394,7 +404,8 @@ async def orders_create_webhook(
             else:
                 # Feature disabled, log would-be tag
                 status = "skipped"
-                reason = "feature_disabled" if not AUTO_TAGGING_ENABLED else "no_order_id"
+                enabled = _is_auto_tagging_enabled_for_store(store_key)
+                reason = "feature_disabled" if not enabled else "no_order_id"
         else:
             status = "skipped"
             reason = "no_zone"
@@ -414,7 +425,8 @@ async def orders_create_webhook(
         "status": status,
         "reason": reason,
         "shop": x_shopify_shop_domain,
-        "enabled": bool(AUTO_TAGGING_ENABLED),
+        "enabled": bool(_is_auto_tagging_enabled_for_store(store_key)),
+        "store": store_key,
     })
 
     # Do not block order processing
@@ -422,9 +434,15 @@ async def orders_create_webhook(
 
 # ---------- Order Tagger status endpoint ----------
 @app.get("/api/order-tagger/status")
-async def order_tagger_status():
+async def order_tagger_status(store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
     try:
-        zones = load_zones()
+        sk = (store or "").strip().lower() or None
+        zones_path = None
+        if sk == "irranova" and ZONES_FILE_IRRANOVA:
+            zones_path = ZONES_FILE_IRRANOVA
+        elif sk == "irrakids" and ZONES_FILE_IRRAKIDS:
+            zones_path = ZONES_FILE_IRRANOVA if False else ZONES_FILE_IRRAKIDS  # explicit
+        zones = load_zones(zones_path)
         feats = (zones.get("features") or [])
         summary = [{
             "name": ((f.get("properties") or {}).get("name")),
@@ -435,7 +453,8 @@ async def order_tagger_status():
         summary = []
     return {
         "ok": True,
-        "enabled": bool(AUTO_TAGGING_ENABLED),
+        "enabled": bool(_is_auto_tagging_enabled_for_store(sk)),
+        "store": (sk or "default"),
         "zones": summary,
     }
 
@@ -1082,6 +1101,17 @@ def _verify_shopify_hmac(raw_body: bytes, recv_hmac: str, secret: str) -> bool:
         return True
     calc = base64.b64encode(hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).digest()).decode()
     return hmac.compare_digest((recv_hmac or "").strip(), calc)
+
+def _is_auto_tagging_enabled_for_store(store_key: Optional[str]) -> bool:
+    sk = (store_key or "").strip().lower()
+    # Specific per-store override if explicitly set, else fall back to global flag
+    if sk == "irrakids" and AUTO_TAGGING_ENABLED_IRRAKIDS:
+        val = AUTO_TAGGING_ENABLED_IRRAKIDS
+        return val in ("1", "true", "TRUE", "yes", "on")
+    if sk == "irranova" and AUTO_TAGGING_ENABLED_IRRANOVA:
+        val = AUTO_TAGGING_ENABLED_IRRANOVA
+        return val in ("1", "true", "TRUE", "yes", "on")
+    return bool(AUTO_TAGGING_ENABLED)
 
 def _parse_iso8601(s: str) -> Optional[datetime]:
     try:

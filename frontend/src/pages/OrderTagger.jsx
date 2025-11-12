@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 
 export default function OrderTagger(){
-	const [status, setStatus] = useState({ ok: true, enabled: false, zones: [] });
+	const [statusIrrakids, setStatusIrrakids] = useState({ ok: true, enabled: false, zones: [], store: 'irrakids' });
+	const [statusIrranova, setStatusIrranova] = useState({ ok: true, enabled: false, zones: [], store: 'irranova' });
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState(null);
 
@@ -10,10 +11,14 @@ export default function OrderTagger(){
 		(async () => {
 			try {
 				setLoading(true);
-				const r = await fetch("/api/order-tagger/status");
-				const js = await r.json();
+				const [r1, r2] = await Promise.all([
+					fetch("/api/order-tagger/status?store=irrakids"),
+					fetch("/api/order-tagger/status?store=irranova"),
+				]);
+				const [js1, js2] = await Promise.all([r1.json(), r2.json()]);
 				if (!alive) return;
-				setStatus(js);
+				setStatusIrrakids(js1);
+				setStatusIrranova(js2);
 			} catch (e) {
 				if (!alive) return;
 				setError("Failed to load status");
@@ -52,14 +57,42 @@ export default function OrderTagger(){
 								</div>
 							</div>
 						</section>
-						<section className="mb-6">
+						<section className="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
 							<div className="rounded-xl border border-gray-200 bg-white p-4">
-								<h2 className="text-base font-semibold mb-3">Zones</h2>
-								{(status.zones || []).length === 0 ? (
+								<h2 className="text-base font-semibold mb-3">Irrakids</h2>
+								<div className="mb-2">
+									<span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${statusIrrakids.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-700'}`}>
+										{statusIrrakids.enabled ? 'ACTIVE' : 'INACTIVE'}
+									</span>
+								</div>
+								{(statusIrrakids.zones || []).length === 0 ? (
 									<div className="text-sm text-gray-600">No zones loaded.</div>
 								) : (
 									<ul className="text-sm">
-										{status.zones.map((z, i) => (
+										{statusIrrakids.zones.map((z, i) => (
+											<li key={i} className="flex items-center justify-between py-2 border-b last:border-b-0">
+												<div>
+													<div className="font-medium">{z.name || "Untitled zone"}</div>
+													<div className="text-gray-500">Geometry: {z.geometryType}</div>
+												</div>
+												<div className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 text-xs font-semibold">{z.tag}</div>
+											</li>
+										))}
+									</ul>
+								)}
+							</div>
+							<div className="rounded-xl border border-gray-200 bg-white p-4">
+								<h2 className="text-base font-semibold mb-3">Irranova</h2>
+								<div className="mb-2">
+									<span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${statusIrranova.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-700'}`}>
+										{statusIrranova.enabled ? 'ACTIVE' : 'INACTIVE'}
+									</span>
+								</div>
+								{(statusIrranova.zones || []).length === 0 ? (
+									<div className="text-sm text-gray-600">No zones loaded.</div>
+								) : (
+									<ul className="text-sm">
+										{statusIrranova.zones.map((z, i) => (
 											<li key={i} className="flex items-center justify-between py-2 border-b last:border-b-0">
 												<div>
 													<div className="font-medium">{z.name || "Untitled zone"}</div>
