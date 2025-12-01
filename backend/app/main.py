@@ -6,7 +6,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPExceptio
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import httpx
 import hmac, hashlib, base64
 from datetime import datetime, timezone
@@ -1377,6 +1377,29 @@ async def get_print_data(numbers: str = Query("", description="Comma-separated o
             continue
 
     return {"ok": True, "orders": out}
+
+# --------- SPA client-side routes (serve index.html) ---------
+@app.get("/order-lookup")
+async def _spa_order_lookup():
+    try:
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+        index_path = os.path.join(base_dir, "index.html")
+        if os.path.isfile(index_path):
+            return FileResponse(index_path)
+    except Exception:
+        pass
+    return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+@app.get("/order-tagger")
+async def _spa_order_tagger():
+    try:
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+        index_path = os.path.join(base_dir, "index.html")
+        if os.path.isfile(index_path):
+            return FileResponse(index_path)
+    except Exception:
+        pass
+    return JSONResponse({"detail": "Not Found"}, status_code=404)
 
 # --------- Static frontend (mounted last) ---------
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
