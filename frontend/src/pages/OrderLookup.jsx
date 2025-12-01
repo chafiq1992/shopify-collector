@@ -534,6 +534,19 @@ export default function OrderLookup(){
                         const next = { ...prev, variants: (prev.variants || []).map(v => (variantIds.has(v.id) ? ({ ...v, status: "fulfilled", unfulfilled_qty: 0 }) : v)) };
                         return next;
                       });
+                      // Update local FO data (set remainingQuantity=0 for selected ids and unselect)
+                      setFoData(prev => {
+                        try {
+                          const sel = new Set(prev.selectedLineItemIds);
+                          const updatedOrders = (prev.orders || []).map(grp => ({
+                            ...grp,
+                            lineItems: (grp.lineItems || []).map(li => sel.has(li.id) ? ({ ...li, remainingQuantity: 0 }) : li)
+                          }));
+                          return { ...prev, orders: updatedOrders, selectedLineItemIds: new Set() };
+                        } catch {
+                          return prev;
+                        }
+                      });
                       setFulfillDone(true);
                       setMessage("Fulfilled successfully");
                       try { setTimeout(()=>setMessage(null), 2000); } catch {}

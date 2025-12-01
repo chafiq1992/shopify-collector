@@ -392,7 +392,12 @@ export default function App(){
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === "order.tag_added" || msg.type === "order.tag_removed" || msg.type === "order.note_updated"){
+        if (
+          msg.type === "order.tag_added" ||
+          msg.type === "order.tag_removed" ||
+          msg.type === "order.note_updated" ||
+          msg.type === "order.fulfilled"
+        ){
           load();
         }
       } catch {}
