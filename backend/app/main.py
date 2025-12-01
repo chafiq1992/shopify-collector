@@ -1445,11 +1445,11 @@ async def get_overrides(
             return
 
     store_key = (store or "").strip().lower()
-    # For Irranova: always attempt live fetch on missing/incomplete; allow forcing via flag
-    if store_key == "irranova":
-        _fetch_live_for_store("irranova")
-    elif not store_key:
-        # If store unknown, try Irranova live fetch to enrich missing keys
+    # Attempt live enrichment for the requested store; if none provided, try both
+    if store_key:
+        _fetch_live_for_store(store_key)
+    else:
+        _fetch_live_for_store("irrakids")
         _fetch_live_for_store("irranova")
 
     return {"ok": True, "overrides": out}
