@@ -159,13 +159,11 @@ export default function OrderBrowser(){
     });
     // Fetch overrides when expanding
     try {
-      if (!overridesByNumber[order.number?.replace(/^#/, "")]){
-        const num = String(order.number || "").replace(/^#/, "");
-        API.fetchOverrides(num, store, false).then(js => {
-          const ov = (js.overrides || {})[num] || null;
-          setOverridesByNumber(prev => ({ ...prev, [num]: ov }));
-        }).catch(()=>{});
-      }
+      const num = String(order.number || "").replace(/^#/, "");
+      API.fetchOverrides(num, store, true).then(js => {
+        const ov = (js.overrides || {})[num] || null;
+        setOverridesByNumber(prev => ({ ...prev, [num]: ov }));
+      }).catch(()=>{});
     } catch {}
   }
 
@@ -199,6 +197,7 @@ export default function OrderBrowser(){
     const num = String(order.number || "");
     const numKey = num.replace(/^#/, "");
     const ov = overridesByNumber[numKey];
+    const shippingCity = (ov && ov.shippingAddress && ov.shippingAddress.city) || order.shipping_city || null;
 
     return (
       <div className="border border-gray-200 rounded-xl bg-white">
@@ -211,7 +210,7 @@ export default function OrderBrowser(){
             </div>
             <div className="text-sm text-gray-700 truncate">
               {order.customer || ov?.customer?.displayName || "—"}
-              {order.shipping_city && <span className="text-gray-400">{` · ${order.shipping_city}`}</span>}
+              {shippingCity && <span className="text-gray-400">{` · ${shippingCity}`}</span>}
             </div>
             <div className="mt-1 flex gap-1 flex-wrap">
               {(order.tags || []).map(t => (
@@ -229,9 +228,14 @@ export default function OrderBrowser(){
               <div className="text-sm text-gray-700">
                 {renderShipping(ov)}
               </div>
-              {ov?.phone && (
-                <div className="text-sm text-gray-600 mt-1">Phone: {ov.phone}</div>
-              )}
+              {(() => {
+                const phone =
+                  (ov && ov.shippingAddress && ov.shippingAddress.phone) ||
+                  (ov && ov.customer && ov.customer.phone) ||
+                  (ov && ov.phone) ||
+                  null;
+                return phone ? <div className="text-sm text-gray-600 mt-1">Phone: {phone}</div> : null;
+              })()}
             </div>
             {/* Items */}
             <div className="mt-3 grid sm:grid-cols-2 md:grid-cols-3 gap-2">
