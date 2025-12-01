@@ -1552,6 +1552,17 @@ async def _spa_order_tagger():
         pass
     return JSONResponse({"detail": "Not Found"}, status_code=404)
 
+@app.get("/order-browser")
+async def _spa_order_browser():
+    try:
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+        index_path = os.path.join(base_dir, "index.html")
+        if os.path.isfile(index_path):
+            return FileResponse(index_path)
+    except Exception:
+        pass
+    return JSONResponse({"detail": "Not Found"}, status_code=404)
+
 # --------- Static frontend (mounted last) ---------
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
 if os.path.isdir(STATIC_DIR):
