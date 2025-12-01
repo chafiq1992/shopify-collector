@@ -1096,8 +1096,20 @@ async def append_note(order_gid: str, payload: AppendNotePayload, store: Optiona
 
 
 # ---------- Fulfillment (fulfill all remaining quantities) ----------
+class FulfillSelectionItem(BaseModel):
+    id: str
+    quantity: int
+
+class FulfillSelectionGroup(BaseModel):
+    fulfillmentOrderId: str
+    fulfillmentOrderLineItems: List[FulfillSelectionItem]
+
+class FulfillRequest(BaseModel):
+    lineItemsByFulfillmentOrder: Optional[List[FulfillSelectionGroup]] = None
+    notifyCustomer: Optional[bool] = False
+
 @app.post("/api/orders/{order_gid:path}/fulfill")
-async def fulfill_order(order_gid: str, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+async def fulfill_order(order_gid: str, body: FulfillRequest, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
     # 1) Fetch fulfillment orders for the order and gather remaining quantities
     q = """
     query GetFO($id: ID!) {
@@ -1111,6 +1123,11 @@ async def fulfill_order(order_gid: str, store: Optional[str] = Query(None, descr
               nodes {
                 id
                 remainingQuantity
+                lineItem {
+                  id
+                  sku
+                  variant { id title }
+                }
               }
             }
           }
@@ -1121,22 +1138,37 @@ async def fulfill_order(order_gid: str, store: Optional[str] = Query(None, descr
     data = await shopify_graphql(q, {"id": order_gid}, store=store)
     order_node = data.get("order") or {}
     fo_nodes = ((order_node.get("fulfillmentOrders") or {}).get("nodes")) or []
-    items: list[dict[str, Any]] = []
-    for fo in fo_nodes:
-        try:
-            fo_id = fo.get("id")
-            for li in ((fo.get("lineItems") or {}).get("nodes") or []):
-                rem = int(li.get("remainingQuantity") or 0)
-                if rem > 0:
-                    items.append({
-                        "fulfillmentOrderId": fo_id,
-                        "fulfillmentOrderLineItemId": li.get("id"),
-                        "quantity": rem,
-                    })
-        except Exception:
-            continue
-    if not items:
-        return {"ok": True, "fulfilled": False, "reason": "no_remaining"}
+    groups_payload: List[Dict[str, Any]] = []
+    if body and body.lineItemsByFulfillmentOrder:
+        # Use explicit selections from the client
+        for g in (body.lineItemsByFulfillmentOrder or []):
+            try:
+                groups_payload.append({
+                    "fulfillmentOrderId": g.fulfillmentOrderId,
+                    "fulfillmentOrderLineItems": [{"id": it.id, "quantity": int(it.quantity)} for it in (g.fulfillmentOrderLineItems or []) if int(it.quantity) > 0],
+                })
+            except Exception:
+                continue
+        # Drop empty groups
+        groups_payload = [g for g in groups_payload if g.get("fulfillmentOrderLineItems")]
+        if not groups_payload:
+            return {"ok": False, "errors": [{"message": "No valid selections provided"}]}
+    else:
+        # Default: fulfill all remaining
+        for fo in fo_nodes:
+            try:
+                fo_id = fo.get("id")
+                items: List[Dict[str, Any]] = []
+                for li in ((fo.get("lineItems") or {}).get("nodes") or []):
+                    rem = int(li.get("remainingQuantity") or 0)
+                    if rem > 0:
+                        items.append({"id": li.get("id"), "quantity": rem})
+                if items:
+                    groups_payload.append({"fulfillmentOrderId": fo_id, "fulfillmentOrderLineItems": items})
+            except Exception:
+                continue
+        if not groups_payload:
+            return {"ok": True, "fulfilled": False, "reason": "no_remaining"}
     # 2) Create fulfillment for all remaining quantities
     mutation = """
     mutation Fulfill($fulfillment: FulfillmentV2Input!) {
@@ -1146,7 +1178,10 @@ async def fulfill_order(order_gid: str, store: Optional[str] = Query(None, descr
       }
     }
     """
-    payload = {"fulfillmentOrderLineItems": items}
+    payload = {
+        "lineItemsByFulfillmentOrder": groups_payload,
+        "notifyCustomer": bool(getattr(body, "notifyCustomer", False) if body else False),
+    }
     resp = await shopify_graphql(mutation, {"fulfillment": payload}, store=store)
     res = (resp.get("fulfillmentCreateV2") or {})
     ues = res.get("userErrors") or []
@@ -1159,6 +1194,53 @@ async def fulfill_order(order_gid: str, store: Optional[str] = Query(None, descr
     except Exception:
         pass
     return {"ok": True, "result": res}
+
+@app.get("/api/orders/{order_gid:path}/fulfillment-orders")
+async def get_fulfillment_orders(order_gid: str, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+    q = """
+    query GetFO($id: ID!) {
+      order(id: $id) {
+        id
+        fulfillmentOrders(first: 50) {
+          nodes {
+            id
+            status
+            lineItems(first: 100) {
+              nodes {
+                id
+                remainingQuantity
+                lineItem {
+                  id
+                  sku
+                  variant { id title }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    data = await shopify_graphql(q, {"id": order_gid}, store=store)
+    order_node = data.get("order") or {}
+    fo_nodes = ((order_node.get("fulfillmentOrders") or {}).get("nodes")) or []
+    out: List[Dict[str, Any]] = []
+    for fo in fo_nodes:
+        items = []
+        for li in ((fo.get("lineItems") or {}).get("nodes") or []):
+            try:
+                itm = {
+                    "id": li.get("id"),
+                    "remainingQuantity": int(li.get("remainingQuantity") or 0),
+                    "sku": (((li.get("lineItem") or {}) or {}).get("sku")),
+                    "variantId": ((((li.get("lineItem") or {}) or {}).get("variant") or {}) or {}).get("id"),
+                    "title": ((((li.get("lineItem") or {}) or {}).get("variant") or {}) or {}).get("title"),
+                }
+                items.append(itm)
+            except Exception:
+                continue
+        out.append({"id": fo.get("id"), "status": fo.get("status"), "lineItems": items})
+    return {"ok": True, "fulfillmentOrders": out}
 
 # ---------- Shopify Webhook (orders/update) ----------
 def _secret_for_shop(shop_domain: str) -> str:

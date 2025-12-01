@@ -50,6 +50,22 @@ const API = {
     if (!res.ok) throw new Error("Failed to fulfill order");
     return res.json();
   },
+  async fulfillWithSelection(orderId, store, lineItemsByFulfillmentOrder){
+    const qs = store ? `?store=${encodeURIComponent(store)}` : "";
+    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/fulfill${qs}`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ lineItemsByFulfillmentOrder }),
+    });
+    if (!res.ok) throw new Error("Failed to fulfill order");
+    return res.json();
+  },
+  async getFulfillmentOrders(orderId, store){
+    const qs = store ? `?store=${encodeURIComponent(store)}` : "";
+    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/fulfillment-orders${qs}`);
+    if (!res.ok) throw new Error("Failed to fetch fulfillment orders");
+    return res.json();
+  },
   async fetchRecentTags(store){
     // Reuse orders endpoint to gather recent tags (approximate suggestions)
     const params = new URLSearchParams({
@@ -101,6 +117,7 @@ export default function OrderLookup(){
   const [tagSuggestions, setTagSuggestions] = useState([]);
   const [tagQuery, setTagQuery] = useState("");
   const [showTagDropdown, setShowTagDropdown] = useState(false);
+  const [foData, setFoData] = useState({ orders: [], mapByVariant: {}, selectedLineItemIds: new Set() });
 
   const inputRef = useRef(null);
   useEffect(() => { try { inputRef.current?.focus(); } catch {} }, []);
@@ -127,6 +144,25 @@ export default function OrderLookup(){
           setOverrideInfo(ov || null);
         } catch {
           setOverrideInfo(null);
+        }
+        // Fetch fulfillment orders and preselect all line items by default
+        try {
+          const fo = await API.getFulfillmentOrders(found.id, store);
+          const byVar = {};
+          const sel = new Set();
+          (fo.fulfillmentOrders || []).forEach(g => {
+            (g.lineItems || []).forEach(li => {
+              const vid = (li.variantId || "").trim();
+              if (vid) {
+                byVar[vid] = byVar[vid] || [];
+                byVar[vid].push({ foId: g.id, id: li.id, remainingQuantity: li.remainingQuantity, sku: li.sku, title: li.title });
+                if (li.remainingQuantity > 0) sel.add(li.id);
+              }
+            });
+          });
+          setFoData({ orders: (fo.fulfillmentOrders || []), mapByVariant: byVar, selectedLineItemIds: sel });
+        } catch {
+          setFoData({ orders: [], mapByVariant: {}, selectedLineItemIds: new Set() });
         }
         // prefetch tag suggestions
         try {
@@ -309,6 +345,38 @@ export default function OrderLookup(){
                         <div className="flex-1 min-w-0">
                           <div className="text-sm font-medium">{v.title || v.sku || "Item"}</div>
                           <div className="text-xs text-gray-500">Qty: {v.unfulfilled_qty ?? v.qty}</div>
+                          {(() => {
+                            const list = foData.mapByVariant[v.id] || [];
+                            if (!list.length) return null;
+                            return (
+                              <div className="mt-2 border-t border-gray-200 pt-2">
+                                <div className="text-xs font-semibold mb-1">Fulfillment</div>
+                                <div className="space-y-1">
+                                  {list.map((li, idx) => {
+                                    const checked = foData.selectedLineItemIds.has(li.id);
+                                    return (
+                                      <label key={li.id} className="flex items-center gap-2 text-xs">
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          onChange={(e)=>{
+                                            setFoData(prev => {
+                                              const nextSel = new Set(prev.selectedLineItemIds);
+                                              if (e.target.checked) nextSel.add(li.id); else nextSel.delete(li.id);
+                                              return { ...prev, selectedLineItemIds: nextSel };
+                                            });
+                                          }}
+                                        />
+                                        <span className="flex-1 truncate">
+                                          {li.title || v.title || v.sku || "Item"} — remaining: {li.remainingQuantity}
+                                        </span>
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            );
+                          })()}
                         </div>
                         <span className={`text-[11px] px-2 py-0.5 rounded-full border ${
                           (v.status || "unknown") === "fulfilled" ? "bg-green-50 text-green-700 border-green-200" :
@@ -420,12 +488,50 @@ export default function OrderLookup(){
                   setFulfillBusy(true);
                   setError(null);
                   try {
-                    const res = await API.fulfill(order.id, store);
+                    // Build selection groups if there are any FO items
+                    let res;
+                    if (foData.orders && foData.orders.length > 0) {
+                      const selIds = foData.selectedLineItemIds;
+                      const groups = [];
+                      foData.orders.forEach(g => {
+                        const items = [];
+                        (g.lineItems || []).forEach(li => {
+                          if (selIds.has(li.id) && li.remainingQuantity > 0){
+                            items.push({ id: li.id, quantity: li.remainingQuantity });
+                          }
+                        });
+                        if (items.length > 0){
+                          groups.push({ fulfillmentOrderId: g.id, fulfillmentOrderLineItems: items });
+                        }
+                      });
+                      if (groups.length === 0){
+                        setError("Select at least one line item to fulfill.");
+                        setFulfillBusy(false);
+                        return;
+                      }
+                      res = await API.fulfillWithSelection(order.id, store, groups);
+                    } else {
+                      res = await API.fulfill(order.id, store);
+                    }
                     if (res && res.ok !== false){
-                      // Optimistically flip all items to fulfilled
+                      // Optimistically flip selected items to fulfilled
                       setOrder(prev => {
                         if (!prev) return prev;
-                        const next = { ...prev, variants: (prev.variants || []).map(v => ({ ...v, status: "fulfilled", unfulfilled_qty: 0 })) };
+                        if (!foData.orders || foData.orders.length === 0){
+                          const next = { ...prev, variants: (prev.variants || []).map(v => ({ ...v, status: "fulfilled", unfulfilled_qty: 0 })) };
+                          return next;
+                        }
+                        // Compute which variant ids were fulfilled from selected FO lines
+                        const variantIds = new Set();
+                        foData.orders.forEach(g => {
+                          (g.lineItems || []).forEach(li => {
+                            if (foData.selectedLineItemIds.has(li.id)){
+                              const vid = (li.variantId || "").trim();
+                              if (vid) variantIds.add(vid);
+                            }
+                          });
+                        });
+                        const next = { ...prev, variants: (prev.variants || []).map(v => (variantIds.has(v.id) ? ({ ...v, status: "fulfilled", unfulfilled_qty: 0 }) : v)) };
                         return next;
                       });
                       setFulfillDone(true);
