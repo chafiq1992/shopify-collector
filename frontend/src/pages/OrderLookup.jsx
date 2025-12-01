@@ -74,6 +74,7 @@ export default function OrderLookup(){
   const [newTag, setNewTag] = useState("");
   const [noteAppend, setNoteAppend] = useState("");
   const [message, setMessage] = useState(null);
+  const [overrideInfo, setOverrideInfo] = useState(null);
 
   const inputRef = useRef(null);
   useEffect(() => { try { inputRef.current?.focus(); } catch {} }, []);
@@ -89,8 +90,18 @@ export default function OrderLookup(){
       if (!found){
         setError("Order not found");
         setOrder(null);
+        setOverrideInfo(null);
       } else {
         setOrder(found);
+        // fetch enrichments (shipping/customer) best-effort
+        try {
+          const r = await fetch(`/api/overrides?orders=${encodeURIComponent(String(found.number).replace(/^#/, ""))}&store=${encodeURIComponent(store)}`);
+          const js = await r.json();
+          const ov = (js.overrides || {})[String(found.number).replace(/^#/, "")] || null;
+          setOverrideInfo(ov || null);
+        } catch {
+          setOverrideInfo(null);
+        }
       }
       // reflect in URL
       try {
@@ -225,6 +236,25 @@ export default function OrderLookup(){
                 <div className="text-lg font-semibold">{totalPrice}</div>
               </div>
             </div>
+            <div className="px-4 pb-2">
+              <div className="text-xs text-gray-500 mb-1">Customer & shipping</div>
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
+                <div className="font-medium">
+                  {(overrideInfo?.shippingAddress?.name || overrideInfo?.customer?.displayName || order.customer || "Unknown customer")}
+                </div>
+                <div className="text-gray-700">
+                  {overrideInfo?.shippingAddress?.address1 || null}{overrideInfo?.shippingAddress?.address2 ? `, ${overrideInfo?.shippingAddress?.address2}` : ""}
+                </div>
+                <div className="text-gray-700">
+                  {[overrideInfo?.shippingAddress?.city || order.shipping_city, overrideInfo?.shippingAddress?.zip].filter(Boolean).join(" ")}
+                </div>
+                {(overrideInfo?.shippingAddress?.phone || overrideInfo?.phone || overrideInfo?.customer?.phone) && (
+                  <div className="text-gray-700 mt-1">
+                    {overrideInfo?.shippingAddress?.phone || overrideInfo?.phone || overrideInfo?.customer?.phone}
+                  </div>
+                )}
+              </div>
+            </div>
             <div className="px-4 py-3">
               <div className="text-sm font-semibold mb-2">Items</div>
               <ul className="space-y-4">
@@ -232,9 +262,9 @@ export default function OrderLookup(){
                   <li key={i} className="py-2">
                     <div className="rounded-xl overflow-hidden border border-gray-200">
                       {v.image ? (
-                        <img src={v.image} alt="" className="w-full max-h-72 object-contain bg-white" />
+                        <img src={v.image} alt="" className="w-full max-h-96 object-contain bg-white" />
                       ) : (
-                        <div className="w-full h-48 rounded-md bg-gray-100 border-b border-gray-200" />
+                        <div className="w-full h-60 rounded-md bg-gray-100 border-b border-gray-200" />
                       )}
                       <div className="p-3 flex items-start justify-between gap-3">
                         <div className="flex-1 min-w-0">
@@ -251,22 +281,6 @@ export default function OrderLookup(){
                   </li>
                 ))}
               </ul>
-            </div>
-            <div className="px-4 py-3 border-t border-gray-100">
-              <div className="text-sm font-semibold mb-2">Note</div>
-              <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm whitespace-pre-wrap min-h-[44px]">{(order.note || "").trim() || <span className="text-gray-500">No note</span>}</div>
-              <div className="mt-2 flex items-center gap-2">
-                <input
-                  value={noteAppend}
-                  onChange={(e)=>setNoteAppend(e.target.value)}
-                  placeholder="Add a comment (appends to note)"
-                  className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2"
-                />
-                <button
-                  onClick={handleAppendNote}
-                  className="px-3 py-2 rounded-lg bg-gray-900 text-white text-sm font-semibold active:scale-[.98]"
-                >Add</button>
-              </div>
             </div>
             <div className="px-4 py-3 border-t border-gray-100">
               <div className="text-sm font-semibold mb-2">Tags</div>
@@ -296,6 +310,46 @@ export default function OrderLookup(){
                   onClick={handleAddTag}
                   className="px-3 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold active:scale-[.98]"
                 >Add tag</button>
+              </div>
+            </div>
+            <div className="px-4 py-3 border-t border-gray-100">
+              <div className="text-sm font-semibold mb-2">Comments</div>
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm min-h-[44px]">
+                {(() => {
+                  const text = (order.note || "").trim();
+                  if (!text) return <span className="text-gray-500">No comments</span>;
+                  const lines = text.split(/\r?\n/).filter(l => l && l.trim());
+                  return (
+                    <ul className="list-disc pl-5 space-y-1">
+                      {lines.map((l, i) => (<li key={i}>{l}</li>))}
+                    </ul>
+                  );
+                })()}
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <input
+                  value={noteAppend}
+                  onChange={(e)=>setNoteAppend(e.target.value)}
+                  placeholder="Write a comment"
+                  className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2"
+                />
+                <button
+                  onClick={handleAppendNote}
+                  className="px-3 py-2 rounded-lg bg-gray-900 text-white text-sm font-semibold active:scale-[.98]"
+                >Post</button>
+              </div>
+            </div>
+            <div className="px-4 py-3 border-t border-gray-100">
+              <div className="text-sm font-semibold mb-2">Timeline</div>
+              <div className="text-sm text-gray-700">
+                <div className="flex items-center justify-between py-1">
+                  <span className="text-gray-500">Created</span>
+                  <span>{(() => { try { return order.created_at ? new Date(order.created_at).toLocaleString() : "—"; } catch { return order.created_at || "—"; } })()}</span>
+                </div>
+                <div className="flex items-center justify-between py-1">
+                  <span className="text-gray-500">Current tags</span>
+                  <span className="truncate max-w-[60%] text-right">{(order.tags || []).join(", ") || "—"}</span>
+                </div>
               </div>
             </div>
           </div>
