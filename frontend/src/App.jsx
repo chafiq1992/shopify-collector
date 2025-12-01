@@ -7,6 +7,7 @@ const OrderCard = React.lazy(() => import('./components/OrderCard.jsx'));
 const PresetSettingsModal = React.lazy(() => import('./components/PresetSettingsModal.jsx'));
 const ProfilePickerModal = React.lazy(() => import('./components/ProfilePickerModal.jsx'));
 const OrderTaggerPage = React.lazy(() => import('./pages/OrderTagger.jsx'));
+const OrderLookupPage = React.lazy(() => import('./pages/OrderLookup.jsx'));
 
 // Types (JSDoc only)
 /**
@@ -496,6 +497,13 @@ export default function App(){
       return (
         <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
           <OrderTaggerPage />
+        </Suspense>
+      );
+    }
+    if (typeof location !== 'undefined' && String(location.pathname || '').trim() === '/order-lookup'){
+      return (
+        <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
+          <OrderLookupPage />
         </Suspense>
       );
     }
