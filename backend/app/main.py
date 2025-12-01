@@ -1095,6 +1095,71 @@ async def append_note(order_gid: str, payload: AppendNotePayload, store: Optiona
     return {"ok": True, "result": data2}
 
 
+# ---------- Fulfillment (fulfill all remaining quantities) ----------
+@app.post("/api/orders/{order_gid:path}/fulfill")
+async def fulfill_order(order_gid: str, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+    # 1) Fetch fulfillment orders for the order and gather remaining quantities
+    q = """
+    query GetFO($id: ID!) {
+      order(id: $id) {
+        id
+        fulfillmentOrders(first: 50) {
+          nodes {
+            id
+            status
+            lineItems(first: 100) {
+              nodes {
+                id
+                remainingQuantity
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    data = await shopify_graphql(q, {"id": order_gid}, store=store)
+    order_node = data.get("order") or {}
+    fo_nodes = ((order_node.get("fulfillmentOrders") or {}).get("nodes")) or []
+    items: list[dict[str, Any]] = []
+    for fo in fo_nodes:
+        try:
+            fo_id = fo.get("id")
+            for li in ((fo.get("lineItems") or {}).get("nodes") or []):
+                rem = int(li.get("remainingQuantity") or 0)
+                if rem > 0:
+                    items.append({
+                        "fulfillmentOrderId": fo_id,
+                        "fulfillmentOrderLineItemId": li.get("id"),
+                        "quantity": rem,
+                    })
+        except Exception:
+            continue
+    if not items:
+        return {"ok": True, "fulfilled": False, "reason": "no_remaining"}
+    # 2) Create fulfillment for all remaining quantities
+    mutation = """
+    mutation Fulfill($fulfillment: FulfillmentV2Input!) {
+      fulfillmentCreateV2(fulfillment: $fulfillment) {
+        fulfillment { id status }
+        userErrors { field message }
+      }
+    }
+    """
+    payload = {"fulfillmentOrderLineItems": items}
+    resp = await shopify_graphql(mutation, {"fulfillment": payload}, store=store)
+    res = (resp.get("fulfillmentCreateV2") or {})
+    ues = res.get("userErrors") or []
+    if ues:
+        # Return errors but 200 to surface in UI
+        return {"ok": False, "errors": ues}
+    # Notify clients best-effort
+    try:
+        await manager.broadcast({"type": "order.fulfilled", "id": order_gid})
+    except Exception:
+        pass
+    return {"ok": True, "result": res}
+
 # ---------- Shopify Webhook (orders/update) ----------
 def _secret_for_shop(shop_domain: str) -> str:
     sd = (shop_domain or "").strip().lower()

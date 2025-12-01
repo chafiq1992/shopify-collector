@@ -41,6 +41,27 @@ const API = {
     });
     if (!res.ok) throw new Error("Failed to update note");
   },
+  async fulfill(orderId, store){
+    const qs = store ? `?store=${encodeURIComponent(store)}` : "";
+    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/fulfill${qs}`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+    });
+    if (!res.ok) throw new Error("Failed to fulfill order");
+    return res.json();
+  },
+  async fetchRecentTags(store){
+    // Reuse orders endpoint to gather recent tags (approximate suggestions)
+    const params = new URLSearchParams({
+      limit: "50",
+      status_filter: "all",
+      store: (store || "").trim(),
+    }).toString();
+    const res = await fetch(`/api/orders?${params}`);
+    if (!res.ok) throw new Error("Failed to fetch tags");
+    const js = await res.json();
+    return js.tags || [];
+  }
 };
 
 export default function OrderLookup(){
@@ -75,6 +96,11 @@ export default function OrderLookup(){
   const [noteAppend, setNoteAppend] = useState("");
   const [message, setMessage] = useState(null);
   const [overrideInfo, setOverrideInfo] = useState(null);
+  const [fulfillBusy, setFulfillBusy] = useState(false);
+  const [fulfillDone, setFulfillDone] = useState(false);
+  const [tagSuggestions, setTagSuggestions] = useState([]);
+  const [tagQuery, setTagQuery] = useState("");
+  const [showTagDropdown, setShowTagDropdown] = useState(false);
 
   const inputRef = useRef(null);
   useEffect(() => { try { inputRef.current?.focus(); } catch {} }, []);
@@ -102,6 +128,13 @@ export default function OrderLookup(){
         } catch {
           setOverrideInfo(null);
         }
+        // prefetch tag suggestions
+        try {
+          const all = await API.fetchRecentTags(store);
+          setTagSuggestions(all);
+        } catch {
+          setTagSuggestions([]);
+        }
       }
       // reflect in URL
       try {
@@ -124,8 +157,8 @@ export default function OrderLookup(){
       setNewTag("");
       setMessage("Tag added");
       try { setTimeout(()=>setMessage(null), 1400); } catch {}
-      // refresh
-      await doSearch(order.number);
+      // Optimistic update
+      setOrder(prev => prev ? ({ ...prev, tags: Array.from(new Set([...(prev.tags || []), tag])) }) : prev);
     } catch (e){
       setError(e?.message || "Failed to add tag");
     }
@@ -136,7 +169,7 @@ export default function OrderLookup(){
       await API.removeTag(order.id, tag, store);
       setMessage("Tag removed");
       try { setTimeout(()=>setMessage(null), 1400); } catch {}
-      await doSearch(order.number);
+      setOrder(prev => prev ? ({ ...prev, tags: (prev.tags || []).filter(t => t !== tag) }) : prev);
     } catch (e){
       setError(e?.message || "Failed to remove tag");
     }
@@ -149,7 +182,7 @@ export default function OrderLookup(){
       setNoteAppend("");
       setMessage("Note updated");
       try { setTimeout(()=>setMessage(null), 1400); } catch {}
-      await doSearch(order.number);
+      setOrder(prev => prev ? ({ ...prev, note: ((prev.note || "").trim() ? `${(prev.note || "").trim()}\n${append}` : append) }) : prev);
     } catch (e){
       setError(e?.message || "Failed to update note");
     }
@@ -158,6 +191,12 @@ export default function OrderLookup(){
   const totalPrice = useMemo(() => {
     try { return Number(order?.total_price || 0).toFixed(2); } catch { return String(order?.total_price || 0); }
   }, [order]);
+
+  function filteredSuggestions(){
+    const q = (tagQuery || newTag || "").trim().toLowerCase();
+    if (!q) return tagSuggestions.slice(0, 20);
+    return (tagSuggestions || []).filter(t => String(t).toLowerCase().includes(q)).slice(0, 20);
+  }
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900">
@@ -302,15 +341,31 @@ export default function OrderLookup(){
               <div className="mt-2 flex items-center gap-2">
                 <input
                   value={newTag}
-                  onChange={(e)=>setNewTag(e.target.value)}
+                  onChange={(e)=>{ setNewTag(e.target.value); setTagQuery(e.target.value); setShowTagDropdown(true); }}
                   placeholder="Add a tag"
                   className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2"
+                  onFocus={()=>{ setShowTagDropdown(true); }}
+                  onBlur={()=>{ setTimeout(()=>setShowTagDropdown(false), 150); }}
                 />
                 <button
                   onClick={handleAddTag}
                   className="px-3 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold active:scale-[.98]"
                 >Add tag</button>
               </div>
+              {showTagDropdown && filteredSuggestions().length > 0 && (
+                <div className="mt-1 border border-gray-200 rounded-lg bg-white shadow-sm max-h-56 overflow-auto text-sm">
+                  {filteredSuggestions().map((s, i) => (
+                    <button
+                      key={`${s}-${i}`}
+                      onMouseDown={(e)=>{ e.preventDefault(); }}
+                      onClick={()=>{ setNewTag(s); setShowTagDropdown(false); }}
+                      className="w-full text-left px-3 py-2 hover:bg-gray-50"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="px-4 py-3 border-t border-gray-100">
               <div className="text-sm font-semibold mb-2">Comments</div>
@@ -361,18 +416,33 @@ export default function OrderLookup(){
             <div className="grid grid-cols-1 gap-2">
               <button
                 onClick={async ()=>{
+                  if (fulfillBusy || fulfillDone) return;
+                  setFulfillBusy(true);
+                  setError(null);
                   try {
-                    await API.addTag(order.id, "pc", store);
-                    setMessage("Marked as fulfilled (pc)");
-                    try { setTimeout(()=>setMessage(null), 1500); } catch {}
-                    await doSearch(order.number);
+                    const res = await API.fulfill(order.id, store);
+                    if (res && res.ok !== false){
+                      // Optimistically flip all items to fulfilled
+                      setOrder(prev => {
+                        if (!prev) return prev;
+                        const next = { ...prev, variants: (prev.variants || []).map(v => ({ ...v, status: "fulfilled", unfulfilled_qty: 0 })) };
+                        return next;
+                      });
+                      setFulfillDone(true);
+                      setMessage("Fulfilled successfully");
+                      try { setTimeout(()=>setMessage(null), 2000); } catch {}
+                    } else {
+                      setError(`Fulfillment failed: ${((res && res.errors && res.errors[0] && res.errors[0].message) || "Unknown error")}`);
+                    }
                   } catch (e){
-                    setError(e?.message || "Failed to mark fulfilled");
+                    setError(e?.message || "Failed to fulfill");
+                  } finally {
+                    setFulfillBusy(false);
                   }
                 }}
-                className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white text-sm bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm"
+                className={`flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white text-sm active:scale-[.98] shadow-sm ${fulfillDone ? 'bg-green-700' : 'bg-green-600 hover:bg-green-700'}`}
               >
-                <span className="font-semibold">Fulfill</span>
+                <span className="font-semibold">{fulfillDone ? 'Fulfilled' : (fulfillBusy ? 'Fulfilling…' : 'Fulfill')}</span>
               </button>
             </div>
           </div>
