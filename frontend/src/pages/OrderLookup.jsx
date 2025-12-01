@@ -184,7 +184,7 @@ export default function OrderLookup(){
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-4 py-4 pb-24">
+      <main className="max-w-3xl mx-auto px-4 py-4 pb-28">
         {loading && (
           <div className="text-gray-600">Loading…</div>
         )}
@@ -199,7 +199,23 @@ export default function OrderLookup(){
         )}
         {!loading && order && (
           <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-200 flex items-baseline justify-between">
+            <div className="px-4 pt-4">
+              <div className="text-[11px] text-gray-500 flex items-center justify-between">
+                <span>Sales channel: {order.sales_channel || "—"}</span>
+                <span>{(() => {
+                  try {
+                    if (!order.created_at) return "—";
+                    const d = new Date(order.created_at);
+                    return d.toLocaleString();
+                  } catch { return order.created_at || "—"; }
+                })()}</span>
+              </div>
+              <div className="mt-1 text-sm text-gray-700">
+                <span className="font-medium">{order.customer || "Unknown customer"}</span>
+                {order.shipping_city ? <span className="text-gray-500"> • {order.shipping_city}</span> : null}
+              </div>
+            </div>
+            <div className="px-4 py-3 border-t border-gray-100 flex items-baseline justify-between">
               <div>
                 <div className="text-xs text-gray-500">Order</div>
                 <div className="text-lg font-semibold">{order.number}</div>
@@ -211,23 +227,27 @@ export default function OrderLookup(){
             </div>
             <div className="px-4 py-3">
               <div className="text-sm font-semibold mb-2">Items</div>
-              <ul className="divide-y divide-gray-100">
+              <ul className="space-y-4">
                 {(order.variants || []).map((v, i) => (
-                  <li key={i} className="py-2 flex items-start gap-3">
-                    {v.image ? (
-                      <img src={v.image} alt="" className="w-12 h-12 rounded-md object-cover border border-gray-200" />
-                    ) : (
-                      <div className="w-12 h-12 rounded-md bg-gray-100 border border-gray-200" />
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium truncate">{v.title || v.sku || "Item"}</div>
-                      <div className="text-xs text-gray-500">Qty: {v.unfulfilled_qty ?? v.qty}</div>
+                  <li key={i} className="py-2">
+                    <div className="rounded-xl overflow-hidden border border-gray-200">
+                      {v.image ? (
+                        <img src={v.image} alt="" className="w-full max-h-72 object-contain bg-white" />
+                      ) : (
+                        <div className="w-full h-48 rounded-md bg-gray-100 border-b border-gray-200" />
+                      )}
+                      <div className="p-3 flex items-start justify-between gap-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium">{v.title || v.sku || "Item"}</div>
+                          <div className="text-xs text-gray-500">Qty: {v.unfulfilled_qty ?? v.qty}</div>
+                        </div>
+                        <span className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                          (v.status || "unknown") === "fulfilled" ? "bg-green-50 text-green-700 border-green-200" :
+                          (v.status || "unknown") === "unfulfilled" ? "bg-yellow-50 text-yellow-800 border-yellow-200" :
+                          "bg-gray-50 text-gray-700 border-gray-200"
+                        }`}>{v.status || "unknown"}</span>
+                      </div>
                     </div>
-                    <span className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                      (v.status || "unknown") === "fulfilled" ? "bg-green-50 text-green-700 border-green-200" :
-                      (v.status || "unknown") === "unfulfilled" ? "bg-yellow-50 text-yellow-800 border-yellow-200" :
-                      "bg-gray-50 text-gray-700 border-gray-200"
-                    }`}>{v.status || "unknown"}</span>
                   </li>
                 ))}
               </ul>
@@ -281,6 +301,29 @@ export default function OrderLookup(){
           </div>
         )}
       </main>
+      {!!order && (
+        <div className="fixed bottom-0 inset-x-0 z-40 border-t border-gray-200 bg-white/90 backdrop-blur">
+          <div className="max-w-3xl mx-auto px-4 py-3">
+            <div className="grid grid-cols-1 gap-2">
+              <button
+                onClick={async ()=>{
+                  try {
+                    await API.addTag(order.id, "pc", store);
+                    setMessage("Marked as fulfilled (pc)");
+                    try { setTimeout(()=>setMessage(null), 1500); } catch {}
+                    await doSearch(order.number);
+                  } catch (e){
+                    setError(e?.message || "Failed to mark fulfilled");
+                  }
+                }}
+                className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white text-sm bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm"
+              >
+                <span className="font-semibold">Fulfill</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

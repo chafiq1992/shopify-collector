@@ -590,6 +590,7 @@ class OrderDTO(BaseModel):
     number: str
     customer: Optional[str] = None
     shipping_city: Optional[str] = None
+    sales_channel: Optional[str] = None
     tags: List[str] = []
     note: Optional[str] = None
     variants: List[OrderVariant] = []
@@ -728,6 +729,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         number=node["name"],
         customer=(node.get("customer") or {}).get("displayName"),
         shipping_city=((node.get("shippingAddress") or {}) or {}).get("city"),
+        sales_channel=node.get("sourceName"),
         tags=node.get("tags") or [],
         note=node.get("note"),
         variants=variants,
@@ -812,6 +814,7 @@ async def list_orders(
                 id
                 name
                 createdAt
+                sourceName
                 tags
                 note
                 currentTotalPriceSet { shopMoney { amount currencyCode } }
@@ -849,6 +852,7 @@ async def list_orders(
                 id
                 name
                 createdAt
+                sourceName
                 tags
                 note
                 shippingAddress { city }
