@@ -1,7 +1,8 @@
 import os
 import re
 import json
-from typing import Dict, Any, Optional, Tuple
+import unicodedata
+from typing import Dict, Any, Optional, Tuple, List
 from time import time as _now
 import httpx
 
@@ -17,13 +18,21 @@ def _normalize_spaces(text: str) -> str:
 	except Exception:
 		return (text or "").strip()
 
+def _strip_diacritics(text: str) -> str:
+	try:
+		nfkd = unicodedata.normalize("NFKD", text)
+		return "".join([c for c in nfkd if not unicodedata.combining(c)])
+	except Exception:
+		return text
+
 def _apply_city_alias(city: str, alias_map: Optional[Dict[str, str]] = None) -> str:
-	clean = _normalize_spaces(city).lower()
+	clean = _strip_diacritics(_normalize_spaces(city)).lower()
 	if not alias_map:
 		return city.strip()
 	try:
 		for k, v in (alias_map or {}).items():
-			if clean == (k or "").strip().lower():
+			key_norm = _strip_diacritics(_normalize_spaces(k)).lower()
+			if clean == key_norm:
 				return (v or "").strip()
 	except Exception:
 		pass
@@ -67,10 +76,12 @@ async def geocode_order_address(
 	api_key: Optional[str] = None,
 	region: str = "ma",
 	alias_map: Optional[Dict[str, str]] = None,
+	bounds: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None,
+	country: str = "Morocco",
 ) -> Dict[str, Any]:
 	"""
 	Attempt to geocode an order using Google Maps Geocoding.
-	Builds a full address string then falls back to city-only.
+	Builds multiple candidate strings (full, city+province, city, zip), includes diacritic-stripped variants, and uses cache per candidate.
 	Returns a dict:
 	{
 	  "ok": bool,
@@ -87,21 +98,41 @@ async def geocode_order_address(
 		return {"ok": False, "address_string": "", "lat": None, "lng": None, "corrected_city": None, "raw": None, "reason": "no_api_key"}
 
 	normalized_city = _apply_city_alias(_normalize_spaces(city or ""), alias_map=alias_map)
-	addr_full = _join_non_empty([_normalize_spaces(address1 or ""), _normalize_spaces(address2 or ""), normalized_city, _normalize_spaces(province or ""), _normalize_spaces(zip_code or ""), "Morocco"])
-	addr_city_only = _join_non_empty([normalized_city, "Morocco"])
+	norm_city_no_diac = _strip_diacritics(normalized_city)
+	norm_province = _normalize_spaces(province or "")
+	norm_zip = _normalize_spaces(zip_code or "")
+	norm_addr1 = _normalize_spaces(address1 or "")
+	norm_addr2 = _normalize_spaces(address2 or "")
+	country_val = _normalize_spaces(country or "Morocco")
 
-	# Cache keys
-	cache_key_full = f"GGEOCODE|{region}|{addr_full.lower()}"
-	cache_key_city = f"GGEOCODE|{region}|{addr_city_only.lower()}"
+	candidates: List[str] = []
+	# Full
+	candidates.append(_join_non_empty([norm_addr1, norm_addr2, normalized_city, norm_province, norm_zip, country_val]))
+	# City + province + country
+	candidates.append(_join_non_empty([normalized_city, norm_province, country_val]))
+	# City + country
+	candidates.append(_join_non_empty([normalized_city, country_val]))
+	# Zip + country
+	if norm_zip:
+		candidates.append(_join_non_empty([norm_zip, country_val]))
+	# Diacritic-stripped variants
+	if norm_city_no_diac.lower() != normalized_city.lower():
+		candidates.append(_join_non_empty([norm_addr1, norm_addr2, norm_city_no_diac, norm_province, norm_zip, country_val]))
+		candidates.append(_join_non_empty([norm_city_no_diac, norm_province, country_val]))
+		candidates.append(_join_non_empty([norm_city_no_diac, country_val]))
 
-	# Try cache
-	cached = _cache_get(cache_key_full)
-	if cached is not None:
-		return cached
+	def _cache_key(addr: str) -> str:
+		return f"GGEOCODE|{region}|{addr.lower()}"
 
 	async def _call(addr: str) -> Dict[str, Any]:
 		url = "https://maps.googleapis.com/maps/api/geocode/json"
 		params = {"address": addr, "region": region, "key": key}
+		if bounds:
+			try:
+				sw, ne = bounds
+				params["bounds"] = f"{sw[0]},{sw[1]}|{ne[0]},{ne[1]}"
+			except Exception:
+				pass
 		async with httpx.AsyncClient(timeout=30) as client:
 			r = await client.get(url, params=params)
 			r.raise_for_status()
@@ -116,7 +147,6 @@ async def geocode_order_address(
 			loc = ((best.get("geometry") or {}).get("location") or {})
 			lat = loc.get("lat")
 			lng = loc.get("lng")
-			# Prefer city-like components
 			candidates = {"locality": None, "administrative_area_level_3": None, "administrative_area_level_2": None}
 			for comp in (best.get("address_components") or []):
 				types = comp.get("types") or []
@@ -134,36 +164,32 @@ async def geocode_order_address(
 		except Exception:
 			return (None, None, None)
 
-	# Try full address
-	try:
-		js = await _call(addr_full)
-		status = (js.get("status") or "").upper()
-		if status == "OK":
-			lat, lng, corrected = _extract_best(js)
-			resp = {"ok": True, "address_string": addr_full, "lat": lat, "lng": lng, "corrected_city": corrected, "raw": js, "reason": None}
-			_cache_set(cache_key_full, resp)
-			return resp
-	except Exception:
-		# fall through
-		pass
+	for cand in candidates:
+		if not cand:
+			continue
+		ck = _cache_key(cand)
+		cached = _cache_get(ck)
+		if cached is not None:
+			if cached.get("ok"):
+				return cached
+			else:
+				continue
+		try:
+			js = await _call(cand)
+			status = (js.get("status") or "").upper()
+			if status == "OK":
+				lat, lng, corrected = _extract_best(js)
+				resp = {"ok": True, "address_string": cand, "lat": lat, "lng": lng, "corrected_city": corrected, "raw": js, "reason": None}
+				_cache_set(ck, resp)
+				return resp
+			else:
+				resp = {"ok": False, "address_string": cand, "lat": None, "lng": None, "corrected_city": None, "raw": js, "reason": status.lower() if status else "geocode_failed"}
+				_cache_set(ck, resp)
+		except Exception:
+			resp = {"ok": False, "address_string": cand, "lat": None, "lng": None, "corrected_city": None, "raw": None, "reason": "geocode_failed"}
+			_cache_set(ck, resp)
+			continue
 
-	# Fallback: city-only
-	cached_city = _cache_get(cache_key_city)
-	if cached_city is not None:
-		return cached_city
-	try:
-		js2 = await _call(addr_city_only)
-		status2 = (js2.get("status") or "").upper()
-		if status2 == "OK":
-			lat, lng, corrected = _extract_best(js2)
-			resp2 = {"ok": True, "address_string": addr_city_only, "lat": lat, "lng": lng, "corrected_city": corrected, "raw": js2, "reason": None}
-			_cache_set(cache_key_city, resp2)
-			return resp2
-		reason = status2.lower() if status2 else "geocode_failed"
-		resp3 = {"ok": False, "address_string": addr_city_only, "lat": None, "lng": None, "corrected_city": None, "raw": js2, "reason": reason}
-		_cache_set(cache_key_city, resp3)
-		return resp3
-	except Exception as e:
-		return {"ok": False, "address_string": addr_city_only, "lat": None, "lng": None, "corrected_city": None, "raw": None, "reason": "geocode_failed"}
+	return {"ok": False, "address_string": "", "lat": None, "lng": None, "corrected_city": None, "raw": None, "reason": "geocode_failed"}
 
 

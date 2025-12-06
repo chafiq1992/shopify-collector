@@ -106,6 +106,9 @@ AUTO_TAGGING_ENABLED_IRRAKIDS = os.environ.get("AUTO_TAGGING_ENABLED_IRRAKIDS", 
 AUTO_TAGGING_ENABLED_IRRANOVA = os.environ.get("AUTO_TAGGING_ENABLED_IRRANOVA", "").strip()
 ZONES_FILE_IRRAKIDS = os.environ.get("IRRAKIDS_ZONES_FILE", "").strip()
 ZONES_FILE_IRRANOVA = os.environ.get("IRRANOVA_ZONES_FILE", "").strip()
+ADDRESS_ALIAS_FILE = os.environ.get("ADDRESS_ALIAS_FILE", "").strip()
+GEO_BOUNDS_SW = os.environ.get("GEO_BOUNDS_SW", "-13.5,20.5").strip()
+GEO_BOUNDS_NE = os.environ.get("GEO_BOUNDS_NE", "-0.5,36.1").strip()
 
 # Optional dedupe/cutoff controls
 PC_TAG_MIN_CREATED_AT = os.environ.get("PC_TAG_MIN_CREATED_AT", "").strip()  # ISO8601 e.g., 2025-01-01T00:00:00Z
@@ -347,7 +350,9 @@ async def orders_create_webhook(
     zip_code = _normalize_spaces((shipping.get("zip") or shipping.get("postal_code") or ""))
 
     # Build and geocode (with fallback to city-only)
-    geo = await geocode_order_address(addr1, addr2, city_in, province, zip_code, api_key=None, region="ma", alias_map=None)
+    aliases = _load_address_aliases()
+    bounds = _parse_bounds()
+    geo = await geocode_order_address(addr1, addr2, city_in, province, zip_code, api_key=None, region="ma", alias_map=aliases, bounds=bounds, country="Morocco")
 
     order_id_num = data.get("id")
     order_name = (data.get("name") or "").strip()
@@ -1287,6 +1292,38 @@ def _is_auto_tagging_enabled_for_store(store_key: Optional[str]) -> bool:
         val = AUTO_TAGGING_ENABLED_IRRANOVA
         return val in ("1", "true", "TRUE", "yes", "on")
     return bool(AUTO_TAGGING_ENABLED)
+
+@lru_cache(maxsize=1)
+def _load_address_aliases() -> Dict[str, str]:
+    path = (ADDRESS_ALIAS_FILE or "").strip()
+    if not path:
+        return {}
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    # Normalize keys/values to strings
+                    out = {}
+                    for k, v in data.items():
+                        try:
+                            out[str(k)] = str(v)
+                        except Exception:
+                            continue
+                    return out
+    except Exception:
+        pass
+    return {}
+
+def _parse_bounds() -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    try:
+        sw_parts = [float(x) for x in GEO_BOUNDS_SW.split(",")]
+        ne_parts = [float(x) for x in GEO_BOUNDS_NE.split(",")]
+        if len(sw_parts) == 2 and len(ne_parts) == 2:
+            return ((sw_parts[0], sw_parts[1]), (ne_parts[0], ne_parts[1]))
+    except Exception:
+        return None
+    return None
 
 def _parse_iso8601(s: str) -> Optional[datetime]:
     try:
