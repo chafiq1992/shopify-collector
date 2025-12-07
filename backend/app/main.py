@@ -349,10 +349,32 @@ async def orders_create_webhook(
     province = _normalize_spaces((shipping.get("province") or shipping.get("province_code") or ""))
     zip_code = _normalize_spaces((shipping.get("zip") or shipping.get("postal_code") or ""))
 
-    # Build and geocode (with fallback to city-only)
+    # Build and geocode (with fallback to city-only). Prefer Shopify-provided coords from the
+    # "View map" link so we avoid calling Google Maps Geocoding when lat/lng are already present.
     aliases = _load_address_aliases()
     bounds = _parse_bounds()
-    geo = await geocode_order_address(addr1, addr2, city_in, province, zip_code, api_key=None, region="ma", alias_map=aliases, bounds=bounds, country="Morocco")
+    geo = None
+
+    lat_from_shopify = shipping.get("latitude")
+    lng_from_shopify = shipping.get("longitude")
+    try:
+        if lat_from_shopify is not None and lng_from_shopify is not None:
+            lat_val = float(lat_from_shopify)
+            lng_val = float(lng_from_shopify)
+            geo = {
+                "ok": True,
+                "address_string": ", ".join([p for p in [addr1, addr2, city_in, province, zip_code] if p]),
+                "lat": lat_val,
+                "lng": lng_val,
+                "corrected_city": city_in or None,
+                "raw": {"source": "shopify_shipping_coordinates"},
+                "reason": None,
+            }
+    except Exception:
+        geo = None
+
+    if geo is None:
+        geo = await geocode_order_address(addr1, addr2, city_in, province, zip_code, api_key=None, region="ma", alias_map=aliases, bounds=bounds, country="Morocco")
 
     order_id_num = data.get("id")
     order_name = (data.get("name") or "").strip()
