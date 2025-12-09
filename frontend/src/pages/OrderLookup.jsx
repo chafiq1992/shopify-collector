@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { authHeaders } from "../lib/auth";
 
 // Minimal API client (mirrors endpoints used elsewhere)
 const API = {
@@ -8,7 +9,7 @@ const API = {
       search: String(number || "").trim(),
       store: (store || "").trim(),
     }).toString();
-    const res = await fetch(`/api/orders?${params}`);
+    const res = await fetch(`/api/orders?${params}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(`Failed to fetch order (${res.status})`);
     const js = await res.json();
     const list = js.orders || [];
@@ -18,7 +19,7 @@ const API = {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/add-tag${qs}`, {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ tag }),
     });
     if (!res.ok) throw new Error("Failed to add tag");
@@ -27,7 +28,7 @@ const API = {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/remove-tag${qs}`, {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ tag }),
     });
     if (!res.ok) throw new Error("Failed to remove tag");
@@ -36,7 +37,7 @@ const API = {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ append }),
     });
     if (!res.ok) throw new Error("Failed to update note");
@@ -45,7 +46,7 @@ const API = {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/fulfill${qs}`, {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: authHeaders({"Content-Type":"application/json"}),
     });
     if (!res.ok) throw new Error("Failed to fulfill order");
     return res.json();
@@ -54,7 +55,7 @@ const API = {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/fulfill${qs}`, {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ lineItemsByFulfillmentOrder }),
     });
     if (!res.ok) throw new Error("Failed to fulfill order");
@@ -62,7 +63,7 @@ const API = {
   },
   async getFulfillmentOrders(orderId, store){
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/fulfillment-orders${qs}`);
+    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/fulfillment-orders${qs}`, { headers: authHeaders() });
     if (!res.ok) throw new Error("Failed to fetch fulfillment orders");
     return res.json();
   },
@@ -73,7 +74,7 @@ const API = {
       status_filter: "all",
       store: (store || "").trim(),
     }).toString();
-    const res = await fetch(`/api/orders?${params}`);
+    const res = await fetch(`/api/orders?${params}`, { headers: authHeaders() });
     if (!res.ok) throw new Error("Failed to fetch tags");
     const js = await res.json();
     return js.tags || [];
@@ -138,7 +139,7 @@ export default function OrderLookup(){
         setOrder(found);
         // fetch enrichments (shipping/customer) best-effort
         try {
-          const r = await fetch(`/api/overrides?orders=${encodeURIComponent(String(found.number).replace(/^#/, ""))}&store=${encodeURIComponent(store)}`);
+          const r = await fetch(`/api/overrides?orders=${encodeURIComponent(String(found.number).replace(/^#/, ""))}&store=${encodeURIComponent(store)}`, { headers: authHeaders() });
           const js = await r.json();
           const ov = (js.overrides || {})[String(found.number).replace(/^#/, "")] || null;
           setOverrideInfo(ov || null);

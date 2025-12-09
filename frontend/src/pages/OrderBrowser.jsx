@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { authHeaders } from "../lib/auth";
 
 // Minimal API client reused across pages
 const API = {
   async getOrders(params = {}) {
     const q = new URLSearchParams(params).toString();
-    const res = await fetch(`/api/orders?${q}`);
+    const res = await fetch(`/api/orders?${q}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(`Failed to fetch orders (${res.status})`);
     return res.json();
   },
@@ -12,7 +13,7 @@ const API = {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/add-tag${qs}`, {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ tag }),
     });
     if (!res.ok) throw new Error("Failed to add tag");
@@ -21,7 +22,7 @@ const API = {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ append }),
     });
     if (!res.ok) throw new Error("Failed to update note");
@@ -32,7 +33,7 @@ const API = {
       store: store || "",
       force_live: forceLive ? "true" : "false",
     }).toString();
-    const res = await fetch(`/api/overrides?${params}`);
+    const res = await fetch(`/api/overrides?${params}`, { headers: authHeaders() });
     if (!res.ok) throw new Error("Failed to fetch overrides");
     return res.json();
   }

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, Suspense } from "react";
-import { CheckCircle, PackageSearch, PackageCheck, XCircle, ChevronLeft, ChevronRight, Search, Settings, Boxes, Printer } from "lucide-react";
+import { CheckCircle, PackageSearch, PackageCheck, XCircle, ChevronLeft, ChevronRight, Search, Settings, Boxes, Printer, LogOut } from "lucide-react";
+import { authHeaders, loadAuth, saveAuth, clearAuth } from "./lib/auth";
 import { printOrdersLocally } from "./lib/localPrintClient";
 import { enqueueOrdersToRelay, isRelayConfigured } from "./lib/printRelayClient";
 
@@ -9,6 +10,8 @@ const ProfilePickerModal = React.lazy(() => import('./components/ProfilePickerMo
 const OrderTaggerPage = React.lazy(() => import('./pages/OrderTagger.jsx'));
 const OrderLookupPage = React.lazy(() => import('./pages/OrderLookup.jsx'));
 const OrderBrowserPage = React.lazy(() => import('./pages/OrderBrowser.jsx'));
+const LoginPage = React.lazy(() => import('./pages/Login.jsx'));
+const AdminAnalyticsPage = React.lazy(() => import('./pages/AdminAnalytics.jsx'));
 
 // Types (JSDoc only)
 /**
@@ -19,14 +22,14 @@ const OrderBrowserPage = React.lazy(() => import('./pages/OrderBrowser.jsx'));
 const API = {
   async getOrders(params = {}) {
     const q = new URLSearchParams(params).toString();
-    const res = await fetch(`/api/orders?${q}`);
+    const res = await fetch(`/api/orders?${q}`, { headers: authHeaders() });
     return res.json();
   },
   async addTag(orderId, tag, store) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     await fetch(`/api/orders/${encodeURIComponent(orderId)}/add-tag${qs}`, {
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
+      headers: authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ tag })
     });
   },
@@ -34,7 +37,7 @@ const API = {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     await fetch(`/api/orders/${encodeURIComponent(orderId)}/remove-tag${qs}`, {
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
+      headers: authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ tag })
     });
   },
@@ -42,10 +45,30 @@ const API = {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     await fetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
+      headers: authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ append })
     });
-  }
+  },
+  async markCollected(orderId, orderNumber, store, metadata = {}) {
+    const qs = store ? `?store=${encodeURIComponent(store)}` : "";
+    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/collected${qs}`, {
+      method: 'POST',
+      headers: authHeaders({'Content-Type':'application/json'}),
+      body: JSON.stringify({ order_number: orderNumber, store, metadata })
+    });
+    if (!res.ok) throw new Error("Failed to mark collected");
+    return res.json();
+  },
+  async markOut(orderId, orderNumber, store, metadata = {}) {
+    const qs = store ? `?store=${encodeURIComponent(store)}` : "";
+    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/out${qs}`, {
+      method: 'POST',
+      headers: authHeaders({'Content-Type':'application/json'}),
+      body: JSON.stringify({ order_number: orderNumber, store, metadata })
+    });
+    if (!res.ok) throw new Error("Failed to mark out");
+    return res.json();
+  },
 };
 
 // Profiles configuration
@@ -57,6 +80,7 @@ const PROFILES = {
 };
 
 export default function App(){
+  const [auth, setAuth] = useState(() => loadAuth());
   const [orders, setOrders] = useState([]);
   const [tags, setTags] = useState([]);
   const [index, setIndex] = useState(0);
@@ -170,6 +194,14 @@ export default function App(){
 
   const wsRef = useRef(null);
   const requestIdRef = useRef(0);
+  function handleLoginSuccess(data){
+    saveAuth(data);
+    setAuth(data);
+  }
+  function handleLogout(){
+    clearAuth();
+    setAuth(null);
+  }
 
   function vibrate(ms = 20){
     try { if (navigator && typeof navigator.vibrate === 'function') navigator.vibrate(ms); } catch {}
@@ -210,6 +242,11 @@ export default function App(){
   async function load(){
     const reqId = ++requestIdRef.current;
     setLoading(true);
+    if (!auth?.access_token){
+      setLoading(false);
+      setOrders([]);
+      return;
+    }
     const codDatesCSV = computeCodDatesCSV(codFromDate, codToDate);
     const usingStockProfile = !!(profile && profile.id === 'stock');
     const isGlobalSearch = (!usingStockProfile && !statusFilter && (search || '').trim() && !showProductFilter);
@@ -325,6 +362,10 @@ export default function App(){
     if (loadingMore) return;
     if (!pageInfo?.hasNextPage || !nextCursor) return;
     setLoadingMore(true);
+    if (!auth?.access_token){
+      setLoadingMore(false);
+      return;
+    }
     // Recompute filters to ensure consistency
     const codDatesCSV = computeCodDatesCSV(codFromDate, codToDate);
     const usingStockProfile = !!(profile && profile.id === 'stock');
@@ -376,13 +417,13 @@ export default function App(){
     setLoadingMore(false);
   }
 
-  useEffect(() => { load(); }, [statusFilter, tagFilter, codFromDate, codToDate, excludeOut, excludeStockTags, profile, stockFilter, store, reloadCounter]);
+  useEffect(() => { load(); }, [statusFilter, tagFilter, codFromDate, codToDate, excludeOut, excludeStockTags, profile, stockFilter, store, reloadCounter, auth?.access_token]);
 
   // Debounced search
   useEffect(() => {
     const t = setTimeout(() => load(), 350);
     return () => clearTimeout(t);
-  }, [search]);
+  }, [search, auth?.access_token]);
 
   useEffect(() => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -471,7 +512,7 @@ export default function App(){
   }
 
   async function handleMarkCollected(order){
-    await API.addTag(order.id, "pc", store);
+    await API.markCollected(order.id, order.number, store, { source: "single" });
     vibrate(20);
     gotoNext();
   }
@@ -486,10 +527,7 @@ export default function App(){
       .filter(v => selected.includes(v.id))
       .map(v => v.title || v.sku || "")
       .join(", ");
-    await Promise.all([
-      API.appendNote(order.id, `OUT: ${titles}`, store),
-      API.addTag(order.id, "out", store),
-    ]);
+    await API.markOut(order.id, order.number, store, { titles });
     setSelectedOutMap(prev => ({ ...prev, [order.id]: new Set() }));
     vibrate(30);
     gotoNext();
@@ -498,25 +536,48 @@ export default function App(){
   // Swipe navigation removed; use buttons below instead
 
   // Lightweight routing: render OrderTagger page when path matches
+  const currentPath = (typeof location !== 'undefined' ? String(location.pathname || '').trim() : '/');
+  if (!auth?.access_token && currentPath !== '/login'){
+    return (
+      <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
+        <LoginPage onSuccess={handleLoginSuccess} />
+      </Suspense>
+    );
+  }
+  if (currentPath === '/login'){
+    return (
+      <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
+        <LoginPage onSuccess={handleLoginSuccess} />
+      </Suspense>
+    );
+  }
+
   try {
-    if (typeof location !== 'undefined' && String(location.pathname || '').trim() === '/order-tagger'){
+    if (currentPath === '/order-tagger'){
       return (
         <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
           <OrderTaggerPage />
         </Suspense>
       );
     }
-    if (typeof location !== 'undefined' && String(location.pathname || '').trim() === '/order-lookup'){
+    if (currentPath === '/order-lookup'){
       return (
         <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
           <OrderLookupPage />
         </Suspense>
       );
     }
-    if (typeof location !== 'undefined' && String(location.pathname || '').trim() === '/order-browser'){
+    if (currentPath === '/order-browser'){
       return (
         <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
           <OrderBrowserPage />
+        </Suspense>
+      );
+    }
+    if (currentPath === '/admin'){
+      return (
+        <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
+          <AdminAnalyticsPage />
         </Suspense>
       );
     }
@@ -545,6 +606,23 @@ export default function App(){
             >Irranova</button>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            {auth?.user && (
+              <div className="hidden sm:flex items-center gap-2 text-xs text-gray-700 border border-gray-200 rounded-lg px-2 py-1 bg-white">
+                <span className="font-semibold">{auth.user.email}</span>
+                <span className="uppercase text-[10px] px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">{auth.user.role}</span>
+                <button aria-label="Logout" onClick={()=>{ vibrate(10); handleLogout(); }} className="p-1.5 rounded-full hover:bg-gray-100">
+                  <LogOut className="w-4 h-4 text-gray-700" />
+                </button>
+              </div>
+            )}
+            {auth?.user?.role === 'admin' && (
+              <button
+                onClick={()=>{ try { history.pushState(null, '', '/admin'); } catch { location.href = '/admin'; } }}
+                className="text-xs px-3 py-1 rounded-full border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+              >
+                Admin
+              </button>
+            )}
             <button aria-label="Choose profile" onClick={()=>{ vibrate(10); setShowProfilePicker(true); }} className="p-1.5 rounded-full hover:bg-gray-100">
               <Boxes className={`w-4 h-4 ${profile?.id === 'stock' ? 'text-blue-600' : 'text-gray-700'}`} />
             </button>
@@ -830,7 +908,7 @@ export default function App(){
                   const targets = selected.length > 0 ? orders.filter(o => selected.includes(o.number)) : (current ? [current] : []);
                   setShowConfirm(null);
                   if (showConfirm === 'collected'){
-                    await Promise.all(targets.map(o => API.addTag(o.id, 'pc', store)));
+                    await Promise.all(targets.map(o => API.markCollected(o.id, o.number, store, { source: "bulk" })));
                     vibrate(20);
                     if (selected.length === 0) gotoNext();
                     if (selected.length > 0) setSelectedOrderNumbers(new Set());
@@ -843,10 +921,7 @@ export default function App(){
                         .filter(v => sel.includes(v.id))
                         .map(v => v.title || v.sku || "")
                         .join(", ");
-                      await Promise.all([
-                        API.appendNote(o.id, `OUT: ${titles}`, store),
-                        API.addTag(o.id, 'out', store),
-                      ]);
+                      await API.markOut(o.id, o.number, store, { titles });
                       setSelectedOutMap(prev => ({ ...prev, [o.id]: new Set() }));
                     }
                     vibrate(30);

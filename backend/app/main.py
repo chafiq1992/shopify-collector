@@ -2,14 +2,14 @@ import os
 import json
 from typing import List, Optional, Dict, Any, Tuple
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
 import httpx
 import hmac, hashlib, base64
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import requests as _requests
 from pydantic import BaseModel
 import random
@@ -17,6 +17,13 @@ from functools import lru_cache
 from io import BytesIO
 import qrcode
 from qrcode.constants import ERROR_CORRECT_M
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, case
+
+# Local auth/db modules
+from .db import get_session, init_db
+from .models import User, OrderEvent, DailyUserStats
+from .auth_routes import router as auth_router, get_current_user, require_admin
 
 # Order Tagger imports
 from .geocode import geocode_order_address
@@ -55,6 +62,7 @@ def resolve_store_settings(store: Optional[str]) -> Tuple[str, str, str]:
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Order Collector API", version="1.0.0")
+app.include_router(auth_router)
 
 # CORS (relaxed for simplicity; tighten in prod)
 app.add_middleware(
@@ -1065,8 +1073,14 @@ async def list_orders(
 class TagPayload(BaseModel):
     tag: str
 
-@app.post("/api/orders/{order_gid:path}/add-tag")
-async def add_tag(order_gid: str, payload: TagPayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+class OrderActionBody(BaseModel):
+    order_number: Optional[str] = None
+    store: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+# ---------- Shared Shopify helpers for tags/notes ----------
+async def _shopify_add_tag(order_gid: str, tag: str, store: Optional[str]):
     mutation = """
     mutation AddTag($id: ID!, $tags: [String!]!) {
       tagsAdd(id: $id, tags: $tags) {
@@ -1074,12 +1088,14 @@ async def add_tag(order_gid: str, payload: TagPayload, store: Optional[str] = Qu
       }
     }
     """
-    data = await shopify_graphql(mutation, {"id": order_gid, "tags": [payload.tag]}, store=store)
-    await manager.broadcast({"type": "order.tag_added", "id": order_gid, "tag": payload.tag})
-    return {"ok": True, "result": data}
+    data = await shopify_graphql(mutation, {"id": order_gid, "tags": [tag]}, store=store)
+    errs = (((data or {}).get("tagsAdd") or {}).get("userErrors")) or []
+    if errs:
+        raise HTTPException(status_code=400, detail=f"Shopify tag add failed: {errs}")
+    return data
 
-@app.post("/api/orders/{order_gid:path}/remove-tag")
-async def remove_tag(order_gid: str, payload: TagPayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+
+async def _shopify_remove_tag(order_gid: str, tag: str, store: Optional[str]):
     mutation = """
     mutation RemoveTag($id: ID!, $tags: [String!]!) {
       tagsRemove(id: $id, tags: $tags) {
@@ -1087,16 +1103,14 @@ async def remove_tag(order_gid: str, payload: TagPayload, store: Optional[str] =
       }
     }
     """
-    data = await shopify_graphql(mutation, {"id": order_gid, "tags": [payload.tag]}, store=store)
-    await manager.broadcast({"type": "order.tag_removed", "id": order_gid, "tag": payload.tag})
-    return {"ok": True, "result": data}
+    data = await shopify_graphql(mutation, {"id": order_gid, "tags": [tag]}, store=store)
+    errs = (((data or {}).get("tagsRemove") or {}).get("userErrors")) or []
+    if errs:
+        raise HTTPException(status_code=400, detail=f"Shopify tag remove failed: {errs}")
+    return data
 
-class AppendNotePayload(BaseModel):
-    append: str
 
-@app.post("/api/orders/{order_gid:path}/append-note")
-async def append_note(order_gid: str, payload: AppendNotePayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
-    # Fetch current note
+async def _shopify_append_note(order_gid: str, append_text: str, store: Optional[str]):
     q = """
     query One($id: ID!) {
       node(id: $id) {
@@ -1107,7 +1121,7 @@ async def append_note(order_gid: str, payload: AppendNotePayload, store: Optiona
     data = await shopify_graphql(q, {"id": order_gid}, store=store)
     node = data["node"]
     current_note = (node or {}).get("note") or ""
-    new_note = (current_note + ("\n" if current_note and not current_note.endswith("\n") else "") + payload.append).strip()
+    new_note = (current_note + ("\n" if current_note and not current_note.endswith("\n") else "") + append_text).strip()
 
     mutation = """
     mutation UpdateOrder($input: OrderInput!) {
@@ -1118,8 +1132,232 @@ async def append_note(order_gid: str, payload: AppendNotePayload, store: Optiona
     }
     """
     data2 = await shopify_graphql(mutation, {"input": {"id": order_gid, "note": new_note}}, store=store)
-    await manager.broadcast({"type": "order.note_updated", "id": order_gid, "note": new_note})
+    errs = (((data2 or {}).get("orderUpdate") or {}).get("userErrors")) or []
+    if errs:
+        raise HTTPException(status_code=400, detail=f"Shopify note update failed: {errs}")
+    return data2
+
+
+# ---------- Audit/event helpers ----------
+def _normalize_store(store: Optional[str]) -> str:
+    val = (store or "irrakids").strip().lower()
+    return val if val else "irrakids"
+
+
+async def _record_user_action(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    order_number: Optional[str],
+    order_gid: Optional[str],
+    store_key: str,
+    action: str,
+    metadata: Optional[Dict[str, Any]] = None,
+):
+    ev = OrderEvent(
+        order_number=(order_number or "").lstrip("#") or (order_gid or ""),
+        order_gid=order_gid,
+        store_key=_normalize_store(store_key),
+        user_id=user_id,
+        action=action,
+        metadata=metadata or {},
+    )
+    session.add(ev)
+    await session.flush()
+    await _bump_daily_stats(session, user_id=user_id, store_key=store_key, action=action)
+
+
+async def _bump_daily_stats(session: AsyncSession, *, user_id: str, store_key: str, action: str):
+    day = datetime.now(timezone.utc).date()
+    key = (user_id, day, _normalize_store(store_key))
+    row = await session.get(DailyUserStats, key)
+    if not row:
+        row = DailyUserStats(
+            user_id=key[0],
+            day=key[1],
+            store_key=key[2],
+            collected_count=1 if action == "collected" else 0,
+            out_count=1 if action == "out" else 0,
+        )
+        session.add(row)
+        await session.flush()
+        return
+
+    if action == "collected":
+        row.collected_count = (row.collected_count or 0) + 1
+    elif action == "out":
+        row.out_count = (row.out_count or 0) + 1
+    row.updated_at = datetime.now(timezone.utc)
+    await session.flush()
+
+
+def _parse_date(date_str: Optional[str]) -> Optional[datetime]:
+    if not date_str:
+        return None
+    try:
+        return datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+@app.post("/api/orders/{order_gid:path}/add-tag")
+async def add_tag(order_gid: str, payload: TagPayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+    data = await _shopify_add_tag(order_gid, payload.tag, store)
+    await manager.broadcast({"type": "order.tag_added", "id": order_gid, "tag": payload.tag})
+    return {"ok": True, "result": data}
+
+@app.post("/api/orders/{order_gid:path}/remove-tag")
+async def remove_tag(order_gid: str, payload: TagPayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+    data = await _shopify_remove_tag(order_gid, payload.tag, store)
+    await manager.broadcast({"type": "order.tag_removed", "id": order_gid, "tag": payload.tag})
+    return {"ok": True, "result": data}
+
+class AppendNotePayload(BaseModel):
+    append: str
+
+@app.post("/api/orders/{order_gid:path}/append-note")
+async def append_note(order_gid: str, payload: AppendNotePayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+    data2 = await _shopify_append_note(order_gid, payload.append, store)
+    await manager.broadcast({"type": "order.note_updated", "id": order_gid, "note": payload.append})
     return {"ok": True, "result": data2}
+
+
+# ---------- Collector actions with audit logging ----------
+@app.post("/api/orders/{order_gid:path}/collected")
+async def mark_collected(
+    order_gid: str,
+    body: OrderActionBody,
+    store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    store_key = _normalize_store(store or body.store)
+    try:
+        await _shopify_add_tag(order_gid, "pc", store_key)
+    except HTTPException as e:
+        # surface Shopify errors cleanly
+        raise e
+    await _record_user_action(
+        session,
+        user_id=user.id,
+        order_number=(body.order_number or "").lstrip("#"),
+        order_gid=order_gid,
+        store_key=store_key,
+        action="collected",
+        metadata=body.metadata,
+    )
+    await session.commit()
+    await manager.broadcast({"type": "order.collected", "id": order_gid, "store": store_key, "user_id": user.id})
+    return {"ok": True}
+
+
+@app.post("/api/orders/{order_gid:path}/out")
+async def mark_out(
+    order_gid: str,
+    body: OrderActionBody,
+    store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    store_key = _normalize_store(store or body.store)
+    note_text = None
+    if body.metadata:
+        note_text = body.metadata.get("note") or body.metadata.get("titles")
+    if note_text:
+        await _shopify_append_note(order_gid, f"OUT: {note_text}", store_key)
+    await _shopify_add_tag(order_gid, "out", store_key)
+    await _record_user_action(
+        session,
+        user_id=user.id,
+        order_number=(body.order_number or "").lstrip("#"),
+        order_gid=order_gid,
+        store_key=store_key,
+        action="out",
+        metadata=body.metadata,
+    )
+    await session.commit()
+    await manager.broadcast({"type": "order.out", "id": order_gid, "store": store_key, "user_id": user.id})
+    return {"ok": True}
+
+
+class StatsRow(BaseModel):
+    user_id: str
+    email: Optional[str] = None
+    name: Optional[str] = None
+    day: str
+    store: str
+    collected: int
+    out: int
+    total: int
+
+
+@app.get("/api/admin/users/stats", response_model=Dict[str, Any])
+async def admin_user_stats(
+    from_date: Optional[str] = Query(None, description="Inclusive start date (YYYY-MM-DD)"),
+    to_date: Optional[str] = Query(None, description="Inclusive end date (YYYY-MM-DD)"),
+    store: Optional[str] = Query(None, description="Optional store filter"),
+    admin: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    start_dt = _parse_date(from_date) or (datetime.now(timezone.utc) - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+    end_dt = _parse_date(to_date) or datetime.now(timezone.utc)
+    # make end inclusive by adding 1 day
+    end_dt_inclusive = end_dt + timedelta(days=1)
+    store_key = _normalize_store(store) if store else None
+
+    stmt = (
+        select(
+            User.id,
+            User.email,
+            User.name,
+            func.date(OrderEvent.created_at).label("day"),
+            OrderEvent.store_key,
+            func.sum(case((OrderEvent.action == "collected", 1), else_=0)).label("collected"),
+            func.sum(case((OrderEvent.action == "out", 1), else_=0)).label("out"),
+        )
+        .join(OrderEvent, User.id == OrderEvent.user_id)
+        .where(OrderEvent.created_at >= start_dt, OrderEvent.created_at < end_dt_inclusive)
+        .group_by(User.id, User.email, User.name, func.date(OrderEvent.created_at), OrderEvent.store_key)
+        .order_by(func.date(OrderEvent.created_at).desc())
+    )
+    if store_key:
+        stmt = stmt.where(OrderEvent.store_key == store_key)
+
+    result = await session.execute(stmt)
+    rows = []
+    for uid, email, name, day_val, store_val, collected, out in result.fetchall():
+        day_str = day_val.isoformat() if hasattr(day_val, "isoformat") else str(day_val)
+        collected_int = int(collected or 0)
+        out_int = int(out or 0)
+        rows.append(
+            StatsRow(
+                user_id=uid,
+                email=email,
+                name=name,
+                day=day_str,
+                store=store_val,
+                collected=collected_int,
+                out=out_int,
+                total=collected_int + out_int,
+            ).dict()
+        )
+
+    summary = {}
+    for r in rows:
+        user_key = r["user_id"]
+        if user_key not in summary:
+            summary[user_key] = {"email": r["email"], "name": r["name"], "collected": 0, "out": 0, "total": 0}
+        summary[user_key]["collected"] += r["collected"]
+        summary[user_key]["out"] += r["out"]
+        summary[user_key]["total"] += r["total"]
+
+    return {
+        "ok": True,
+        "rows": rows,
+        "summary": summary,
+        "from": start_dt.date().isoformat(),
+        "to": end_dt.date().isoformat(),
+        "store": store_key or "all",
+    }
 
 
 # ---------- Fulfillment (fulfill all remaining quantities) ----------
@@ -1628,6 +1866,14 @@ if os.path.isdir(STATIC_DIR):
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 else:
     print(f"[WARN] Static directory not found at {STATIC_DIR}. Build the frontend first.")
+
+# Ensure database tables exist on startup
+@app.on_event("startup")
+async def _init_db_tables():
+    try:
+        await init_db()
+    except Exception as e:
+        print(f"[DB] Failed to init tables: {e}")
 
 # Log routes on startup to verify ordering and presence
 @app.on_event("startup")
