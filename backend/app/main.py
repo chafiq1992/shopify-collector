@@ -1160,7 +1160,7 @@ async def _record_user_action(
         store_key=_normalize_store(store_key),
         user_id=user_id,
         action=action,
-        metadata=metadata or {},
+        event_metadata=metadata or {},
     )
     session.add(ev)
     await session.flush()

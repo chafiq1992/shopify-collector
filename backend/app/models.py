@@ -45,7 +45,8 @@ class OrderEvent(Base):
     store_key = Column(String(32), nullable=False, index=True)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     action = Column(String(32), nullable=False, index=True)
-    metadata = Column(_json_type(), nullable=True)
+    # "metadata" is reserved by SQLAlchemy Declarative; use event_metadata instead
+    event_metadata = Column(_json_type(), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
 
     user = relationship("User", back_populates="events")
