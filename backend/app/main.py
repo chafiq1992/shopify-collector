@@ -23,14 +23,15 @@ from sqlalchemy import select, func, case
 # Local auth/db modules (optional)
 HAVE_AUTH_DB = True
 try:
-    from .db import get_session, init_db
+    from .db import get_session, init_db, SessionLocal
     from .models import User, OrderEvent, DailyUserStats
-    from .auth_routes import router as auth_router, get_current_user, require_admin
+    from .auth_routes import router as auth_router, get_current_user, require_admin, hash_password
     from .admin_bootstrap_routes import router as admin_bootstrap_router
 except Exception:
     HAVE_AUTH_DB = False
     get_session = None  # type: ignore
     init_db = None  # type: ignore
+    SessionLocal = None  # type: ignore
     auth_router = None  # type: ignore
     admin_bootstrap_router = None  # type: ignore
     def get_current_user():  # type: ignore
@@ -1959,6 +1960,17 @@ async def _spa_order_browser():
         pass
     return JSONResponse({"detail": "Not Found"}, status_code=404)
 
+@app.get("/admin")
+async def _spa_admin():
+    try:
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+        index_path = os.path.join(base_dir, "index.html")
+        if os.path.isfile(index_path):
+            return FileResponse(index_path)
+    except Exception:
+        pass
+    return JSONResponse({"detail": "Not Found"}, status_code=404)
+
 # --------- Static frontend (mounted last) ---------
 STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
 if os.path.isdir(STATIC_DIR):
@@ -1987,3 +1999,48 @@ async def _log_routes():
             print(f" - {route_type}: {path} ({name})")
     except Exception as e:
         print(f"[ROUTES] Failed to list routes: {e}")
+
+
+# ---------- Optional default admin bootstrap (env-based) ----------
+# Creates an admin user ONLY IF no admin exists. Useful for first deploy / recovery.
+ADMIN_DEFAULT_EMAIL = (os.environ.get("ADMIN_DEFAULT_EMAIL") or "").strip().lower()
+ADMIN_DEFAULT_PASSWORD = (os.environ.get("ADMIN_DEFAULT_PASSWORD") or "").strip()
+ADMIN_DEFAULT_NAME = (os.environ.get("ADMIN_DEFAULT_NAME") or "").strip()
+
+if HAVE_AUTH_DB:
+    @app.on_event("startup")
+    async def _ensure_default_admin():
+        try:
+            if not ADMIN_DEFAULT_EMAIL or not ADMIN_DEFAULT_PASSWORD:
+                return
+            if SessionLocal is None:
+                return
+            async with SessionLocal() as session:  # type: ignore
+                admin_count = await session.scalar(select(func.count()).select_from(User).where(User.role == "admin"))
+                if (admin_count or 0) > 0:
+                    return
+                email = ADMIN_DEFAULT_EMAIL
+                user = await session.scalar(select(User).where(User.email == email))
+                if not user:
+                    user = User(
+                        email=email,
+                        name=(ADMIN_DEFAULT_NAME or None),
+                        password_hash=hash_password(ADMIN_DEFAULT_PASSWORD),
+                        role="admin",
+                        is_active=True,
+                    )
+                    session.add(user)
+                else:
+                    user.email = email
+                    user.name = (ADMIN_DEFAULT_NAME or user.name or "").strip() or None
+                    user.password_hash = hash_password(ADMIN_DEFAULT_PASSWORD)
+                    user.role = "admin"
+                    user.is_active = True
+                await session.commit()
+                print(f"[AUTH] Default admin ensured: {email}")
+        except Exception as e:
+            # Never fail startup for this helper
+            try:
+                print(f"[AUTH] Default admin bootstrap skipped/failed: {e}")
+            except Exception:
+                pass
