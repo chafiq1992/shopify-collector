@@ -895,9 +895,9 @@ async def list_orders(
             if fulfillment_from:
                 q = f"{q} updated_at:>={fulfillment_from}".strip()
             if fulfillment_to:
-                # Make end exclusive by adding 1 day to the date
+                # Allow a one-week drift for updates that happen after fulfillment
                 to_dt = datetime.fromisoformat(fulfillment_to).replace(tzinfo=timezone.utc)
-                to_next = (to_dt + timedelta(days=1)).date().isoformat()
+                to_next = (to_dt + timedelta(days=8)).date().isoformat()
                 q = f"{q} updated_at:<{to_next}".strip()
         except Exception:
             pass
@@ -1024,19 +1024,19 @@ async def list_orders(
     items: List[OrderDTO] = [map_order_node(e["node"]) for e in edges]
     # Optional post-filter by fulfillment date range (inclusive)
     if fulfillment_from or fulfillment_to:
-        try:
-            start_dt = None
-            end_dt = None
-            if fulfillment_from:
-                # Start of day UTC
-                start_dt = datetime.fromisoformat(fulfillment_from).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-            if fulfillment_to:
-                # End of day inclusive => add 1 day and compare strictly less than
-                end_dt = datetime.fromisoformat(fulfillment_to).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-                end_dt = end_dt + timedelta(days=1)
-        except Exception:
-            start_dt = None
-            end_dt = None
+        def _compute_range():
+            try:
+                sdt = None
+                edt = None
+                if fulfillment_from:
+                    sdt = datetime.fromisoformat(fulfillment_from).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+                if fulfillment_to:
+                    edt = datetime.fromisoformat(fulfillment_to).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+                    edt = edt + timedelta(days=1)
+                return sdt, edt
+            except Exception:
+                return None, None
+        start_dt, end_dt = _compute_range()
         def _in_range(ts: Optional[str]) -> bool:
             if not ts:
                 return False
@@ -1053,16 +1053,40 @@ async def list_orders(
                 return True
             except Exception:
                 return False
-        items = [o for o in items if _in_range(o.fulfilled_at)]
-        # Since we applied a server-side approximation and a client-side filter,
-        # the original pagination cursors/counts no longer reflect the filtered result.
-        # Force a consistent response for this mode.
-        unique_tags = sorted({t for o in items for t in (o.tags or [])})
+        # Accumulate across pages to avoid missing results due to updated_at sorting
+        matches: List[OrderDTO] = [o for o in items if _in_range(o.fulfilled_at)]
+        local_next = None
+        try:
+            if edges:
+                local_next = edges[-1].get("cursor")
+        except Exception:
+            local_next = None
+        has_more = (ords.get("pageInfo") or {}).get("hasNextPage") or False
+        pages = 1
+        MAX_PAGES = 40  # safety cap
+        while has_more and local_next and pages < MAX_PAGES:
+            try:
+                page = await shopify_graphql(query, {"first": limit, "after": local_next, "query": q or None}, store=store)
+            except HTTPException as he:
+                if he.status_code in (429, 502, 503):
+                    break
+                raise
+            ords2 = page["orders"]
+            edges2 = ords2.get("edges") or []
+            page_items: List[OrderDTO] = [map_order_node(e["node"]) for e in edges2]
+            matches.extend([o for o in page_items if _in_range(o.fulfilled_at)])
+            has_more = (ords2.get("pageInfo") or {}).get("hasNextPage") or False
+            try:
+                local_next = edges2[-1].get("cursor") if edges2 else None
+            except Exception:
+                local_next = None
+            pages += 1
+        unique_tags = sorted({t for o in matches for t in (o.tags or [])})
         resp = {
-            "orders": [json.loads(o.json()) for o in items],
+            "orders": [json.loads(o.json()) for o in matches],
             "pageInfo": {"hasNextPage": False},
             "tags": unique_tags,
-            "totalCount": len(items),
+            "totalCount": len(matches),
             "nextCursor": None,
         }
         _orders_cache_set(cache_key, resp)
