@@ -20,10 +20,30 @@ from qrcode.constants import ERROR_CORRECT_M
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, case
 
-# Local auth/db modules
-from .db import get_session, init_db
-from .models import User, OrderEvent, DailyUserStats
-from .auth_routes import router as auth_router, get_current_user, require_admin
+# Local auth/db modules (optional)
+HAVE_AUTH_DB = True
+try:
+    from .db import get_session, init_db
+    from .models import User, OrderEvent, DailyUserStats
+    from .auth_routes import router as auth_router, get_current_user, require_admin
+except Exception:
+    HAVE_AUTH_DB = False
+    get_session = None  # type: ignore
+    init_db = None  # type: ignore
+    auth_router = None  # type: ignore
+    def get_current_user():  # type: ignore
+        raise HTTPException(status_code=503, detail="auth not configured")
+    def require_admin():  # type: ignore
+        raise HTTPException(status_code=503, detail="auth not configured")
+    class User(BaseModel):  # type: ignore
+        id: str = "unknown"
+        email: Optional[str] = None
+        name: Optional[str] = None
+    class OrderEvent:  # type: ignore
+        # placeholder for typing only
+        pass
+    class DailyUserStats:  # type: ignore
+        pass
 
 # Order Tagger imports
 from .geocode import geocode_order_address
@@ -62,7 +82,8 @@ def resolve_store_settings(store: Optional[str]) -> Tuple[str, str, str]:
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Order Collector API", version="1.0.0")
-app.include_router(auth_router)
+if HAVE_AUTH_DB and auth_router is not None:
+    app.include_router(auth_router)
 
 # CORS (relaxed for simplicity; tighten in prod)
 app.add_middleware(
@@ -1281,61 +1302,71 @@ async def append_note(order_gid: str, payload: AppendNotePayload, store: Optiona
 
 
 # ---------- Collector actions with audit logging ----------
-@app.post("/api/orders/{order_gid:path}/collected")
-async def mark_collected(
-    order_gid: str,
-    body: OrderActionBody,
-    store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-):
-    store_key = _normalize_store(store or body.store)
-    try:
-        await _shopify_add_tag(order_gid, "pc", store_key)
-    except HTTPException as e:
-        # surface Shopify errors cleanly
-        raise e
-    await _record_user_action(
-        session,
-        user_id=user.id,
-        order_number=(body.order_number or "").lstrip("#"),
-        order_gid=order_gid,
-        store_key=store_key,
-        action="collected",
-        metadata=body.metadata,
-    )
-    await session.commit()
-    await manager.broadcast({"type": "order.collected", "id": order_gid, "store": store_key, "user_id": user.id})
-    return {"ok": True}
+if HAVE_AUTH_DB:
+    @app.post("/api/orders/{order_gid:path}/collected")
+    async def mark_collected(
+        order_gid: str,
+        body: OrderActionBody,
+        store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
+        user: User = Depends(get_current_user),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        store_key = _normalize_store(store or body.store)
+        try:
+            await _shopify_add_tag(order_gid, "pc", store_key)
+        except HTTPException as e:
+            # surface Shopify errors cleanly
+            raise e
+        await _record_user_action(
+            session,
+            user_id=user.id,
+            order_number=(body.order_number or "").lstrip("#"),
+            order_gid=order_gid,
+            store_key=store_key,
+            action="collected",
+            metadata=body.metadata,
+        )
+        await session.commit()
+        await manager.broadcast({"type": "order.collected", "id": order_gid, "store": store_key, "user_id": user.id})
+        return {"ok": True}
+else:
+    @app.post("/api/orders/{order_gid:path}/collected")
+    async def mark_collected_unavailable(order_gid: str):
+        raise HTTPException(status_code=503, detail="auth/db not configured")
 
 
-@app.post("/api/orders/{order_gid:path}/out")
-async def mark_out(
-    order_gid: str,
-    body: OrderActionBody,
-    store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-):
-    store_key = _normalize_store(store or body.store)
-    note_text = None
-    if body.metadata:
-        note_text = body.metadata.get("note") or body.metadata.get("titles")
-    if note_text:
-        await _shopify_append_note(order_gid, f"OUT: {note_text}", store_key)
-    await _shopify_add_tag(order_gid, "out", store_key)
-    await _record_user_action(
-        session,
-        user_id=user.id,
-        order_number=(body.order_number or "").lstrip("#"),
-        order_gid=order_gid,
-        store_key=store_key,
-        action="out",
-        metadata=body.metadata,
-    )
-    await session.commit()
-    await manager.broadcast({"type": "order.out", "id": order_gid, "store": store_key, "user_id": user.id})
-    return {"ok": True}
+if HAVE_AUTH_DB:
+    @app.post("/api/orders/{order_gid:path}/out")
+    async def mark_out(
+        order_gid: str,
+        body: OrderActionBody,
+        store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
+        user: User = Depends(get_current_user),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        store_key = _normalize_store(store or body.store)
+        note_text = None
+        if body.metadata:
+            note_text = body.metadata.get("note") or body.metadata.get("titles")
+        if note_text:
+            await _shopify_append_note(order_gid, f"OUT: {note_text}", store_key)
+        await _shopify_add_tag(order_gid, "out", store_key)
+        await _record_user_action(
+            session,
+            user_id=user.id,
+            order_number=(body.order_number or "").lstrip("#"),
+            order_gid=order_gid,
+            store_key=store_key,
+            action="out",
+            metadata=body.metadata,
+        )
+        await session.commit()
+        await manager.broadcast({"type": "order.out", "id": order_gid, "store": store_key, "user_id": user.id})
+        return {"ok": True}
+else:
+    @app.post("/api/orders/{order_gid:path}/out")
+    async def mark_out_unavailable(order_gid: str):
+        raise HTTPException(status_code=503, detail="auth/db not configured")
 
 
 class StatsRow(BaseModel):
@@ -1349,74 +1380,79 @@ class StatsRow(BaseModel):
     total: int
 
 
-@app.get("/api/admin/users/stats", response_model=Dict[str, Any])
-async def admin_user_stats(
-    from_date: Optional[str] = Query(None, description="Inclusive start date (YYYY-MM-DD)"),
-    to_date: Optional[str] = Query(None, description="Inclusive end date (YYYY-MM-DD)"),
-    store: Optional[str] = Query(None, description="Optional store filter"),
-    admin: User = Depends(require_admin),
-    session: AsyncSession = Depends(get_session),
-):
-    start_dt = _parse_date(from_date) or (datetime.now(timezone.utc) - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
-    end_dt = _parse_date(to_date) or datetime.now(timezone.utc)
-    # make end inclusive by adding 1 day
-    end_dt_inclusive = end_dt + timedelta(days=1)
-    store_key = _normalize_store(store) if store else None
+if HAVE_AUTH_DB:
+    @app.get("/api/admin/users/stats", response_model=Dict[str, Any])
+    async def admin_user_stats(
+        from_date: Optional[str] = Query(None, description="Inclusive start date (YYYY-MM-DD)"),
+        to_date: Optional[str] = Query(None, description="Inclusive end date (YYYY-MM-DD)"),
+        store: Optional[str] = Query(None, description="Optional store filter"),
+        admin: User = Depends(require_admin),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        start_dt = _parse_date(from_date) or (datetime.now(timezone.utc) - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_dt = _parse_date(to_date) or datetime.now(timezone.utc)
+        # make end inclusive by adding 1 day
+        end_dt_inclusive = end_dt + timedelta(days=1)
+        store_key = _normalize_store(store) if store else None
 
-    stmt = (
-        select(
-            User.id,
-            User.email,
-            User.name,
-            func.date(OrderEvent.created_at).label("day"),
-            OrderEvent.store_key,
-            func.sum(case((OrderEvent.action == "collected", 1), else_=0)).label("collected"),
-            func.sum(case((OrderEvent.action == "out", 1), else_=0)).label("out"),
+        stmt = (
+            select(
+                User.id,
+                User.email,
+                User.name,
+                func.date(OrderEvent.created_at).label("day"),
+                OrderEvent.store_key,
+                func.sum(case((OrderEvent.action == "collected", 1), else_=0)).label("collected"),
+                func.sum(case((OrderEvent.action == "out", 1), else_=0)).label("out"),
+            )
+            .join(OrderEvent, User.id == OrderEvent.user_id)
+            .where(OrderEvent.created_at >= start_dt, OrderEvent.created_at < end_dt_inclusive)
+            .group_by(User.id, User.email, User.name, func.date(OrderEvent.created_at), OrderEvent.store_key)
+            .order_by(func.date(OrderEvent.created_at).desc())
         )
-        .join(OrderEvent, User.id == OrderEvent.user_id)
-        .where(OrderEvent.created_at >= start_dt, OrderEvent.created_at < end_dt_inclusive)
-        .group_by(User.id, User.email, User.name, func.date(OrderEvent.created_at), OrderEvent.store_key)
-        .order_by(func.date(OrderEvent.created_at).desc())
-    )
-    if store_key:
-        stmt = stmt.where(OrderEvent.store_key == store_key)
+        if store_key:
+            stmt = stmt.where(OrderEvent.store_key == store_key)
 
-    result = await session.execute(stmt)
-    rows = []
-    for uid, email, name, day_val, store_val, collected, out in result.fetchall():
-        day_str = day_val.isoformat() if hasattr(day_val, "isoformat") else str(day_val)
-        collected_int = int(collected or 0)
-        out_int = int(out or 0)
-        rows.append(
-            StatsRow(
-                user_id=uid,
-                email=email,
-                name=name,
-                day=day_str,
-                store=store_val,
-                collected=collected_int,
-                out=out_int,
-                total=collected_int + out_int,
-            ).dict()
-        )
+        result = await session.execute(stmt)
+        rows = []
+        for uid, email, name, day_val, store_val, collected, out in result.fetchall():
+            day_str = day_val.isoformat() if hasattr(day_val, "isoformat") else str(day_val)
+            collected_int = int(collected or 0)
+            out_int = int(out or 0)
+            rows.append(
+                StatsRow(
+                    user_id=uid,
+                    email=email,
+                    name=name,
+                    day=day_str,
+                    store=store_val,
+                    collected=collected_int,
+                    out=out_int,
+                    total=collected_int + out_int,
+                ).dict()
+            )
 
-    summary = {}
-    for r in rows:
-        user_key = r["user_id"]
-        if user_key not in summary:
-            summary[user_key] = {"email": r["email"], "name": r["name"], "collected": 0, "out": 0, "total": 0}
-        summary[user_key]["collected"] += r["collected"]
-        summary[user_key]["out"] += r["out"]
-        summary[user_key]["total"] += r["total"]
+        summary = {}
+        for r in rows:
+            user_key = r["user_id"]
+            if user_key not in summary:
+                summary[user_key] = {"email": r["email"], "name": r["name"], "collected": 0, "out": 0, "total": 0}
+            summary[user_key]["collected"] += r["collected"]
+            summary[user_key]["out"] += r["out"]
+            summary[user_key]["total"] += r["total"]
 
-    return {
-        "ok": True,
-        "rows": rows,
-        "summary": summary,
-        "from": start_dt.date().isoformat(),
-        "to": end_dt.date().isoformat(),
-        "store": store_key or "all",
-    }
+        return {
+            "ok": True,
+            "rows": rows,
+            "summary": summary,
+            "from": start_dt.date().isoformat(),
+            "to": end_dt.date().isoformat(),
+            "store": store_key or "all",
+        }
+else:
+    @app.get("/api/admin/users/stats", response_model=Dict[str, Any])
+    async def admin_user_stats_unavailable():
+        raise HTTPException(status_code=503, detail="auth/db not configured")
 
 
 # ---------- Fulfillment (fulfill all remaining quantities) ----------
@@ -1926,13 +1962,14 @@ if os.path.isdir(STATIC_DIR):
 else:
     print(f"[WARN] Static directory not found at {STATIC_DIR}. Build the frontend first.")
 
-# Ensure database tables exist on startup
-@app.on_event("startup")
-async def _init_db_tables():
-    try:
-        await init_db()
-    except Exception as e:
-        print(f"[DB] Failed to init tables: {e}")
+# Ensure database tables exist on startup (optional)
+if HAVE_AUTH_DB and init_db is not None:
+    @app.on_event("startup")
+    async def _init_db_tables():
+        try:
+            await init_db()  # type: ignore
+        except Exception as e:
+            print(f"[DB] Failed to init tables: {e}")
 
 # Log routes on startup to verify ordering and presence
 @app.on_event("startup")
