@@ -789,15 +789,41 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
     # Determine the last fulfillment timestamp from fulfillments nodes if present
     fulfilled_at_val: Optional[str] = None
     try:
-        fulf_nodes = ((node.get("fulfillments") or {}).get("nodes")) or []
+        # Shopify schema differs by version:
+        # - Some versions: fulfillments is a list of objects [{createdAt, status}, ...]
+        # - Others: fulfillments is a connection { nodes: [...] } or { edges: [{node: ...}] }
+        fulf = node.get("fulfillments")
         times: List[str] = []
-        for f in fulf_nodes:
-            ts = f.get("createdAt")
-            if ts:
-                times.append(str(ts))
+        if isinstance(fulf, list):
+            for f in fulf:
+                try:
+                    ts = (f or {}).get("createdAt")
+                    if ts:
+                        times.append(str(ts))
+                except Exception:
+                    continue
+        elif isinstance(fulf, dict):
+            nodes = (fulf.get("nodes") or [])
+            if isinstance(nodes, list):
+                for f in nodes:
+                    try:
+                        ts = (f or {}).get("createdAt")
+                        if ts:
+                            times.append(str(ts))
+                    except Exception:
+                        continue
+            edges = (fulf.get("edges") or [])
+            if isinstance(edges, list):
+                for e in edges:
+                    try:
+                        f = (e or {}).get("node") or {}
+                        ts = (f or {}).get("createdAt")
+                        if ts:
+                            times.append(str(ts))
+                    except Exception:
+                        continue
         if times:
-            # Use the latest fulfillment time (most recent)
-            fulfilled_at_val = max(times)
+            fulfilled_at_val = max(times)  # latest
     except Exception:
         fulfilled_at_val = None
     return OrderDTO(
@@ -899,9 +925,7 @@ async def list_orders(
                 sourceName
                 tags
                 note
-                fulfillments(first: 10) {
-                  nodes { createdAt status }
-                }
+                fulfillments { createdAt status }
                 currentTotalPriceSet { shopMoney { amount currencyCode } }
                 totalPriceSet { shopMoney { amount currencyCode } }
                 lineItems(first: 50) {
@@ -940,9 +964,7 @@ async def list_orders(
                 sourceName
                 tags
                 note
-                fulfillments(first: 10) {
-                  nodes { createdAt status }
-                }
+                fulfillments { createdAt status }
                 shippingAddress { city }
                 customer { displayName }
                 currentTotalPriceSet { shopMoney { amount currencyCode } }
