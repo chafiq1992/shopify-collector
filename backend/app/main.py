@@ -632,6 +632,7 @@ class OrderDTO(BaseModel):
     total_price: float = 0.0
     considered_fulfilled: bool = False
     created_at: Optional[str] = None
+    fulfilled_at: Optional[str] = None
 
 # ---------- Helpers ----------
 def build_query_string(
@@ -759,6 +760,20 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
     except Exception:
         price = 0.0
     considered_fulfilled = any((getattr(v, "status", None) or "") == "fulfilled" for v in variants)
+    # Determine the last fulfillment timestamp from fulfillments nodes if present
+    fulfilled_at_val: Optional[str] = None
+    try:
+        fulf_nodes = ((node.get("fulfillments") or {}).get("nodes")) or []
+        times: List[str] = []
+        for f in fulf_nodes:
+            ts = f.get("createdAt")
+            if ts:
+                times.append(str(ts))
+        if times:
+            # Use the latest fulfillment time (most recent)
+            fulfilled_at_val = max(times)
+    except Exception:
+        fulfilled_at_val = None
     return OrderDTO(
         id=node["id"],
         number=node["name"],
@@ -771,6 +786,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         total_price=price,
         considered_fulfilled=considered_fulfilled,
         created_at=node.get("createdAt"),
+        fulfilled_at=fulfilled_at_val,
     )
 
 # ---------- Routes ----------
@@ -795,6 +811,8 @@ async def list_orders(
     store: Optional[str] = Query(None, description="Select store: 'irrakids' (default) or 'irranova'"),
     product_id: Optional[str] = Query(None, description="Filter orders that contain this product id (Shopify GID or numeric)"),
     disable_collect_ranking: bool = Query(False, description="If true, skip special collect ranking and return raw results"),
+    fulfillment_from: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD) inclusive start for fulfillment date"),
+    fulfillment_to: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD) inclusive end for fulfillment date"),
 ):
     domain, password, _ = resolve_store_settings(store)
     if not domain or not password:
@@ -813,6 +831,9 @@ async def list_orders(
         exclude_out,
         product_id,
     )
+    # Narrow server-side query when fulfillment date filtering is requested
+    if fulfillment_from or fulfillment_to:
+        q = f"{q} fulfillment_status:fulfilled".strip()
 
     # Build GraphQL query based on store capabilities
 
@@ -852,6 +873,9 @@ async def list_orders(
                 sourceName
                 tags
                 note
+                fulfillments(first: 10) {
+                  nodes { createdAt status }
+                }
                 currentTotalPriceSet { shopMoney { amount currencyCode } }
                 totalPriceSet { shopMoney { amount currencyCode } }
                 lineItems(first: 50) {
@@ -890,6 +914,9 @@ async def list_orders(
                 sourceName
                 tags
                 note
+                fulfillments(first: 10) {
+                  nodes { createdAt status }
+                }
                 shippingAddress { city }
                 customer { displayName }
                 currentTotalPriceSet { shopMoney { amount currencyCode } }
@@ -930,6 +957,38 @@ async def list_orders(
     ords = data["orders"]
     edges = ords.get("edges") or []
     items: List[OrderDTO] = [map_order_node(e["node"]) for e in edges]
+    # Optional post-filter by fulfillment date range (inclusive)
+    if fulfillment_from or fulfillment_to:
+        try:
+            start_dt = None
+            end_dt = None
+            if fulfillment_from:
+                # Start of day UTC
+                start_dt = datetime.fromisoformat(fulfillment_from).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+            if fulfillment_to:
+                # End of day inclusive => add 1 day and compare strictly less than
+                end_dt = datetime.fromisoformat(fulfillment_to).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+                end_dt = end_dt + timedelta(days=1)
+        except Exception:
+            start_dt = None
+            end_dt = None
+        def _in_range(ts: Optional[str]) -> bool:
+            if not ts:
+                return False
+            try:
+                dt = _parse_iso8601(ts)
+                if not dt:
+                    return False
+                if not dt.tzinfo:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if start_dt and dt < start_dt:
+                    return False
+                if end_dt and dt >= end_dt:
+                    return False
+                return True
+            except Exception:
+                return False
+        items = [o for o in items if _in_range(o.fulfilled_at)]
 
     # For Irranova, backfill customer/shipping city from cached overrides when available
     if (store or "irrakids").strip().lower() == "irranova":

@@ -64,6 +64,8 @@ export default function OrderBrowser(){
   const [fulfillmentFilter, setFulfillmentFilter] = useState("all"); // all | unfulfilled | fulfilled
   const [showFilters, setShowFilters] = useState(true);
   const [search, setSearch] = useState(""); // optional order # search
+  const [fulfilledFrom, setFulfilledFrom] = useState("");
+  const [fulfilledTo, setFulfilledTo] = useState("");
 
   // Data
   const [orders, setOrders] = useState([]);
@@ -88,6 +90,10 @@ export default function OrderBrowser(){
     } else if (fulfillmentFilter === "fulfilled"){
       q += " fulfillment_status:fulfilled";
     }
+    // If a fulfillment date range is set, ensure we only query fulfilled orders
+    if ((fulfilledFrom || fulfilledTo) && !q.includes("fulfillment_status:fulfilled")){
+      q += " fulfillment_status:fulfilled";
+    }
     return q.trim();
   }
 
@@ -107,6 +113,8 @@ export default function OrderBrowser(){
         tag_filter: (tagFilter || "").trim(),
         search: (search || "").trim(),
         base_query: buildBaseQuery(),
+        fulfillment_from: (fulfilledFrom || "").trim(),
+        fulfillment_to: (fulfilledTo || "").trim(),
         store,
       });
       if (reqId !== requestIdRef.current) return;
@@ -132,6 +140,8 @@ export default function OrderBrowser(){
         tag_filter: (tagFilter || "").trim(),
         search: (search || "").trim(),
         base_query: buildBaseQuery(),
+        fulfillment_from: (fulfilledFrom || "").trim(),
+        fulfillment_to: (fulfilledTo || "").trim(),
         store,
       });
       const more = data.orders || [];
@@ -150,7 +160,7 @@ export default function OrderBrowser(){
     // Debounce search a bit
     const t = setTimeout(() => { load(true); }, 350);
     return () => clearTimeout(t);
-  }, [tagFilter, fulfillmentFilter, store, search]);
+  }, [tagFilter, fulfillmentFilter, store, search, fulfilledFrom, fulfilledTo]);
 
   function toggleExpanded(order){
     setExpandedIds(prev => {
@@ -198,6 +208,7 @@ export default function OrderBrowser(){
     const num = String(order.number || "");
     const numKey = num.replace(/^#/, "");
     const ov = overridesByNumber[numKey];
+    const fulfilledOn = order.fulfilled_at ? formatDate(order.fulfilled_at) : null;
     const shippingCity = (ov && ov.shippingAddress && ov.shippingAddress.city) || order.shipping_city || null;
 
     return (
@@ -212,6 +223,7 @@ export default function OrderBrowser(){
             <div className="text-sm text-gray-700 truncate">
               {order.customer || ov?.customer?.displayName || "—"}
               {shippingCity && <span className="text-gray-400">{` · ${shippingCity}`}</span>}
+              {fulfilledOn && <span className="text-gray-400">{` · Fulfilled ${fulfilledOn}`}</span>}
             </div>
             <div className="mt-1 flex gap-1 flex-wrap">
               {(order.tags || []).map(t => (
@@ -365,6 +377,32 @@ export default function OrderBrowser(){
                   <FilterChip label="All" active={fulfillmentFilter === 'all'} onClick={()=>setFulfillmentFilter('all')} />
                   <FilterChip label="Unfulfilled" active={fulfillmentFilter === 'unfulfilled'} onClick={()=>setFulfillmentFilter('unfulfilled')} />
                   <FilterChip label="Fulfilled" active={fulfillmentFilter === 'fulfilled'} onClick={()=>setFulfillmentFilter('fulfilled')} />
+                </div>
+              </div>
+              <div className="bg-gray-100 rounded-xl px-3 py-2 md:col-span-3">
+                <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Fulfilled between</div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <input
+                    type="date"
+                    value={fulfilledFrom}
+                    onChange={(e)=>setFulfilledFrom(e.target.value)}
+                    className="text-sm border border-gray-300 rounded px-2 py-1"
+                  />
+                  <span className="text-[11px] uppercase tracking-wide text-gray-400">to</span>
+                  <input
+                    type="date"
+                    value={fulfilledTo}
+                    onChange={(e)=>setFulfilledTo(e.target.value)}
+                    className="text-sm border border-gray-300 rounded px-2 py-1"
+                  />
+                  <button
+                    className="ml-2 inline-flex items-center px-3 py-1 rounded-full text-[11px] font-semibold bg-blue-600 text-white active:scale-[.98]"
+                    onClick={()=>load(true)}
+                  >Apply</button>
+                  <button
+                    className="inline-flex items-center px-3 py-1 rounded-full text-[11px] font-semibold bg-gray-200 text-gray-800 active:scale-[.98]"
+                    onClick={()=>{ setFulfilledFrom(""); setFulfilledTo(""); load(true); }}
+                  >Clear</button>
                 </div>
               </div>
             </div>
