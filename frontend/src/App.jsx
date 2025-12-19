@@ -89,33 +89,10 @@ export default function App(){
   const [productIdFilter, setProductIdFilter] = useState("");
   const [showProductFilter, setShowProductFilter] = useState(false);
   const [statusFilter, setStatusFilter] = useState("collect"); // collect|verification
-  const [codDate, setCodDate] = useState(() => {
-    try {
-      const now = new Date();
-      const yyyy = now.getFullYear();
-      const mm = String(now.getMonth()+1).padStart(2,'0');
-      const dd = String(now.getDate()).padStart(2,'0');
-      return `${yyyy}-${mm}-${dd}`;
-    } catch { return ""; }
-  }); // legacy single date (YYYY-MM-DD)
-  const [codFromDate, setCodFromDate] = useState(() => {
-    try {
-      const now = new Date();
-      const yyyy = now.getFullYear();
-      const mm = String(now.getMonth()+1).padStart(2,'0');
-      const dd = String(now.getDate()).padStart(2,'0');
-      return `${yyyy}-${mm}-${dd}`;
-    } catch { return ""; }
-  }); // YYYY-MM-DD
-  const [codToDate, setCodToDate] = useState(() => {
-    try {
-      const now = new Date();
-      const yyyy = now.getFullYear();
-      const mm = String(now.getMonth()+1).padStart(2,'0');
-      const dd = String(now.getDate()).padStart(2,'0');
-      return `${yyyy}-${mm}-${dd}`;
-    } catch { return ""; }
-  }); // YYYY-MM-DD
+  // COD date filtering is optional; keep it empty by default so collectors see orders immediately.
+  const [codDate, setCodDate] = useState(""); // legacy single date (YYYY-MM-DD)
+  const [codFromDate, setCodFromDate] = useState(""); // YYYY-MM-DD
+  const [codToDate, setCodToDate] = useState(""); // YYYY-MM-DD
   const [tagFilter, setTagFilter] = useState(null);
   const [loading, setLoading] = useState(false);
   const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
@@ -266,6 +243,7 @@ export default function App(){
       : '';
     const baseQuery = (isGlobalSearch ? '' : `${stockBase}${negativeTagQuery}`).trim();
     const isProductMode = !!(productIdFilter || "").trim();
+    const applyCodDates = (!usingStockProfile && !isGlobalSearch && (statusFilter === "collect" || statusFilter === "verification" || isProductMode));
     const isBulkFilter = (!usingStockProfile && ((statusFilter === "collect" || statusFilter === "verification") || isProductMode));
     const perPage = isBulkFilter ? 250 : 30;
 
@@ -279,7 +257,7 @@ export default function App(){
       product_id: (productIdFilter || ""),
       // Apply date range to all non-Stock filters (collect, verification, product)
       cod_date: "",
-      cod_dates: (isGlobalSearch || usingStockProfile) ? "" : (codDatesCSV || ""),
+      cod_dates: applyCodDates ? (codDatesCSV || "") : "",
       collect_prefix: preset.collectPrefix,
       collect_exclude_tag: preset.collectExcludeTag,
       verification_include_tag: preset.verificationIncludeTag,
@@ -310,7 +288,7 @@ export default function App(){
             product_id: (productIdFilter || ""),
             // Always carry date range for non-Stock profiles (applies to collect/verification/product modes)
             cod_date: "",
-            cod_dates: (!usingStockProfile && !isGlobalSearch) ? (codDatesCSV || "") : "",
+            cod_dates: applyCodDates ? (codDatesCSV || "") : "",
             collect_prefix: preset.collectPrefix,
             collect_exclude_tag: preset.collectExcludeTag,
             verification_include_tag: preset.verificationIncludeTag,
@@ -390,6 +368,7 @@ export default function App(){
       const isBulkFilter = (!usingStockProfile && ((statusFilter === "collect" || statusFilter === "verification") || !!(productIdFilter || "").trim()));
       const perPage = isBulkFilter ? 250 : 30;
       const isProductMode = !!(productIdFilter || "").trim();
+      const applyCodDates = (!usingStockProfile && !isGlobalSearch && (statusFilter === "collect" || statusFilter === "verification" || isProductMode));
       const effectiveStatusFilter = (usingStockProfile ? "all" : (statusFilter || "all"));
       const data = await API.getOrders({
         limit: perPage,
@@ -400,7 +379,7 @@ export default function App(){
         product_id: (productIdFilter || ""),
         cod_date: "",
         // Carry date range for non-Stock profiles in product/collect/verification modes
-        cod_dates: (!usingStockProfile && !isGlobalSearch) ? (codDatesCSV || "") : "",
+        cod_dates: applyCodDates ? (codDatesCSV || "") : "",
         collect_prefix: preset.collectPrefix,
         collect_exclude_tag: preset.collectExcludeTag,
         verification_include_tag: preset.verificationIncludeTag,
