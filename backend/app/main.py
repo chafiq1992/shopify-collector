@@ -887,7 +887,20 @@ async def list_orders(
     )
     # Narrow server-side query when fulfillment date filtering is requested
     if fulfillment_from or fulfillment_to:
+        # Ensure we only query fulfilled orders
         q = f"{q} fulfillment_status:fulfilled".strip()
+        # Additionally constrain by updated_at window to approximate fulfillment date range
+        # Shopify query syntax accepts YYYY-MM-DD for updated_at comparisons
+        try:
+            if fulfillment_from:
+                q = f"{q} updated_at:>={fulfillment_from}".strip()
+            if fulfillment_to:
+                # Make end exclusive by adding 1 day to the date
+                to_dt = datetime.fromisoformat(fulfillment_to).replace(tzinfo=timezone.utc)
+                to_next = (to_dt + timedelta(days=1)).date().isoformat()
+                q = f"{q} updated_at:<{to_next}".strip()
+        except Exception:
+            pass
 
     # Build GraphQL query based on store capabilities
 
@@ -1041,6 +1054,19 @@ async def list_orders(
             except Exception:
                 return False
         items = [o for o in items if _in_range(o.fulfilled_at)]
+        # Since we applied a server-side approximation and a client-side filter,
+        # the original pagination cursors/counts no longer reflect the filtered result.
+        # Force a consistent response for this mode.
+        unique_tags = sorted({t for o in items for t in (o.tags or [])})
+        resp = {
+            "orders": [json.loads(o.json()) for o in items],
+            "pageInfo": {"hasNextPage": False},
+            "tags": unique_tags,
+            "totalCount": len(items),
+            "nextCursor": None,
+        }
+        _orders_cache_set(cache_key, resp)
+        return resp
 
     # For Irranova, backfill customer/shipping city from cached overrides when available
     if (store or "irrakids").strip().lower() == "irranova":
