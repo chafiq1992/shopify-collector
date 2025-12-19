@@ -659,6 +659,7 @@ class OrderDTO(BaseModel):
     considered_fulfilled: bool = False
     created_at: Optional[str] = None
     fulfilled_at: Optional[str] = None
+    financial_status: Optional[str] = None
 
 # ---------- Helpers ----------
 def build_query_string(
@@ -839,6 +840,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         considered_fulfilled=considered_fulfilled,
         created_at=node.get("createdAt"),
         fulfilled_at=fulfilled_at_val,
+        financial_status=node.get("displayFinancialStatus"),
     )
 
 # ---------- Routes ----------
@@ -928,6 +930,7 @@ async def list_orders(
                 fulfillments { createdAt status }
                 currentTotalPriceSet { shopMoney { amount currencyCode } }
                 totalPriceSet { shopMoney { amount currencyCode } }
+                displayFinancialStatus
                 lineItems(first: 50) {
                   edges {
                     node {
@@ -969,6 +972,7 @@ async def list_orders(
                 customer { displayName }
                 currentTotalPriceSet { shopMoney { amount currencyCode } }
                 totalPriceSet { shopMoney { amount currencyCode } }
+                displayFinancialStatus
                 lineItems(first: 50) {
                   edges {
                     node {

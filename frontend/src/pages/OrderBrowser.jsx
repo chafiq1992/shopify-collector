@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { authHeaders } from "../lib/auth";
 
 // Minimal API client reused across pages
@@ -68,12 +68,15 @@ export default function OrderBrowser(){
   const [fulfilledTo, setFulfilledTo] = useState("");
 
   // Data
-  const [orders, setOrders] = useState([]);
+  // Pagination model: cache pages client-side (Shopify-like Prev/Next UX without losing "Prev")
+  const [pages, setPages] = useState([]); // [{ orders, nextCursor, hasNextPage }]
+  const [pageIndex, setPageIndex] = useState(0);
+  const [perPage, setPerPage] = useState(25);
+  const orders = pages[pageIndex]?.orders || [];
   const [availableTags, setAvailableTags] = useState([]);
-  const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
-  const [nextCursor, setNextCursor] = useState(null);
+  const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [pagingBusy, setPagingBusy] = useState(false);
   const [error, setError] = useState(null);
   const requestIdRef = useRef(0);
 
@@ -82,6 +85,16 @@ export default function OrderBrowser(){
   const [noteAppendById, setNoteAppendById] = useState({});
   const [newTagById, setNewTagById] = useState({});
   const [overridesByNumber, setOverridesByNumber] = useState({});
+
+  function updateOrderInPages(orderId, updater){
+    setPages(prev => prev.map(p => ({
+      ...p,
+      orders: (p.orders || []).map(o => {
+        if (o.id !== orderId) return o;
+        try { return updater(o); } catch { return o; }
+      })
+    })));
+  }
 
   function buildBaseQuery(){
     let q = "";
@@ -97,18 +110,15 @@ export default function OrderBrowser(){
     return q.trim();
   }
 
-  async function load(reset = true){
+  async function loadFirstPage(){
     const reqId = ++requestIdRef.current;
-    if (reset){
-      setOrders([]);
-      setNextCursor(null);
-      setPageInfo({ hasNextPage: false });
-    }
+    setPages([]);
+    setPageIndex(0);
     setLoading(true);
     setError(null);
     try {
       const data = await API.getOrders({
-        limit: 30,
+        limit: perPage,
         status_filter: "all",
         tag_filter: (tagFilter || "").trim(),
         search: (search || "").trim(),
@@ -118,10 +128,14 @@ export default function OrderBrowser(){
         store,
       });
       if (reqId !== requestIdRef.current) return;
-      setOrders(data.orders || []);
+      const firstOrders = data.orders || [];
       setAvailableTags(data.tags || []);
-      setPageInfo(data.pageInfo || { hasNextPage: false });
-      setNextCursor(data.nextCursor || null);
+      setTotalCount(Number(data.totalCount || firstOrders.length || 0));
+      setPages([{
+        orders: firstOrders,
+        nextCursor: data.nextCursor || null,
+        hasNextPage: !!(data.pageInfo || {}).hasNextPage,
+      }]);
     } catch (e){
       setError(e?.message || "Failed to load orders");
     } finally {
@@ -129,13 +143,20 @@ export default function OrderBrowser(){
     }
   }
 
-  async function loadMore(){
-    if (loadingMore || !pageInfo?.hasNextPage || !nextCursor) return;
-    setLoadingMore(true);
+  async function gotoNextPage(){
+    // If next page is already cached, just navigate.
+    if (pageIndex < pages.length - 1){
+      setPageIndex(i => i + 1);
+      return;
+    }
+    const current = pages[pageIndex];
+    if (!current?.hasNextPage || !current?.nextCursor) return;
+    if (pagingBusy) return;
+    setPagingBusy(true);
     try {
       const data = await API.getOrders({
-        limit: 30,
-        cursor: nextCursor,
+        limit: perPage,
+        cursor: current.nextCursor,
         status_filter: "all",
         tag_filter: (tagFilter || "").trim(),
         search: (search || "").trim(),
@@ -144,23 +165,27 @@ export default function OrderBrowser(){
         fulfillment_to: (fulfilledTo || "").trim(),
         store,
       });
-      const more = data.orders || [];
-      setOrders(prev => prev.concat(more));
-      setPageInfo(data.pageInfo || { hasNextPage: false });
-      setNextCursor(data.nextCursor || null);
-      // Preload overrides best-effort for newly loaded orders if any are expanded later
+      const nextOrders = data.orders || [];
+      setAvailableTags(data.tags || []);
+      setTotalCount(Number(data.totalCount || totalCount || nextOrders.length || 0));
+      setPages(prev => prev.concat([{
+        orders: nextOrders,
+        nextCursor: data.nextCursor || null,
+        hasNextPage: !!(data.pageInfo || {}).hasNextPage,
+      }]));
+      setPageIndex(i => i + 1);
     } catch (e){
-      // best-effort
+      // Best-effort: keep user on current page
     } finally {
-      setLoadingMore(false);
+      setPagingBusy(false);
     }
   }
 
   useEffect(() => {
     // Debounce search a bit
-    const t = setTimeout(() => { load(true); }, 350);
+    const t = setTimeout(() => { loadFirstPage(); }, 350);
     return () => clearTimeout(t);
-  }, [tagFilter, fulfillmentFilter, store, search, fulfilledFrom, fulfilledTo]);
+  }, [tagFilter, fulfillmentFilter, store, search, fulfilledFrom, fulfilledTo, perPage]);
 
   function toggleExpanded(order){
     setExpandedIds(prev => {
@@ -185,7 +210,7 @@ export default function OrderBrowser(){
       await API.addTag(order.id, tag, store);
       setNewTagById(prev => ({ ...prev, [order.id]: "" }));
       // Optimistic update
-      setOrders(prev => prev.map(o => o.id === order.id ? ({ ...o, tags: Array.from(new Set([...(o.tags || []), tag])) }) : o));
+      updateOrderInPages(order.id, (o) => ({ ...o, tags: Array.from(new Set([...(o.tags || []), tag])) }));
     } catch (e){
       alert(e?.message || "Failed to add tag");
     }
@@ -197,10 +222,145 @@ export default function OrderBrowser(){
     try {
       await API.appendNote(order.id, append, store);
       setNoteAppendById(prev => ({ ...prev, [order.id]: "" }));
-      setOrders(prev => prev.map(o => o.id === order.id ? ({ ...o, note: ((o.note || "").trim() ? `${(o.note || "").trim()}\n${append}` : append) }) : o));
+      updateOrderInPages(order.id, (o) => ({ ...o, note: ((o.note || "").trim() ? `${(o.note || "").trim()}\n${append}` : append) }));
     } catch (e){
       alert(e?.message || "Failed to update note");
     }
+  }
+
+  function gotoPrevPage(){
+    setPageIndex(i => Math.max(0, i - 1));
+  }
+
+  const currentPage = pages[pageIndex] || { orders: [], hasNextPage: false, nextCursor: null };
+  const hasPrevPage = pageIndex > 0;
+  const hasNextPage = !!currentPage.hasNextPage;
+  const startIndex = totalCount > 0 ? (pageIndex * perPage + 1) : (orders.length ? 1 : 0);
+  const endIndex = totalCount > 0
+    ? Math.min(totalCount, pageIndex * perPage + orders.length)
+    : (pageIndex * perPage + orders.length);
+
+  function SummaryBar(){
+    return (
+      <div className="mb-3 rounded-2xl border border-gray-200 bg-white p-3 flex items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="text-sm font-semibold">Orders</div>
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+              {totalCount || 0} total
+            </span>
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-gray-50 text-gray-700 border border-gray-200">
+              Showing {startIndex}-{endIndex}
+            </span>
+          </div>
+          <div className="mt-1 text-xs text-gray-600 flex gap-2 flex-wrap">
+            {store && <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">Store: <span className="font-semibold">{store}</span></span>}
+            {fulfillmentFilter !== 'all' && (
+              <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">
+                Fulfillment: <span className="font-semibold">{fulfillmentFilter}</span>
+              </span>
+            )}
+            {(tagFilter || "").trim() && (
+              <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">
+                Tag: <span className="font-semibold">{tagFilter.trim()}</span>
+              </span>
+            )}
+            {(search || "").trim() && (
+              <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">
+                Search: <span className="font-semibold">{search.trim()}</span>
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-gray-600">
+            <span className="mr-2">Per page</span>
+            <select
+              value={perPage}
+              onChange={(e)=>setPerPage(parseInt(e.target.value || "25", 10))}
+              className="text-xs border border-gray-300 rounded-lg px-2 py-1 bg-white"
+            >
+              <option value={25}>25</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+            </select>
+          </label>
+        </div>
+      </div>
+    );
+  }
+
+  function PaginationBar(){
+    return (
+      <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-gray-200 bg-white px-3 py-2">
+        <div className="text-xs text-gray-600">
+          Page <span className="font-semibold">{pageIndex + 1}</span>
+          {totalCount > 0 && (
+            <span className="text-gray-400">{` · ${totalCount} total`}</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={gotoPrevPage}
+            disabled={!hasPrevPage || loading || pagingBusy}
+            className="px-3 py-1.5 rounded-full text-xs font-semibold border border-gray-300 bg-white disabled:opacity-50 hover:bg-gray-50"
+          >
+            Prev
+          </button>
+          <button
+            onClick={gotoNextPage}
+            disabled={!hasNextPage || loading || pagingBusy}
+            className="px-3 py-1.5 rounded-full text-xs font-semibold bg-gray-900 text-white disabled:opacity-50"
+          >
+            Next
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function paymentPill(financialStatus){
+    const raw = String(financialStatus || "").trim();
+    const k = raw.toLowerCase().replace(/\s+/g, "_");
+    const label = raw
+      ? raw.toLowerCase().replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())
+      : "—";
+    if (k.includes("paid")) return { label: "Paid", cls: "bg-emerald-600 text-white" };
+    if (k.includes("pending") || k.includes("authorized")) return { label: "Pending", cls: "bg-amber-500 text-white" };
+    if (k.includes("partially")) return { label: "Partial", cls: "bg-blue-600 text-white" };
+    if (k.includes("refunded") || k.includes("voided")) return { label: "Refunded", cls: "bg-gray-700 text-white" };
+    return { label: label, cls: "bg-gray-200 text-gray-800 border border-gray-300" };
+  }
+
+  function fulfillmentPill(order){
+    const fulfilled = !!(order?.considered_fulfilled || order?.fulfilled_at);
+    return fulfilled
+      ? { label: "Fulfilled", cls: "bg-emerald-50 text-emerald-700 border border-emerald-200" }
+      : { label: "Unfulfilled", cls: "bg-amber-50 text-amber-800 border border-amber-200" };
+  }
+
+  function tagPillClasses(tag){
+    const t = String(tag || "").trim();
+    const tl = t.toLowerCase();
+    if (tl === "out") return "bg-red-600 text-white";
+    if (tl === "pc" || tl === "collected") return "bg-emerald-600 text-white";
+    if (tl === "urgent") return "bg-amber-500 text-white";
+    if (tl === "btis") return "bg-purple-600 text-white";
+    if (tl === "en att b") return "bg-orange-600 text-white";
+    if (tl === "cod print") return "bg-indigo-600 text-white";
+    // Deterministic palette for everything else
+    const palettes = [
+      "bg-sky-50 text-sky-700 border border-sky-200",
+      "bg-teal-50 text-teal-700 border border-teal-200",
+      "bg-fuchsia-50 text-fuchsia-700 border border-fuchsia-200",
+      "bg-lime-50 text-lime-800 border border-lime-200",
+      "bg-rose-50 text-rose-700 border border-rose-200",
+      "bg-slate-50 text-slate-700 border border-slate-200",
+    ];
+    let h = 0;
+    for (let i = 0; i < tl.length; i++) h = ((h << 5) - h + tl.charCodeAt(i)) | 0;
+    const idx = Math.abs(h) % palettes.length;
+    return palettes[idx];
   }
 
   function OrderRow({ order }){
@@ -210,28 +370,59 @@ export default function OrderBrowser(){
     const ov = overridesByNumber[numKey];
     const fulfilledOn = order.fulfilled_at ? formatDate(order.fulfilled_at) : null;
     const shippingCity = (ov && ov.shippingAddress && ov.shippingAddress.city) || order.shipping_city || null;
+    const pay = paymentPill(order.financial_status);
+    const fulf = fulfillmentPill(order);
+    const noteText = String(order.note || "").trim();
 
     return (
-      <div className="border border-gray-200 rounded-xl bg-white">
-        <button onClick={()=>toggleExpanded(order)} className="w-full px-4 py-3 text-left flex items-center gap-3">
+      <div className="border border-gray-200 rounded-2xl bg-white overflow-hidden shadow-sm">
+        <button onClick={()=>toggleExpanded(order)} className="w-full px-4 py-3 text-left flex items-start gap-3 hover:bg-gray-50/60">
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="font-semibold">{num}</span>
-              <span className="text-xs text-gray-500">{formatDate(order.created_at)}</span>
-              <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">{formatMoney(order.total_price)}</span>
+            <div className="flex items-start gap-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-extrabold tracking-tight">{num}</span>
+                  <span className="text-xs text-gray-500">{formatDate(order.created_at)}</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 font-semibold">
+                    {formatMoney(order.total_price)}
+                  </span>
+                </div>
+                <div className="mt-0.5 text-sm text-gray-800 truncate">
+                  <span className="font-semibold">{order.customer || ov?.customer?.displayName || "—"}</span>
+                  {shippingCity && <span className="text-gray-400">{` · ${shippingCity}`}</span>}
+                  {fulfilledOn && <span className="text-gray-400">{` · Fulfilled ${fulfilledOn}`}</span>}
+                </div>
+              </div>
+              <div className="ml-auto flex items-center gap-2 flex-wrap justify-end">
+                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-extrabold ${pay.cls}`}>
+                  {pay.label}
+                </span>
+                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold ${fulf.cls}`}>
+                  {fulf.label}
+                </span>
+              </div>
             </div>
-            <div className="text-sm text-gray-700 truncate">
-              {order.customer || ov?.customer?.displayName || "—"}
-              {shippingCity && <span className="text-gray-400">{` · ${shippingCity}`}</span>}
-              {fulfilledOn && <span className="text-gray-400">{` · Fulfilled ${fulfilledOn}`}</span>}
-            </div>
-            <div className="mt-1 flex gap-1 flex-wrap">
+
+            <div className="mt-2 flex gap-1.5 flex-wrap">
               {(order.tags || []).map(t => (
-                <span key={t} className="text-[11px] px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200 text-gray-800">{t}</span>
+                <span
+                  key={t}
+                  className={`text-[11px] px-2 py-0.5 rounded-full font-extrabold tracking-wide ${tagPillClasses(t)}`}
+                  title={t}
+                >
+                  {t}
+                </span>
               ))}
             </div>
+
+            <div className={`mt-2 rounded-xl border px-3 py-2 ${noteText ? "bg-amber-50 border-amber-200" : "bg-gray-50 border-gray-200"}`}>
+              <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Note</div>
+              <div className={`text-sm whitespace-pre-wrap ${noteText ? "text-amber-950" : "text-gray-500"}`}>
+                {noteText ? noteText : "No note"}
+              </div>
+            </div>
           </div>
-          <div className="text-xs text-blue-700">{expanded ? "Hide" : "Show"}</div>
+          <div className="text-xs font-semibold text-blue-700 shrink-0 pt-1">{expanded ? "Hide" : "Show"}</div>
         </button>
         {expanded && (
           <div className="px-4 pb-4">
@@ -397,11 +588,16 @@ export default function OrderBrowser(){
                   />
                   <button
                     className="ml-2 inline-flex items-center px-3 py-1 rounded-full text-[11px] font-semibold bg-blue-600 text-white active:scale-[.98]"
-                    onClick={()=>load(true)}
+                    onClick={()=>loadFirstPage()}
                   >Apply</button>
                   <button
                     className="inline-flex items-center px-3 py-1 rounded-full text-[11px] font-semibold bg-gray-200 text-gray-800 active:scale-[.98]"
-                    onClick={()=>{ setFulfilledFrom(""); setFulfilledTo(""); load(true); }}
+                    onClick={()=>{
+                      setFulfilledFrom("");
+                      setFulfilledTo("");
+                      // Ensure reload uses cleared values
+                      setTimeout(() => { try { loadFirstPage(); } catch {} }, 0);
+                    }}
                   >Clear</button>
                 </div>
               </div>
@@ -413,16 +609,11 @@ export default function OrderBrowser(){
         {error && (
           <div className="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</div>
         )}
+        <SummaryBar />
         <div className="flex flex-col gap-3">
           {orders.map(o => <OrderRow key={o.id} order={o} />)}
         </div>
-        <div className="mt-4 flex justify-center">
-          {pageInfo?.hasNextPage ? (
-            <button onClick={loadMore} disabled={loadingMore} className="px-4 py-2 rounded-full text-sm bg-gray-900 text-white disabled:opacity-60">{loadingMore ? "Loading…" : "Load more"}</button>
-          ) : (
-            <div className="text-sm text-gray-500">End of list</div>
-          )}
-        </div>
+        <PaginationBar />
       </main>
     </div>
   );
