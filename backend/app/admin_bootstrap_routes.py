@@ -2,14 +2,15 @@ import os
 import hmac
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from datetime import datetime
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_session
 from .models import User
-from .auth_routes import hash_password, get_current_user, require_admin
+from .auth_routes import hash_password, require_admin
 
 router = APIRouter()
 
@@ -125,5 +126,38 @@ async def admin_reset_password(
     user.is_active = True
     await db.commit()
     return {"ok": True}
+
+
+def _dt_to_iso(val) -> str | None:
+    try:
+        if isinstance(val, datetime):
+            return val.isoformat()
+    except Exception:
+        return None
+    return None
+
+
+@router.get("/api/admin/users")
+async def admin_list_users(
+    db: AsyncSession = Depends(get_session),
+    _: User = Depends(require_admin),
+):
+    result = await db.execute(select(User).order_by(User.created_at.desc()))
+    users = result.scalars().all()
+    return {
+        "ok": True,
+        "users": [
+            {
+                "id": u.id,
+                "email": u.email,
+                "name": u.name,
+                "role": u.role,
+                "is_active": bool(u.is_active),
+                "created_at": _dt_to_iso(u.created_at),
+                "last_login_at": _dt_to_iso(u.last_login_at),
+            }
+            for u in users
+        ],
+    }
 
 

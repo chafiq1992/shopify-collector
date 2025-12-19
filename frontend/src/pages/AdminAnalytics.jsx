@@ -13,8 +13,18 @@ export default function AdminAnalytics(){
   const [store, setStore] = useState("all");
   const [rows, setRows] = useState([]);
   const [summary, setSummary] = useState({});
+  const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [adminMsg, setAdminMsg] = useState(null);
+
+  const [newUserEmail, setNewUserEmail] = useState("");
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserPassword, setNewUserPassword] = useState("");
+  const [newUserRole, setNewUserRole] = useState("collector");
+
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetPassword, setResetPassword] = useState("");
 
   async function load(){
     setLoading(true);
@@ -42,7 +52,81 @@ export default function AdminAnalytics(){
     }
   }
 
+  async function loadUsers(){
+    try {
+      const res = await authFetch(`/api/admin/users`, {
+        headers: authHeaders({"Accept":"application/json"})
+      });
+      if (!res.ok) {
+        const js = await res.json().catch(()=>({detail:"Failed to load users"}));
+        throw new Error(js.detail || "Failed to load users");
+      }
+      const js = await res.json();
+      setUsers(js.users || []);
+    } catch (e){
+      // Keep stats visible even if this fails
+      setAdminMsg(e?.message || "Failed to load users");
+    }
+  }
+
+  function genPassword(){
+    // Simple, readable random password (no ambiguous chars)
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    let out = "";
+    for (let i = 0; i < 12; i++){
+      out += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return out;
+  }
+
+  async function handleCreateUser(e){
+    e?.preventDefault?.();
+    setAdminMsg(null);
+    try {
+      const res = await authFetch(`/api/admin/users/create`, {
+        method: "POST",
+        headers: authHeaders({"Content-Type":"application/json"}),
+        body: JSON.stringify({
+          email: newUserEmail,
+          password: newUserPassword,
+          name: newUserName || null,
+          role: newUserRole,
+        })
+      });
+      const js = await res.json().catch(()=>({detail:"Failed to create user"}));
+      if (!res.ok) throw new Error(js.detail || "Failed to create user");
+      setAdminMsg(`User created: ${js?.user?.email || newUserEmail}`);
+      setNewUserEmail(""); setNewUserName(""); setNewUserPassword(""); setNewUserRole("collector");
+      await loadUsers();
+    } catch (e2){
+      setAdminMsg(e2?.message || "Failed to create user");
+    }
+  }
+
+  async function handleResetPassword(e){
+    e?.preventDefault?.();
+    setAdminMsg(null);
+    try {
+      const res = await authFetch(`/api/admin/users/reset-password`, {
+        method: "POST",
+        headers: authHeaders({"Content-Type":"application/json"}),
+        body: JSON.stringify({
+          email: resetEmail,
+          new_password: resetPassword,
+        })
+      });
+      const js = await res.json().catch(()=>({detail:"Failed to reset password"}));
+      if (!res.ok) throw new Error(js.detail || "Failed to reset password");
+      setAdminMsg(`Password reset for: ${resetEmail}`);
+      setResetEmail(""); setResetPassword("");
+      await loadUsers();
+    } catch (e2){
+      setAdminMsg(e2?.message || "Failed to reset password");
+    }
+  }
+
   useEffect(() => { load(); }, []); // initial
+  useEffect(() => { loadUsers(); }, []); // initial
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900">
@@ -77,10 +161,95 @@ export default function AdminAnalytics(){
       </header>
       <main className="max-w-6xl mx-auto px-4 py-4">
         {error && <div className="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</div>}
+        {adminMsg && <div className="mb-3 text-sm text-blue-800 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">{adminMsg}</div>}
         {loading ? (
           <div className="text-gray-600">Loading…</div>
         ) : (
           <>
+            <section className="mb-6">
+              <h3 className="text-sm font-semibold text-gray-700 mb-2">User management</h3>
+              <div className="grid lg:grid-cols-3 gap-3">
+                <div className="border border-gray-200 rounded-xl bg-white p-3">
+                  <div className="text-sm font-semibold mb-2">Create user</div>
+                  <form onSubmit={handleCreateUser} className="space-y-2">
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">Email (username)</label>
+                      <input value={newUserEmail} onChange={(e)=>setNewUserEmail(e.target.value)} type="email" className="w-full border border-gray-300 rounded-lg px-2 py-1 text-sm" placeholder="user@example.com" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">Name (optional)</label>
+                      <input value={newUserName} onChange={(e)=>setNewUserName(e.target.value)} type="text" className="w-full border border-gray-300 rounded-lg px-2 py-1 text-sm" placeholder="Full name" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">Password</label>
+                      <div className="flex gap-2">
+                        <input value={newUserPassword} onChange={(e)=>setNewUserPassword(e.target.value)} type="text" className="w-full border border-gray-300 rounded-lg px-2 py-1 text-sm" placeholder="Set password" />
+                        <button type="button" onClick={()=>setNewUserPassword(genPassword())} className="shrink-0 text-xs px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Generate</button>
+                      </div>
+                      <div className="mt-1 text-[11px] text-gray-500">Tokens expire in 12 hours (server setting).</div>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">Role</label>
+                      <select value={newUserRole} onChange={(e)=>setNewUserRole(e.target.value)} className="w-full border border-gray-300 rounded-lg px-2 py-1 text-sm bg-white">
+                        <option value="collector">collector</option>
+                        <option value="admin">admin</option>
+                      </select>
+                    </div>
+                    <button type="submit" className="w-full text-sm px-3 py-2 rounded-lg bg-gray-900 text-white font-semibold active:scale-[.98]">Create user</button>
+                  </form>
+                </div>
+
+                <div className="border border-gray-200 rounded-xl bg-white p-3">
+                  <div className="text-sm font-semibold mb-2">Reset password</div>
+                  <form onSubmit={handleResetPassword} className="space-y-2">
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">User email</label>
+                      <input value={resetEmail} onChange={(e)=>setResetEmail(e.target.value)} type="email" className="w-full border border-gray-300 rounded-lg px-2 py-1 text-sm" placeholder="user@example.com" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">New password</label>
+                      <div className="flex gap-2">
+                        <input value={resetPassword} onChange={(e)=>setResetPassword(e.target.value)} type="text" className="w-full border border-gray-300 rounded-lg px-2 py-1 text-sm" placeholder="New password" />
+                        <button type="button" onClick={()=>setResetPassword(genPassword())} className="shrink-0 text-xs px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Generate</button>
+                      </div>
+                    </div>
+                    <button type="submit" className="w-full text-sm px-3 py-2 rounded-lg bg-blue-600 text-white font-semibold active:scale-[.98]">Reset password</button>
+                  </form>
+                </div>
+
+                <div className="border border-gray-200 rounded-xl bg-white p-3">
+                  <div className="text-sm font-semibold mb-2">Users</div>
+                  <div className="text-xs text-gray-500 mb-2">Email is the login username.</div>
+                  <div className="max-h-[320px] overflow-auto border border-gray-200 rounded-lg">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-gray-100 sticky top-0">
+                        <tr>
+                          <th className="text-left px-2 py-2 border-b border-gray-200">Email</th>
+                          <th className="text-left px-2 py-2 border-b border-gray-200">Role</th>
+                          <th className="text-left px-2 py-2 border-b border-gray-200">Active</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(users || []).map(u => (
+                          <tr key={u.id} className="border-b last:border-b-0">
+                            <td className="px-2 py-2">
+                              <div className="font-medium">{u.email}</div>
+                              <div className="text-xs text-gray-500">{u.name || ""}</div>
+                            </td>
+                            <td className="px-2 py-2">{u.role}</td>
+                            <td className="px-2 py-2">{u.is_active ? "yes" : "no"}</td>
+                          </tr>
+                        ))}
+                        {(users || []).length === 0 && (
+                          <tr><td colSpan={3} className="px-2 py-3 text-center text-gray-500">No users</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                  <button onClick={loadUsers} className="mt-2 w-full text-sm px-3 py-2 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Refresh</button>
+                </div>
+              </div>
+            </section>
             <section className="mb-4">
               <h3 className="text-sm font-semibold text-gray-700 mb-2">Per-user totals</h3>
               <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">

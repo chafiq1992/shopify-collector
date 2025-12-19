@@ -195,6 +195,7 @@ export default function App(){
   const wsRef = useRef(null);
   const requestIdRef = useRef(0);
   function handleLoginSuccess(data){
+    // Login page controls remember-me storage; this is a harmless fallback
     saveAuth(data);
     setAuth(data);
   }

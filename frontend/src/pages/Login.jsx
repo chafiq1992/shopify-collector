@@ -4,6 +4,7 @@ import { saveAuth, clearAuth } from "../lib/auth";
 export default function Login({ onSuccess }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -26,7 +27,7 @@ export default function Login({ onSuccess }) {
         throw new Error(js.detail || "Login failed");
       }
       const data = await res.json();
-      saveAuth(data);
+      saveAuth(data, { remember });
       if (onSuccess) onSuccess(data);
     } catch (e) {
       setError(e?.message || "Login failed");
@@ -48,6 +49,7 @@ export default function Login({ onSuccess }) {
               type="email"
               value={email}
               onChange={(e)=>setEmail(e.target.value)}
+              autoComplete="username"
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
               placeholder="you@example.com"
             />
@@ -58,10 +60,15 @@ export default function Login({ onSuccess }) {
               type="password"
               value={password}
               onChange={(e)=>setPassword(e.target.value)}
+              autoComplete="current-password"
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
               placeholder="••••••••"
             />
           </div>
+          <label className="flex items-center gap-2 text-xs text-gray-600 select-none">
+            <input type="checkbox" checked={remember} onChange={(e)=>setRemember(e.target.checked)} />
+            <span>Remember me (stay signed in on this device)</span>
+          </label>
           {error && <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</div>}
           <button
             type="submit"
