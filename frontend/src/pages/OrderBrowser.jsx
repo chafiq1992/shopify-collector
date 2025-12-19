@@ -250,75 +250,71 @@ export default function OrderBrowser(){
 
   function SummaryBar(){
     return (
-      <div className="mb-3 rounded-2xl border border-gray-200 bg-white p-3 flex items-start gap-3">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="text-sm font-semibold">Orders</div>
-            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-200">
-              {totalCount || 0} total
-            </span>
-            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-gray-50 text-gray-700 border border-gray-200">
+      <div className="mb-6 flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+        <div className="flex flex-col gap-2">
+          <div className="flex items-baseline gap-2">
+            <h2 className="text-2xl font-bold tracking-tight text-gray-900">Orders</h2>
+            <span className="text-gray-500 font-medium text-sm bg-gray-100 px-2.5 py-0.5 rounded-full">{totalCount} total</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-white border border-gray-200 text-gray-600 shadow-sm">
               Showing {startIndex}-{endIndex}
             </span>
-          </div>
-          <div className="mt-1 text-xs text-gray-600 flex gap-2 flex-wrap">
-            {store && <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">Store: <span className="font-semibold">{store}</span></span>}
+            {store && <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-50 border border-indigo-100 text-indigo-700">Store: {store}</span>}
             {fulfillmentFilter !== 'all' && (
-              <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">
-                Fulfillment: <span className="font-semibold">{fulfillmentFilter}</span>
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-50 border border-amber-100 text-amber-700 capitalize">
+                {fulfillmentFilter}
               </span>
             )}
             {(tagFilter || "").trim() && (
-              <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">
-                Tag: <span className="font-semibold">{tagFilter.trim()}</span>
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-50 border border-purple-100 text-purple-700">
+                Tag: {tagFilter.trim()}
               </span>
             )}
             {(search || "").trim() && (
-              <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">
-                Search: <span className="font-semibold">{search.trim()}</span>
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 border border-blue-100 text-blue-700">
+                Search: {search.trim()}
               </span>
             )}
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <label className="text-xs text-gray-600">
-            <span className="mr-2">Per page</span>
-            <select
-              value={perPage}
-              onChange={(e)=>setPerPage(parseInt(e.target.value || "25", 10))}
-              className="text-xs border border-gray-300 rounded-lg px-2 py-1 bg-white"
-            >
-              <option value={25}>25</option>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-            </select>
+        <div className="flex items-center gap-3 bg-white p-1.5 rounded-xl border border-gray-200 shadow-sm">
+          <label className="text-xs font-medium text-gray-500 pl-2">
+            Rows:
           </label>
+          <select
+            value={perPage}
+            onChange={(e)=>setPerPage(parseInt(e.target.value || "25", 10))}
+            className="text-xs font-bold bg-transparent border-none outline-none text-gray-900 pr-1 cursor-pointer"
+          >
+            <option value={25}>25</option>
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+          </select>
         </div>
       </div>
     );
   }
 
   function PaginationBar(){
+    if (totalCount === 0) return null;
     return (
-      <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-gray-200 bg-white px-3 py-2">
-        <div className="text-xs text-gray-600">
-          Page <span className="font-semibold">{pageIndex + 1}</span>
-          {totalCount > 0 && (
-            <span className="text-gray-400">{` · ${totalCount} total`}</span>
-          )}
+      <div className="mt-8 flex items-center justify-between border-t border-gray-200 pt-6">
+        <div className="text-xs text-gray-500 font-medium">
+          Page <span className="text-gray-900 font-bold">{pageIndex + 1}</span> of <span className="text-gray-900 font-bold">{Math.ceil(totalCount / perPage) || 1}</span>
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={gotoPrevPage}
             disabled={!hasPrevPage || loading || pagingBusy}
-            className="px-3 py-1.5 rounded-full text-xs font-semibold border border-gray-300 bg-white disabled:opacity-50 hover:bg-gray-50"
+            className="px-4 py-2 rounded-full text-xs font-bold border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 hover:border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm active:scale-95"
           >
-            Prev
+            Previous
           </button>
           <button
             onClick={gotoNextPage}
             disabled={!hasNextPage || loading || pagingBusy}
-            className="px-3 py-1.5 rounded-full text-xs font-semibold bg-gray-900 text-white disabled:opacity-50"
+            className="px-4 py-2 rounded-full text-xs font-bold bg-gray-900 text-white hover:bg-black disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm active:scale-95"
           >
             Next
           </button>
@@ -371,6 +367,30 @@ export default function OrderBrowser(){
     return palettes[idx];
   }
 
+  function SkeletonRow(){
+    return (
+      <div className="border border-gray-100 rounded-2xl bg-white p-4 shadow-sm animate-pulse">
+        <div className="flex items-start gap-4">
+          <div className="flex-1">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="h-5 w-24 bg-gray-200 rounded-md"></div>
+              <div className="h-4 w-32 bg-gray-100 rounded-md"></div>
+            </div>
+            <div className="h-4 w-48 bg-gray-100 rounded-md mb-2"></div>
+            <div className="flex gap-2 mt-2">
+              <div className="h-5 w-16 bg-gray-100 rounded-full"></div>
+              <div className="h-5 w-16 bg-gray-100 rounded-full"></div>
+            </div>
+          </div>
+          <div className="flex gap-2">
+             <div className="h-6 w-20 bg-gray-200 rounded-full"></div>
+             <div className="h-6 w-20 bg-gray-200 rounded-full"></div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   function OrderRow({ order }){
     const expanded = expandedIds.has(order.id);
     const num = String(order.number || "");
@@ -383,39 +403,39 @@ export default function OrderBrowser(){
     const noteText = String(order.note || "").trim();
 
     return (
-      <div className="border border-gray-200 rounded-2xl bg-white overflow-hidden shadow-sm">
-        <button onClick={()=>toggleExpanded(order)} className="w-full px-4 py-3 text-left flex items-start gap-3 hover:bg-gray-50/60">
+      <div className={`border transition-all duration-200 rounded-2xl bg-white overflow-hidden ${expanded ? "border-blue-200 ring-4 ring-blue-50/50 shadow-md" : "border-gray-100 hover:border-gray-200 hover:shadow-md"}`}>
+        <button onClick={()=>toggleExpanded(order)} className="w-full px-5 py-4 text-left flex items-start gap-4 group">
           <div className="flex-1 min-w-0">
-            <div className="flex items-start gap-2">
+            <div className="flex items-start gap-3">
               <div className="min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-extrabold tracking-tight">{num}</span>
-                  <span className="text-xs text-gray-500">{formatDate(order.created_at)}</span>
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 font-semibold">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="text-base font-extrabold tracking-tight text-gray-900">{num}</span>
+                  <span className="text-xs font-medium text-gray-400">{formatDate(order.created_at)}</span>
+                  <span className="text-xs px-2.5 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200 font-bold tabular-nums">
                     {formatMoney(order.total_price)}
                   </span>
                 </div>
-                <div className="mt-0.5 text-sm text-gray-800 truncate">
-                  <span className="font-semibold">{order.customer || ov?.customer?.displayName || "—"}</span>
-                  {shippingCity && <span className="text-gray-400">{` · ${shippingCity}`}</span>}
-                  {fulfilledOn && <span className="text-gray-400">{` · Fulfilled ${fulfilledOn}`}</span>}
+                <div className="mt-1 text-sm text-gray-600 truncate flex items-center gap-2">
+                  <span className="font-semibold text-gray-800">{order.customer || ov?.customer?.displayName || "—"}</span>
+                  {shippingCity && <span className="text-gray-400 font-light">{`· ${shippingCity}`}</span>}
+                  {fulfilledOn && <span className="text-gray-400 font-light">{`· Fulfilled ${fulfilledOn}`}</span>}
                 </div>
               </div>
               <div className="ml-auto flex items-center gap-2 flex-wrap justify-end">
-                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-extrabold ${pay.cls}`}>
+                <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wider font-bold shadow-sm ${pay.cls}`}>
                   {pay.label}
                 </span>
-                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold ${fulf.cls}`}>
+                <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] uppercase tracking-wider font-bold shadow-sm ${fulf.cls}`}>
                   {fulf.label}
                 </span>
               </div>
             </div>
 
-            <div className="mt-2 flex gap-1.5 flex-wrap">
+            <div className="mt-3 flex gap-1.5 flex-wrap">
               {(order.tags || []).map(t => (
                 <span
                   key={t}
-                  className={`text-[11px] px-2 py-0.5 rounded-full font-extrabold tracking-wide ${tagPillClasses(t)}`}
+                  className={`text-[10px] px-2.5 py-1 rounded-full font-bold uppercase tracking-wide border shadow-sm ${tagPillClasses(t)}`}
                   title={t}
                 >
                   {t}
@@ -423,21 +443,23 @@ export default function OrderBrowser(){
               ))}
             </div>
 
-            <div className={`mt-2 rounded-xl border px-3 py-2 ${noteText ? "bg-amber-50 border-amber-200" : "bg-gray-50 border-gray-200"}`}>
-              <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Note</div>
-              <div className={`text-sm whitespace-pre-wrap ${noteText ? "text-amber-950" : "text-gray-500"}`}>
-                {noteText ? noteText : "No note"}
+            <div className={`mt-3 rounded-xl border px-4 py-3 transition-colors ${noteText ? "bg-amber-50/50 border-amber-100" : "bg-gray-50/50 border-gray-100"}`}>
+              <div className="text-[10px] uppercase tracking-widest text-gray-400 font-bold mb-1.5">Note</div>
+              <div className={`text-sm whitespace-pre-wrap leading-relaxed ${noteText ? "text-gray-800 font-medium" : "text-gray-400 italic"}`}>
+                {noteText ? noteText : "No note attached"}
               </div>
             </div>
           </div>
-          <div className="text-xs font-semibold text-blue-700 shrink-0 pt-1">{expanded ? "Hide" : "Show"}</div>
+          <div className="text-xs font-bold text-gray-300 group-hover:text-blue-600 transition-colors pt-1">
+            {expanded ? "Hide" : "Edit"}
+          </div>
         </button>
         {expanded && (
-          <div className="px-4 pb-4">
+          <div className="px-5 pb-5 pt-1 border-t border-gray-100 bg-gray-50/30">
             {/* Shipping / Customer */}
-            <div className="rounded-lg border border-gray-200 p-3 bg-gray-50">
-              <div className="text-sm font-semibold mb-1">Shipping</div>
-              <div className="text-sm text-gray-700">
+            <div className="rounded-xl border border-gray-200 p-4 bg-white shadow-sm mb-4">
+              <div className="text-xs uppercase tracking-widest font-bold text-gray-400 mb-2">Shipping Details</div>
+              <div className="text-sm text-gray-800 leading-relaxed font-medium">
                 {renderShipping(ov)}
               </div>
               {(() => {
@@ -446,24 +468,24 @@ export default function OrderBrowser(){
                   (ov && ov.customer && ov.customer.phone) ||
                   (ov && ov.phone) ||
                   null;
-                return phone ? <div className="text-sm text-gray-600 mt-1">Phone: {phone}</div> : null;
+                return phone ? <div className="text-sm text-gray-500 mt-2 flex items-center gap-2"><span>📞</span> {phone}</div> : null;
               })()}
             </div>
             {/* Items */}
-            <div className="mt-3 grid sm:grid-cols-2 md:grid-cols-3 gap-2">
+            <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
               {(order.variants || []).map((v, idx) => (
-                <div key={order.id + ":" + idx} className="flex gap-2 items-center border border-gray-200 rounded-lg p-2">
-                  <div className="w-12 h-12 bg-gray-100 rounded overflow-hidden flex items-center justify-center">
+                <div key={order.id + ":" + idx} className="group flex gap-3 items-center border border-gray-200 bg-white rounded-xl p-2.5 hover:border-blue-300 hover:shadow-sm transition-all">
+                  <div className="w-14 h-14 bg-gray-100 rounded-lg overflow-hidden flex items-center justify-center shrink-0 border border-gray-100">
                     {v.image ? (
-                      <img src={v.image} alt="" className="w-full h-full object-cover"/>
+                      <img src={v.image} alt="" loading="lazy" className="w-full h-full object-cover transition-transform group-hover:scale-105"/>
                     ) : (
-                      <div className="text-[10px] text-gray-400">No image</div>
+                      <div className="text-[10px] text-gray-400 font-medium">No img</div>
                     )}
                   </div>
-                  <div className="min-w-0">
-                    <div className="text-xs font-medium truncate">{v.title || v.sku || "Item"}</div>
-                    <div className="text-[11px] text-gray-500">Qty: {v.qty}</div>
-                    <div className={`text-[11px] ${v.status === 'fulfilled' ? 'text-green-700' : v.status === 'unfulfilled' ? 'text-amber-700' : 'text-gray-500'}`}>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-bold text-gray-900 truncate" title={v.title || v.sku}>{v.title || v.sku || "Item"}</div>
+                    <div className="text-[11px] text-gray-500 font-medium mt-0.5">Qty: <span className="text-gray-900">{v.qty}</span></div>
+                    <div className={`text-[10px] uppercase tracking-wide font-bold mt-1 ${v.status === 'fulfilled' ? 'text-emerald-600' : v.status === 'unfulfilled' ? 'text-amber-600' : 'text-gray-400'}`}>
                       {v.status || "unknown"}
                     </div>
                   </div>
@@ -471,35 +493,35 @@ export default function OrderBrowser(){
               ))}
             </div>
             {/* Note + Tag */}
-            <div className="mt-4 grid md:grid-cols-2 gap-3">
-              <div>
-                <div className="text-sm font-semibold mb-1">Add note</div>
+            <div className="mt-5 grid md:grid-cols-2 gap-4">
+              <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
+                <div className="text-xs uppercase tracking-widest font-bold text-gray-400 mb-2">Append Note</div>
                 <div className="flex gap-2">
                   <input
                     value={noteAppendById[order.id] || ""}
                     onChange={(e)=>setNoteAppendById(prev => ({ ...prev, [order.id]: e.target.value }))}
-                    placeholder="Append text to note"
-                    className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1"
+                    placeholder="Type to append..."
+                    className="flex-1 text-sm border border-gray-200 bg-gray-50 rounded-lg px-3 py-2 outline-none focus:border-blue-500 focus:bg-white transition-all"
                   />
-                  <button onClick={()=>handleAppendNote(order)} className="text-sm px-3 py-1 rounded-lg bg-gray-900 text-white">Add</button>
+                  <button onClick={()=>handleAppendNote(order)} className="text-xs font-bold px-4 py-2 rounded-lg bg-gray-900 text-white hover:bg-black active:scale-95 transition-all">Add</button>
                 </div>
                 {order.note && (
-                  <div className="mt-2 text-xs text-gray-600 whitespace-pre-wrap bg-gray-50 border border-gray-200 rounded-lg p-2 max-h-40 overflow-auto">
+                  <div className="mt-3 text-xs text-gray-600 whitespace-pre-wrap bg-amber-50/50 border border-amber-100 rounded-lg p-3 max-h-32 overflow-auto font-medium">
                     {order.note}
                   </div>
                 )}
               </div>
-              <div>
-                <div className="text-sm font-semibold mb-1">Add tag</div>
+              <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
+                <div className="text-xs uppercase tracking-widest font-bold text-gray-400 mb-2">Add Tag</div>
                 <div className="flex gap-2">
                   <input
                     value={newTagById[order.id] || ""}
                     onChange={(e)=>setNewTagById(prev => ({ ...prev, [order.id]: e.target.value }))}
-                    placeholder="Enter tag"
-                    className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1"
+                    placeholder="New tag..."
+                    className="flex-1 text-sm border border-gray-200 bg-gray-50 rounded-lg px-3 py-2 outline-none focus:border-blue-500 focus:bg-white transition-all"
                     list={`tag-suggestions-${order.id}`}
                   />
-                  <button onClick={()=>handleAddTag(order)} className="text-sm px-3 py-1 rounded-lg bg-blue-600 text-white">Add</button>
+                  <button onClick={()=>handleAddTag(order)} className="text-xs font-bold px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 active:scale-95 transition-all">Add</button>
                 </div>
                 <datalist id={`tag-suggestions-${order.id}`}>
                   {(availableTags || []).slice(0,50).map(t => (
@@ -621,13 +643,26 @@ export default function OrderBrowser(){
           </div>
         )}
       </header>
-      <main className="max-w-5xl mx-auto px-4 py-4">
+      <main className="max-w-5xl mx-auto px-4 py-6">
         {error && (
-          <div className="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</div>
+          <div className="mb-4 text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-4 py-3 font-medium flex items-center gap-2">
+            <span>⚠️</span> {error}
+          </div>
         )}
         <SummaryBar />
-        <div className="flex flex-col gap-3">
-          {orders.map(o => <OrderRow key={o.id} order={o} />)}
+        <div className="flex flex-col gap-4">
+          {loading && orders.length === 0 ? (
+            Array.from({length: 5}).map((_, i) => <SkeletonRow key={i} />)
+          ) : (
+            orders.map(o => <OrderRow key={o.id} order={o} />)
+          )}
+          {!loading && orders.length === 0 && (
+            <div className="text-center py-12 bg-white rounded-2xl border border-dashed border-gray-300">
+              <div className="text-gray-400 mb-2 text-4xl">📦</div>
+              <div className="text-gray-500 font-medium">No orders found</div>
+              <div className="text-sm text-gray-400 mt-1">Try adjusting your filters</div>
+            </div>
+          )}
         </div>
         <PaginationBar />
       </main>
@@ -684,5 +719,6 @@ function renderShipping(ov){
     </div>
   );
 }
+
 
 
