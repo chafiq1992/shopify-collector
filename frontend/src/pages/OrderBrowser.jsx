@@ -66,6 +66,7 @@ export default function OrderBrowser(){
   const [search, setSearch] = useState(""); // optional order # search
   const [fulfilledFrom, setFulfilledFrom] = useState("");
   const [fulfilledTo, setFulfilledTo] = useState("");
+  const [financialStatus, setFinancialStatus] = useState("all"); // all | paid | pending
 
   // Data
   // Pagination model: cache pages client-side (Shopify-like Prev/Next UX without losing "Prev")
@@ -125,6 +126,7 @@ export default function OrderBrowser(){
         base_query: buildBaseQuery(),
         fulfillment_from: (fulfilledFrom || "").trim(),
         fulfillment_to: (fulfilledTo || "").trim(),
+        financial_status: (financialStatus === "all" ? "" : financialStatus),
         store,
       });
       if (reqId !== requestIdRef.current) return;
@@ -163,6 +165,7 @@ export default function OrderBrowser(){
         base_query: buildBaseQuery(),
         fulfillment_from: (fulfilledFrom || "").trim(),
         fulfillment_to: (fulfilledTo || "").trim(),
+        financial_status: (financialStatus === "all" ? "" : financialStatus),
         store,
       });
       const nextOrders = data.orders || [];
@@ -186,6 +189,11 @@ export default function OrderBrowser(){
     const t = setTimeout(() => { loadFirstPage(); }, 350);
     return () => clearTimeout(t);
   }, [tagFilter, fulfillmentFilter, store, search, fulfilledFrom, fulfilledTo, perPage]);
+  useEffect(() => {
+    // Reload when financial status changes
+    const t = setTimeout(() => { loadFirstPage(); }, 0);
+    return () => clearTimeout(t);
+  }, [financialStatus]);
 
   function toggleExpanded(order){
     setExpandedIds(prev => {
@@ -568,6 +576,14 @@ export default function OrderBrowser(){
                   <FilterChip label="All" active={fulfillmentFilter === 'all'} onClick={()=>setFulfillmentFilter('all')} />
                   <FilterChip label="Unfulfilled" active={fulfillmentFilter === 'unfulfilled'} onClick={()=>setFulfillmentFilter('unfulfilled')} />
                   <FilterChip label="Fulfilled" active={fulfillmentFilter === 'fulfilled'} onClick={()=>setFulfillmentFilter('fulfilled')} />
+                </div>
+              </div>
+              <div className="bg-gray-100 rounded-xl px-3 py-2">
+                <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Payment</div>
+                <div className="flex items-center gap-2">
+                  <FilterChip label="All" active={financialStatus === 'all'} onClick={()=>setFinancialStatus('all')} />
+                  <FilterChip label="Paid" active={financialStatus === 'paid'} onClick={()=>setFinancialStatus('paid')} />
+                  <FilterChip label="Pending" active={financialStatus === 'pending'} onClick={()=>setFinancialStatus('pending')} />
                 </div>
               </div>
               <div className="bg-gray-100 rounded-xl px-3 py-2 md:col-span-3">

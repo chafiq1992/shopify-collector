@@ -674,6 +674,7 @@ def build_query_string(
     verification_include_tag: Optional[str] = None,
     exclude_out: bool = False,
     product_id: Optional[str] = None,
+    financial_status: Optional[str] = None,
 ) -> str:
     q = base_query.strip() if base_query else ""
     # New filter modes
@@ -698,6 +699,11 @@ def build_query_string(
     # Global OUT exclusion
     if exclude_out:
         q += " -tag:out"
+    # Financial status narrowing (paid | pending)
+    if financial_status:
+        fs = (financial_status or "").strip().lower()
+        if fs in ("paid", "pending"):
+            q += f" financial_status:{fs}"
     # Optional COD date tag(s): expect dd/mm/yy
     # If multiple provided (comma-separated), build an OR group across tags with the chosen prefix
     prefix = (collect_prefix or "cod").strip()
@@ -867,6 +873,7 @@ async def list_orders(
     disable_collect_ranking: bool = Query(False, description="If true, skip special collect ranking and return raw results"),
     fulfillment_from: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD) inclusive start for fulfillment date"),
     fulfillment_to: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD) inclusive end for fulfillment date"),
+    financial_status: Optional[str] = Query(None, description="Filter by payment status: paid or pending"),
 ):
     domain, password, _ = resolve_store_settings(store)
     if not domain or not password:
@@ -884,6 +891,7 @@ async def list_orders(
         verification_include_tag,
         exclude_out,
         product_id,
+        financial_status,
     )
     # Narrow server-side query when fulfillment date filtering is requested
     if fulfillment_from or fulfillment_to:
@@ -922,6 +930,7 @@ async def list_orders(
         "store": (store or "").strip().lower(),
         "product_id": product_id,
         "disable_collect_ranking": bool(disable_collect_ranking),
+        "financial_status": (financial_status or "").strip().lower(),
     })
     cached = _orders_cache_get(cache_key)
     if cached is not None:
