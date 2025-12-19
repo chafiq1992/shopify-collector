@@ -26,11 +26,13 @@ try:
     from .db import get_session, init_db
     from .models import User, OrderEvent, DailyUserStats
     from .auth_routes import router as auth_router, get_current_user, require_admin
+    from .admin_bootstrap_routes import router as admin_bootstrap_router
 except Exception:
     HAVE_AUTH_DB = False
     get_session = None  # type: ignore
     init_db = None  # type: ignore
     auth_router = None  # type: ignore
+    admin_bootstrap_router = None  # type: ignore
     def get_current_user():  # type: ignore
         raise HTTPException(status_code=503, detail="auth not configured")
     def require_admin():  # type: ignore
@@ -84,6 +86,8 @@ def resolve_store_settings(store: Optional[str]) -> Tuple[str, str, str]:
 app = FastAPI(title="Order Collector API", version="1.0.0")
 if HAVE_AUTH_DB and auth_router is not None:
     app.include_router(auth_router)
+if HAVE_AUTH_DB and admin_bootstrap_router is not None:
+    app.include_router(admin_bootstrap_router)
 
 # CORS (relaxed for simplicity; tighten in prod)
 app.add_middleware(
