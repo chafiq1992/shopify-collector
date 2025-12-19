@@ -1013,12 +1013,27 @@ async def list_orders(
     try:
         data = await shopify_graphql(query, variables, store=store)
     except HTTPException as he:
-        # Surface throttling as an empty list with error field to avoid hard 500s in UI
-        if he.status_code in (429, 502, 503):
-            resp = {"orders": [], "pageInfo": {"hasNextPage": False}, "tags": [], "totalCount": 0, "nextCursor": None, "error": he.detail}
-            _orders_cache_set(cache_key, resp)
-            return resp
-        raise
+        # If throttled, try progressively smaller page sizes with short delays
+        async def _retry_smaller():
+            for sz, wait in ((10, 0.6), (5, 1.0)):
+                try:
+                    await asyncio.sleep(wait)
+                    data_small = await shopify_graphql(query, {**variables, "first": sz}, store=store)
+                    return data_small
+                except HTTPException as he2:
+                    # Continue if still throttled or transient
+                    if he2.status_code in (429, 502, 503) or "THROTTLED" in str(getattr(he2, "detail", "")).upper():
+                        continue
+                    raise
+            return None
+        if he.status_code in (429, 502, 503) or "THROTTLED" in str(getattr(he, "detail", "")).upper():
+            data = await _retry_smaller()
+            if data is None:
+                resp = {"orders": [], "pageInfo": {"hasNextPage": False}, "tags": [], "totalCount": 0, "nextCursor": None, "error": he.detail}
+                _orders_cache_set(cache_key, resp)
+                return resp
+        else:
+            raise
     ords = data["orders"]
     edges = ords.get("edges") or []
     items: List[OrderDTO] = [map_order_node(e["node"]) for e in edges]
