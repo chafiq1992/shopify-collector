@@ -83,6 +83,7 @@ export default function App(){
   const [auth, setAuth] = useState(() => loadAuth());
   const [orders, setOrders] = useState([]);
   const [tags, setTags] = useState([]);
+  const [apiError, setApiError] = useState(null);
   const [index, setIndex] = useState(0);
   const [search, setSearch] = useState("");
   const [productIdFilter, setProductIdFilter] = useState("");
@@ -243,6 +244,7 @@ export default function App(){
   async function load(){
     const reqId = ++requestIdRef.current;
     setLoading(true);
+    setApiError(null);
     if (!auth?.access_token){
       setLoading(false);
       setOrders([]);
@@ -288,6 +290,9 @@ export default function App(){
       disable_collect_ranking: (!!(productIdFilter||"").trim() && productSortOldToNew) ? true : false,
     });
     if (reqId !== requestIdRef.current) return; // stale response
+    if (data && data.error){
+      setApiError(String(data.error));
+    }
     let ords = data.orders || [];
     let totalCountFromApi = data.totalCount || ords.length;
     // Auto-paginate for bulk filters to load ALL orders
@@ -635,6 +640,15 @@ export default function App(){
           </div>
         </div>
         <div className="max-w-5xl mx-auto px-4 pb-1 flex flex-col gap-1">
+          {apiError && (
+            <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-xl px-3 py-2 text-xs">
+              <div className="font-semibold">Backend error</div>
+              <div className="mt-0.5">{apiError}</div>
+              <div className="mt-1 text-[11px] text-amber-800/80">
+                Usually this means Shopify credentials are missing in Cloud Run (set <span className="font-mono">SHOPIFY_PASSWORD</span> or <span className="font-mono">IRRAKIDS_SHOPIFY_PASSWORD</span>).
+              </div>
+            </div>
+          )}
           <div className="flex items-center gap-2 bg-gray-100 rounded-xl px-3 py-1">
             <Search className="w-4 h-4 text-gray-500" />
             <input
