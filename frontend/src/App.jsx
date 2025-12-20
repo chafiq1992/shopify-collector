@@ -112,6 +112,74 @@ async function copyTextToClipboard(text){
   return { ok: false, method: "failed" };
 }
 
+const PENDING_ACTIONS_KEY = "orderCollectorPendingActionsV1";
+function loadPendingActions(){
+  try {
+    const raw = localStorage.getItem(PENDING_ACTIONS_KEY);
+    const arr = JSON.parse(raw || "[]");
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+function savePendingActions(arr){
+  try { localStorage.setItem(PENDING_ACTIONS_KEY, JSON.stringify(Array.isArray(arr) ? arr : [])); } catch {}
+}
+
+function sleep(ms){
+  return new Promise(r => setTimeout(r, ms));
+}
+
+async function withRetries(fn, { attempts = 3, baseDelayMs = 350 } = {}){
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++){
+    try {
+      return await fn(i);
+    } catch (e){
+      lastErr = e;
+      // small backoff + jitter
+      const wait = baseDelayMs * Math.pow(1.6, i) + Math.floor(Math.random() * 120);
+      await sleep(wait);
+    }
+  }
+  throw lastErr || new Error("Request failed");
+}
+
+function ActionOverlay({ state }){
+  // state: { open, type, variant, title, subtitle, confettiKey }
+  if (!state?.open) return null;
+  const variant = state.variant || "info"; // success | danger | info
+  const isSuccess = variant === "success";
+  const isDanger = variant === "danger";
+  const bg = isSuccess ? "bg-emerald-600" : isDanger ? "bg-red-600" : "bg-gray-900";
+  const ring = isSuccess ? "ring-emerald-200" : isDanger ? "ring-red-200" : "ring-gray-200";
+  const anim = isSuccess ? "oc-pop" : isDanger ? "oc-shake" : "oc-pop";
+  const Icon = state.type === "print" ? Printer : state.type === "out" ? XCircle : CheckCircle;
+  return (
+    <div className="fixed inset-0 z-[60] pointer-events-none flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/20 backdrop-blur-[1px]" />
+      {state.type === "collected" && isSuccess && (
+        <div key={String(state.confettiKey || 0)} className="oc-confetti" aria-hidden="true">
+          {Array.from({ length: 24 }).map((_, i) => (
+            <i key={i} className={`oc-confetti-piece oc-c${(i % 6) + 1}`} style={{ left: `${(i * 4) % 100}%`, animationDelay: `${(i % 8) * 0.02}s` }} />
+          ))}
+        </div>
+      )}
+      <div className={`relative pointer-events-none w-[92%] max-w-sm rounded-2xl shadow-xl ring-4 ${ring} ${bg} text-white px-5 py-4 ${anim}`}>
+        <div className="flex items-start gap-3">
+          <div className={`mt-0.5 rounded-xl bg-white/15 p-2 ${state.type === "print" ? "oc-printing" : ""}`}>
+            <Icon className="w-6 h-6" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-base font-extrabold tracking-tight">{state.title || ""}</div>
+            {state.subtitle ? <div className="text-sm text-white/90 mt-0.5">{state.subtitle}</div> : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App(){
   const [auth, setAuth] = useState(() => loadAuth());
   const [orders, setOrders] = useState([]);
@@ -141,6 +209,10 @@ export default function App(){
   const [showSettings, setShowSettings] = useState(false);
   const [showProfilePicker, setShowProfilePicker] = useState(false);
   const [showConfirm, setShowConfirm] = useState(null); // 'collected' | 'out' | 'print' | null
+  const [actionBusy, setActionBusy] = useState(false);
+  const [overlay, setOverlay] = useState({ open: false });
+  const overlayTimerRef = useRef(null);
+  const [pendingCount, setPendingCount] = useState(() => loadPendingActions().length);
   const [store, setStore] = useState(() => {
     // Prefer URL ?store=..., then sessionStorage; default to irrakids
     try {
@@ -530,14 +602,7 @@ export default function App(){
   }
 
   async function handleMarkCollected(order){
-    try {
-      await API.markCollected(order.id, order.number, store, { source: "single" });
-      vibrate(20);
-      gotoNext();
-    } catch (e){
-      setApiError(e?.message || "Failed to mark collected");
-      try { alert(e?.message || "Failed to mark collected"); } catch {}
-    }
+    await runCollected([order], { source: "single", afterSingle: true });
   }
 
   async function handleMarkOut(order){
@@ -550,15 +615,7 @@ export default function App(){
       .filter(v => selected.includes(v.id))
       .map(v => v.title || v.sku || "")
       .join(", ");
-    try {
-      await API.markOut(order.id, order.number, store, { titles });
-      setSelectedOutMap(prev => ({ ...prev, [order.id]: new Set() }));
-      vibrate(30);
-      gotoNext();
-    } catch (e){
-      setApiError(e?.message || "Failed to mark out");
-      try { alert(e?.message || "Failed to mark out"); } catch {}
-    }
+    await runOut([{ order, titles }], { afterSingle: true });
   }
 
   // Swipe navigation removed; use buttons below instead
@@ -613,6 +670,7 @@ export default function App(){
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900 overflow-hidden">
+      <ActionOverlay state={overlay} />
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur border-b border-gray-200">
         {loading && (
           <div className="progress-track">
@@ -638,6 +696,11 @@ export default function App(){
               <div className="hidden sm:flex items-center gap-2 text-xs text-gray-700 border border-gray-200 rounded-lg px-2 py-1 bg-white">
                 <span className="font-semibold">{auth.user.email}</span>
                 <span className="uppercase text-[10px] px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">{auth.user.role}</span>
+                {pendingCount > 0 && (
+                  <span className="uppercase text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200">
+                    Sync {pendingCount}
+                  </span>
+                )}
                 <button aria-label="Logout" onClick={()=>{ vibrate(10); handleLogout(); }} className="p-1.5 rounded-full hover:bg-gray-100">
                   <LogOut className="w-4 h-4 text-gray-700" />
                 </button>
@@ -889,10 +952,10 @@ export default function App(){
             )}
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <button type="button" onClick={()=>setShowConfirm('collected')} className="touch-manipulation flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
+            <button type="button" disabled={actionBusy} onClick={()=>{ try { vibrate(10); } catch {}; setShowConfirm('collected'); }} className="touch-manipulation flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm disabled:opacity-60 disabled:cursor-not-allowed">
               <CheckCircle className="w-4 h-4"/> <span className="font-semibold">{`Collected${selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}`}</span>
             </button>
-            <button type="button" onClick={()=>setShowConfirm('out')} className="touch-manipulation flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
+            <button type="button" disabled={actionBusy} onClick={()=>{ try { vibrate(10); } catch {}; setShowConfirm('out'); }} className="touch-manipulation flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm disabled:opacity-60 disabled:cursor-not-allowed">
               <XCircle className="w-4 h-4"/> <span className="font-semibold">{`OUT${selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}`}</span>
             </button>
           </div>
@@ -949,36 +1012,26 @@ export default function App(){
                   const targets = selected.length > 0 ? orders.filter(o => selected.includes(o.number)) : (current ? [current] : []);
                   try {
                     setShowConfirm(null);
+                    if (actionBusy) return;
                     if (showConfirm === 'collected'){
-                      await Promise.all(targets.map(o => API.markCollected(o.id, o.number, store, { source: "bulk" })));
-                      vibrate(20);
-                      if (selected.length === 0) gotoNext();
+                      await runCollected(targets, { source: selected.length > 0 ? "bulk" : "single", afterSingle: selected.length === 0 });
                       if (selected.length > 0) setSelectedOrderNumbers(new Set());
                     } else if (showConfirm === 'out'){
                       // Only process orders with at least one selected variant
                       const processable = targets.filter(o => (selectedOutMap[o.id] && selectedOutMap[o.id].size > 0));
-                      for (const o of processable){
+                      const list = processable.map(o => {
                         const sel = Array.from(selectedOutMap[o.id] || []);
                         const titles = (o.variants || [])
                           .filter(v => sel.includes(v.id))
                           .map(v => v.title || v.sku || "")
                           .join(", ");
-                        await API.markOut(o.id, o.number, store, { titles });
-                        setSelectedOutMap(prev => ({ ...prev, [o.id]: new Set() }));
-                      }
-                      vibrate(30);
-                      if (selected.length === 0) gotoNext();
+                        return { order: o, titles };
+                      });
+                      await runOut(list, { afterSingle: selected.length === 0 });
                       if (selected.length > 0) setSelectedOrderNumbers(new Set());
                     } else if (showConfirm === 'print'){
-                      // Trigger webhook by tagging before printing so overrides get cached
-                      try {
-                        await Promise.all(targets.map(o => API.addTag(o.id, 'cod print', store)));
-                      } catch {}
-                      // Small delay to allow webhook to reach the server (best-effort)
-                      try { await new Promise(r => setTimeout(r, 400)); } catch {}
                       const nums = targets.map(o => o.number);
-                      await handlePrintOrders(nums);
-                      // Keep selections after printing; they will be cleared upon Collected
+                      await runPrint(nums);
                     }
                   } catch (e){
                     setApiError(e?.message || "Action failed");
@@ -1012,6 +1065,133 @@ export default function App(){
       )}
     </div>
   );
+
+  function showOverlay(next, ms = 950){
+    try { if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current); } catch {}
+    setOverlay(next);
+    overlayTimerRef.current = setTimeout(() => setOverlay({ open: false }), ms);
+  }
+
+  function queueAction(action){
+    const arr = loadPendingActions();
+    const next = arr.concat([action]);
+    savePendingActions(next);
+    setPendingCount(next.length);
+  }
+
+  async function flushPending(){
+    const arr = loadPendingActions();
+    if (!arr.length) { setPendingCount(0); return; }
+    let remaining = arr.slice();
+    // Process oldest first, one-by-one (keeps app smooth and avoids request bursts)
+    for (const item of arr){
+      try {
+        if (item.type === "collected"){
+          await withRetries(() => API.markCollected(item.orderId, item.orderNumber, item.store, item.metadata || {}), { attempts: 3 });
+        } else if (item.type === "out"){
+          await withRetries(() => API.markOut(item.orderId, item.orderNumber, item.store, item.metadata || {}), { attempts: 3 });
+        } else {
+          // unknown action type
+        }
+        remaining = remaining.filter(x => x.id !== item.id);
+        savePendingActions(remaining);
+        setPendingCount(remaining.length);
+      } catch {
+        // stop on first failure to avoid hammering when offline
+        break;
+      }
+    }
+  }
+
+  // Background sync for pending actions (reliable for flaky mobile networks)
+  useEffect(() => {
+    const onOnline = () => { try { flushPending(); } catch {} };
+    try { window.addEventListener("online", onOnline); } catch {}
+    const t = setInterval(() => { try { flushPending(); } catch {} }, 15000);
+    // initial attempt
+    try { flushPending(); } catch {}
+    return () => {
+      try { window.removeEventListener("online", onOnline); } catch {}
+      try { clearInterval(t); } catch {}
+    };
+  }, [store, auth?.access_token]);
+
+  async function runCollected(targetOrders, { source = "single", afterSingle = false } = {}){
+    if (!targetOrders || targetOrders.length === 0) return;
+    setActionBusy(true);
+    try {
+      // sequential for reliability + nicer UX pacing
+      for (const o of targetOrders){
+        await withRetries(() => API.markCollected(o.id, o.number, store, { source }), { attempts: 3 });
+      }
+      vibrate(20);
+      showOverlay({ open: true, type: "collected", variant: "success", title: "Collected!", subtitle: "Great job — keep going.", confettiKey: Date.now() }, 1050);
+      if (afterSingle) gotoNext();
+    } catch (e){
+      // If offline/flaky, queue and keep user moving (backend is idempotent)
+      try {
+        for (const o of targetOrders){
+          queueAction({ id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, type: "collected", orderId: o.id, orderNumber: o.number, store, metadata: { source }, ts: Date.now() });
+        }
+      } catch {}
+      showOverlay({ open: true, type: "collected", variant: "info", title: "Saved — syncing…", subtitle: "We’ll send it when connection is stable." }, 1100);
+      setApiError(e?.message || "Failed to mark collected");
+      if (afterSingle) gotoNext();
+    } finally {
+      setActionBusy(false);
+      try { flushPending(); } catch {}
+    }
+  }
+
+  async function runOut(items, { afterSingle = false } = {}){
+    if (!items || items.length === 0) return;
+    setActionBusy(true);
+    try {
+      for (const it of items){
+        await withRetries(() => API.markOut(it.order.id, it.order.number, store, { titles: it.titles }), { attempts: 3 });
+        setSelectedOutMap(prev => ({ ...prev, [it.order.id]: new Set() }));
+      }
+      vibrate(30);
+      showOverlay({ open: true, type: "out", variant: "danger", title: "Marked OUT", subtitle: "Noted and tagged." }, 900);
+      if (afterSingle) gotoNext();
+    } catch (e){
+      try {
+        for (const it of items){
+          queueAction({ id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, type: "out", orderId: it.order.id, orderNumber: it.order.number, store, metadata: { titles: it.titles }, ts: Date.now() });
+        }
+      } catch {}
+      showOverlay({ open: true, type: "out", variant: "info", title: "Saved — syncing…", subtitle: "We’ll send it when connection is stable." }, 1100);
+      setApiError(e?.message || "Failed to mark out");
+      if (afterSingle) gotoNext();
+    } finally {
+      setActionBusy(false);
+      try { flushPending(); } catch {}
+    }
+  }
+
+  async function runPrint(orderNumbers){
+    const list = (orderNumbers || []).map(n => String(n));
+    if (!list.length) return;
+    if (actionBusy) return;
+    setActionBusy(true);
+    showOverlay({ open: true, type: "print", variant: "info", title: "Printing…", subtitle: "Sending to printer." }, 1600);
+    try {
+      // Trigger webhook by tagging before printing so overrides get cached
+      try {
+        for (const o of orders.filter(x => list.includes(x.number))){
+          await withRetries(() => API.addTag(o.id, "cod print", store), { attempts: 2, baseDelayMs: 250 });
+        }
+      } catch {}
+      // Small delay to allow webhook to reach the server (best-effort)
+      try { await sleep(400); } catch {}
+      await handlePrintOrders(list);
+      showOverlay({ open: true, type: "print", variant: "success", title: "Queued to print", subtitle: "Nice — moving fast." }, 900);
+    } catch (e){
+      showOverlay({ open: true, type: "print", variant: "danger", title: "Print failed", subtitle: e?.message || "Try again." }, 1200);
+    } finally {
+      setActionBusy(false);
+    }
+  }
 }
 
 const Chip = React.memo(function Chip({ label, active, onClick }){

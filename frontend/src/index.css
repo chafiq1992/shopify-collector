@@ -2,6 +2,67 @@
 @tailwind components;
 @tailwind utilities;
 
+/* -----------------------------
+   Action overlays (mobile-safe)
+-------------------------------- */
+.oc-pop {
+  animation: ocPop 220ms ease-out;
+}
+@keyframes ocPop {
+  0% { transform: scale(0.96); opacity: 0.0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.oc-shake {
+  animation: ocShake 360ms ease-in-out;
+}
+@keyframes ocShake {
+  0% { transform: translateX(0); }
+  15% { transform: translateX(-10px); }
+  30% { transform: translateX(9px); }
+  45% { transform: translateX(-7px); }
+  60% { transform: translateX(6px); }
+  75% { transform: translateX(-4px); }
+  100% { transform: translateX(0); }
+}
+
+.oc-printing svg {
+  animation: ocPrintPulse 650ms ease-in-out infinite;
+}
+@keyframes ocPrintPulse {
+  0% { transform: translateY(0); opacity: 0.85; }
+  50% { transform: translateY(-2px); opacity: 1; }
+  100% { transform: translateY(0); opacity: 0.85; }
+}
+
+.oc-confetti {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.oc-confetti-piece {
+  position: absolute;
+  top: -12px;
+  width: 8px;
+  height: 12px;
+  border-radius: 2px;
+  opacity: 0.95;
+  animation: ocConfetti 900ms cubic-bezier(.2,.8,.2,1) forwards;
+  will-change: transform, opacity;
+}
+.oc-c1 { background: #34d399; }
+.oc-c2 { background: #60a5fa; }
+.oc-c3 { background: #fbbf24; }
+.oc-c4 { background: #f472b6; }
+.oc-c5 { background: #a78bfa; }
+.oc-c6 { background: #fb7185; }
+
+@keyframes ocConfetti {
+  0% { transform: translateY(0) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(540px) rotate(260deg); opacity: 0; }
+}
+
 html, body, #root { height: 100%; }
 /* Allow vertical scrolling on small screens while avoiding horizontal overflow */
 html, body { overflow-x: hidden; overflow-y: auto; }
