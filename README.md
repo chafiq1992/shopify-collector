@@ -23,6 +23,15 @@ Copy the **Admin API access token** and set env vars below.
 - `SHOPIFY_API_KEY` — optional; if set with `SHOPIFY_PASSWORD`, basic auth is used
 - `SHOPIFY_API_VERSION` — default `2025-01`
 
+Auth + collector analytics (recommended for production):
+
+- `DATABASE_URL` — SQLAlchemy URL. **For production on Cloud Run, use a persistent DB (e.g. Cloud SQL Postgres).**
+- `JWT_SECRET` — secret used to sign login tokens.
+
+Important:
+
+- Cloud Run containers can restart and scale to multiple instances. If you keep `DATABASE_URL` as SQLite (`sqlite+aiosqlite:///./local.db`), collector analytics can be **missing/incomplete** because data is not durable and can differ per instance.
+
 Multi-store (optional):
 
 - `IRRAKIDS_SHOPIFY_PASSWORD`, `IRRAKIDS_SHOPIFY_API_KEY` — overrides for Irrakids, if different
@@ -91,6 +100,14 @@ gcloud run deploy order-collector \
 ```
 
 > Cloud Run supports **WebSockets** out of the box. For multi-instance fan-out, back WebSocket events with Pub/Sub or Redis instead of in-memory list.
+
+### Collector analytics reliability (Cloud Run)
+
+For accurate per-collector `Collected`/`OUT` analytics:
+
+- Set `DATABASE_URL` to a persistent database (Cloud SQL Postgres strongly recommended).
+- The backend prevents **double counting** by treating repeated `Collected`/`OUT` actions for the same order as idempotent.
+- Admin “OUT orders details” are available via `GET /api/admin/out-events` and are shown in `/admin`.
 
 ## 6) GitHub → Cloud Run (CI/CD example)
 

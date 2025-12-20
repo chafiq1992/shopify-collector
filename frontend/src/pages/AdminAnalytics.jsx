@@ -13,6 +13,8 @@ export default function AdminAnalytics(){
   const [store, setStore] = useState("all");
   const [rows, setRows] = useState([]);
   const [summary, setSummary] = useState({});
+  const [outRows, setOutRows] = useState([]);
+  const [outLoading, setOutLoading] = useState(false);
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -49,6 +51,31 @@ export default function AdminAnalytics(){
       setError(e?.message || "Failed to load stats");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadOutEvents(){
+    setOutLoading(true);
+    setAdminMsg(null);
+    try {
+      const params = new URLSearchParams({
+        from_date: fromDate,
+        to_date: toDate,
+      });
+      if (store && store !== "all") params.set("store", store);
+      const res = await authFetch(`/api/admin/out-events?${params.toString()}`, {
+        headers: authHeaders({"Accept":"application/json"})
+      });
+      if (!res.ok) {
+        const js = await res.json().catch(()=>({detail:"Failed to load OUT orders"}));
+        throw new Error(js.detail || "Failed to load OUT orders");
+      }
+      const js = await res.json();
+      setOutRows(js.rows || []);
+    } catch (e){
+      setAdminMsg(e?.message || "Failed to load OUT orders");
+    } finally {
+      setOutLoading(false);
     }
   }
 
@@ -302,6 +329,51 @@ export default function AdminAnalytics(){
                     )}
                   </tbody>
                 </table>
+              </div>
+            </section>
+            <section className="mt-6">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-gray-700">OUT orders (details)</h3>
+                <button
+                  onClick={loadOutEvents}
+                  className="text-xs px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50"
+                  disabled={outLoading}
+                >
+                  {outLoading ? "Loading…" : "Load OUT orders"}
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm bg-white border border-gray-200 rounded-xl overflow-hidden">
+                  <thead className="bg-gray-100 text-left">
+                    <tr>
+                      <th className="px-3 py-2 border-b border-gray-200">Time</th>
+                      <th className="px-3 py-2 border-b border-gray-200">Order</th>
+                      <th className="px-3 py-2 border-b border-gray-200">Collector</th>
+                      <th className="px-3 py-2 border-b border-gray-200">Store</th>
+                      <th className="px-3 py-2 border-b border-gray-200">Titles (optional)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(outRows || []).map((r, idx) => (
+                      <tr key={idx} className="border-b last:border-b-0">
+                        <td className="px-3 py-2 text-gray-600">{(r.created_at || "").replace("T"," ").slice(0,19)}</td>
+                        <td className="px-3 py-2 font-semibold">{r.order_number}</td>
+                        <td className="px-3 py-2">
+                          <div className="font-medium">{r?.user?.name || r?.user?.email || r?.user?.id || "—"}</div>
+                          <div className="text-xs text-gray-500">{r?.user?.email || ""}</div>
+                        </td>
+                        <td className="px-3 py-2">{r.store}</td>
+                        <td className="px-3 py-2 text-gray-700">{r.titles || "—"}</td>
+                      </tr>
+                    ))}
+                    {(outRows || []).length === 0 && (
+                      <tr><td colSpan={5} className="px-3 py-4 text-center text-gray-500">No OUT orders loaded (or none in range).</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <div className="mt-2 text-[11px] text-gray-500">
+                Tip: this list comes from collector actions (not Shopify tag history). If your database is not persistent, you may see missing rows.
               </div>
             </section>
           </>

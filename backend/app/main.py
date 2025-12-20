@@ -19,6 +19,7 @@ import qrcode
 from qrcode.constants import ERROR_CORRECT_M
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, case
+from sqlalchemy.exc import IntegrityError
 
 # Local auth/db modules (optional)
 HAVE_AUTH_DB = True
@@ -1417,11 +1418,28 @@ if HAVE_AUTH_DB:
         session: AsyncSession = Depends(get_session),  # type: ignore
     ):
         store_key = _normalize_store(store or body.store)
+        # Idempotency: if already recorded, do not bump counts again.
+        try:
+            existing = await session.scalar(
+                select(OrderEvent).where(
+                    OrderEvent.order_gid == order_gid,
+                    OrderEvent.store_key == store_key,
+                    OrderEvent.action == "collected",
+                )
+            )
+        except Exception:
+            existing = None
         try:
             await _shopify_add_tag(order_gid, "pc", store_key)
         except HTTPException as e:
             # surface Shopify errors cleanly
             raise e
+        if existing:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+            return {"ok": True, "deduped": True, "existing": {"user_id": getattr(existing, "user_id", None), "created_at": str(getattr(existing, "created_at", ""))}}
         await _record_user_action(
             session,
             user_id=user.id,
@@ -1431,7 +1449,15 @@ if HAVE_AUTH_DB:
             action="collected",
             metadata=body.metadata,
         )
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Race: another request inserted the same action concurrently.
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+            return {"ok": True, "deduped": True}
         await manager.broadcast({"type": "order.collected", "id": order_gid, "store": store_key, "user_id": user.id})
         return {"ok": True}
 else:
@@ -1450,12 +1476,29 @@ if HAVE_AUTH_DB:
         session: AsyncSession = Depends(get_session),  # type: ignore
     ):
         store_key = _normalize_store(store or body.store)
+        # Idempotency: if already recorded, do not bump counts again.
+        try:
+            existing = await session.scalar(
+                select(OrderEvent).where(
+                    OrderEvent.order_gid == order_gid,
+                    OrderEvent.store_key == store_key,
+                    OrderEvent.action == "out",
+                )
+            )
+        except Exception:
+            existing = None
         note_text = None
         if body.metadata:
             note_text = body.metadata.get("note") or body.metadata.get("titles")
         if note_text:
             await _shopify_append_note(order_gid, f"OUT: {note_text}", store_key)
         await _shopify_add_tag(order_gid, "out", store_key)
+        if existing:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+            return {"ok": True, "deduped": True, "existing": {"user_id": getattr(existing, "user_id", None), "created_at": str(getattr(existing, "created_at", ""))}}
         await _record_user_action(
             session,
             user_id=user.id,
@@ -1465,7 +1508,14 @@ if HAVE_AUTH_DB:
             action="out",
             metadata=body.metadata,
         )
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+            return {"ok": True, "deduped": True}
         await manager.broadcast({"type": "order.out", "id": order_gid, "store": store_key, "user_id": user.id})
         return {"ok": True}
 else:
@@ -1557,6 +1607,69 @@ if HAVE_AUTH_DB:
 else:
     @app.get("/api/admin/users/stats", response_model=Dict[str, Any])
     async def admin_user_stats_unavailable():
+        raise HTTPException(status_code=503, detail="auth/db not configured")
+
+
+# ---------- Admin: OUT orders details ----------
+if HAVE_AUTH_DB:
+    @app.get("/api/admin/out-events", response_model=Dict[str, Any])
+    async def admin_out_events(
+        from_date: Optional[str] = Query(None, description="Inclusive start date (YYYY-MM-DD)"),
+        to_date: Optional[str] = Query(None, description="Inclusive end date (YYYY-MM-DD)"),
+        store: Optional[str] = Query(None, description="Optional store filter"),
+        admin: User = Depends(require_admin),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        start_dt = _parse_date(from_date) or (datetime.now(timezone.utc) - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_dt = _parse_date(to_date) or datetime.now(timezone.utc)
+        end_dt_inclusive = end_dt + timedelta(days=1)
+        store_key = _normalize_store(store) if store else None
+
+        stmt = (
+            select(
+                OrderEvent.order_number,
+                OrderEvent.order_gid,
+                OrderEvent.store_key,
+                OrderEvent.created_at,
+                OrderEvent.event_metadata,
+                User.email,
+                User.name,
+                User.id,
+            )
+            .join(User, User.id == OrderEvent.user_id)
+            .where(
+                OrderEvent.action == "out",
+                OrderEvent.created_at >= start_dt,
+                OrderEvent.created_at < end_dt_inclusive,
+            )
+            .order_by(OrderEvent.created_at.desc())
+        )
+        if store_key:
+            stmt = stmt.where(OrderEvent.store_key == store_key)
+
+        result = await session.execute(stmt)
+        out_rows: List[Dict[str, Any]] = []
+        for order_number, order_gid, store_val, created_at, meta, email, name, uid in result.fetchall():
+            titles = None
+            try:
+                titles = (meta or {}).get("titles")
+            except Exception:
+                titles = None
+            out_rows.append(
+                {
+                    "order_number": order_number,
+                    "order_gid": order_gid,
+                    "store": store_val,
+                    "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+                    "titles": titles,
+                    "user": {"id": uid, "email": email, "name": name},
+                }
+            )
+
+        return {"ok": True, "rows": out_rows, "from": start_dt.date().isoformat(), "to": end_dt.date().isoformat(), "store": store_key or "all"}
+else:
+    @app.get("/api/admin/out-events", response_model=Dict[str, Any])
+    async def admin_out_events_unavailable():
         raise HTTPException(status_code=503, detail="auth/db not configured")
 
 
@@ -2083,6 +2196,15 @@ if HAVE_AUTH_DB and init_db is not None:
     @app.on_event("startup")
     async def _init_db_tables():
         try:
+            # Warn loudly if using local SQLite on Cloud Run (not durable, can split per instance).
+            try:
+                db_url = (os.environ.get("DATABASE_URL") or "sqlite+aiosqlite:///./local.db").strip()
+                is_cloud_run = bool(os.environ.get("K_SERVICE") or os.environ.get("K_REVISION"))
+                if is_cloud_run and ("sqlite" in db_url.lower()):
+                    print("[DB][WARN] Using SQLite on Cloud Run is NOT durable and may cause missing analytics across instances/restarts.")
+                    print("[DB][WARN] Configure DATABASE_URL to a persistent database (e.g. Cloud SQL Postgres) for reliable collector analytics.")
+            except Exception:
+                pass
             await init_db()  # type: ignore
         except Exception as e:
             print(f"[DB] Failed to init tables: {e}")

@@ -47,14 +47,9 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
             });
             const variantsForDisplay = normalizedVariants.filter(v => v.__normalizedStatus === 'unfulfilled');
             return variantsForDisplay.map((v, i) => {
-              // Long-press handlers to copy product id
-              let timer = null;
-              const startPress = (e) => { try { e.preventDefault(); } catch {}; try { if (timer) clearTimeout(timer); } catch {}; timer = setTimeout(() => { try { onCopyProductId && onCopyProductId(v.product_id); } catch {}; timer = null; }, 550); };
-              const clearPress = () => { try { if (timer) clearTimeout(timer); } catch {}; timer = null; };
-              const preventContext = (e) => { try { e.preventDefault(); } catch {} };
               return (
               <div key={v.id || i} className={`min-w-[210px] sm:min-w-[240px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
-                <div className="aspect-[3/2] sm:aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden" onMouseDown={startPress} onMouseUp={clearPress} onMouseLeave={clearPress} onTouchStart={startPress} onTouchEnd={clearPress} onTouchCancel={clearPress} onContextMenu={preventContext}>
+                <div className="aspect-[3/2] sm:aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
                   {v.image ? (
                     <img src={v.image} alt={v.sku || ""} loading="lazy" className="w-full h-full object-cover" />
                   ) : (
@@ -69,6 +64,20 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                 <div className="p-1.5 flex items-center gap-2">
                   <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
                   <span className="font-mono text-[11px] bg-gray-50 px-2 py-0.5 rounded border border-gray-200">{v.sku}</span>
+                  {v.product_id ? (
+                    <>
+                      <span className="text-[10px] uppercase tracking-wide text-gray-500">PID</span>
+                      <span className="font-mono text-[11px] bg-gray-50 px-2 py-0.5 rounded border border-gray-200 select-text">{String(v.product_id)}</span>
+                      <button
+                        type="button"
+                        className="text-[11px] font-semibold px-2 py-0.5 rounded border border-gray-300 bg-white hover:bg-gray-50 touch-manipulation"
+                        onClick={()=>{ try { onCopyProductId && onCopyProductId(v.product_id); } catch {} }}
+                        title="Copy Product ID"
+                      >
+                        Copy
+                      </button>
+                    </>
+                  ) : null}
                   {v.title && <span className="text-[11px] text-gray-700 flex-1 whitespace-normal break-words">· {v.title}</span>}
                   <span className="ml-auto text-[10px] uppercase tracking-wide text-gray-500">Qty</span>
                   <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-red-600 text-white text-xs font-semibold">{v.qty}</span>

@@ -10,6 +10,7 @@ from sqlalchemy import (
     String,
     JSON,
     func,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
@@ -38,6 +39,11 @@ class User(Base):
 
 class OrderEvent(Base):
     __tablename__ = "order_events"
+    __table_args__ = (
+        # Prevent double-counting the same order action for the same store.
+        # Note: existing SQLite DBs won't auto-migrate; new DBs will enforce it.
+        UniqueConstraint("order_gid", "store_key", "action", name="uq_order_events_order_store_action"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     order_number = Column(String(64), nullable=False, index=True)

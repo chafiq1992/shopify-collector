@@ -79,6 +79,39 @@ const PROFILES = {
   },
 };
 
+async function copyTextToClipboard(text){
+  const str = String(text ?? "");
+  if (!str) return { ok: false, method: "empty" };
+  // 1) Modern async clipboard (requires user gesture on iOS Safari)
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(str);
+      return { ok: true, method: "clipboard" };
+    }
+  } catch {}
+  // 2) Fallback: execCommand copy (older Safari)
+  try {
+    const el = document.createElement("textarea");
+    el.value = str;
+    el.setAttribute("readonly", "");
+    el.style.position = "fixed";
+    el.style.left = "-9999px";
+    el.style.top = "0";
+    document.body.appendChild(el);
+    el.select();
+    el.setSelectionRange(0, el.value.length);
+    const ok = document.execCommand("copy");
+    document.body.removeChild(el);
+    if (ok) return { ok: true, method: "execCommand" };
+  } catch {}
+  // 3) Last resort: prompt (user can long-press to copy)
+  try {
+    window.prompt("Copy this Product ID:", str);
+    return { ok: false, method: "prompt" };
+  } catch {}
+  return { ok: false, method: "failed" };
+}
+
 export default function App(){
   const [auth, setAuth] = useState(() => loadAuth());
   const [orders, setOrders] = useState([]);
@@ -497,9 +530,14 @@ export default function App(){
   }
 
   async function handleMarkCollected(order){
-    await API.markCollected(order.id, order.number, store, { source: "single" });
-    vibrate(20);
-    gotoNext();
+    try {
+      await API.markCollected(order.id, order.number, store, { source: "single" });
+      vibrate(20);
+      gotoNext();
+    } catch (e){
+      setApiError(e?.message || "Failed to mark collected");
+      try { alert(e?.message || "Failed to mark collected"); } catch {}
+    }
   }
 
   async function handleMarkOut(order){
@@ -512,10 +550,15 @@ export default function App(){
       .filter(v => selected.includes(v.id))
       .map(v => v.title || v.sku || "")
       .join(", ");
-    await API.markOut(order.id, order.number, store, { titles });
-    setSelectedOutMap(prev => ({ ...prev, [order.id]: new Set() }));
-    vibrate(30);
-    gotoNext();
+    try {
+      await API.markOut(order.id, order.number, store, { titles });
+      setSelectedOutMap(prev => ({ ...prev, [order.id]: new Set() }));
+      vibrate(30);
+      gotoNext();
+    } catch (e){
+      setApiError(e?.message || "Failed to mark out");
+      try { alert(e?.message || "Failed to mark out"); } catch {}
+    }
   }
 
   // Swipe navigation removed; use buttons below instead
@@ -807,8 +850,12 @@ export default function App(){
               onCopyProductId={async (pid)=>{
                 try {
                   if (!pid) return;
-                  await navigator.clipboard.writeText(String(pid));
-                  setPrintMsg(`Copied product id`);
+                  const r = await copyTextToClipboard(pid);
+                  if (r.ok){
+                    setPrintMsg(`Copied product id`);
+                  } else {
+                    setPrintMsg(`Product id shown (tap & hold to copy)`);
+                  }
                   try { setTimeout(() => setPrintMsg(null), 1500); } catch {}
                   vibrate(20);
                 } catch {}
@@ -842,10 +889,10 @@ export default function App(){
             )}
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <button onClick={()=>setShowConfirm('collected')} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
+            <button type="button" onClick={()=>setShowConfirm('collected')} className="touch-manipulation flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm">
               <CheckCircle className="w-4 h-4"/> <span className="font-semibold">{`Collected${selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}`}</span>
             </button>
-            <button onClick={()=>setShowConfirm('out')} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
+            <button type="button" onClick={()=>setShowConfirm('out')} className="touch-manipulation flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm">
               <XCircle className="w-4 h-4"/> <span className="font-semibold">{`OUT${selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}`}</span>
             </button>
           </div>
@@ -900,37 +947,42 @@ export default function App(){
                 onClick={async ()=>{
                   const selected = Array.from(selectedOrderNumbers || []);
                   const targets = selected.length > 0 ? orders.filter(o => selected.includes(o.number)) : (current ? [current] : []);
-                  setShowConfirm(null);
-                  if (showConfirm === 'collected'){
-                    await Promise.all(targets.map(o => API.markCollected(o.id, o.number, store, { source: "bulk" })));
-                    vibrate(20);
-                    if (selected.length === 0) gotoNext();
-                    if (selected.length > 0) setSelectedOrderNumbers(new Set());
-                  } else if (showConfirm === 'out'){
-                    // Only process orders with at least one selected variant
-                    const processable = targets.filter(o => (selectedOutMap[o.id] && selectedOutMap[o.id].size > 0));
-                    for (const o of processable){
-                      const sel = Array.from(selectedOutMap[o.id] || []);
-                      const titles = (o.variants || [])
-                        .filter(v => sel.includes(v.id))
-                        .map(v => v.title || v.sku || "")
-                        .join(", ");
-                      await API.markOut(o.id, o.number, store, { titles });
-                      setSelectedOutMap(prev => ({ ...prev, [o.id]: new Set() }));
+                  try {
+                    setShowConfirm(null);
+                    if (showConfirm === 'collected'){
+                      await Promise.all(targets.map(o => API.markCollected(o.id, o.number, store, { source: "bulk" })));
+                      vibrate(20);
+                      if (selected.length === 0) gotoNext();
+                      if (selected.length > 0) setSelectedOrderNumbers(new Set());
+                    } else if (showConfirm === 'out'){
+                      // Only process orders with at least one selected variant
+                      const processable = targets.filter(o => (selectedOutMap[o.id] && selectedOutMap[o.id].size > 0));
+                      for (const o of processable){
+                        const sel = Array.from(selectedOutMap[o.id] || []);
+                        const titles = (o.variants || [])
+                          .filter(v => sel.includes(v.id))
+                          .map(v => v.title || v.sku || "")
+                          .join(", ");
+                        await API.markOut(o.id, o.number, store, { titles });
+                        setSelectedOutMap(prev => ({ ...prev, [o.id]: new Set() }));
+                      }
+                      vibrate(30);
+                      if (selected.length === 0) gotoNext();
+                      if (selected.length > 0) setSelectedOrderNumbers(new Set());
+                    } else if (showConfirm === 'print'){
+                      // Trigger webhook by tagging before printing so overrides get cached
+                      try {
+                        await Promise.all(targets.map(o => API.addTag(o.id, 'cod print', store)));
+                      } catch {}
+                      // Small delay to allow webhook to reach the server (best-effort)
+                      try { await new Promise(r => setTimeout(r, 400)); } catch {}
+                      const nums = targets.map(o => o.number);
+                      await handlePrintOrders(nums);
+                      // Keep selections after printing; they will be cleared upon Collected
                     }
-                    vibrate(30);
-                    if (selected.length === 0) gotoNext();
-                    if (selected.length > 0) setSelectedOrderNumbers(new Set());
-                  } else if (showConfirm === 'print'){
-                    // Trigger webhook by tagging before printing so overrides get cached
-                    try {
-                      await Promise.all(targets.map(o => API.addTag(o.id, 'cod print', store)));
-                    } catch {}
-                    // Small delay to allow webhook to reach the server (best-effort)
-                    try { await new Promise(r => setTimeout(r, 400)); } catch {}
-                    const nums = targets.map(o => o.number);
-                    await handlePrintOrders(nums);
-                    // Keep selections after printing; they will be cleared upon Collected
+                  } catch (e){
+                    setApiError(e?.message || "Action failed");
+                    try { alert(e?.message || "Action failed"); } catch {}
                   }
                 }}
                 className={`px-4 py-2 rounded-xl text-white text-sm font-semibold ${showConfirm === 'collected' ? 'bg-green-600 hover:bg-green-700' : showConfirm === 'out' ? 'bg-red-600 hover:bg-red-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}
