@@ -1435,11 +1435,8 @@ if HAVE_AUTH_DB:
             # surface Shopify errors cleanly
             raise e
         if existing:
-            try:
-                await session.rollback()
-            except Exception:
-                pass
-            return {"ok": True, "deduped": True, "existing": {"user_id": getattr(existing, "user_id", None), "created_at": str(getattr(existing, "created_at", ""))}}
+            # IMPORTANT: don't touch ORM attributes after rollback/expire (can trigger async IO in sync context).
+            return {"ok": True, "deduped": True}
         await _record_user_action(
             session,
             user_id=user.id,
@@ -1494,11 +1491,7 @@ if HAVE_AUTH_DB:
             await _shopify_append_note(order_gid, f"OUT: {note_text}", store_key)
         await _shopify_add_tag(order_gid, "out", store_key)
         if existing:
-            try:
-                await session.rollback()
-            except Exception:
-                pass
-            return {"ok": True, "deduped": True, "existing": {"user_id": getattr(existing, "user_id", None), "created_at": str(getattr(existing, "created_at", ""))}}
+            return {"ok": True, "deduped": True}
         await _record_user_action(
             session,
             user_id=user.id,

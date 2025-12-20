@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { StickyNote, Image as ImageIcon } from "lucide-react";
 
 function tagPillClasses(tag){
@@ -12,6 +12,34 @@ function tagPillClasses(tag){
 }
 
 function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMarkOut, onPrev, onNext, position, total, selectedForPrint, onToggleSelectOrder, onCopyProductId }){
+  const [pidModal, setPidModal] = useState({ open: false, pid: null });
+  const pidInputRef = useRef(null);
+  const pressTimerRef = useRef(null);
+
+  useEffect(() => {
+    if (!pidModal?.open) return;
+    try {
+      const t = setTimeout(() => {
+        try { pidInputRef.current?.focus?.(); } catch {}
+        try { pidInputRef.current?.select?.(); } catch {}
+      }, 0);
+      return () => clearTimeout(t);
+    } catch {}
+  }, [pidModal?.open]);
+
+  function clearPress(){
+    try { if (pressTimerRef.current) clearTimeout(pressTimerRef.current); } catch {}
+    pressTimerRef.current = null;
+  }
+
+  function startPress(pid){
+    try { if (pressTimerRef.current) clearTimeout(pressTimerRef.current); } catch {}
+    pressTimerRef.current = setTimeout(() => {
+      setPidModal({ open: true, pid });
+      pressTimerRef.current = null;
+    }, 520);
+  }
+
   return (
     <div className="rounded-2xl shadow-sm border border-gray-200 bg-white overflow-hidden">
       <div className="flex items-center gap-2 px-3 py-2 border-b bg-gray-50">
@@ -47,9 +75,20 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
             });
             const variantsForDisplay = normalizedVariants.filter(v => v.__normalizedStatus === 'unfulfilled');
             return variantsForDisplay.map((v, i) => {
+              const pid = v.product_id;
               return (
               <div key={v.id || i} className={`min-w-[210px] sm:min-w-[240px] snap-start group relative rounded-2xl overflow-hidden border ${selectedOut.has(v.id) ? "border-red-500 ring-2 ring-red-300" : "border-gray-200"}`}>
-                <div className="aspect-[3/2] sm:aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
+                <div
+                  className="aspect-[3/2] sm:aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden"
+                  style={{ WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }}
+                  onContextMenu={(e)=>{ try { e.preventDefault(); } catch {} }}
+                  onMouseDown={(e)=>{ if (!pid) return; try { e.preventDefault(); } catch {}; startPress(pid); }}
+                  onMouseUp={clearPress}
+                  onMouseLeave={clearPress}
+                  onTouchStart={(e)=>{ if (!pid) return; try { e.preventDefault(); } catch {}; startPress(pid); }}
+                  onTouchEnd={clearPress}
+                  onTouchCancel={clearPress}
+                >
                   {v.image ? (
                     <img src={v.image} alt={v.sku || ""} loading="lazy" className="w-full h-full object-cover" />
                   ) : (
@@ -64,20 +103,6 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                 <div className="p-1.5 flex items-center gap-2">
                   <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
                   <span className="font-mono text-[11px] bg-gray-50 px-2 py-0.5 rounded border border-gray-200">{v.sku}</span>
-                  {v.product_id ? (
-                    <>
-                      <span className="text-[10px] uppercase tracking-wide text-gray-500">PID</span>
-                      <span className="font-mono text-[11px] bg-gray-50 px-2 py-0.5 rounded border border-gray-200 select-text">{String(v.product_id)}</span>
-                      <button
-                        type="button"
-                        className="text-[11px] font-semibold px-2 py-0.5 rounded border border-gray-300 bg-white hover:bg-gray-50 touch-manipulation"
-                        onClick={()=>{ try { onCopyProductId && onCopyProductId(v.product_id); } catch {} }}
-                        title="Copy Product ID"
-                      >
-                        Copy
-                      </button>
-                    </>
-                  ) : null}
                   {v.title && <span className="text-[11px] text-gray-700 flex-1 whitespace-normal break-words">· {v.title}</span>}
                   <span className="ml-auto text-[10px] uppercase tracking-wide text-gray-500">Qty</span>
                   <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-red-600 text-white text-xs font-semibold">{v.qty}</span>
@@ -96,6 +121,39 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
           })()}
         </div>
       </div>
+
+      {pidModal?.open && (
+        <div className="fixed inset-0 z-[70] bg-black/40 flex items-center justify-center p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-white shadow-lg border border-gray-200 p-4">
+            <div className="text-sm font-semibold text-gray-900">Copy Product ID</div>
+            <div className="text-xs text-gray-500 mt-1">Tap “Copy” (works on iPhone Safari). You can also select the text.</div>
+            <div className="mt-3 flex gap-2">
+              <input
+                ref={pidInputRef}
+                readOnly
+                value={pidModal.pid ? String(pidModal.pid) : ""}
+                className="flex-1 font-mono text-sm border border-gray-300 rounded-lg px-3 py-2 bg-gray-50 select-text"
+              />
+              <button
+                type="button"
+                className="shrink-0 px-4 py-2 rounded-lg bg-gray-900 text-white text-sm font-semibold active:scale-[.98] touch-manipulation"
+                onClick={()=>{ try { onCopyProductId && onCopyProductId(pidModal.pid); } catch {}; setPidModal({ open: false, pid: null }); }}
+              >
+                Copy
+              </button>
+            </div>
+            <div className="mt-3 flex justify-end">
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:bg-gray-50"
+                onClick={()=>setPidModal({ open: false, pid: null })}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="px-3 pb-2 flex items-center gap-2 text-xs text-gray-600">
         <StickyNote className="w-4 h-4"/>
