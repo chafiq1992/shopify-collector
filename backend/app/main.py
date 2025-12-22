@@ -643,7 +643,8 @@ class OrderVariant(BaseModel):
     barcode: Optional[str] = None
     sku: Optional[str] = None
     title: Optional[str] = None
-    inventory_quantity: Optional[int] = None  # Shopify variant inventoryQuantity (on hand / available)
+    available_quantity: Optional[int] = None  # Shopify variant inventoryQuantity (AVAILABLE)
+    on_hand_quantity: Optional[int] = None  # Sum of inventory levels quantities(name="on_hand") across locations
     qty: int
     status: Optional[str] = None  # fulfilled | unfulfilled | removed | unknown
     unfulfilled_qty: Optional[int] = None
@@ -754,12 +755,32 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         li = edge["node"]
         img = None
         var = li.get("variant")
-        inv_qty: Optional[int] = None
+        available_qty: Optional[int] = None
+        on_hand_qty: Optional[int] = None
         try:
             if var is not None and (var.get("inventoryQuantity") is not None):
-                inv_qty = int(var.get("inventoryQuantity"))
+                available_qty = int(var.get("inventoryQuantity"))
         except Exception:
-            inv_qty = None
+            available_qty = None
+        # on_hand quantity (sum across locations)
+        try:
+            levels = (((var or {}).get("inventoryItem") or {}).get("inventoryLevels") or {})
+            edges = (levels.get("edges") or [])
+            total = 0
+            found_any = False
+            for e in edges:
+                node_lvl = (e or {}).get("node") or {}
+                quants = node_lvl.get("quantities") or []
+                for q in quants:
+                    try:
+                        if (q or {}).get("name") == "on_hand":
+                            total += int((q or {}).get("quantity") or 0)
+                            found_any = True
+                    except Exception:
+                        continue
+            on_hand_qty = total if found_any else None
+        except Exception:
+            on_hand_qty = None
         if var and var.get("image"):
             img = var["image"].get("url")
         if (not img) and var and ((var.get("product") or {}).get("featuredImage")):
@@ -787,7 +808,8 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             barcode=(var or {}).get("barcode"),
             sku=li.get("sku"),
             title=(var or {}).get("title"),
-            inventory_quantity=inv_qty,
+            available_quantity=available_qty,
+            on_hand_quantity=on_hand_qty,
             qty=qty,
             status=status_val,
             unfulfilled_qty=(None if unfulfilled_qty is None else int(unfulfilled_qty)),
@@ -973,6 +995,15 @@ async def list_orders(
                         title
                         barcode
                         inventoryQuantity
+                        inventoryItem {
+                          inventoryLevels(first: 50) {
+                            edges {
+                              node {
+                                quantities(names: ["on_hand"]) { name quantity }
+                              }
+                            }
+                          }
+                        }
                         image { url }
                         product { id featuredImage { url } }
                       }
@@ -1016,6 +1047,15 @@ async def list_orders(
                         title
                         barcode
                         inventoryQuantity
+                        inventoryItem {
+                          inventoryLevels(first: 50) {
+                            edges {
+                              node {
+                                quantities(names: ["on_hand"]) { name quantity }
+                              }
+                            }
+                          }
+                        }
                         image { url }
                         product { id featuredImage { url } }
                       }

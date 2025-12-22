@@ -100,9 +100,9 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                     <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium shadow
                       ${v.__normalizedStatus === 'fulfilled' ? 'bg-green-600 text-white' : v.__normalizedStatus === 'removed' ? 'bg-gray-500 text-white' : v.__normalizedStatus === 'unfulfilled' ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-800'}`}
                     >{v.__normalizedLabel}</span>
-                    {typeof v.inventory_quantity === "number" && (
+                    {typeof v.on_hand_quantity === "number" && (
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-medium shadow bg-black/70 text-white backdrop-blur">
-                        On hand: {v.inventory_quantity}
+                        On hand: {v.on_hand_quantity}
                       </span>
                     )}
                   </div>
