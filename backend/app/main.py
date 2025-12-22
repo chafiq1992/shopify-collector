@@ -635,6 +635,97 @@ async def shopify_graphql(query: str, variables: Dict[str, Any] | None, *, store
         raise last_exc
     raise HTTPException(status_code=502, detail=f"Shopify request failed: {last_exc}")
 
+
+async def _enrich_orders_with_on_hand(items: List["OrderDTO"], *, store: Optional[str]) -> None:
+    """
+    Populate OrderVariant.on_hand_quantity by querying InventoryItem inventoryLevels in batch.
+
+    We intentionally do this as a second query (instead of nesting inventoryLevels inside the Orders query),
+    to keep the Orders query cheap enough to avoid Shopify throttling (which can reduce visible orders).
+    """
+    try:
+        inv_ids: List[str] = []
+        seen: set[str] = set()
+        for o in (items or []):
+            for v in (getattr(o, "variants", None) or []):
+                try:
+                    st = (getattr(v, "status", None) or "").strip().lower()
+                    if st != "unfulfilled":
+                        continue
+                    iid = (getattr(v, "inventory_item_id", None) or "").strip()
+                    if not iid or iid in seen:
+                        continue
+                    seen.add(iid)
+                    inv_ids.append(iid)
+                except Exception:
+                    continue
+        if not inv_ids:
+            return
+
+        # Shopify GraphQL nodes() supports batching; chunk for safety.
+        CHUNK = 80
+        inv_to_on_hand: Dict[str, int] = {}
+        q = """
+        query InvOnHand($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on InventoryItem {
+              id
+              inventoryLevels(first: 20) {
+                edges {
+                  node {
+                    quantities(names: ["on_hand"]) { name quantity }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        for i in range(0, len(inv_ids), CHUNK):
+            part = inv_ids[i:i+CHUNK]
+            try:
+                data = await shopify_graphql(q, {"ids": part}, store=store)
+            except HTTPException:
+                # Don't break orders listing if inventory scope is missing or if throttled.
+                return
+            nodes = (data or {}).get("nodes") or []
+            for n in nodes:
+                try:
+                    if not n or not isinstance(n, dict):
+                        continue
+                    iid = (n.get("id") or "").strip()
+                    if not iid:
+                        continue
+                    levels = (n.get("inventoryLevels") or {}).get("edges") or []
+                    total = 0
+                    found = False
+                    for e in levels:
+                        node_lvl = (e or {}).get("node") or {}
+                        quants = node_lvl.get("quantities") or []
+                        for qv in quants:
+                            try:
+                                if (qv or {}).get("name") == "on_hand":
+                                    total += int((qv or {}).get("quantity") or 0)
+                                    found = True
+                            except Exception:
+                                continue
+                    if found:
+                        inv_to_on_hand[iid] = total
+                except Exception:
+                    continue
+
+        # Apply mapping
+        for o in (items or []):
+            for v in (getattr(o, "variants", None) or []):
+                try:
+                    iid = (getattr(v, "inventory_item_id", None) or "").strip()
+                    if iid and iid in inv_to_on_hand:
+                        v.on_hand_quantity = int(inv_to_on_hand[iid])
+                except Exception:
+                    continue
+    except Exception:
+        return
+
 # ---------- Schemas ----------
 class OrderVariant(BaseModel):
     id: Optional[str] = None
@@ -645,6 +736,7 @@ class OrderVariant(BaseModel):
     title: Optional[str] = None
     available_quantity: Optional[int] = None  # Shopify variant inventoryQuantity (AVAILABLE)
     on_hand_quantity: Optional[int] = None  # Sum of inventory levels quantities(name="on_hand") across locations
+    inventory_item_id: Optional[str] = None  # Shopify InventoryItem GID (used to fetch on_hand in batch)
     qty: int
     status: Optional[str] = None  # fulfilled | unfulfilled | removed | unknown
     unfulfilled_qty: Optional[int] = None
@@ -756,31 +848,16 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         img = None
         var = li.get("variant")
         available_qty: Optional[int] = None
-        on_hand_qty: Optional[int] = None
+        inv_item_id: Optional[str] = None
         try:
             if var is not None and (var.get("inventoryQuantity") is not None):
                 available_qty = int(var.get("inventoryQuantity"))
         except Exception:
             available_qty = None
-        # on_hand quantity (sum across locations)
         try:
-            levels = (((var or {}).get("inventoryItem") or {}).get("inventoryLevels") or {})
-            edges = (levels.get("edges") or [])
-            total = 0
-            found_any = False
-            for e in edges:
-                node_lvl = (e or {}).get("node") or {}
-                quants = node_lvl.get("quantities") or []
-                for q in quants:
-                    try:
-                        if (q or {}).get("name") == "on_hand":
-                            total += int((q or {}).get("quantity") or 0)
-                            found_any = True
-                    except Exception:
-                        continue
-            on_hand_qty = total if found_any else None
+            inv_item_id = (((var or {}).get("inventoryItem") or {}).get("id") or None)
         except Exception:
-            on_hand_qty = None
+            inv_item_id = None
         if var and var.get("image"):
             img = var["image"].get("url")
         if (not img) and var and ((var.get("product") or {}).get("featuredImage")):
@@ -809,7 +886,8 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             sku=li.get("sku"),
             title=(var or {}).get("title"),
             available_quantity=available_qty,
-            on_hand_quantity=on_hand_qty,
+            on_hand_quantity=None,
+            inventory_item_id=inv_item_id,
             qty=qty,
             status=status_val,
             unfulfilled_qty=(None if unfulfilled_qty is None else int(unfulfilled_qty)),
@@ -995,15 +1073,7 @@ async def list_orders(
                         title
                         barcode
                         inventoryQuantity
-                        inventoryItem {
-                          inventoryLevels(first: 50) {
-                            edges {
-                              node {
-                                quantities(names: ["on_hand"]) { name quantity }
-                              }
-                            }
-                          }
-                        }
+                        inventoryItem { id }
                         image { url }
                         product { id featuredImage { url } }
                       }
@@ -1047,15 +1117,7 @@ async def list_orders(
                         title
                         barcode
                         inventoryQuantity
-                        inventoryItem {
-                          inventoryLevels(first: 50) {
-                            edges {
-                              node {
-                                quantities(names: ["on_hand"]) { name quantity }
-                              }
-                            }
-                          }
-                        }
+                        inventoryItem { id }
                         image { url }
                         product { id featuredImage { url } }
                       }
@@ -1157,6 +1219,10 @@ async def list_orders(
                 local_next = None
             pages += 1
         unique_tags = sorted({t for o in matches for t in (o.tags or [])})
+        try:
+            await _enrich_orders_with_on_hand(matches, store=store)
+        except Exception:
+            pass
         resp = {
             "orders": [json.loads(o.json()) for o in matches],
             "pageInfo": {"hasNextPage": False},
@@ -1263,6 +1329,10 @@ async def list_orders(
             flattened.extend(grp)
 
         items = flattened[:limit]
+        try:
+            await _enrich_orders_with_on_hand(items, store=store)
+        except Exception:
+            pass
         # Gather unique tags for chips and return with computed page info
         unique_tags = sorted({t for o in items for t in (o.tags or [])})
         total_count_val = 0
@@ -1283,6 +1353,11 @@ async def list_orders(
 
     # Gather unique tags for chips
     unique_tags = sorted({t for o in items for t in (o.tags or [])})
+
+    try:
+        await _enrich_orders_with_on_hand(items, store=store)
+    except Exception:
+        pass
 
     total_count_val = 0
     try:
