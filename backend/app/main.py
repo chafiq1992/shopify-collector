@@ -643,6 +643,7 @@ class OrderVariant(BaseModel):
     barcode: Optional[str] = None
     sku: Optional[str] = None
     title: Optional[str] = None
+    inventory_quantity: Optional[int] = None  # Shopify variant inventoryQuantity (on hand / available)
     qty: int
     status: Optional[str] = None  # fulfilled | unfulfilled | removed | unknown
     unfulfilled_qty: Optional[int] = None
@@ -753,6 +754,12 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         li = edge["node"]
         img = None
         var = li.get("variant")
+        inv_qty: Optional[int] = None
+        try:
+            if var is not None and (var.get("inventoryQuantity") is not None):
+                inv_qty = int(var.get("inventoryQuantity"))
+        except Exception:
+            inv_qty = None
         if var and var.get("image"):
             img = var["image"].get("url")
         if (not img) and var and ((var.get("product") or {}).get("featuredImage")):
@@ -780,6 +787,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             barcode=(var or {}).get("barcode"),
             sku=li.get("sku"),
             title=(var or {}).get("title"),
+            inventory_quantity=inv_qty,
             qty=qty,
             status=status_val,
             unfulfilled_qty=(None if unfulfilled_qty is None else int(unfulfilled_qty)),
@@ -964,6 +972,7 @@ async def list_orders(
                         id
                         title
                         barcode
+                        inventoryQuantity
                         image { url }
                         product { id featuredImage { url } }
                       }
@@ -1006,6 +1015,7 @@ async def list_orders(
                         id
                         title
                         barcode
+                        inventoryQuantity
                         image { url }
                         product { id featuredImage { url } }
                       }

@@ -96,9 +96,16 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                   )}
                 </div>
                 {v.__normalizedStatus && (
-                  <span className={`absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-medium shadow
-                    ${v.__normalizedStatus === 'fulfilled' ? 'bg-green-600 text-white' : v.__normalizedStatus === 'removed' ? 'bg-gray-500 text-white' : v.__normalizedStatus === 'unfulfilled' ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-800'}`}
-                  >{v.__normalizedLabel}</span>
+                  <div className="absolute top-2 left-2 flex flex-col gap-1">
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium shadow
+                      ${v.__normalizedStatus === 'fulfilled' ? 'bg-green-600 text-white' : v.__normalizedStatus === 'removed' ? 'bg-gray-500 text-white' : v.__normalizedStatus === 'unfulfilled' ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-800'}`}
+                    >{v.__normalizedLabel}</span>
+                    {typeof v.inventory_quantity === "number" && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-medium shadow bg-black/70 text-white backdrop-blur">
+                        On hand: {v.inventory_quantity}
+                      </span>
+                    )}
+                  </div>
                 )}
                 <div className="p-1.5 flex items-center gap-2">
                   <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
