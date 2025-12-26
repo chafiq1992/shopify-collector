@@ -1105,8 +1105,8 @@ async def list_orders(
     if (store or "irrakids").strip().lower() == "irranova":
         # Avoid PII (customer, shippingAddress) but keep variant fields
         query = """
-        query Orders($first: Int!, $after: String, $query: String) {
-          orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: true) {
+        query Orders($first: Int!, $after: String, $query: String, $reverse: Boolean!) {
+          orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: $reverse) {
             edges {
               cursor
               node {
@@ -1148,8 +1148,8 @@ async def list_orders(
         """
     else:
         query = """
-        query Orders($first: Int!, $after: String, $query: String) {
-          orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: true) {
+        query Orders($first: Int!, $after: String, $query: String, $reverse: Boolean!) {
+          orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: $reverse) {
             edges {
               cursor
               node {
@@ -1191,7 +1191,9 @@ async def list_orders(
           ordersCount(query: $query) { count }
         }
         """
-    variables = {"first": limit, "after": cursor, "query": q or None}
+    # Default ordering for normal browsing is newest first. For fulfillment-date fallback scanning
+    # we will switch to oldest-first to reach the target day quickly.
+    variables = {"first": limit, "after": cursor, "query": q or None, "reverse": True}
     try:
         data = await shopify_graphql(query, variables, store=store)
     except HTTPException as he:
@@ -1278,7 +1280,9 @@ async def list_orders(
             if should_fallback:
                 q = q_fallback
                 do_post_filter = True
-                variables = {"first": limit, "after": cursor, "query": q or None}
+                # IMPORTANT: scan oldest->newest within updated_at window to reach the target day quickly
+                scan_first = max(25, min(250, int(limit or 25)))
+                variables = {"first": scan_first, "after": cursor, "query": q or None, "reverse": False}
                 # Recompute cache for fallback query
                 cache_key_fb = _orders_cache_key({
                     "path": "/api/orders",
@@ -1370,7 +1374,8 @@ async def list_orders(
         MAX_PAGES = 40  # safety cap
         while has_more and local_next and pages < MAX_PAGES:
             try:
-                page = await shopify_graphql(query, {"first": limit, "after": local_next, "query": q or None}, store=store)
+                scan_first = max(25, min(250, int(limit or 25)))
+                page = await shopify_graphql(query, {"first": scan_first, "after": local_next, "query": q or None, "reverse": False}, store=store)
             except HTTPException as he:
                 if he.status_code in (429, 502, 503):
                     break
@@ -1452,7 +1457,7 @@ async def list_orders(
         after_cursor = None
         # Always try to use a wider window irrespective of incoming limit
         while len(accumulated_edges) < target_window:
-            variables2 = {"first": min(chunk, target_window - len(accumulated_edges)), "after": after_cursor, "query": q or None}
+            variables2 = {"first": min(chunk, target_window - len(accumulated_edges)), "after": after_cursor, "query": q or None, "reverse": True}
             try:
                 page = await shopify_graphql(query, variables2, store=store)
             except HTTPException as he:
