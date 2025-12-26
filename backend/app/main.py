@@ -797,8 +797,12 @@ def build_query_string(
     # Financial status narrowing (paid | pending)
     if financial_status:
         fs = (financial_status or "").strip().lower()
-        if fs in ("paid", "pending"):
-            q += f" financial_status:{fs}"
+        if fs == "paid":
+            q += " financial_status:paid"
+        elif fs == "pending":
+            # Shopify "pending payment" in Admin can correspond to multiple internal values,
+            # commonly: pending, authorized, partially_paid. Include all so the UI matches Admin.
+            q += " (financial_status:pending OR financial_status:authorized OR financial_status:partially_paid)"
     # Optional COD date tag(s): expect dd/mm/yy
     # If multiple provided (comma-separated), build an OR group across tags with the chosen prefix
     prefix = (collect_prefix or "cod").strip()
@@ -1004,6 +1008,16 @@ async def list_orders(
     )
     # Narrow server-side query when fulfillment date filtering is requested
     if fulfillment_from or fulfillment_to:
+        # Shopify order search defaults to open orders unless status:any is provided.
+        # For fulfillment-date browsing we want to match Shopify Admin's "All orders" view,
+        # including archived/closed fulfilled orders.
+        try:
+            import re
+            if not re.search(r"(^|\s)status:", q):
+                q = f"{q} status:any".strip()
+        except Exception:
+            # Best-effort; keep existing query if regex fails for any reason
+            pass
         # Ensure we only query fulfilled orders
         q = f"{q} fulfillment_status:fulfilled".strip()
         # Additionally constrain by updated_at window to approximate fulfillment date range
