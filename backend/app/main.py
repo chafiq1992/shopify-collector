@@ -754,6 +754,9 @@ class OrderDTO(BaseModel):
     considered_fulfilled: bool = False
     created_at: Optional[str] = None
     fulfilled_at: Optional[str] = None
+    # All fulfillment timestamps (createdAt) found on the order.
+    # Used to match "Fulfilled on <date>" like Shopify Admin (any fulfillment in range, not only the latest).
+    fulfillment_times: List[str] = []
     financial_status: Optional[str] = None
 
 # ---------- Helpers ----------
@@ -908,18 +911,18 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
     considered_fulfilled = any((getattr(v, "status", None) or "") == "fulfilled" for v in variants)
     # Determine the last fulfillment timestamp from fulfillments nodes if present
     fulfilled_at_val: Optional[str] = None
+    fulfillment_times: List[str] = []
     try:
         # Shopify schema differs by version:
         # - Some versions: fulfillments is a list of objects [{createdAt, status}, ...]
         # - Others: fulfillments is a connection { nodes: [...] } or { edges: [{node: ...}] }
         fulf = node.get("fulfillments")
-        times: List[str] = []
         if isinstance(fulf, list):
             for f in fulf:
                 try:
                     ts = (f or {}).get("createdAt")
                     if ts:
-                        times.append(str(ts))
+                        fulfillment_times.append(str(ts))
                 except Exception:
                     continue
         elif isinstance(fulf, dict):
@@ -929,7 +932,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
                     try:
                         ts = (f or {}).get("createdAt")
                         if ts:
-                            times.append(str(ts))
+                            fulfillment_times.append(str(ts))
                     except Exception:
                         continue
             edges = (fulf.get("edges") or [])
@@ -939,11 +942,11 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
                         f = (e or {}).get("node") or {}
                         ts = (f or {}).get("createdAt")
                         if ts:
-                            times.append(str(ts))
+                            fulfillment_times.append(str(ts))
                     except Exception:
                         continue
-        if times:
-            fulfilled_at_val = max(times)  # latest
+        if fulfillment_times:
+            fulfilled_at_val = max(fulfillment_times)  # latest (display)
     except Exception:
         fulfilled_at_val = None
     return OrderDTO(
@@ -959,6 +962,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         considered_fulfilled=considered_fulfilled,
         created_at=node.get("createdAt"),
         fulfilled_at=fulfilled_at_val,
+        fulfillment_times=fulfillment_times,
         financial_status=node.get("displayFinancialStatus"),
     )
 
@@ -1026,10 +1030,13 @@ async def list_orders(
             if fulfillment_from:
                 q = f"{q} updated_at:>={fulfillment_from}".strip()
             if fulfillment_to:
-                # Allow a one-week drift for updates that happen after fulfillment
+                # Allow a drift for updates that happen after fulfillment, but never cap earlier than "now"
+                # (otherwise older fulfillments disappear if the order was edited later).
                 to_dt = datetime.fromisoformat(fulfillment_to).replace(tzinfo=timezone.utc)
-                to_next = (to_dt + timedelta(days=8)).date().isoformat()
-                q = f"{q} updated_at:<{to_next}".strip()
+                drift_cap = (to_dt + timedelta(days=8)).date()
+                now_cap = (datetime.now(timezone.utc).date() + timedelta(days=1))
+                cap = (now_cap if drift_cap < now_cap else drift_cap).isoformat()
+                q = f"{q} updated_at:<{cap}".strip()
         except Exception:
             pass
 
@@ -1054,6 +1061,8 @@ async def list_orders(
         "product_id": product_id,
         "disable_collect_ranking": bool(disable_collect_ranking),
         "financial_status": (financial_status or "").strip().lower(),
+        "fulfillment_from": (fulfillment_from or "").strip(),
+        "fulfillment_to": (fulfillment_to or "").strip(),
     })
     cached = _orders_cache_get(cache_key)
     if cached is not None:
@@ -1204,8 +1213,17 @@ async def list_orders(
                 return True
             except Exception:
                 return False
+        def _any_fulfillment_in_range(o: "OrderDTO") -> bool:
+            try:
+                ts_list = getattr(o, "fulfillment_times", None) or []
+                if ts_list:
+                    return any(_in_range(t) for t in ts_list)
+                # Fallback to last fulfillment timestamp if list missing
+                return _in_range(getattr(o, "fulfilled_at", None))
+            except Exception:
+                return False
         # Accumulate across pages to avoid missing results due to updated_at sorting
-        matches: List[OrderDTO] = [o for o in items if _in_range(o.fulfilled_at)]
+        matches: List[OrderDTO] = [o for o in items if _any_fulfillment_in_range(o)]
         local_next = None
         try:
             if edges:
@@ -1225,7 +1243,7 @@ async def list_orders(
             ords2 = page["orders"]
             edges2 = ords2.get("edges") or []
             page_items: List[OrderDTO] = [map_order_node(e["node"]) for e in edges2]
-            matches.extend([o for o in page_items if _in_range(o.fulfilled_at)])
+            matches.extend([o for o in page_items if _any_fulfillment_in_range(o)])
             has_more = (ords2.get("pageInfo") or {}).get("hasNextPage") or False
             try:
                 local_next = edges2[-1].get("cursor") if edges2 else None
