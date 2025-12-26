@@ -1216,12 +1216,66 @@ async def list_orders(
                 return resp
         else:
             raise
-    # If fast fulfillment_date query returned no rows, fallback to the slower scan+post-filter strategy.
+    # If fast fulfillment_date query returned no rows OR appears to be ignored by Shopify search,
+    # fallback to the slower scan+post-filter strategy.
     try:
         if want_fulfillment_date and q_fallback:
             edges0 = ((data.get("orders") or {}).get("edges")) or []
             cnt0 = int((data.get("ordersCount") or {}).get("count") or 0)
-            if (not edges0) and cnt0 == 0:
+            should_fallback = (not edges0) and cnt0 == 0
+
+            # Validation: if we used a fast query (q != q_fallback) but the returned orders
+            # are not actually in the requested date range, assume Shopify ignored fulfillment_date:*.
+            if (not should_fallback) and edges0 and (q != q_fallback):
+                try:
+                    # Build date window
+                    start_dt = None
+                    end_dt = None
+                    if orig_fulfillment_from:
+                        start_dt = datetime.fromisoformat(orig_fulfillment_from).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+                    if orig_fulfillment_to:
+                        end_dt = datetime.fromisoformat(orig_fulfillment_to).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc) + timedelta(days=1)
+
+                    def _in_range_ts(ts: Optional[str]) -> bool:
+                        if not ts:
+                            return False
+                        dt = _parse_iso8601(ts)
+                        if not dt:
+                            return False
+                        if not dt.tzinfo:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        if start_dt and dt < start_dt:
+                            return False
+                        if end_dt and dt >= end_dt:
+                            return False
+                        return True
+
+                    def _any_ts_in_range(o: "OrderDTO") -> bool:
+                        try:
+                            ts_list = getattr(o, "fulfillment_times", None) or []
+                            if ts_list:
+                                return any(_in_range_ts(t) for t in ts_list)
+                            if _in_range_ts(getattr(o, "fulfilled_at", None)):
+                                return True
+                            return _in_range_ts(getattr(o, "updated_at", None))
+                        except Exception:
+                            return False
+
+                    # Validate first page only (cheap) to detect ignored search term.
+                    page0_items: List[OrderDTO] = [map_order_node(e["node"]) for e in edges0 if (e or {}).get("node")]
+                    mismatches = 0
+                    for o in page0_items:
+                        if not _any_ts_in_range(o):
+                            mismatches += 1
+                            # One mismatch is enough to suspect the fast filter is not applied.
+                            break
+                    if mismatches > 0:
+                        should_fallback = True
+                except Exception:
+                    # If validation fails, do not force fallback; keep fast path.
+                    pass
+
+            if should_fallback:
                 q = q_fallback
                 do_post_filter = True
                 variables = {"first": limit, "after": cursor, "query": q or None}
