@@ -999,6 +999,12 @@ async def list_orders(
     if not domain or not password:
         return JSONResponse({"orders": [], "pageInfo": {"hasNextPage": False}, "error": "Shopify env not configured"}, status_code=200)
 
+    # Preserve original fulfillment date filters. We may choose between:
+    # - Fast server-side filtering (fulfillment_date:* query) when supported by Shopify search
+    # - Fallback scan + post-filter using fulfillments/updatedAt if the fast query returns 0
+    orig_fulfillment_from = (fulfillment_from or "").strip() or None
+    orig_fulfillment_to = (fulfillment_to or "").strip() or None
+
     q = build_query_string(
         (base_query or ""),
         status_filter,
@@ -1013,8 +1019,12 @@ async def list_orders(
         product_id,
         financial_status,
     )
-    # Narrow server-side query when fulfillment date filtering is requested
-    if fulfillment_from or fulfillment_to:
+    # Fulfillment date filter strategy:
+    # Prefer fast server-side query using fulfillment_date if possible; fallback to scan+post-filter.
+    want_fulfillment_date = bool(orig_fulfillment_from or orig_fulfillment_to)
+    q_fallback: Optional[str] = None
+    do_post_filter = False
+    if want_fulfillment_date:
         # Shopify order search defaults to open orders unless status:any is provided.
         # For fulfillment-date browsing we want to match Shopify Admin's "All orders" view,
         # including archived/closed fulfilled orders.
@@ -1023,25 +1033,39 @@ async def list_orders(
             if not re.search(r"(^|\s)status:", q):
                 q = f"{q} status:any".strip()
         except Exception:
-            # Best-effort; keep existing query if regex fails for any reason
             pass
-        # Ensure we only query fulfilled orders
-        q = f"{q} fulfillment_status:fulfilled".strip()
-        # Additionally constrain by updated_at window to approximate fulfillment date range
-        # Shopify query syntax accepts YYYY-MM-DD for updated_at comparisons
+        # Ensure we only query fulfilled orders (idempotent)
+        if "fulfillment_status:" not in q:
+            q = f"{q} fulfillment_status:fulfilled".strip()
+
+        # Fast path: let Shopify search filter by fulfillment date (if supported)
+        fast_terms: List[str] = []
+        if orig_fulfillment_from and orig_fulfillment_to and orig_fulfillment_from == orig_fulfillment_to:
+            fast_terms.append(f"fulfillment_date:{orig_fulfillment_from}")
+        else:
+            if orig_fulfillment_from:
+                fast_terms.append(f"fulfillment_date:>={orig_fulfillment_from}")
+            if orig_fulfillment_to:
+                fast_terms.append(f"fulfillment_date:<={orig_fulfillment_to}")
+        q_fast = f"{q} {' '.join(fast_terms)}".strip()
+
+        # Fallback path: constrain by updated_at window and then post-filter by fulfillments/updatedAt.
+        q_fallback = q
         try:
-            if fulfillment_from:
-                q = f"{q} updated_at:>={fulfillment_from}".strip()
-            if fulfillment_to:
+            if orig_fulfillment_from:
+                q_fallback = f"{q_fallback} updated_at:>={orig_fulfillment_from}".strip()
+            if orig_fulfillment_to:
                 # Allow a drift for updates that happen after fulfillment, but never cap earlier than "now"
-                # (otherwise older fulfillments disappear if the order was edited later).
-                to_dt = datetime.fromisoformat(fulfillment_to).replace(tzinfo=timezone.utc)
+                to_dt = datetime.fromisoformat(orig_fulfillment_to).replace(tzinfo=timezone.utc)
                 drift_cap = (to_dt + timedelta(days=8)).date()
                 now_cap = (datetime.now(timezone.utc).date() + timedelta(days=1))
                 cap = (now_cap if drift_cap < now_cap else drift_cap).isoformat()
-                q = f"{q} updated_at:<{cap}".strip()
+                q_fallback = f"{q_fallback} updated_at:<{cap}".strip()
         except Exception:
             pass
+
+        # Start with fast query; we may fallback after the first fetch if it returns 0.
+        q = q_fast
 
     # Build GraphQL query based on store capabilities
 
@@ -1068,6 +1092,14 @@ async def list_orders(
         "fulfillment_to": (fulfillment_to or "").strip(),
     })
     cached = _orders_cache_get(cache_key)
+    # If we are using the fast fulfillment-date query and it cached an empty response,
+    # ignore it so we can attempt the slower fallback (otherwise we can get "stuck" at 0).
+    if cached is not None:
+        try:
+            if want_fulfillment_date and int(cached.get("totalCount") or 0) == 0 and q_fallback:
+                cached = None
+        except Exception:
+            pass
     if cached is not None:
         return cached
     if (store or "irrakids").strip().lower() == "irranova":
@@ -1184,19 +1216,60 @@ async def list_orders(
                 return resp
         else:
             raise
+    # If fast fulfillment_date query returned no rows, fallback to the slower scan+post-filter strategy.
+    try:
+        if want_fulfillment_date and q_fallback:
+            edges0 = ((data.get("orders") or {}).get("edges")) or []
+            cnt0 = int((data.get("ordersCount") or {}).get("count") or 0)
+            if (not edges0) and cnt0 == 0:
+                q = q_fallback
+                do_post_filter = True
+                variables = {"first": limit, "after": cursor, "query": q or None}
+                # Recompute cache for fallback query
+                cache_key_fb = _orders_cache_key({
+                    "path": "/api/orders",
+                    "q": q,
+                    "limit": limit,
+                    "cursor": cursor,
+                    "status_filter": status_filter,
+                    "tag_filter": tag_filter,
+                    "search": search,
+                    "cod_date": cod_date,
+                    "cod_dates": cod_dates,
+                    "collect_prefix": collect_prefix,
+                    "collect_exclude_tag": collect_exclude_tag,
+                    "verification_include_tag": verification_include_tag,
+                    "exclude_out": exclude_out,
+                    "store": (store or "").strip().lower(),
+                    "product_id": product_id,
+                    "disable_collect_ranking": bool(disable_collect_ranking),
+                    "financial_status": (financial_status or "").strip().lower(),
+                    "fulfillment_from": (orig_fulfillment_from or ""),
+                    "fulfillment_to": (orig_fulfillment_to or ""),
+                })
+                cached_fb = _orders_cache_get(cache_key_fb)
+                if cached_fb is not None:
+                    return cached_fb
+                data = await shopify_graphql(query, variables, store=store)
+                # Update cache_key variable so we cache the fallback response at the correct key
+                cache_key = cache_key_fb
+    except Exception:
+        # If anything goes wrong, keep the fast path results
+        do_post_filter = False
+
     ords = data["orders"]
     edges = ords.get("edges") or []
     items: List[OrderDTO] = [map_order_node(e["node"]) for e in edges]
     # Optional post-filter by fulfillment date range (inclusive)
-    if fulfillment_from or fulfillment_to:
+    if want_fulfillment_date and do_post_filter:
         def _compute_range():
             try:
                 sdt = None
                 edt = None
-                if fulfillment_from:
-                    sdt = datetime.fromisoformat(fulfillment_from).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-                if fulfillment_to:
-                    edt = datetime.fromisoformat(fulfillment_to).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+                if orig_fulfillment_from:
+                    sdt = datetime.fromisoformat(orig_fulfillment_from).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+                if orig_fulfillment_to:
+                    edt = datetime.fromisoformat(orig_fulfillment_to).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
                     edt = edt + timedelta(days=1)
                 return sdt, edt
             except Exception:
