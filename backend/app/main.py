@@ -753,6 +753,7 @@ class OrderDTO(BaseModel):
     total_price: float = 0.0
     considered_fulfilled: bool = False
     created_at: Optional[str] = None
+    updated_at: Optional[str] = None
     fulfilled_at: Optional[str] = None
     # All fulfillment timestamps (createdAt) found on the order.
     # Used to match "Fulfilled on <date>" like Shopify Admin (any fulfillment in range, not only the latest).
@@ -961,6 +962,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         total_price=price,
         considered_fulfilled=considered_fulfilled,
         created_at=node.get("createdAt"),
+        updated_at=node.get("updatedAt"),
         fulfilled_at=fulfilled_at_val,
         fulfillment_times=fulfillment_times,
         financial_status=node.get("displayFinancialStatus"),
@@ -991,6 +993,7 @@ async def list_orders(
     fulfillment_from: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD) inclusive start for fulfillment date"),
     fulfillment_to: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD) inclusive end for fulfillment date"),
     financial_status: Optional[str] = Query(None, description="Filter by payment status: paid or pending"),
+    debug: bool = Query(False, description="If true, include debug metadata (resolved Shopify query, scan stats)"),
 ):
     domain, password, _ = resolve_store_settings(store)
     if not domain or not password:
@@ -1078,6 +1081,7 @@ async def list_orders(
                 id
                 name
                 createdAt
+                updatedAt
                 sourceName
                 tags
                 note
@@ -1120,6 +1124,7 @@ async def list_orders(
                 id
                 name
                 createdAt
+                updatedAt
                 sourceName
                 tags
                 note
@@ -1219,7 +1224,10 @@ async def list_orders(
                 if ts_list:
                     return any(_in_range(t) for t in ts_list)
                 # Fallback to last fulfillment timestamp if list missing
-                return _in_range(getattr(o, "fulfilled_at", None))
+                if _in_range(getattr(o, "fulfilled_at", None)):
+                    return True
+                # Final fallback: use updatedAt (approx) if fulfillments are unavailable
+                return _in_range(getattr(o, "updated_at", None))
             except Exception:
                 return False
         # Accumulate across pages to avoid missing results due to updated_at sorting
@@ -1255,13 +1263,31 @@ async def list_orders(
             await _enrich_orders_with_on_hand(matches, store=store)
         except Exception:
             pass
-        resp = {
+        resp: Dict[str, Any] = {
             "orders": [json.loads(o.json()) for o in matches],
             "pageInfo": {"hasNextPage": False},
             "tags": unique_tags,
             "totalCount": len(matches),
             "nextCursor": None,
         }
+        if debug:
+            try:
+                sample = []
+                for o in (matches[:5] if matches else items[:5]):
+                    sample.append({
+                        "number": getattr(o, "number", None),
+                        "updated_at": getattr(o, "updated_at", None),
+                        "fulfilled_at": getattr(o, "fulfilled_at", None),
+                        "fulfillment_times_len": len(getattr(o, "fulfillment_times", None) or []),
+                    })
+                resp["debug"] = {
+                    "resolved_query": q,
+                    "first_page_edges": len(edges or []),
+                    "matched_count": len(matches),
+                    "sample": sample,
+                }
+            except Exception:
+                resp["debug"] = {"resolved_query": q}
         _orders_cache_set(cache_key, resp)
         return resp
 
