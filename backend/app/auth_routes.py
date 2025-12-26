@@ -8,6 +8,7 @@ from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import DBAPIError
 from .db import get_session
 from .models import User
 
@@ -65,7 +66,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
             raise cred_exc
     except JWTError:
         raise cred_exc
-    user = await db.scalar(select(User).where(User.id == uid))
+    try:
+        user = await db.scalar(select(User).where(User.id == uid))
+    except DBAPIError as e:
+        # If the DB connection was dropped (common on Cloud Run/Cloud SQL idle), return 503 so client retries.
+        msg = str(getattr(e, "orig", e))
+        if "connection is closed" in msg.lower() or getattr(e, "connection_invalidated", False):
+            raise HTTPException(status_code=503, detail="database connection was reset; please retry")
+        raise
     if not user or not user.is_active:
         raise cred_exc
     return user
@@ -81,7 +89,11 @@ async def get_current_user_optional(token: str = Depends(oauth2_optional), db: A
             return None
     except JWTError:
         return None
-    return await db.scalar(select(User).where(User.id == uid, User.is_active == True))
+    try:
+        return await db.scalar(select(User).where(User.id == uid, User.is_active == True))
+    except DBAPIError:
+        # Optional auth should never crash an endpoint; treat DB blips as unauthenticated.
+        return None
 
 
 async def require_admin(user: User = Depends(get_current_user)) -> User:

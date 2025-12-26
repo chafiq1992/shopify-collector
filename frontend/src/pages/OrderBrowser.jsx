@@ -1,17 +1,17 @@
 import React, { useEffect, useRef, useState } from "react";
-import { authHeaders } from "../lib/auth";
+import { authFetch, authHeaders } from "../lib/auth";
 
 // Minimal API client reused across pages
 const API = {
   async getOrders(params = {}) {
     const q = new URLSearchParams(params).toString();
-    const res = await fetch(`/api/orders?${q}`, { headers: authHeaders() });
+    const res = await authFetch(`/api/orders?${q}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(`Failed to fetch orders (${res.status})`);
     return res.json();
   },
   async addTag(orderId, tag, store) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/add-tag${qs}`, {
+    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/add-tag${qs}`, {
       method: "POST",
       headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ tag }),
@@ -20,7 +20,7 @@ const API = {
   },
   async appendNote(orderId, append, store) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
+    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
       method: "POST",
       headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ append }),
@@ -33,7 +33,7 @@ const API = {
       store: store || "",
       force_live: forceLive ? "true" : "false",
     }).toString();
-    const res = await fetch(`/api/overrides?${params}`, { headers: authHeaders() });
+    const res = await authFetch(`/api/overrides?${params}`, { headers: authHeaders() });
     if (!res.ok) throw new Error("Failed to fetch overrides");
     return res.json();
   }

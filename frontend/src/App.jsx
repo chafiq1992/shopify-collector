@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, Suspense } from "react";
 import { CheckCircle, PackageSearch, PackageCheck, XCircle, ChevronLeft, ChevronRight, Search, Settings, Boxes, Printer, LogOut } from "lucide-react";
-import { authHeaders, loadAuth, saveAuth, clearAuth } from "./lib/auth";
+import { authFetch, authHeaders, loadAuth, saveAuth, clearAuth } from "./lib/auth";
 import { printOrdersLocally } from "./lib/localPrintClient";
 import { enqueueOrdersToRelay, isRelayConfigured } from "./lib/printRelayClient";
 
@@ -22,12 +22,12 @@ const AdminAnalyticsPage = React.lazy(() => import('./pages/AdminAnalytics.jsx')
 const API = {
   async getOrders(params = {}) {
     const q = new URLSearchParams(params).toString();
-    const res = await fetch(`/api/orders?${q}`, { headers: authHeaders() });
+    const res = await authFetch(`/api/orders?${q}`, { headers: authHeaders() });
     return res.json();
   },
   async addTag(orderId, tag, store) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    await fetch(`/api/orders/${encodeURIComponent(orderId)}/add-tag${qs}`, {
+    await authFetch(`/api/orders/${encodeURIComponent(orderId)}/add-tag${qs}`, {
       method: 'POST',
       headers: authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ tag })
@@ -35,7 +35,7 @@ const API = {
   },
   async removeTag(orderId, tag, store) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    await fetch(`/api/orders/${encodeURIComponent(orderId)}/remove-tag${qs}`, {
+    await authFetch(`/api/orders/${encodeURIComponent(orderId)}/remove-tag${qs}`, {
       method: 'POST',
       headers: authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ tag })
@@ -43,7 +43,7 @@ const API = {
   },
   async appendNote(orderId, append, store) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    await fetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
+    await authFetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
       method: 'POST',
       headers: authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ append })
@@ -51,21 +51,23 @@ const API = {
   },
   async markCollected(orderId, orderNumber, store, metadata = {}) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/collected${qs}`, {
+    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/collected${qs}`, {
       method: 'POST',
       headers: authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ order_number: orderNumber, store, metadata })
     });
+    if (res.status === 401) throw new Error("Session expired. Please login again.");
     if (!res.ok) throw new Error("Failed to mark collected");
     return res.json();
   },
   async markOut(orderId, orderNumber, store, metadata = {}) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/out${qs}`, {
+    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/out${qs}`, {
       method: 'POST',
       headers: authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ order_number: orderNumber, store, metadata })
     });
+    if (res.status === 401) throw new Error("Session expired. Please login again.");
     if (!res.ok) throw new Error("Failed to mark out");
     return res.json();
   },
@@ -286,6 +288,15 @@ export default function App(){
     clearAuth();
     setAuth(null);
   }
+
+  // If any API call gets a 401, authFetch() clears storage; this listener makes the UI switch to Login immediately.
+  useEffect(() => {
+    const onCleared = () => {
+      try { setAuth(null); } catch {}
+    };
+    try { window.addEventListener("orderCollectorAuthCleared", onCleared); } catch {}
+    return () => { try { window.removeEventListener("orderCollectorAuthCleared", onCleared); } catch {} };
+  }, []);
 
   function vibrate(ms = 20){
     try { if (navigator && typeof navigator.vibrate === 'function') navigator.vibrate(ms); } catch {}
@@ -1128,6 +1139,13 @@ export default function App(){
       showOverlay({ open: true, type: "collected", variant: "success", title: "Collected!", subtitle: "Great job — keep going.", confettiKey: Date.now() }, 1050);
       if (afterSingle) gotoNext();
     } catch (e){
+      // If auth expired, do not queue: force re-login
+      if (String(e?.message || "").toLowerCase().includes("session expired")) {
+        try { setAuth(null); } catch {}
+        showOverlay({ open: true, type: "collected", variant: "danger", title: "Login required", subtitle: "Your session expired — please login again." }, 1200);
+        setApiError("Session expired. Please login again.");
+        return;
+      }
       // If offline/flaky, queue and keep user moving (backend is idempotent)
       try {
         for (const o of targetOrders){
@@ -1155,6 +1173,13 @@ export default function App(){
       showOverlay({ open: true, type: "out", variant: "danger", title: "Marked OUT", subtitle: "Noted and tagged." }, 900);
       if (afterSingle) gotoNext();
     } catch (e){
+      // If auth expired, do not queue: force re-login
+      if (String(e?.message || "").toLowerCase().includes("session expired")) {
+        try { setAuth(null); } catch {}
+        showOverlay({ open: true, type: "out", variant: "danger", title: "Login required", subtitle: "Your session expired — please login again." }, 1200);
+        setApiError("Session expired. Please login again.");
+        return;
+      }
       try {
         for (const it of items){
           queueAction({ id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, type: "out", orderId: it.order.id, orderNumber: it.order.number, store, metadata: { titles: it.titles }, ts: Date.now() });

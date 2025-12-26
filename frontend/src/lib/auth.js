@@ -46,6 +46,10 @@ export async function authFetch(url, options = {}) {
   const resp = await fetch(url, { ...options, headers });
   if (resp.status === 401) {
     clearAuth();
+    // Let the app react immediately (e.g. show login screen)
+    try {
+      window.dispatchEvent(new CustomEvent("orderCollectorAuthCleared", { detail: { reason: "401" } }));
+    } catch {}
   }
   return resp;
 }
