@@ -1009,10 +1009,22 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             fulfilled_at_val = max(fulfillment_times)  # latest (display)
     except Exception:
         fulfilled_at_val = None
+    cust_name: Optional[str] = None
+    try:
+        cust_name = ((node.get("customer") or {}) or {}).get("displayName")
+    except Exception:
+        cust_name = None
+    # Draft orders / some channels may not populate `customer`, but shippingAddress.name is usually present.
+    if not cust_name:
+        try:
+            cust_name = ((node.get("shippingAddress") or {}) or {}).get("name") or None
+        except Exception:
+            cust_name = None
+
     return OrderDTO(
         id=node["id"],
         number=node["name"],
-        customer=(node.get("customer") or {}).get("displayName"),
+        customer=cust_name,
         shipping_city=((node.get("shippingAddress") or {}) or {}).get("city"),
         sales_channel=node.get("sourceName"),
         tags=node.get("tags") or [],
@@ -1161,95 +1173,50 @@ async def list_orders(
             pass
     if cached is not None:
         return cached
-    if (store or "irrakids").strip().lower() == "irranova":
-        # Avoid PII (customer, shippingAddress) but keep variant fields
-        query = """
-        query Orders($first: Int!, $after: String, $query: String, $reverse: Boolean!) {
-          orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: $reverse) {
-            edges {
-              cursor
-              node {
-                id
-                name
-                createdAt
-                updatedAt
-                sourceName
-                tags
-                note
-                fulfillments { createdAt status }
-                currentTotalPriceSet { shopMoney { amount currencyCode } }
-                totalPriceSet { shopMoney { amount currencyCode } }
-                displayFinancialStatus
-                lineItems(first: 50) {
-                  edges {
-                    node {
-                      quantity
-                      unfulfilledQuantity
-                      sku
-                      variant {
-                        id
-                        title
-                        barcode
-                        inventoryQuantity
-                        inventoryItem { id }
-                        image { url }
-                        product { id featuredImage { url } }
-                      }
-                    }
+    query = """
+    query Orders($first: Int!, $after: String, $query: String, $reverse: Boolean!) {
+      orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: $reverse) {
+        edges {
+          cursor
+          node {
+            id
+            name
+            createdAt
+            updatedAt
+            sourceName
+            tags
+            note
+            fulfillments { createdAt status }
+            shippingAddress { name city }
+            customer { displayName }
+            currentTotalPriceSet { shopMoney { amount currencyCode } }
+            totalPriceSet { shopMoney { amount currencyCode } }
+            displayFinancialStatus
+            lineItems(first: 50) {
+              edges {
+                node {
+                  quantity
+                  unfulfilledQuantity
+                  sku
+                  variant {
+                    id
+                    title
+                    barcode
+                    inventoryQuantity
+                    inventoryItem { id }
+                    image { url }
+                    product { id featuredImage { url } }
                   }
                 }
               }
             }
-            pageInfo { hasNextPage }
           }
-          ordersCount(query: $query) { count }
         }
-        """
-    else:
-        query = """
-        query Orders($first: Int!, $after: String, $query: String, $reverse: Boolean!) {
-          orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: $reverse) {
-            edges {
-              cursor
-              node {
-                id
-                name
-                createdAt
-                updatedAt
-                sourceName
-                tags
-                note
-                fulfillments { createdAt status }
-                shippingAddress { city }
-                customer { displayName }
-                currentTotalPriceSet { shopMoney { amount currencyCode } }
-                totalPriceSet { shopMoney { amount currencyCode } }
-                displayFinancialStatus
-                lineItems(first: 50) {
-                  edges {
-                    node {
-                      quantity
-                      unfulfilledQuantity
-                      sku
-                      variant {
-                        id
-                        title
-                        barcode
-                        inventoryQuantity
-                        inventoryItem { id }
-                        image { url }
-                        product { id featuredImage { url } }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-            pageInfo { hasNextPage }
-          }
-          ordersCount(query: $query) { count }
-        }
-        """
+        pageInfo { hasNextPage }
+      }
+      ordersCount(query: $query) { count }
+    }
+    """
     # Default ordering for normal browsing is newest first. For fulfillment-date fallback scanning
     # we will switch to oldest-first to reach the target day quickly.
     variables = {"first": limit, "after": cursor, "query": q or None, "reverse": True}
