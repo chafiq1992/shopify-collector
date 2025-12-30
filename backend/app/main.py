@@ -2501,64 +2501,73 @@ async def get_print_data(numbers: str = Query("", description="Comma-separated o
     return {"ok": True, "orders": out}
 
 # --------- SPA client-side routes (serve index.html) ---------
-@app.get("/order-lookup")
-async def _spa_order_lookup():
+def _frontend_dist_dir() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+
+
+def _frontend_index_path() -> str:
+    return os.path.join(_frontend_dist_dir(), "index.html")
+
+
+async def _serve_frontend_index_or_404():
     try:
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
-        index_path = os.path.join(base_dir, "index.html")
+        index_path = _frontend_index_path()
         if os.path.isfile(index_path):
             return FileResponse(index_path)
     except Exception:
         pass
-    return JSONResponse({"detail": "Not Found"}, status_code=404)
+    # Keep default-style response but include useful hint
+    return JSONResponse(
+        {"detail": "Not Found", "hint": "frontend build missing; expected frontend/dist/index.html in container"},
+        status_code=404,
+    )
+
+
+@app.get("/order-lookup")
+async def _spa_order_lookup():
+    return await _serve_frontend_index_or_404()
 
 @app.get("/order-tagger")
 async def _spa_order_tagger():
-    try:
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
-        index_path = os.path.join(base_dir, "index.html")
-        if os.path.isfile(index_path):
-            return FileResponse(index_path)
-    except Exception:
-        pass
-    return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await _serve_frontend_index_or_404()
 
 @app.get("/order-browser")
 async def _spa_order_browser():
-    try:
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
-        index_path = os.path.join(base_dir, "index.html")
-        if os.path.isfile(index_path):
-            return FileResponse(index_path)
-    except Exception:
-        pass
-    return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await _serve_frontend_index_or_404()
 
 @app.get("/admin")
 async def _spa_admin():
-    try:
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
-        index_path = os.path.join(base_dir, "index.html")
-        if os.path.isfile(index_path):
-            return FileResponse(index_path)
-    except Exception:
-        pass
-    return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await _serve_frontend_index_or_404()
 
 
 @app.get("/shopify-connect")
 async def _spa_shopify_connect():
+    return await _serve_frontend_index_or_404()
+
+
+@app.get("/{full_path:path}")
+async def _spa_fallback(full_path: str):
+    """
+    SPA fallback:
+    - Serve static assets if present in frontend/dist
+    - Otherwise serve index.html for client-side routes (e.g. /shopify-connect)
+    - Never intercept API/WebSocket paths
+    """
+    p = (full_path or "").lstrip("/")
+    if p.startswith("api/") or p == "api" or p.startswith("ws") or p == "ws":
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
     try:
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
-        index_path = os.path.join(base_dir, "index.html")
-        if os.path.isfile(index_path):
-            return FileResponse(index_path)
+        base = _frontend_dist_dir()
+        # Serve actual file if it exists (assets, index.css, etc.)
+        candidate = os.path.abspath(os.path.join(base, p))
+        if candidate.startswith(base) and os.path.isfile(candidate):
+            return FileResponse(candidate)
     except Exception:
         pass
-    return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await _serve_frontend_index_or_404()
 
 # --------- Static frontend (mounted last) ---------
-STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+STATIC_DIR = _frontend_dist_dir()
 if os.path.isdir(STATIC_DIR):
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 else:
