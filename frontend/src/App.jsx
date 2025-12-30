@@ -12,6 +12,7 @@ const OrderLookupPage = React.lazy(() => import('./pages/OrderLookup.jsx'));
 const OrderBrowserPage = React.lazy(() => import('./pages/OrderBrowser.jsx'));
 const LoginPage = React.lazy(() => import('./pages/Login.jsx'));
 const AdminAnalyticsPage = React.lazy(() => import('./pages/AdminAnalytics.jsx'));
+const ShopifyConnectPage = React.lazy(() => import('./pages/ShopifyConnect.jsx'));
 
 // Types (JSDoc only)
 /**
@@ -677,6 +678,13 @@ export default function App(){
         </Suspense>
       );
     }
+    if (currentPath === '/shopify-connect'){
+      return (
+        <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
+          <ShopifyConnectPage store={store} setStore={setStore} />
+        </Suspense>
+      );
+    }
   } catch {}
 
   return (
@@ -718,12 +726,20 @@ export default function App(){
               </div>
             )}
             {auth?.user?.role === 'admin' && (
-              <button
-                onClick={()=>{ try { history.pushState(null, '', '/admin'); } catch { location.href = '/admin'; } }}
-                className="text-xs px-3 py-1 rounded-full border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
-              >
-                Admin
-              </button>
+              <>
+                <button
+                  onClick={()=>{ try { history.pushState(null, '', '/admin'); } catch { location.href = '/admin'; } }}
+                  className="text-xs px-3 py-1 rounded-full border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+                >
+                  Admin
+                </button>
+                <button
+                  onClick={()=>{ try { history.pushState(null, '', '/shopify-connect'); } catch { location.href = '/shopify-connect'; } }}
+                  className="text-xs px-3 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                >
+                  Shopify Connect
+                </button>
+              </>
             )}
             <button aria-label="Choose profile" onClick={()=>{ vibrate(10); setShowProfilePicker(true); }} className="p-1.5 rounded-full hover:bg-gray-100">
               <Boxes className={`w-4 h-4 ${profile?.id === 'stock' ? 'text-blue-600' : 'text-gray-700'}`} />

@@ -10,11 +10,33 @@ A clean, swipe-first app for warehouse/employee order collection:
 
 ## 1) Shopify prerequisites
 
-Create a **custom app** in Shopify admin with Admin API scopes:
-- `read_orders`
-- `write_orders`
+This repo supports **mixed-mode Shopify auth** for two stores:
+
+- **irrakids**: keeps the “old method” — static Admin API token from env (sent as `X-Shopify-Access-Token`).
+- **irranova**: uses **public app OAuth** (Shopify Dev Dashboard Client ID + Secret) to mint and persist a per-store Admin API token in the DB.
+
+### Old method (env token)
+
+Create a **custom app** in Shopify admin (or use your existing token) with Admin API scopes like:
+- `read_orders`, `write_orders` (plus any other features you use)
 
 Copy the **Admin API access token** and set env vars below.
+
+### New method (public app OAuth) — Irranova only
+
+In the Shopify Dev Dashboard:
+
+- Create a **public app**
+- Add the exact redirect URL to the allowlist:
+  - `{BASE_URL}/api/shopify/oauth/callback` (must match exactly, not just the domain)
+- Set env vars below (`SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_OAUTH_SCOPES`, `BASE_URL`)
+
+Then in the app UI, open `/shopify-connect` and run the install flow for `irranova`.
+
+Important lessons:
+
+- Do **not** paste or refresh the callback URL manually — OAuth codes are **one-time-use**. Always go through “Connect” → approve in Shopify.
+- If you hit a production HMAC mismatch, you can temporarily set `SHOPIFY_OAUTH_SKIP_HMAC=1` to unblock install (still verifies signed `state`). Remove it after successful install.
 
 ## 2) Environment variables
 
@@ -39,6 +61,24 @@ Multi-store (optional):
 - `IRRANOVA_SHOPIFY_PASSWORD`, `IRRANOVA_SHOPIFY_API_KEY` — credentials for Irranova
 
 If per-store passwords are not set, the app will fall back to `SHOPIFY_PASSWORD`/`SHOPIFY_API_KEY`.
+
+### Shopify OAuth (public app) env vars (Irranova)
+
+- `BASE_URL` — public Cloud Run URL used to build redirect URI exactly: `{BASE_URL}/api/shopify/oauth/callback`
+- `SHOPIFY_CLIENT_ID`
+- `SHOPIFY_CLIENT_SECRET` (starts with `shpss_...`)
+- `SHOPIFY_OAUTH_SCOPES` — comma-separated
+- `SHOPIFY_OAUTH_STORES` — comma-separated store labels allowed to use OAuth (default behavior enables **only** `irranova`)
+- Optional: `SHOPIFY_OAUTH_SKIP_HMAC=1` (emergency unblock only)
+
+### Mixed-mode resolver behavior
+
+When resolving Shopify credentials for a store:
+
+- Prefer env `SHOPIFY_SHOP_DOMAIN_<STORE>` + `SHOPIFY_ACCESS_TOKEN_<STORE>` (for all stores).
+- If the store is OAuth-enabled (default `irranova`) **and** env credentials are missing, fall back to the DB record stored by the OAuth install.
+
+Reference: [Shopify OAuth getting started](https://shopify.dev/apps/auth/oauth/getting-started) and [Shopify API authentication (HMAC verification)](https://shopify.dev/docs/api/usage/authentication).
 
 ## 3) Local development
 

@@ -70,3 +70,19 @@ class DailyUserStats(Base):
 
     user = relationship("User")
 
+
+class AppSetting(Base):
+    """
+    Simple key/value settings store (JSON value) for small configuration + per-store secrets.
+
+    Used for Shopify OAuth persistence:
+      key = "shopify_oauth:{store_label}"
+      value = {"shop": "...myshopify.com", "access_token": "...", "scopes": "...", "installed_at": "..."}
+    """
+
+    __tablename__ = "app_settings"
+
+    key = Column(String(255), primary_key=True)
+    value = Column(_json_type(), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())

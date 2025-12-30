@@ -25,9 +25,11 @@ from sqlalchemy.exc import IntegrityError
 HAVE_AUTH_DB = True
 try:
     from .db import get_session, init_db, SessionLocal
-    from .models import User, OrderEvent, DailyUserStats
+    from .models import User, OrderEvent, DailyUserStats, AppSetting
     from .auth_routes import router as auth_router, get_current_user, require_admin, hash_password
     from .admin_bootstrap_routes import router as admin_bootstrap_router
+    from .shopify_oauth_routes import router as shopify_oauth_router
+    from .settings_store import get_shopify_oauth_record
 except Exception:
     HAVE_AUTH_DB = False
     get_session = None  # type: ignore
@@ -72,17 +74,66 @@ def resolve_store_settings(store: Optional[str]) -> Tuple[str, str, str]:
         # Unknown store → treat as irrakids to keep backward compatibility
         key = "irrakids"
 
-    if key == "irranova":
-        domain = os.environ.get("IRRANOVA_STORE_DOMAIN", "").strip()
-        password = os.environ.get("IRRANOVA_SHOPIFY_PASSWORD", "").strip() or DEFAULT_PASSWORD
-        api_key = os.environ.get("IRRANOVA_SHOPIFY_API_KEY", "").strip() or DEFAULT_API_KEY
-    else:
-        # irrakids
-        domain = os.environ.get("IRRAKIDS_STORE_DOMAIN", DEFAULT_DOMAIN).strip()
-        password = os.environ.get("IRRAKIDS_SHOPIFY_PASSWORD", "").strip() or DEFAULT_PASSWORD
-        api_key = os.environ.get("IRRAKIDS_SHOPIFY_API_KEY", "").strip() or DEFAULT_API_KEY
+    # New preferred env var convention:
+    #   SHOPIFY_SHOP_DOMAIN_<STORE> and SHOPIFY_ACCESS_TOKEN_<STORE>
+    # Back-compat:
+    #   IRRAKIDS_STORE_DOMAIN / IRRANOVA_STORE_DOMAIN and *_SHOPIFY_PASSWORD / SHOPIFY_PASSWORD
+    upper = key.upper()
+    domain = os.environ.get(f"SHOPIFY_SHOP_DOMAIN_{upper}", "").strip()
+    token = os.environ.get(f"SHOPIFY_ACCESS_TOKEN_{upper}", "").strip()
+    api_key = os.environ.get(f"SHOPIFY_API_KEY_{upper}", "").strip()
 
-    return (domain, password, api_key)
+    if key == "irranova":
+        domain = domain or os.environ.get("IRRANOVA_STORE_DOMAIN", "").strip()
+        token = token or (os.environ.get("IRRANOVA_SHOPIFY_PASSWORD", "").strip() or DEFAULT_PASSWORD)
+        api_key = api_key or (os.environ.get("IRRANOVA_SHOPIFY_API_KEY", "").strip() or DEFAULT_API_KEY)
+    else:
+        domain = domain or os.environ.get("IRRAKIDS_STORE_DOMAIN", DEFAULT_DOMAIN).strip()
+        token = token or (os.environ.get("IRRAKIDS_SHOPIFY_PASSWORD", "").strip() or DEFAULT_PASSWORD)
+        api_key = api_key or (os.environ.get("IRRAKIDS_SHOPIFY_API_KEY", "").strip() or DEFAULT_API_KEY)
+
+    return (domain, token, api_key)
+
+
+def _oauth_enabled_stores() -> set[str]:
+    raw = (os.environ.get("SHOPIFY_OAUTH_STORES") or "").strip()
+    if not raw:
+        return {"irranova"}  # safe default
+    out: set[str] = set()
+    for part in raw.split(","):
+        p = (part or "").strip().lower()
+        if p:
+            out.add(p)
+    return out
+
+
+async def resolve_store_settings_effective(store: Optional[str]) -> Tuple[str, str, str]:
+    """
+    Mixed-mode Shopify credential resolver:
+    - Prefer env for all stores (new vars first, then legacy)
+    - If store is OAuth-enabled and env is missing, fall back to DB shopify_oauth record
+    """
+    domain, token, api_key = resolve_store_settings(store)
+    if domain and token:
+        return (domain, token, api_key)
+
+    key = (store or "irrakids").strip().lower()
+    if key not in ("irrakids", "irranova"):
+        key = "irrakids"
+
+    if (key in _oauth_enabled_stores()) and HAVE_AUTH_DB and SessionLocal is not None:
+        try:
+            async with SessionLocal() as db:  # type: ignore[misc]
+                rec = await get_shopify_oauth_record(db, key)  # type: ignore[arg-type]
+                if isinstance(rec, dict):
+                    shop = (rec.get("shop") or "").strip().lower()
+                    access_token = (rec.get("access_token") or "").strip()
+                    if shop and access_token:
+                        return (shop, access_token, api_key)
+        except Exception:
+            pass
+
+    return (domain, token, api_key)
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Order Collector API", version="1.0.0")
@@ -90,6 +141,8 @@ if HAVE_AUTH_DB and auth_router is not None:
     app.include_router(auth_router)
 if HAVE_AUTH_DB and admin_bootstrap_router is not None:
     app.include_router(admin_bootstrap_router)
+if HAVE_AUTH_DB and "shopify_oauth_router" in globals() and shopify_oauth_router is not None:  # type: ignore[name-defined]
+    app.include_router(shopify_oauth_router)  # type: ignore[arg-type]
 
 # CORS (relaxed for simplicity; tighten in prod)
 app.add_middleware(
@@ -567,20 +620,20 @@ def _shopify_graphql_url(domain: str, password: str, api_key: str) -> str:
     return f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
 
 async def shopify_graphql(query: str, variables: Dict[str, Any] | None, *, store: Optional[str]) -> Dict[str, Any]:
-    domain, password, api_key = resolve_store_settings(store)
-    if not domain or not password:
+    domain, access_token, api_key = await resolve_store_settings_effective(store)
+    if not domain or not access_token:
         raise HTTPException(status_code=400, detail="Shopify credentials not configured for selected store")
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     # Always use token/password header (custom/private app password)
-    headers["X-Shopify-Access-Token"] = password
+    headers["X-Shopify-Access-Token"] = access_token
 
     max_retries = 5
     base_delay = 0.35
     last_exc: Optional[Exception] = None
-    url = _shopify_graphql_url(domain, password, api_key)
+    url = _shopify_graphql_url(domain, access_token, api_key)
     async with httpx.AsyncClient(timeout=30) as client:
         for attempt in range(max_retries):
             try:
@@ -995,8 +1048,8 @@ async def list_orders(
     financial_status: Optional[str] = Query(None, description="Filter by payment status: paid or pending"),
     debug: bool = Query(False, description="If true, include debug metadata (resolved Shopify query, scan stats)"),
 ):
-    domain, password, _ = resolve_store_settings(store)
-    if not domain or not password:
+    domain, access_token, _ = await resolve_store_settings_effective(store)
+    if not domain or not access_token:
         return JSONResponse({"orders": [], "pageInfo": {"hasNextPage": False}, "error": "Shopify env not configured"}, status_code=200)
 
     # Preserve original fulfillment date filters. We may choose between:
@@ -2306,10 +2359,10 @@ async def get_overrides(
         if k in ORDER_OVERRIDES:
             out[k] = ORDER_OVERRIDES[k]
 
-    def _fetch_live_for_store(store_key: str):
+    async def _fetch_live_for_store(store_key: str):
         try:
-            domain, password, api_key = resolve_store_settings(store_key)
-            if not domain or not password:
+            domain, access_token, api_key = await resolve_store_settings_effective(store_key)
+            if not domain or not access_token:
                 return
             for k in keys:
                 # Skip if we already have complete data and not forcing live
@@ -2318,7 +2371,7 @@ async def get_overrides(
                 try:
                     name = _requests.utils.quote(f"#{k}")
                     url = f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/orders.json?name={name}&status=any"
-                    headers = {"X-Shopify-Access-Token": password, "Accept": "application/json"}
+                    headers = {"X-Shopify-Access-Token": access_token, "Accept": "application/json"}
                     r = _requests.get(url, headers=headers, timeout=30)
                     r.raise_for_status()
                     js = r.json().get("orders", [])
@@ -2365,10 +2418,10 @@ async def get_overrides(
     store_key = (store or "").strip().lower()
     # Attempt live enrichment for the requested store; if none provided, try both
     if store_key:
-        _fetch_live_for_store(store_key)
+        await _fetch_live_for_store(store_key)
     else:
-        _fetch_live_for_store("irrakids")
-        _fetch_live_for_store("irranova")
+        await _fetch_live_for_store("irrakids")
+        await _fetch_live_for_store("irranova")
 
     return {"ok": True, "overrides": out}
 
@@ -2483,6 +2536,18 @@ async def _spa_order_browser():
 
 @app.get("/admin")
 async def _spa_admin():
+    try:
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+        index_path = os.path.join(base_dir, "index.html")
+        if os.path.isfile(index_path):
+            return FileResponse(index_path)
+    except Exception:
+        pass
+    return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+
+@app.get("/shopify-connect")
+async def _spa_shopify_connect():
     try:
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
         index_path = os.path.join(base_dir, "index.html")
