@@ -84,10 +84,16 @@ def resolve_store_settings(store: Optional[str]) -> Tuple[str, str, str]:
     api_key = os.environ.get(f"SHOPIFY_API_KEY_{upper}", "").strip()
 
     if key == "irranova":
+        # IMPORTANT:
+        # - Do NOT fall back to DEFAULT_PASSWORD for irranova.
+        #   DEFAULT_PASSWORD is the global SHOPIFY_PASSWORD and is intended for irrakids.
+        #   Falling back would send the wrong token to the wrong shop (causing 401),
+        #   and would prevent OAuth DB fallback from ever being used.
         domain = domain or os.environ.get("IRRANOVA_STORE_DOMAIN", "").strip()
-        token = token or (os.environ.get("IRRANOVA_SHOPIFY_PASSWORD", "").strip() or DEFAULT_PASSWORD)
-        api_key = api_key or (os.environ.get("IRRANOVA_SHOPIFY_API_KEY", "").strip() or DEFAULT_API_KEY)
+        token = token or os.environ.get("IRRANOVA_SHOPIFY_PASSWORD", "").strip()
+        api_key = api_key or os.environ.get("IRRANOVA_SHOPIFY_API_KEY", "").strip()
     else:
+        # irrakids keeps backward compatibility with global fallbacks
         domain = domain or os.environ.get("IRRAKIDS_STORE_DOMAIN", DEFAULT_DOMAIN).strip()
         token = token or (os.environ.get("IRRAKIDS_SHOPIFY_PASSWORD", "").strip() or DEFAULT_PASSWORD)
         api_key = api_key or (os.environ.get("IRRAKIDS_SHOPIFY_API_KEY", "").strip() or DEFAULT_API_KEY)
