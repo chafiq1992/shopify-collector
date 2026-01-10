@@ -10,6 +10,7 @@ const ProfilePickerModal = React.lazy(() => import('./components/ProfilePickerMo
 const OrderTaggerPage = React.lazy(() => import('./pages/OrderTagger.jsx'));
 const OrderLookupPage = React.lazy(() => import('./pages/OrderLookup.jsx'));
 const OrderBrowserPage = React.lazy(() => import('./pages/OrderBrowser.jsx'));
+const VariantOrdersPage = React.lazy(() => import('./pages/VariantOrders.jsx'));
 const LoginPage = React.lazy(() => import('./pages/Login.jsx'));
 const AdminAnalyticsPage = React.lazy(() => import('./pages/AdminAnalytics.jsx'));
 const ShopifyConnectPage = React.lazy(() => import('./pages/ShopifyConnect.jsx'));
@@ -671,6 +672,13 @@ export default function App(){
         </Suspense>
       );
     }
+    if (currentPath === '/variant-orders'){
+      return (
+        <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
+          <VariantOrdersPage />
+        </Suspense>
+      );
+    }
     if (currentPath === '/admin'){
       return (
         <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
@@ -740,6 +748,14 @@ export default function App(){
                   Shopify Connect
                 </button>
               </>
+            )}
+            {auth?.user && (
+              <button
+                onClick={()=>{ try { history.pushState(null, '', '/variant-orders'); } catch { location.href = '/variant-orders'; } }}
+                className="text-xs px-3 py-1 rounded-full border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+              >
+                Variants
+              </button>
             )}
             <button aria-label="Choose profile" onClick={()=>{ vibrate(10); setShowProfilePicker(true); }} className="p-1.5 rounded-full hover:bg-gray-100">
               <Boxes className={`w-4 h-4 ${profile?.id === 'stock' ? 'text-blue-600' : 'text-gray-700'}`} />

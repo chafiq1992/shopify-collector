@@ -155,13 +155,43 @@ export default function AdminAnalytics(){
   useEffect(() => { load(); }, []); // initial
   useEffect(() => { loadUsers(); }, []); // initial
 
+  function goto(path){
+    try {
+      const s = (store && store !== "all") ? String(store) : "";
+      const url = s ? `${path}?store=${encodeURIComponent(s)}` : path;
+      history.pushState(null, "", url);
+      // Ensure the lightweight router in App.jsx re-renders
+      try { window.dispatchEvent(new PopStateEvent("popstate")); } catch {}
+    } catch {
+      try { location.href = path; } catch {}
+    }
+  }
+
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900">
       <header className="sticky top-0 z-30 bg-white/80 backdrop-blur border-b border-gray-200">
         <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3">
           <div className="text-lg font-semibold">Admin Analytics</div>
+          <div className="ml-4 hidden md:flex flex-wrap items-center gap-2">
+            <button onClick={()=>goto("/")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Collector</button>
+            <button onClick={()=>goto("/order-browser")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Order Browser</button>
+            <button onClick={()=>goto("/order-tagger")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Order Tagger</button>
+            <button onClick={()=>goto("/order-lookup")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Order Lookup</button>
+            <button onClick={()=>goto("/variant-orders")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Variant Orders</button>
+            <button onClick={()=>goto("/shopify-connect")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Shopify Connect</button>
+          </div>
           <div className="ml-auto flex items-center gap-2">
             <button onClick={()=>history.back()} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Back</button>
+          </div>
+        </div>
+        <div className="max-w-6xl mx-auto px-4 pb-2 md:hidden">
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={()=>goto("/")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Collector</button>
+            <button onClick={()=>goto("/order-browser")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Order Browser</button>
+            <button onClick={()=>goto("/order-tagger")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Tagger</button>
+            <button onClick={()=>goto("/order-lookup")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Lookup</button>
+            <button onClick={()=>goto("/variant-orders")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Variants</button>
+            <button onClick={()=>goto("/shopify-connect")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Connect</button>
           </div>
         </div>
         <div className="max-w-6xl mx-auto px-4 pb-3 grid sm:grid-cols-4 gap-3">

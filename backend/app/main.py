@@ -805,6 +805,13 @@ class OrderDTO(BaseModel):
     number: str
     customer: Optional[str] = None
     shipping_city: Optional[str] = None
+    shipping_name: Optional[str] = None
+    shipping_phone: Optional[str] = None
+    shipping_address1: Optional[str] = None
+    shipping_address2: Optional[str] = None
+    shipping_zip: Optional[str] = None
+    shipping_province: Optional[str] = None
+    shipping_country: Optional[str] = None
     sales_channel: Optional[str] = None
     tags: List[str] = []
     note: Optional[str] = None
@@ -866,6 +873,8 @@ def build_query_string(
             # Shopify "pending payment" in Admin can correspond to multiple internal values,
             # commonly: pending, authorized, partially_paid. Include all so the UI matches Admin.
             q += " (financial_status:pending OR financial_status:authorized OR financial_status:partially_paid)"
+        elif fs in ("paid_or_pending", "paid,pending", "paid|pending", "paid_pending"):
+            q += " (financial_status:paid OR financial_status:pending OR financial_status:authorized OR financial_status:partially_paid)"
     # Optional COD date tag(s): expect dd/mm/yy
     # If multiple provided (comma-separated), build an OR group across tags with the chosen prefix
     prefix = (collect_prefix or "cod").strip()
@@ -1020,12 +1029,20 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             cust_name = ((node.get("shippingAddress") or {}) or {}).get("name") or None
         except Exception:
             cust_name = None
+    ship = (node.get("shippingAddress") or {}) or {}
 
     return OrderDTO(
         id=node["id"],
         number=node["name"],
         customer=cust_name,
-        shipping_city=((node.get("shippingAddress") or {}) or {}).get("city"),
+        shipping_city=ship.get("city"),
+        shipping_name=ship.get("name"),
+        shipping_phone=ship.get("phone"),
+        shipping_address1=ship.get("address1"),
+        shipping_address2=ship.get("address2"),
+        shipping_zip=ship.get("zip"),
+        shipping_province=ship.get("province"),
+        shipping_country=ship.get("country"),
         sales_channel=node.get("sourceName"),
         tags=node.get("tags") or [],
         note=node.get("note"),
@@ -1063,7 +1080,7 @@ async def list_orders(
     disable_collect_ranking: bool = Query(False, description="If true, skip special collect ranking and return raw results"),
     fulfillment_from: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD) inclusive start for fulfillment date"),
     fulfillment_to: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD) inclusive end for fulfillment date"),
-    financial_status: Optional[str] = Query(None, description="Filter by payment status: paid or pending"),
+    financial_status: Optional[str] = Query(None, description="Filter by payment status: paid, pending, or paid_or_pending"),
     debug: bool = Query(False, description="If true, include debug metadata (resolved Shopify query, scan stats)"),
 ):
     domain, access_token, _ = await resolve_store_settings_effective(store)
@@ -1187,7 +1204,7 @@ async def list_orders(
             tags
             note
             fulfillments { createdAt status }
-            shippingAddress { name city }
+            shippingAddress { name city phone address1 address2 zip province country }
             customer { displayName }
             currentTotalPriceSet { shopMoney { amount currencyCode } }
             totalPriceSet { shopMoney { amount currencyCode } }
@@ -1457,8 +1474,23 @@ async def list_orders(
                 ov = ORDER_OVERRIDES.get(key) or {}
                 if (not o.customer) and ((ov.get("customer") or {}).get("displayName")):
                     o.customer = (ov.get("customer") or {}).get("displayName")
-                if (not o.shipping_city) and ((ov.get("shippingAddress") or {}).get("city")):
-                    o.shipping_city = (ov.get("shippingAddress") or {}).get("city")
+                shp = (ov.get("shippingAddress") or {})
+                if (not o.shipping_city) and (shp.get("city")):
+                    o.shipping_city = shp.get("city")
+                if (not o.shipping_name) and (shp.get("name")):
+                    o.shipping_name = shp.get("name")
+                if (not o.shipping_phone) and (shp.get("phone")):
+                    o.shipping_phone = shp.get("phone")
+                if (not o.shipping_address1) and (shp.get("address1")):
+                    o.shipping_address1 = shp.get("address1")
+                if (not o.shipping_address2) and (shp.get("address2")):
+                    o.shipping_address2 = shp.get("address2")
+                if (not o.shipping_zip) and (shp.get("zip")):
+                    o.shipping_zip = shp.get("zip")
+                if (not o.shipping_province) and (shp.get("province")):
+                    o.shipping_province = shp.get("province")
+                if (not o.shipping_country) and (shp.get("country")):
+                    o.shipping_country = shp.get("country")
         except Exception:
             pass
 
