@@ -754,7 +754,7 @@ export default function App(){
                 onClick={()=>{ try { history.pushState(null, '', '/variant-orders'); } catch { location.href = '/variant-orders'; } }}
                 className="text-xs px-3 py-1 rounded-full border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
               >
-                Variants
+                Products
               </button>
             )}
             <button aria-label="Choose profile" onClick={()=>{ vibrate(10); setShowProfilePicker(true); }} className="p-1.5 rounded-full hover:bg-gray-100">

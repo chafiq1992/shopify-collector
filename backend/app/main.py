@@ -789,6 +789,7 @@ async def _enrich_orders_with_on_hand(items: List["OrderDTO"], *, store: Optiona
 class OrderVariant(BaseModel):
     id: Optional[str] = None
     product_id: Optional[str] = None
+    product_title: Optional[str] = None
     image: Optional[str] = None
     barcode: Optional[str] = None
     sku: Optional[str] = None
@@ -957,6 +958,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         variants.append(OrderVariant(
             id=(var or {}).get("id"),
             product_id=((var or {}).get("product") or {}).get("id"),
+            product_title=((var or {}).get("product") or {}).get("title"),
             image=img,
             barcode=(var or {}).get("barcode"),
             sku=li.get("sku"),
@@ -1222,7 +1224,7 @@ async def list_orders(
                     inventoryQuantity
                     inventoryItem { id }
                     image { url }
-                    product { id featuredImage { url } }
+                    product { id title featuredImage { url } }
                   }
                 }
               }
