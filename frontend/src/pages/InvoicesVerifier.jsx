@@ -21,6 +21,19 @@ function extractOrderNumberFromSendCode(sendCode) {
   return m2 ? m2[1] : "";
 }
 
+function parseDhAmounts(text) {
+  // Accept "290 DH", "290DH", "-10 DH", "299.50 DH", "299,50 DH"
+  const re = /(-?\d+(?:[.,]\d+)?)\s*DH\b/gi;
+  const out = [];
+  let m;
+  while ((m = re.exec(String(text || ""))) !== null) {
+    const raw = String(m[1] || "").replace(",", ".");
+    const n = Number(raw);
+    if (Number.isFinite(n)) out.push(n);
+  }
+  return out;
+}
+
 function normalizePdfLines(textItems) {
   // textItems: [{str, x, y}]
   const items = (textItems || [])
@@ -31,7 +44,9 @@ function normalizePdfLines(textItems) {
   const lines = [];
   let current = [];
   let currentY = null;
-  const Y_TOL = 2.2; // works well for typical table PDFs
+  // Some PDFs place the numeric columns on a slightly different baseline than text,
+  // so a looser tolerance helps keep a full row on the same "line".
+  const Y_TOL = 4.5;
 
   for (const it of items) {
     if (currentY === null) {
@@ -67,30 +82,45 @@ function parseLionexInvoice(lines) {
   })();
 
   const rows = [];
-  // A row typically contains code like "7-127130" and multiple "... DH" amounts.
-  const codeRe = /\b\d+-\d+\b/;
-  const moneyRe = /(-?\d+)\s*DH\b/gi;
+  // A delivery row contains "Code d'envoi" like "7-127130".
+  // IMPORTANT: don't match invoice header patterns like "280126-062670" (too many digits before dash).
+  const codeRe = /\b\d{1,2}-\d{4,}\b/;
   const dateRe = /\b\d{4}-\d{2}-\d{2}\b/g;
   const phoneRe = /\b0\d{9}\b/;
 
-  for (const line of (lines || [])) {
-    if (!codeRe.test(line)) continue;
-    const sendCode = (line.match(codeRe) || [])[0] || "";
+  const list = (lines || []);
+  for (let i = 0; i < list.length; i++) {
+    const base = String(list[i] || "").trim();
+    if (!codeRe.test(base)) continue;
+    const sendCode = (base.match(codeRe) || [])[0] || "";
     if (!sendCode) continue;
 
-    const dates = (line.match(dateRe) || []).slice(0, 2);
+    // Some PDFs wrap the last columns (DH amounts) to a continuation line.
+    // Merge following lines until we capture at least 3 DH amounts or until the next row begins.
+    let combined = base;
+    let monies = parseDhAmounts(combined);
+    let j = i + 1;
+    while (monies.length < 3 && j < list.length) {
+      const next = String(list[j] || "").trim();
+      if (!next) { j++; continue; }
+      if (codeRe.test(next)) break; // next row
+      // Only merge likely continuations (numbers/DH fragments)
+      if (!/(DH\b|\d)/i.test(next)) break;
+      combined = `${combined} ${next}`.replace(/\s+/g, " ").trim();
+      monies = parseDhAmounts(combined);
+      j++;
+    }
+    // Skip merged continuation lines
+    i = j - 1;
+
+    const dates = (combined.match(dateRe) || []).slice(0, 2);
     const pickupDate = dates[0] || "";
     const deliveryDate = dates[1] || "";
 
-    const phone = (line.match(phoneRe) || [])[0] || "";
-    const status = (line.match(/\b(Livré|Refusé)\b/i) || [])[0] || "";
+    const phone = (combined.match(phoneRe) || [])[0] || "";
+    const status = (combined.match(/\b(Livré|Refusé)\b/i) || [])[0] || "";
 
     // Collect all DH amounts, take last 3 as (crbt, fees, total) — consistent with PDF example.
-    const monies = [];
-    let mm;
-    while ((mm = moneyRe.exec(line)) !== null) {
-      monies.push(Number(mm[1]));
-    }
     const last3 = monies.slice(-3);
     const crbt = last3.length >= 3 ? last3[0] : null;
     const fees = last3.length >= 3 ? last3[1] : null;
@@ -99,9 +129,9 @@ function parseLionexInvoice(lines) {
     // City is “whatever is between status and the first money amount”
     let city = "";
     try {
-      const idxStatus = status ? line.toLowerCase().indexOf(status.toLowerCase()) : -1;
+      const idxStatus = status ? combined.toLowerCase().indexOf(status.toLowerCase()) : -1;
       if (idxStatus >= 0) {
-        const afterStatus = line.slice(idxStatus + status.length).trim();
+        const afterStatus = combined.slice(idxStatus + status.length).trim();
         const firstMoneyIdx = afterStatus.search(/-?\d+\s*DH\b/i);
         city = (firstMoneyIdx >= 0 ? afterStatus.slice(0, firstMoneyIdx) : afterStatus)
           .replace(/\s+/g, " ")
@@ -121,7 +151,7 @@ function parseLionexInvoice(lines) {
       crbt,
       fees,
       total,
-      raw: line,
+      raw: combined,
     });
   }
 
@@ -170,7 +200,8 @@ export default function InvoicesVerifier() {
     return flatRows.map((r) => {
       const info = lookup[String(r.orderNumber || "").trim()] || null;
       const shopTotal = info && info.found ? Number(info.total_price || 0) : null;
-      const inv = r.crbt != null ? Number(r.crbt) : (r.total != null ? Number(r.total) : null);
+      // We verify against CRBT (cash to collect) for Lionex invoices.
+      const inv = r.crbt != null ? Number(r.crbt) : null;
       const diff = (inv != null && shopTotal != null) ? (shopTotal - inv) : null;
       const absDiff = diff != null ? Math.abs(diff) : null;
       return {
