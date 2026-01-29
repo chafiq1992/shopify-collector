@@ -34,6 +34,14 @@ function parseDhAmounts(text) {
   return out;
 }
 
+function normalizeStatusLabel(s) {
+  const v = String(s || "").trim().toLowerCase();
+  if (!v) return "";
+  if (v.startsWith("refus")) return "Refusé";
+  if (v.startsWith("livr")) return "Livré";
+  return "";
+}
+
 function pickCrbtFeesTotal(monies) {
   const vals = (monies || []).map((x) => Number(x)).filter((n) => Number.isFinite(n));
   if (vals.length < 2) return { crbt: null, fees: null, total: null, method: "none" };
@@ -140,6 +148,22 @@ function parseLionexInvoice(lines) {
     const m = all.match(/Date\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}[^\n]*)/i);
     return m ? m[1].trim() : "";
   })();
+  const invoiceTotalNet = (() => {
+    // Prefer explicit "Total Net"
+    const m = all.match(/Total\s*Net\s*([\d.,-]+)\s*DH/i);
+    if (m) return safeNum(m[1]);
+    // Fallback: header "Total : 9752 DH" (first occurrence)
+    const m2 = all.match(/\bTotal\s*:\s*([\d.,-]+)\s*DH/i);
+    return m2 ? safeNum(m2[1]) : null;
+  })();
+  const invoiceTotalBrut = (() => {
+    const m = all.match(/Total\s*Brut\s*([\d.,-]+)\s*DH/i);
+    return m ? safeNum(m[1]) : null;
+  })();
+  const invoiceFeesTotal = (() => {
+    const m = all.match(/\bFrais\s*([\d.,-]+)\s*DH/i);
+    return m ? safeNum(m[1]) : null;
+  })();
 
   const rows = [];
   // A delivery row contains "Code d'envoi" like "7-127130".
@@ -147,6 +171,7 @@ function parseLionexInvoice(lines) {
   const codeRe = /\b\d{1,2}-\d{4,}\b/;
   const dateRe = /\b\d{4}-\d{2}-\d{2}\b/g;
   const phoneRe = /\b0\d{9}\b/;
+  const statusRe = /\b(Livr[ée]|Livre|Refus[ée]|Refuse)\b/i;
 
   const list = (lines || []);
   for (let i = 0; i < list.length; i++) {
@@ -161,20 +186,28 @@ function parseLionexInvoice(lines) {
     // - at least 3 DH amounts (CRBT/Frais/Total),
     // or until the next row begins.
     let combined = base;
+    const pieces = [base];
     let monies = parseDhAmounts(combined);
-    let hasStatus = /\b(Livr[ée]|Refus[ée])\b/i.test(combined);
+    let statusFound = normalizeStatusLabel(((combined.match(statusRe) || [])[0] || ""));
+    let hasStatus = !!statusFound;
     let j = i + 1;
     let merges = 0;
     while (j < list.length) {
       const next = String(list[j] || "").trim();
       if (!next) { j++; continue; }
       if (codeRe.test(next)) break; // next row
+      // Stop at footer/summary sections to avoid accidentally merging totals into the last shipment row
+      if (/^(Total\b|Total\s+Brut\b|Total\s+Net\b|Sauf\b|Lionex\b|Facture\b|Colis\b|Statut\s*:)/i.test(next)) break;
       // Merge a small number of continuation lines even if they don't contain digits,
       // because some PDFs put "Livré | City" on a separate line.
       if (merges >= 4) break;
+      pieces.push(next);
       combined = `${combined} ${next}`.replace(/\s+/g, " ").trim();
       monies = parseDhAmounts(combined);
-      hasStatus = hasStatus || /\b(Livr[ée]|Refus[ée])\b/i.test(combined);
+      if (!statusFound) {
+        statusFound = normalizeStatusLabel(((next.match(statusRe) || [])[0] || "")) || statusFound;
+      }
+      hasStatus = hasStatus || !!statusFound;
       merges += 1;
       // Stop early when we have what we need
       if (hasStatus && monies.length >= 3) break;
@@ -188,7 +221,7 @@ function parseLionexInvoice(lines) {
     const deliveryDate = dates[1] || "";
 
     const phone = (combined.match(phoneRe) || [])[0] || "";
-    const status = (combined.match(/\b(Livr[ée]|Refus[ée])\b/i) || [])[0] || "";
+    const status = statusFound || normalizeStatusLabel(((combined.match(statusRe) || [])[0] || ""));
 
     // Collect all DH amounts, take last 3 as (crbt, fees, total) — consistent with PDF example.
     const picked = pickCrbtFeesTotal(monies);
@@ -225,7 +258,7 @@ function parseLionexInvoice(lines) {
     });
   }
 
-  return { invoiceNumber, invoiceDate, rows };
+  return { invoiceNumber, invoiceDate, invoiceTotalNet, invoiceTotalBrut, invoiceFeesTotal, rows };
 }
 
 async function extractPdfLines(file) {
@@ -271,14 +304,18 @@ export default function InvoicesVerifier() {
       const info = lookup[String(r.orderNumber || "").trim()] || null;
       const shopTotal = info && info.found ? Number(info.total_price || 0) : null;
       // We verify against CRBT (cash to collect) for Lionex invoices.
-      const inv = r.crbt != null ? Number(r.crbt) : null;
-      const diff = (inv != null && shopTotal != null) ? (shopTotal - inv) : null;
+      const isRefused = String(r.status || "").trim().toLowerCase().startsWith("refus");
+      const inv = (r.crbt != null ? Number(r.crbt) : null);
+      const invComparable = isRefused ? 0 : inv;
+      const shopComparable = isRefused ? 0 : shopTotal;
+      const diff = (invComparable != null && shopComparable != null) ? (shopComparable - invComparable) : null;
       const absDiff = diff != null ? Math.abs(diff) : null;
       return {
         ...r,
         shopify: info,
         shopTotal,
-        invAmount: inv,
+        invAmount: invComparable,
+        isRefused,
         diff,
         absDiff,
       };
@@ -306,6 +343,9 @@ export default function InvoicesVerifier() {
           fileName: f.name,
           invoiceNumber: parsedDoc.invoiceNumber,
           invoiceDate: parsedDoc.invoiceDate,
+          invoiceTotalNet: parsedDoc.invoiceTotalNet,
+          invoiceTotalBrut: parsedDoc.invoiceTotalBrut,
+          invoiceFeesTotal: parsedDoc.invoiceFeesTotal,
           rows: parsedDoc.rows,
         });
       }
@@ -438,8 +478,63 @@ export default function InvoicesVerifier() {
                       {d.invoiceNumber ? <span> • {d.invoiceNumber}</span> : null}
                       {d.invoiceDate ? <span> • {d.invoiceDate}</span> : null}
                       <span> • rows: {(d.rows || []).length}</span>
+                      {(d.invoiceTotalBrut != null || d.invoiceTotalNet != null) ? (
+                        <span>
+                          {" "}• PDF totals:
+                          {d.invoiceTotalBrut != null ? <span> brut {Number(d.invoiceTotalBrut).toFixed(2)} DH</span> : null}
+                          {d.invoiceFeesTotal != null ? <span> / frais {Number(d.invoiceFeesTotal).toFixed(2)} DH</span> : null}
+                          {d.invoiceTotalNet != null ? <span> / net {Number(d.invoiceTotalNet).toFixed(2)} DH</span> : null}
+                        </span>
+                      ) : null}
                     </div>
                   ))}
+                </div>
+                <div className="mt-3 border-t border-gray-200 pt-3 text-xs text-gray-700">
+                  {(() => {
+                    const rows = rowsWithShopify || [];
+                    const delivered = rows.filter(x => x.shopify?.found && !x.isRefused);
+                    const refused = rows.filter(x => x.shopify?.found && x.isRefused);
+                    const sumShop = delivered.reduce((acc, x) => acc + Number(x.shopTotal || 0), 0);
+                    const sumInvCrbt = delivered.reduce((acc, x) => acc + Number(x.crbt || 0), 0);
+                    const sumInvNet = delivered.reduce((acc, x) => {
+                      // Prefer explicit total column if present; else compute from CRBT-fees
+                      if (x.total != null) return acc + Number(x.total || 0);
+                      if (x.crbt != null && x.fees != null) return acc + (Number(x.crbt || 0) - Number(x.fees || 0));
+                      return acc;
+                    }, 0);
+                    const doc = parsed[0] || {};
+                    const pdfBrut = doc.invoiceTotalBrut;
+                    const pdfNet = doc.invoiceTotalNet;
+                    return (
+                      <div className="flex flex-wrap gap-2 items-center">
+                        <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">
+                          Delivered matched: {delivered.length}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">
+                          Refused matched (counted 0): {refused.length}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700">
+                          Σ Shopify (delivered): {sumShop.toFixed(2)} DH
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-700">
+                          Σ Invoice CRBT (delivered): {sumInvCrbt.toFixed(2)} DH
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700">
+                          Σ Invoice Net (delivered): {sumInvNet.toFixed(2)} DH
+                        </span>
+                        {pdfBrut != null ? (
+                          <span className="px-2 py-0.5 rounded-full bg-purple-50 border border-purple-200 text-purple-700">
+                            PDF Total Brut: {Number(pdfBrut).toFixed(2)} DH (Δ { (sumShop - Number(pdfBrut)).toFixed(2) })
+                          </span>
+                        ) : null}
+                        {pdfNet != null ? (
+                          <span className="px-2 py-0.5 rounded-full bg-purple-50 border border-purple-200 text-purple-700">
+                            PDF Total Net: {Number(pdfNet).toFixed(2)} DH (Δ { (sumInvNet - Number(pdfNet)).toFixed(2) })
+                          </span>
+                        ) : null}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -496,7 +591,7 @@ export default function InvoicesVerifier() {
                         <td className="px-3 py-2">{r.shopify?.store || "—"}</td>
                         <td className="px-3 py-2">{r.status || "—"}</td>
                         <td className="px-3 py-2">{r.city || "—"}</td>
-                        <td className="px-3 py-2 text-right font-semibold">{r.crbt != null ? Number(r.crbt).toFixed(2) : "—"}</td>
+                        <td className="px-3 py-2 text-right font-semibold">{r.isRefused ? "0.00" : (r.crbt != null ? Number(r.crbt).toFixed(2) : "—")}</td>
                         <td className="px-3 py-2 text-right font-semibold">{r.shopTotal != null ? Number(r.shopTotal).toFixed(2) : (r.shopify?.error ? "not found" : "—")}</td>
                         <td className={`px-3 py-2 text-right font-semibold ${isGreen ? "text-emerald-700" : isRed ? "text-red-700" : "text-gray-700"}`}>
                           {r.diff != null ? Number(r.diff).toFixed(2) : "—"}
