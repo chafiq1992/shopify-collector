@@ -14,6 +14,7 @@ const VariantOrdersPage = React.lazy(() => import('./pages/VariantOrders.jsx'));
 const LoginPage = React.lazy(() => import('./pages/Login.jsx'));
 const AdminAnalyticsPage = React.lazy(() => import('./pages/AdminAnalytics.jsx'));
 const ShopifyConnectPage = React.lazy(() => import('./pages/ShopifyConnect.jsx'));
+const InvoicesVerifierPage = React.lazy(() => import('./pages/InvoicesVerifier.jsx'));
 
 // Types (JSDoc only)
 /**
@@ -186,6 +187,8 @@ function ActionOverlay({ state }){
 
 export default function App(){
   const [auth, setAuth] = useState(() => loadAuth());
+  // Lightweight client-side routing: force re-render on history changes
+  const [routeTick, setRouteTick] = useState(0);
   const [orders, setOrders] = useState([]);
   const [tags, setTags] = useState([]);
   const [apiError, setApiError] = useState(null);
@@ -290,6 +293,23 @@ export default function App(){
     clearAuth();
     setAuth(null);
   }
+
+  function navigate(path){
+    const p = String(path || "/");
+    try {
+      history.pushState(null, "", p);
+      // pushState doesn't emit popstate; we force a re-render
+      setRouteTick(x => x + 1);
+    } catch {
+      try { location.href = p; } catch {}
+    }
+  }
+
+  useEffect(() => {
+    const onPop = () => { try { setRouteTick(x => x + 1); } catch {} };
+    try { window.addEventListener("popstate", onPop); } catch {}
+    return () => { try { window.removeEventListener("popstate", onPop); } catch {} };
+  }, []);
 
   // If any API call gets a 401, authFetch() clears storage; this listener makes the UI switch to Login immediately.
   useEffect(() => {
@@ -651,6 +671,13 @@ export default function App(){
   }
 
   try {
+    if (currentPath === '/invoices-verifier'){
+      return (
+        <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
+          <InvoicesVerifierPage />
+        </Suspense>
+      );
+    }
     if (currentPath === '/order-tagger'){
       return (
         <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
@@ -736,13 +763,19 @@ export default function App(){
             {auth?.user?.role === 'admin' && (
               <>
                 <button
-                  onClick={()=>{ try { history.pushState(null, '', '/admin'); } catch { location.href = '/admin'; } }}
+                  onClick={()=>navigate('/admin')}
                   className="text-xs px-3 py-1 rounded-full border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
                 >
                   Admin
                 </button>
                 <button
-                  onClick={()=>{ try { history.pushState(null, '', '/shopify-connect'); } catch { location.href = '/shopify-connect'; } }}
+                  onClick={()=>navigate('/invoices-verifier')}
+                  className="text-xs px-3 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                >
+                  Invoices
+                </button>
+                <button
+                  onClick={()=>navigate('/shopify-connect')}
                   className="text-xs px-3 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
                 >
                   Shopify Connect
@@ -751,7 +784,7 @@ export default function App(){
             )}
             {auth?.user && (
               <button
-                onClick={()=>{ try { history.pushState(null, '', '/variant-orders'); } catch { location.href = '/variant-orders'; } }}
+                onClick={()=>navigate('/variant-orders')}
                 className="text-xs px-3 py-1 rounded-full border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
               >
                 Products

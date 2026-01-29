@@ -2188,6 +2188,232 @@ async def get_fulfillment_orders(order_gid: str, store: Optional[str] = Query(No
         out.append({"id": fo.get("id"), "status": fo.get("status"), "lineItems": items})
     return {"ok": True, "fulfillmentOrders": out}
 
+
+# ---------- Invoice verifier helpers ----------
+class InvoiceLookupRequest(BaseModel):
+    order_numbers: List[str]
+    # If the max-min spread across order numbers is >= gap_threshold, we split stores by midpoint:
+    # larger numbers => irrakids, smaller => irranova.
+    gap_threshold: int = 30000
+
+
+class InvoiceLookupRow(BaseModel):
+    order_number: str
+    store: Optional[str] = None
+    found: bool = False
+    order_gid: Optional[str] = None
+    total_price: Optional[float] = None
+    financial_status: Optional[str] = None
+    error: Optional[str] = None
+
+
+def _infer_store_by_number_cluster(order_numbers: List[str], *, gap_threshold: int = 30000) -> Dict[str, Optional[str]]:
+    """
+    Returns mapping order_number -> inferred store (irrakids|irranova|None).
+    If we can't confidently split, values will be None (caller can try both stores).
+    """
+    nums: List[Tuple[str, int]] = []
+    for s in (order_numbers or []):
+        try:
+            raw = (s or "").strip().lstrip("#")
+            if not raw:
+                continue
+            # keep digits only (defensive)
+            import re
+            m = re.search(r"(\d+)", raw)
+            if not m:
+                continue
+            nums.append((raw, int(m.group(1))))
+        except Exception:
+            continue
+    if not nums:
+        return {str(s or "").strip().lstrip("#"): None for s in (order_numbers or []) if str(s or "").strip()}
+    values = [n for _, n in nums]
+    mn = min(values)
+    mx = max(values)
+    if (mx - mn) < int(gap_threshold or 30000):
+        # ambiguous; do not guess
+        return {k: None for k, _ in nums}
+    mid = (mx + mn) / 2.0
+    out: Dict[str, Optional[str]] = {}
+    for k, n in nums:
+        out[k] = "irrakids" if n > mid else "irranova"
+    return out
+
+
+async def _shopify_find_order_by_number(order_number: str, *, store: str) -> Optional[Dict[str, Any]]:
+    n = (order_number or "").strip().lstrip("#")
+    if not n or not n.isdigit():
+        return None
+    # Ensure we can match archived/closed as well.
+    q = f"status:any name:{n}"
+    query = """
+    query FindOrderByNumber($first: Int!, $query: String!) {
+      orders(first: $first, query: $query) {
+        edges {
+          node {
+            id
+            name
+            currentTotalPriceSet { shopMoney { amount currencyCode } }
+            totalPriceSet { shopMoney { amount currencyCode } }
+            displayFinancialStatus
+          }
+        }
+      }
+    }
+    """
+    data = await shopify_graphql(query, {"first": 1, "query": q}, store=store)
+    edges = ((data.get("orders") or {}).get("edges")) or []
+    if not edges:
+        return None
+    node = (edges[0] or {}).get("node") or {}
+    if not node:
+        return None
+    # Price logic mirrors map_order_node()
+    price = 0.0
+    try:
+        ctps = (node.get("currentTotalPriceSet") or {}).get("shopMoney") or {}
+        tps = (node.get("totalPriceSet") or {}).get("shopMoney") or {}
+        amt = ctps.get("amount") or tps.get("amount") or 0
+        price = float(amt)
+    except Exception:
+        price = 0.0
+    return {
+        "id": node.get("id"),
+        "name": node.get("name"),
+        "total_price": price,
+        "financial_status": node.get("displayFinancialStatus"),
+    }
+
+
+@app.post("/api/invoices/lookup-orders", response_model=Dict[str, Any])
+async def invoice_lookup_orders(body: InvoiceLookupRequest, admin: User = Depends(require_admin)):  # type: ignore
+    # Normalize + dedupe while preserving order
+    nums: List[str] = []
+    seen = set()
+    for x in (body.order_numbers or []):
+        k = (str(x or "").strip().lstrip("#"))
+        if not k:
+            continue
+        if k in seen:
+            continue
+        seen.add(k)
+        nums.append(k)
+
+    inferred = _infer_store_by_number_cluster(nums, gap_threshold=int(body.gap_threshold or 30000))
+    rows: List[InvoiceLookupRow] = []
+
+    # Quick env sanity check per store (so we can return friendly errors)
+    async def _store_ready(store_key: str) -> bool:
+        try:
+            domain, token, _ = await resolve_store_settings_effective(store_key)
+            return bool(domain and token)
+        except Exception:
+            return False
+
+    store_ready = {
+        "irrakids": await _store_ready("irrakids"),
+        "irranova": await _store_ready("irranova"),
+    }
+
+    sem = asyncio.Semaphore(8)
+
+    async def _lookup_one(n: str) -> InvoiceLookupRow:
+        async with sem:
+            preferred = (inferred.get(n) or "").strip().lower() or None
+            stores_to_try = []
+            if preferred in ("irrakids", "irranova"):
+                stores_to_try = [preferred, ("irranova" if preferred == "irrakids" else "irrakids")]
+            else:
+                stores_to_try = ["irrakids", "irranova"]
+
+            last_err = None
+            for st in stores_to_try:
+                if not store_ready.get(st):
+                    last_err = f"Shopify store '{st}' not configured"
+                    continue
+                try:
+                    found = await _shopify_find_order_by_number(n, store=st)
+                    if found:
+                        return InvoiceLookupRow(
+                            order_number=n,
+                            store=st,
+                            found=True,
+                            order_gid=found.get("id"),
+                            total_price=float(found.get("total_price") or 0),
+                            financial_status=found.get("financial_status"),
+                        )
+                except Exception as e:
+                    last_err = str(getattr(e, "detail", None) or getattr(e, "message", None) or str(e))
+                    continue
+            return InvoiceLookupRow(order_number=n, store=preferred, found=False, error=last_err or "Order not found")
+
+    results = await asyncio.gather(*[_lookup_one(n) for n in nums])
+    rows = [r for r in results if r]
+    return {"ok": True, "rows": [json.loads(r.json()) for r in rows]}
+
+
+class InvoiceMarkPaidOrder(BaseModel):
+    order_gid: str
+    store: str
+
+
+class InvoiceMarkPaidRequest(BaseModel):
+    orders: List[InvoiceMarkPaidOrder]
+
+
+@app.post("/api/invoices/mark-paid", response_model=Dict[str, Any])
+async def invoice_mark_paid(body: InvoiceMarkPaidRequest, admin: User = Depends(require_admin)):  # type: ignore
+    items = body.orders or []
+    # Defensive dedupe
+    dedup: List[InvoiceMarkPaidOrder] = []
+    seen = set()
+    for it in items:
+        try:
+            gid = (it.order_gid or "").strip()
+            st = (it.store or "").strip().lower()
+            if not gid or st not in ("irrakids", "irranova"):
+                continue
+            key = f"{st}|{gid}"
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup.append(InvoiceMarkPaidOrder(order_gid=gid, store=st))
+        except Exception:
+            continue
+
+    mutation = """
+    mutation MarkOrderPaid($input: OrderMarkAsPaidInput!) {
+      orderMarkAsPaid(input: $input) {
+        order { id displayFinancialStatus }
+        userErrors { field message }
+      }
+    }
+    """
+
+    sem = asyncio.Semaphore(6)
+
+    async def _mark_one(it: InvoiceMarkPaidOrder) -> Dict[str, Any]:
+        async with sem:
+            try:
+                resp = await shopify_graphql(mutation, {"input": {"id": it.order_gid}}, store=it.store)
+                payload = (resp.get("orderMarkAsPaid") or {})
+                errs = payload.get("userErrors") or []
+                if errs:
+                    return {"ok": False, "store": it.store, "order_gid": it.order_gid, "errors": errs}
+                return {
+                    "ok": True,
+                    "store": it.store,
+                    "order_gid": it.order_gid,
+                    "financial_status": ((payload.get("order") or {}) or {}).get("displayFinancialStatus"),
+                }
+            except Exception as e:
+                return {"ok": False, "store": it.store, "order_gid": it.order_gid, "error": str(getattr(e, "detail", None) or str(e))}
+
+    results = await asyncio.gather(*[_mark_one(it) for it in dedup])
+    ok_count = sum(1 for r in results if r and r.get("ok"))
+    return {"ok": True, "updated": ok_count, "results": results}
+
 # ---------- Shopify Webhook (orders/update) ----------
 def _secret_for_shop(shop_domain: str) -> str:
     sd = (shop_domain or "").strip().lower()
