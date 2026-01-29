@@ -522,9 +522,23 @@ function parseIbexInvoice(lines) {
 function parsePalExpressInvoice(lines) {
   const hdr = parseInvoiceHeader(lines);
   const rows = [];
-  const codeRe = /\b\d{1,2}-[0-9A-Z_]{3,}\b/i;
+  // PalExpress "Code d'envoi" is always like "7-126771". Avoid matching invoice-number suffixes like "22-223".
+  const codeRe = /\b7-\d{4,}(?:_[A-Z0-9]+)?\b/i;
   const dateRe = /\b\d{4}-\d{2}-\d{2}\b/g;
   const phoneRe = /\b0\d{9}\b/;
+
+  function _pickCrbtFeesIgnoreWeirdTotal(monies) {
+    const vals = (monies || []).map((x) => Number(x)).filter((n) => Number.isFinite(n));
+    // Ignore the last PDF column "Total" which is not reliable in PalExpress (very large IDs like 659829 DH)
+    const filtered = vals.filter((n) => Math.abs(n) <= 5000);
+    // Fees usually small (<= 80)
+    const fees = filtered.find((n) => Math.abs(n) <= 80) ?? null;
+    // CRBT is the largest remaining (<= 5000) excluding fees
+    const crbtCandidates = filtered.filter((n) => fees == null ? true : n !== fees);
+    const crbt = crbtCandidates.length ? Math.max(...crbtCandidates) : null;
+    const net = (crbt != null && fees != null) ? (crbt - fees) : null;
+    return { crbt, fees, total: net };
+  }
 
   const list = (lines || []);
   for (let i = 0; i < list.length; i++) {
@@ -571,9 +585,16 @@ function parsePalExpressInvoice(lines) {
       if (phoneIdx >= 0 && dateIdx >= 0) cut = Math.min(phoneIdx, dateIdx);
       else cut = (phoneIdx >= 0 ? phoneIdx : dateIdx);
       const before = (cut >= 0 ? afterCode.slice(0, cut) : afterCode).trim();
-      // First token(s) are city (often uppercase). Keep up to first 3 tokens.
+      // City is the leading ALL-CAPS latin tokens; stop when we hit lowercase or Arabic.
       const toks = before.split(/\s+/).filter(Boolean);
-      city = toks.slice(0, 3).join(" ").trim();
+      const out = [];
+      for (const t of toks) {
+        if (/[a-z]/.test(t)) break;
+        if (/[\u0600-\u06FF]/.test(t)) break;
+        out.push(t);
+        if (out.length >= 4) break;
+      }
+      city = (out.length ? out.join(" ") : (toks[0] || "")).trim();
     } catch {}
 
     const dates = (combined.match(dateRe) || []).slice(0, 2);
@@ -584,7 +605,7 @@ function parsePalExpressInvoice(lines) {
     const metaFinal = statusMeta || findStatusInText(combined);
     const status = statusFound || metaFinal?.label || "";
 
-    const picked = pickCrbtFeesTotal(monies);
+    const picked = _pickCrbtFeesIgnoreWeirdTotal(monies);
     const crbt = picked.crbt != null ? picked.crbt : null;
     const fees = picked.fees != null ? picked.fees : null;
     const total = picked.total != null ? picked.total : null;
