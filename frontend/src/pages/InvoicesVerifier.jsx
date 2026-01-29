@@ -34,6 +34,66 @@ function parseDhAmounts(text) {
   return out;
 }
 
+function pickCrbtFeesTotal(monies) {
+  const vals = (monies || []).map((x) => Number(x)).filter((n) => Number.isFinite(n));
+  if (vals.length < 2) return { crbt: null, fees: null, total: null, method: "none" };
+
+  // Helper: prefer realistic fees (often 10–40) and prefer exact arithmetic match:
+  // total = crbt - fees
+  const EPS = 0.6; // allow minor float noise / OCR quirks
+  let best = null;
+  for (let i = 0; i < vals.length; i++) {
+    for (let j = 0; j < vals.length; j++) {
+      if (j === i) continue;
+      for (let k = 0; k < vals.length; k++) {
+        if (k === i || k === j) continue;
+        const crbt = vals[i];
+        const fees = vals[j];
+        const total = vals[k];
+        const err = Math.abs((crbt - fees) - total);
+        if (err > EPS) continue;
+        // scoring: smaller err, fees within common range, crbt typically >= fees in abs
+        let score = err;
+        if (Math.abs(fees) <= 80) score -= 0.25;
+        if (Math.abs(crbt) >= Math.abs(fees)) score -= 0.05;
+        if (best == null || score < best.score) best = { crbt, fees, total, score, method: "identity" };
+      }
+    }
+  }
+  if (best) return { crbt: best.crbt, fees: best.fees, total: best.total, method: best.method };
+
+  // Fallback: if we only have 2 meaningful values and one looks like fees, compute crbt = total + fees.
+  // This helps when the "CRBT DH" token breaks and we only catch fees + total.
+  if (vals.length >= 2) {
+    // try all pairs
+    let best2 = null;
+    for (let a = 0; a < vals.length; a++) {
+      for (let b = 0; b < vals.length; b++) {
+        if (a === b) continue;
+        const fees = vals[a];
+        const total = vals[b];
+        if (Math.abs(fees) > 80) continue;
+        const crbt = total + fees;
+        // basic sanity: CRBT should be in a reasonable range
+        if (!Number.isFinite(crbt)) continue;
+        if (crbt < -100 || crbt > 20000) continue;
+        // prefer totals that are not tiny (avoid picking fees as total)
+        let score = Math.abs(total) < 50 ? 10 : 0;
+        score += Math.abs(fees) <= 40 ? -0.2 : 0;
+        if (best2 == null || score < best2.score) best2 = { crbt, fees, total, score, method: "computed" };
+      }
+    }
+    if (best2) return { crbt: best2.crbt, fees: best2.fees, total: best2.total, method: best2.method };
+  }
+
+  // Last resort: keep previous heuristic (last 3)
+  if (vals.length >= 3) {
+    const last3 = vals.slice(-3);
+    return { crbt: last3[0], fees: last3[1], total: last3[2], method: "last3" };
+  }
+  return { crbt: null, fees: null, total: null, method: "none" };
+}
+
 function normalizePdfLines(textItems) {
   // textItems: [{str, x, y}]
   const items = (textItems || [])
@@ -131,10 +191,10 @@ function parseLionexInvoice(lines) {
     const status = (combined.match(/\b(Livr[ée]|Refus[ée])\b/i) || [])[0] || "";
 
     // Collect all DH amounts, take last 3 as (crbt, fees, total) — consistent with PDF example.
-    const last3 = monies.slice(-3);
-    const crbt = last3.length >= 3 ? last3[0] : null;
-    const fees = last3.length >= 3 ? last3[1] : null;
-    const total = last3.length >= 3 ? last3[2] : null;
+    const picked = pickCrbtFeesTotal(monies);
+    const crbt = picked.crbt != null ? picked.crbt : null;
+    const fees = picked.fees != null ? picked.fees : null;
+    const total = picked.total != null ? picked.total : null;
 
     // City is “whatever is between status and the first money amount”
     let city = "";
