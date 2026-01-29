@@ -37,9 +37,22 @@ function parseDhAmounts(text) {
 function normalizeStatusLabel(s) {
   const v = String(s || "").trim().toLowerCase();
   if (!v) return "";
-  if (v.startsWith("refus")) return "Refusé";
-  if (v.startsWith("livr")) return "Livré";
+  if (v.includes("refus")) return "Refusé";
+  if (v.includes("livr")) return "Livré";
   return "";
+}
+
+function findStatusInText(text) {
+  // PDF extraction can mangle accents ("Livré" -> "LivrÃ©" etc). So match on stems.
+  const re = /\b(livr\w*|refus\w*)\b/i;
+  const m = re.exec(String(text || ""));
+  if (!m) return null;
+  return {
+    raw: m[0],
+    label: normalizeStatusLabel(m[0]),
+    index: typeof m.index === "number" ? m.index : -1,
+    length: String(m[0] || "").length,
+  };
 }
 
 function pickCrbtFeesTotal(monies) {
@@ -171,7 +184,6 @@ function parseLionexInvoice(lines) {
   const codeRe = /\b\d{1,2}-\d{4,}\b/;
   const dateRe = /\b\d{4}-\d{2}-\d{2}\b/g;
   const phoneRe = /\b0\d{9}\b/;
-  const statusRe = /\b(Livr[ée]|Livre|Refus[ée]|Refuse)\b/i;
 
   const list = (lines || []);
   for (let i = 0; i < list.length; i++) {
@@ -188,7 +200,8 @@ function parseLionexInvoice(lines) {
     let combined = base;
     const pieces = [base];
     let monies = parseDhAmounts(combined);
-    let statusFound = normalizeStatusLabel(((combined.match(statusRe) || [])[0] || ""));
+    let statusMeta = findStatusInText(combined);
+    let statusFound = statusMeta?.label || "";
     let hasStatus = !!statusFound;
     let j = i + 1;
     let merges = 0;
@@ -205,7 +218,9 @@ function parseLionexInvoice(lines) {
       combined = `${combined} ${next}`.replace(/\s+/g, " ").trim();
       monies = parseDhAmounts(combined);
       if (!statusFound) {
-        statusFound = normalizeStatusLabel(((next.match(statusRe) || [])[0] || "")) || statusFound;
+        const m2 = findStatusInText(next) || findStatusInText(combined);
+        statusFound = m2?.label || statusFound;
+        statusMeta = statusMeta || m2 || null;
       }
       hasStatus = hasStatus || !!statusFound;
       merges += 1;
@@ -221,7 +236,8 @@ function parseLionexInvoice(lines) {
     const deliveryDate = dates[1] || "";
 
     const phone = (combined.match(phoneRe) || [])[0] || "";
-    const status = statusFound || normalizeStatusLabel(((combined.match(statusRe) || [])[0] || ""));
+    const metaFinal = statusMeta || findStatusInText(combined);
+    const status = statusFound || metaFinal?.label || "";
 
     // Collect all DH amounts, take last 3 as (crbt, fees, total) — consistent with PDF example.
     const picked = pickCrbtFeesTotal(monies);
@@ -232,9 +248,10 @@ function parseLionexInvoice(lines) {
     // City is “whatever is between status and the first money amount”
     let city = "";
     try {
-      const idxStatus = status ? combined.toLowerCase().indexOf(status.toLowerCase()) : -1;
+      const meta = metaFinal;
+      const idxStatus = meta && meta.index >= 0 ? meta.index : -1;
       if (idxStatus >= 0) {
-        const afterStatus = combined.slice(idxStatus + status.length).trim();
+        const afterStatus = combined.slice(idxStatus + (meta?.length || status.length)).trim();
         const firstMoneyIdx = afterStatus.search(/-?\d+(?:[.,]\d+)?\s*DH\b/i);
         city = (firstMoneyIdx >= 0 ? afterStatus.slice(0, firstMoneyIdx) : afterStatus)
           .replace(/\s+/g, " ")
@@ -566,6 +583,7 @@ export default function InvoicesVerifier() {
                     <th className="text-left px-3 py-2">Store</th>
                     <th className="text-left px-3 py-2">Status</th>
                     <th className="text-left px-3 py-2">City</th>
+                    <th className="text-right px-3 py-2">Frais (DH)</th>
                     <th className="text-right px-3 py-2">Invoice CRBT (DH)</th>
                     <th className="text-right px-3 py-2">Shopify total (DH)</th>
                     <th className="text-right px-3 py-2">Diff (Shopify - CRBT)</th>
@@ -591,6 +609,7 @@ export default function InvoicesVerifier() {
                         <td className="px-3 py-2">{r.shopify?.store || "—"}</td>
                         <td className="px-3 py-2">{r.status || "—"}</td>
                         <td className="px-3 py-2">{r.city || "—"}</td>
+                        <td className="px-3 py-2 text-right font-semibold">{r.fees != null ? Number(r.fees).toFixed(2) : "—"}</td>
                         <td className="px-3 py-2 text-right font-semibold">{r.isRefused ? "0.00" : (r.crbt != null ? Number(r.crbt).toFixed(2) : "—")}</td>
                         <td className="px-3 py-2 text-right font-semibold">{r.shopTotal != null ? Number(r.shopTotal).toFixed(2) : (r.shopify?.error ? "not found" : "—")}</td>
                         <td className={`px-3 py-2 text-right font-semibold ${isGreen ? "text-emerald-700" : isRed ? "text-red-700" : "text-gray-700"}`}>
