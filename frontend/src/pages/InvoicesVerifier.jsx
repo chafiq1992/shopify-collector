@@ -152,7 +152,7 @@ function normalizePdfLines(textItems) {
   return lines.filter(Boolean);
 }
 
-function parseLionexInvoice(lines) {
+function parseInvoiceHeader(lines) {
   const all = (lines || []).join("\n");
   const invoiceNumber = (() => {
     const m = all.match(/Facture\s*:\s*([A-Z0-9-]+)/i);
@@ -178,6 +178,11 @@ function parseLionexInvoice(lines) {
     const m = all.match(/\bFrais\s*([\d.,-]+)\s*DH/i);
     return m ? safeNum(m[1]) : null;
   })();
+  return { invoiceNumber, invoiceDate, invoiceTotalNet, invoiceTotalBrut, invoiceFeesTotal };
+}
+
+function parseLionexInvoice(lines) {
+  const hdr = parseInvoiceHeader(lines);
 
   const rows = [];
   // A delivery row contains "Code d'envoi" like "7-127130".
@@ -287,7 +292,106 @@ function parseLionexInvoice(lines) {
     });
   }
 
-  return { invoiceNumber, invoiceDate, invoiceTotalNet, invoiceTotalBrut, invoiceFeesTotal, rows };
+  return { ...hdr, rows };
+}
+
+function parse12LiveryInvoice(lines) {
+  const hdr = parseInvoiceHeader(lines);
+  const rows = [];
+  // 12Livery can include suffixes like "7-127295_RMB"
+  const codeRe = /\b\d{1,2}-[0-9A-Z_]{3,}\b/i;
+  const dateRe = /\b\d{4}-\d{2}-\d{2}\b/g;
+
+  const list = (lines || []);
+  for (let i = 0; i < list.length; i++) {
+    const base = String(list[i] || "").trim();
+    if (!codeRe.test(base)) continue;
+    const sendCode = (base.match(codeRe) || [])[0] || "";
+    if (!sendCode) continue;
+
+    let combined = base;
+    let monies = parseDhAmounts(combined);
+    let statusMeta = findStatusInText(combined);
+    let statusFound = statusMeta?.label || "";
+    let hasStatus = !!statusFound;
+    let j = i + 1;
+    let merges = 0;
+    while (j < list.length) {
+      const next = String(list[j] || "").trim();
+      if (!next) { j++; continue; }
+      if (codeRe.test(next)) break;
+      if (/^(Total\b|Total\s+Brut\b|Total\s+Net\b|Sauf\b|12Livery\b|Facture\b|Colis\b|Statut\s*:)/i.test(next)) break;
+      if (merges >= 4) break;
+      combined = `${combined} ${next}`.replace(/\s+/g, " ").trim();
+      monies = parseDhAmounts(combined);
+      if (!statusFound) {
+        const m2 = findStatusInText(next) || findStatusInText(combined);
+        statusFound = m2?.label || statusFound;
+        statusMeta = statusMeta || m2 || null;
+      }
+      hasStatus = hasStatus || !!statusFound;
+      merges += 1;
+      if (hasStatus && monies.length >= 3) break;
+      j++;
+    }
+    i = j - 1;
+
+    const dates = (combined.match(dateRe) || []).slice(0, 2);
+    const pickupDate = dates[0] || "";
+    const deliveryDate = dates[1] || "";
+
+    const metaFinal = statusMeta || findStatusInText(combined);
+    const status = statusFound || metaFinal?.label || "";
+
+    const picked = pickCrbtFeesTotal(monies);
+    const crbt = picked.crbt != null ? picked.crbt : null;
+    const fees = picked.fees != null ? picked.fees : null;
+    const total = picked.total != null ? picked.total : null;
+
+    let city = "";
+    try {
+      const meta = metaFinal;
+      const idxStatus = meta && meta.index >= 0 ? meta.index : -1;
+      if (idxStatus >= 0) {
+        const afterStatus = combined.slice(idxStatus + (meta?.length || status.length)).trim();
+        const firstNumberIdx = afterStatus.search(/-?\d+(?:[.,]\d+)?/);
+        const firstMoneyIdx = afterStatus.search(/-?\d+(?:[.,]\d+)?\s*DH\b/i);
+        const cutIdx = (firstNumberIdx >= 0 ? firstNumberIdx : firstMoneyIdx);
+        city = (cutIdx >= 0 ? afterStatus.slice(0, cutIdx) : afterStatus)
+          .replace(/\s+/g, " ")
+          .trim();
+        city = city
+          .replace(/^\|+/, "")
+          .replace(/^(?:Ã©|é)\s+/i, "")
+          .replace(/^[^A-Za-z0-9\u00C0-\u017F]+/, "")
+          .replace(/\s+$/, "")
+          .trim();
+      }
+    } catch {}
+
+    const orderNumber = extractOrderNumberFromSendCode(sendCode);
+    rows.push({
+      sendCode,
+      orderNumber,
+      pickupDate,
+      deliveryDate,
+      phone: "",
+      status,
+      city,
+      crbt,
+      fees,
+      total,
+      raw: combined,
+    });
+  }
+
+  return { ...hdr, rows };
+}
+
+function parseByCompany(lines, company) {
+  const key = String(company || "lionex").trim().toLowerCase();
+  if (key === "12livery" || key === "12-livery" || key === "12_livery") return parse12LiveryInvoice(lines);
+  return parseLionexInvoice(lines);
 }
 
 async function extractPdfLines(file) {
@@ -309,7 +413,8 @@ async function extractPdfLines(file) {
 }
 
 export default function InvoicesVerifier() {
-  const [files, setFiles] = useState([]);
+  const [defaultCompany, setDefaultCompany] = useState("lionex");
+  const [fileEntries, setFileEntries] = useState([]); // [{ file, company }]
   const [parsed, setParsed] = useState([]); // [{fileName, invoiceNumber, invoiceDate, rows:[]}]
   const [lookup, setLookup] = useState({}); // orderNumber -> {found, store, order_gid, total_price, financial_status}
   const [busy, setBusy] = useState(false);
@@ -359,17 +464,21 @@ export default function InvoicesVerifier() {
     return { total: rowsWithShopify.length, ok: ok.length, green: green.length, red: red.length, missing: missing.length };
   }, [rowsWithShopify]);
 
-  async function parseSelectedFiles(nextFiles) {
+  async function parseSelectedFiles(entries) {
     setBusy(true);
     setError(null);
     setPaidMsg(null);
     try {
       const docs = [];
-      for (const f of nextFiles) {
+      for (const ent of (entries || [])) {
+        const f = ent?.file;
+        if (!f) continue;
+        const company = String(ent?.company || defaultCompany || "lionex");
         const lines = await extractPdfLines(f);
-        const parsedDoc = parseLionexInvoice(lines);
+        const parsedDoc = parseByCompany(lines, company);
         docs.push({
           fileName: f.name,
+          company,
           invoiceNumber: parsedDoc.invoiceNumber,
           invoiceDate: parsedDoc.invoiceDate,
           invoiceTotalNet: parsedDoc.invoiceTotalNet,
@@ -467,6 +576,15 @@ export default function InvoicesVerifier() {
             <div className="text-[11px] text-gray-500">Upload Lionex invoice PDF(s) and compare CRBT vs Shopify total</div>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            <select
+              value={defaultCompany}
+              onChange={(e) => setDefaultCompany(e.target.value)}
+              className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
+              title="Default delivery company for newly added PDFs"
+            >
+              <option value="lionex">Lionex</option>
+              <option value="12livery">12Livery</option>
+            </select>
             <input
               ref={inputRef}
               type="file"
@@ -474,8 +592,10 @@ export default function InvoicesVerifier() {
               multiple
               onChange={(e) => {
                 const list = Array.from(e.target.files || []);
-                setFiles(list);
-                if (list.length) parseSelectedFiles(list);
+                const entries = list.map((f) => ({ file: f, company: defaultCompany }));
+                setFileEntries(entries);
+                setParsed([]);
+                setLookup({});
               }}
               className="text-xs"
             />
@@ -504,6 +624,7 @@ export default function InvoicesVerifier() {
                   {parsed.map((d) => (
                     <div key={d.fileName}>
                       <span className="font-medium">{d.fileName}</span>
+                      {d.company ? <span> • {String(d.company)}</span> : null}
                       {d.invoiceNumber ? <span> • {d.invoiceNumber}</span> : null}
                       {d.invoiceDate ? <span> • {d.invoiceDate}</span> : null}
                       <span> • rows: {(d.rows || []).length}</span>
@@ -579,7 +700,47 @@ export default function InvoicesVerifier() {
         )}
 
         {parsed.length === 0 && !busy && (
-          <div className="text-gray-500">Choose one or more PDF invoices to start.</div>
+          <>
+            {fileEntries.length === 0 ? (
+              <div className="text-gray-500">Choose one or more PDF invoices to start.</div>
+            ) : (
+              <div className="rounded-2xl border border-gray-200 bg-white p-4">
+                <div className="text-sm font-semibold">PDFs to parse</div>
+                <div className="mt-2 space-y-2">
+                  {fileEntries.map((ent, idx) => (
+                    <div key={`${ent.file?.name || "file"}-${idx}`} className="flex items-center gap-2">
+                      <div className="flex-1 text-xs text-gray-800 truncate">{ent.file?.name}</div>
+                      <select
+                        value={String(ent.company || defaultCompany)}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setFileEntries((prev) => prev.map((x, i) => (i === idx ? ({ ...x, company: val }) : x)));
+                        }}
+                        className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
+                      >
+                        <option value="lionex">Lionex</option>
+                        <option value="12livery">12Livery</option>
+                      </select>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 flex items-center gap-2">
+                  <button
+                    onClick={() => parseSelectedFiles(fileEntries)}
+                    className="px-4 py-2 rounded-xl text-white text-sm font-semibold bg-blue-600 hover:bg-blue-700 active:scale-[.98]"
+                  >
+                    Parse PDFs
+                  </button>
+                  <button
+                    onClick={() => { setFileEntries([]); setParsed([]); setLookup({}); }}
+                    className="px-4 py-2 rounded-xl text-sm font-semibold border border-gray-300 bg-white hover:bg-gray-50 active:scale-[.98]"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         )}
 
         {rowsWithShopify.length > 0 && (
