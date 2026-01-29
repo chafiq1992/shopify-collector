@@ -195,12 +195,23 @@ function normalizePdfLines(textItems) {
 function parseInvoiceHeader(lines) {
   const all = (lines || []).join("\n");
   const invoiceNumber = (() => {
+    // Lionex/12Livery/Metalivraison/PalExpress style
     const m = all.match(/Facture\s*:\s*([A-Z0-9-]+)/i);
-    return m ? m[1] : "";
+    if (m) return m[1];
+    // YFD/Livré24 style: "# FC-...."
+    const m2 = all.match(/#\s*(FC-[0-9-]+)/i);
+    if (m2) return m2[1];
+    // "Facture client N°: # FC-..."
+    const m3 = all.match(/Facture\s*client\s*N°\s*:\s*#?\s*(FC-[0-9-]+)/i);
+    return m3 ? m3[1] : "";
   })();
   const invoiceDate = (() => {
+    // ISO style
     const m = all.match(/Date\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}[^\n]*)/i);
-    return m ? m[1].trim() : "";
+    if (m) return m[1].trim();
+    // dd/mm/yyyy style (YFD/Livré24)
+    const m2 = all.match(/\bDate\s*:\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4})\b/i);
+    return m2 ? m2[1].trim() : "";
   })();
   const invoiceTotalNet = (() => {
     // Prefer explicit "Total Net"
@@ -215,6 +226,9 @@ function parseInvoiceHeader(lines) {
     return m ? safeNum(m[1]) : null;
   })();
   const invoiceFeesTotal = (() => {
+    // Prefer TTC when present (YFD/Livré24)
+    const mTtc = all.match(/\bFrais\s*TTC\s*([\d.,-]+)\s*DH/i);
+    if (mTtc) return safeNum(mTtc[1]);
     const m = all.match(/\bFrais\s*([\d.,-]+)\s*DH/i);
     return m ? safeNum(m[1]) : null;
   })();
@@ -629,12 +643,202 @@ function parsePalExpressInvoice(lines) {
   return { ...hdr, rows };
 }
 
+function parseCrbtFeesOnly(monies) {
+  const vals = (monies || []).map((x) => Number(x)).filter((n) => Number.isFinite(n));
+  const filtered = vals.filter((n) => Math.abs(n) <= 20000);
+  const fees = filtered.find((n) => Math.abs(n) <= 120) ?? null;
+  const crbtCandidates = filtered.filter((n) => (fees == null ? true : n !== fees));
+  const crbt = crbtCandidates.length ? Math.max(...crbtCandidates) : null;
+  return { crbt, fees, total: (crbt != null && fees != null) ? (crbt - fees) : null };
+}
+
+function parseYfdInvoice(lines) {
+  const hdr = parseInvoiceHeader(lines);
+  const rows = [];
+  const sendCodeRe = /\b7-\d{4,}\b/;
+  const phoneRe = /\b0\d{9}\b/;
+
+  const list = (lines || []);
+  for (let i = 0; i < list.length; i++) {
+    const base = String(list[i] || "").trim();
+    if (!sendCodeRe.test(base)) continue;
+    // Merge a couple of lines because YFD sometimes splits "YFD-... \n 7-xxxxx"
+    let combined = base;
+    let j = i + 1;
+    let merges = 0;
+    while (j < list.length) {
+      const next = String(list[j] || "").trim();
+      if (!next) { j++; continue; }
+      if (sendCodeRe.test(next)) break;
+      if (/^(Total\b|Total\s+Brut\b|Total\s+Net\b|Frais\b|Charges\b|Cachet\b|Note\b)/i.test(next)) break;
+      if (merges >= 3) break;
+      combined = `${combined} ${next}`.replace(/\s+/g, " ").trim();
+      merges += 1;
+      j++;
+    }
+
+    const sendCode = (combined.match(sendCodeRe) || [])[0] || "";
+    if (!sendCode) continue;
+
+    const phone = (combined.match(phoneRe) || [])[0] || "";
+    const metaFinal = findStatusInText(combined);
+    const status = metaFinal?.label || "";
+
+    // City sits between phone and status in this layout.
+    let city = "";
+    try {
+      if (phone) {
+        const idxPhone = combined.indexOf(phone);
+        const afterPhone = idxPhone >= 0 ? combined.slice(idxPhone + phone.length).trim() : combined;
+        const st = findStatusInText(afterPhone);
+        if (st && st.index >= 0) city = afterPhone.slice(0, st.index).trim();
+        else city = afterPhone.trim();
+        // trim at first number (CRBT/Frais)
+        const numIdx = city.search(/-?\d+(?:[.,]\d+)?/);
+        if (numIdx >= 0) city = city.slice(0, numIdx).trim();
+        // only first 3 tokens
+        city = city.replace(/\s+/g, " ").trim().split(" ").slice(0, 3).join(" ");
+      }
+    } catch {}
+
+    const monies = parseDhAmounts(combined);
+    const picked = parseCrbtFeesOnly(monies);
+    rows.push({
+      sendCode,
+      orderNumber: extractOrderNumberFromSendCode(sendCode),
+      pickupDate: "",
+      deliveryDate: "",
+      phone,
+      status,
+      city,
+      crbt: picked.crbt,
+      fees: picked.fees,
+      total: picked.total,
+      raw: combined,
+    });
+  }
+
+  return { ...hdr, rows };
+}
+
+function parseLivre24Invoice(lines) {
+  const hdr = parseInvoiceHeader(lines);
+  const rows = [];
+  const sendCodeRe = /\b7-\d{4,}\b/;
+  const phoneRe = /\b0\d{9}\b/;
+  const dateRe = /\b\d{2}\/\d{2}\/\d{4}\b/;
+
+  const list = (lines || []);
+  for (let i = 0; i < list.length; i++) {
+    const base = String(list[i] || "").trim();
+    if (!sendCodeRe.test(base)) continue;
+    let combined = base;
+    let j = i + 1;
+    let merges = 0;
+    while (j < list.length) {
+      const next = String(list[j] || "").trim();
+      if (!next) { j++; continue; }
+      if (sendCodeRe.test(next)) break;
+      if (/^(Total\b|Total\s+Brut\b|Total\s+Net\b|Frais\b|Charges\b|Cachet\b|Note\b)/i.test(next)) break;
+      if (merges >= 3) break;
+      combined = `${combined} ${next}`.replace(/\s+/g, " ").trim();
+      merges += 1;
+      j++;
+    }
+
+    const sendCode = (combined.match(sendCodeRe) || [])[0] || "";
+    if (!sendCode) continue;
+
+    const phone = (combined.match(phoneRe) || [])[0] || "";
+    const deliveryDate = (combined.match(dateRe) || [])[0] || "";
+    const metaFinal = findStatusInText(combined);
+    const status = metaFinal?.label || "";
+
+    // City between phone and delivery date
+    let city = "";
+    try {
+      if (phone) {
+        const idxPhone = combined.indexOf(phone);
+        const afterPhone = idxPhone >= 0 ? combined.slice(idxPhone + phone.length).trim() : combined;
+        const idxDate = deliveryDate ? afterPhone.indexOf(deliveryDate) : -1;
+        city = (idxDate >= 0 ? afterPhone.slice(0, idxDate) : afterPhone).trim();
+        // trim at first number
+        const numIdx = city.search(/-?\d+(?:[.,]\d+)?/);
+        if (numIdx >= 0) city = city.slice(0, numIdx).trim();
+        city = city.replace(/\s+/g, " ").trim().split(" ").slice(0, 3).join(" ");
+      }
+    } catch {}
+
+    const monies = parseDhAmounts(combined);
+    const picked = parseCrbtFeesOnly(monies);
+    rows.push({
+      sendCode,
+      orderNumber: extractOrderNumberFromSendCode(sendCode),
+      pickupDate: "",
+      deliveryDate,
+      phone,
+      status,
+      city,
+      crbt: picked.crbt,
+      fees: picked.fees,
+      total: picked.total,
+      raw: combined,
+    });
+  }
+
+  return { ...hdr, rows };
+}
+
+function parseOscarioInvoice(lines) {
+  // Fallback parser: treat any row with a "7-xxxxx" and DH amounts as a shipment row.
+  const hdr = parseInvoiceHeader(lines);
+  const rows = [];
+  const sendCodeRe = /\b7-\d{4,}(?:_[A-Z0-9]+)?\b/i;
+  const phoneRe = /\b0\d{9}\b/;
+  const isoDateRe = /\b\d{4}-\d{2}-\d{2}\b/g;
+  const frDateRe = /\b\d{2}\/\d{2}\/\d{4}\b/g;
+
+  const list = (lines || []);
+  for (let i = 0; i < list.length; i++) {
+    const base = String(list[i] || "").trim();
+    if (!sendCodeRe.test(base)) continue;
+    const monies0 = parseDhAmounts(base);
+    if (monies0.length < 2) continue;
+    const sendCode = (base.match(sendCodeRe) || [])[0] || "";
+    if (!sendCode) continue;
+    const phone = (base.match(phoneRe) || [])[0] || "";
+    const metaFinal = findStatusInText(base);
+    const status = metaFinal?.label || "";
+    const datesIso = (base.match(isoDateRe) || []);
+    const datesFr = (base.match(frDateRe) || []);
+    const deliveryDate = (datesIso[0] || datesFr[0] || "");
+    const picked = parseCrbtFeesOnly(monies0);
+    rows.push({
+      sendCode,
+      orderNumber: extractOrderNumberFromSendCode(sendCode),
+      pickupDate: "",
+      deliveryDate,
+      phone,
+      status,
+      city: "",
+      crbt: picked.crbt,
+      fees: picked.fees,
+      total: picked.total,
+      raw: base,
+    });
+  }
+  return { ...hdr, rows };
+}
+
 function parseByCompany(lines, company) {
   const key = String(company || "lionex").trim().toLowerCase();
   if (key === "12livery" || key === "12-livery" || key === "12_livery") return parse12LiveryInvoice(lines);
   if (key === "metalivraison") return parseMetalivraisonInvoice(lines);
   if (key === "ibex") return parseIbexInvoice(lines);
   if (key === "palexpress" || key === "pal-express" || key === "pal_express") return parsePalExpressInvoice(lines);
+  if (key === "yfd" || key === "yourfast" || key === "your-fast") return parseYfdInvoice(lines);
+  if (key === "livre24" || key === "livre-24" || key === "livr\u00e924") return parseLivre24Invoice(lines);
+  if (key === "oscario") return parseOscarioInvoice(lines);
   return parseLionexInvoice(lines);
 }
 
@@ -831,6 +1035,9 @@ export default function InvoicesVerifier() {
               <option value="metalivraison">Metalivraison</option>
               <option value="ibex">IBEX</option>
               <option value="palexpress">Pal Express</option>
+              <option value="yfd">YFD (Your Fast)</option>
+              <option value="livre24">Livré24</option>
+              <option value="oscario">Oscario</option>
             </select>
             <input
               ref={inputRef}
@@ -970,6 +1177,9 @@ export default function InvoicesVerifier() {
                         <option value="metalivraison">Metalivraison</option>
                         <option value="ibex">IBEX</option>
                         <option value="palexpress">Pal Express</option>
+                        <option value="yfd">YFD (Your Fast)</option>
+                        <option value="livre24">Livré24</option>
+                        <option value="oscario">Oscario</option>
                       </select>
                     </div>
                   ))}
