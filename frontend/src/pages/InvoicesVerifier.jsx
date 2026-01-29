@@ -44,7 +44,8 @@ function normalizeStatusLabel(s) {
 
 function findStatusInText(text) {
   // PDF extraction can mangle accents ("Livré" -> "LivrÃ©" etc). So match on stems.
-  const re = /\b(livr\w*|refus\w*)\b/i;
+  // Use [^\\s|]* instead of \\w* so we capture "Livré" and also mangled "LivrÃ©".
+  const re = /\b(livr[^\s|]*|refus[^\s|]*)\b/i;
   const m = re.exec(String(text || ""));
   if (!m) return null;
   return {
@@ -252,9 +253,20 @@ function parseLionexInvoice(lines) {
       const idxStatus = meta && meta.index >= 0 ? meta.index : -1;
       if (idxStatus >= 0) {
         const afterStatus = combined.slice(idxStatus + (meta?.length || status.length)).trim();
+        // In these PDFs, the CRBT number often appears *before* "DH" on the next visual line,
+        // so cut city at the first numeric token, not only at "DH".
+        const firstNumberIdx = afterStatus.search(/-?\d+(?:[.,]\d+)?/);
         const firstMoneyIdx = afterStatus.search(/-?\d+(?:[.,]\d+)?\s*DH\b/i);
-        city = (firstMoneyIdx >= 0 ? afterStatus.slice(0, firstMoneyIdx) : afterStatus)
+        const cutIdx = (firstNumberIdx >= 0 ? firstNumberIdx : firstMoneyIdx);
+        city = (cutIdx >= 0 ? afterStatus.slice(0, cutIdx) : afterStatus)
           .replace(/\s+/g, " ")
+          .trim();
+        // Clean common encoding artifacts and separators
+        city = city
+          .replace(/^\|+/, "")
+          .replace(/^(?:Ã©|é)\s+/i, "")
+          .replace(/^[^A-Za-z0-9\u00C0-\u017F]+/, "")
+          .replace(/\s+$/, "")
           .trim();
       }
     } catch {}
@@ -622,6 +634,26 @@ export default function InvoicesVerifier() {
                     );
                   })}
                 </tbody>
+                <tfoot>
+                  {(() => {
+                    const rows = rowsWithShopify || [];
+                    const delivered = rows.filter(x => x.shopify?.found && !x.isRefused);
+                    const sumFees = delivered.reduce((acc, x) => acc + Number(x.fees || 0), 0);
+                    const sumCrbt = delivered.reduce((acc, x) => acc + Number(x.crbt || 0), 0);
+                    const sumShop = delivered.reduce((acc, x) => acc + Number(x.shopTotal || 0), 0);
+                    const sumDiff = delivered.reduce((acc, x) => acc + Number(x.diff || 0), 0);
+                    return (
+                      <tr className="bg-gray-900 text-white">
+                        <td className="px-3 py-2 font-extrabold" colSpan={7}>TOTALS (delivered only)</td>
+                        <td className="px-3 py-2 text-right font-extrabold">{sumFees.toFixed(2)}</td>
+                        <td className="px-3 py-2 text-right font-extrabold">{sumCrbt.toFixed(2)}</td>
+                        <td className="px-3 py-2 text-right font-extrabold">{sumShop.toFixed(2)}</td>
+                        <td className="px-3 py-2 text-right font-extrabold">{sumDiff.toFixed(2)}</td>
+                        <td className="px-3 py-2 font-extrabold">—</td>
+                      </tr>
+                    );
+                  })()}
+                </tfoot>
               </table>
             </div>
           </div>
