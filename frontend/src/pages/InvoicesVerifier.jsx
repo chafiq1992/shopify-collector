@@ -96,18 +96,28 @@ function parseLionexInvoice(lines) {
     if (!sendCode) continue;
 
     // Some PDFs wrap the last columns (DH amounts) to a continuation line.
-    // Merge following lines until we capture at least 3 DH amounts or until the next row begins.
+    // Merge following lines until we capture:
+    // - status (Livré/Refusé) and
+    // - at least 3 DH amounts (CRBT/Frais/Total),
+    // or until the next row begins.
     let combined = base;
     let monies = parseDhAmounts(combined);
+    let hasStatus = /\b(Livr[ée]|Refus[ée])\b/i.test(combined);
     let j = i + 1;
-    while (monies.length < 3 && j < list.length) {
+    let merges = 0;
+    while (j < list.length) {
       const next = String(list[j] || "").trim();
       if (!next) { j++; continue; }
       if (codeRe.test(next)) break; // next row
-      // Only merge likely continuations (numbers/DH fragments)
-      if (!/(DH\b|\d)/i.test(next)) break;
+      // Merge a small number of continuation lines even if they don't contain digits,
+      // because some PDFs put "Livré | City" on a separate line.
+      if (merges >= 4) break;
       combined = `${combined} ${next}`.replace(/\s+/g, " ").trim();
       monies = parseDhAmounts(combined);
+      hasStatus = hasStatus || /\b(Livr[ée]|Refus[ée])\b/i.test(combined);
+      merges += 1;
+      // Stop early when we have what we need
+      if (hasStatus && monies.length >= 3) break;
       j++;
     }
     // Skip merged continuation lines
@@ -118,7 +128,7 @@ function parseLionexInvoice(lines) {
     const deliveryDate = dates[1] || "";
 
     const phone = (combined.match(phoneRe) || [])[0] || "";
-    const status = (combined.match(/\b(Livré|Refusé)\b/i) || [])[0] || "";
+    const status = (combined.match(/\b(Livr[ée]|Refus[ée])\b/i) || [])[0] || "";
 
     // Collect all DH amounts, take last 3 as (crbt, fees, total) — consistent with PDF example.
     const last3 = monies.slice(-3);
@@ -132,7 +142,7 @@ function parseLionexInvoice(lines) {
       const idxStatus = status ? combined.toLowerCase().indexOf(status.toLowerCase()) : -1;
       if (idxStatus >= 0) {
         const afterStatus = combined.slice(idxStatus + status.length).trim();
-        const firstMoneyIdx = afterStatus.search(/-?\d+\s*DH\b/i);
+        const firstMoneyIdx = afterStatus.search(/-?\d+(?:[.,]\d+)?\s*DH\b/i);
         city = (firstMoneyIdx >= 0 ? afterStatus.slice(0, firstMoneyIdx) : afterStatus)
           .replace(/\s+/g, " ")
           .trim();
