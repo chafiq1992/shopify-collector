@@ -116,6 +116,46 @@ function pickCrbtFeesTotal(monies) {
   return { crbt: null, fees: null, total: null, method: "none" };
 }
 
+function pickCrbtFeesPackagingTotal(monies) {
+  // IBEX: can have an extra "Emballage" amount column.
+  // Try to satisfy: total = crbt - fees - packaging (packaging default 0).
+  const vals = (monies || []).map((x) => Number(x)).filter((n) => Number.isFinite(n));
+  const EPS = 0.6;
+  if (vals.length < 3) {
+    const base = pickCrbtFeesTotal(vals);
+    return { ...base, packaging: 0, method: `fallback:${base.method || "none"}` };
+  }
+  // Try all 4-tuples first
+  if (vals.length >= 4) {
+    let best = null;
+    for (let i = 0; i < vals.length; i++) {
+      for (let j = 0; j < vals.length; j++) {
+        if (j === i) continue;
+        for (let k = 0; k < vals.length; k++) {
+          if (k === i || k === j) continue;
+          for (let t = 0; t < vals.length; t++) {
+            if (t === i || t === j || t === k) continue;
+            const crbt = vals[i];
+            const fees = vals[j];
+            const packaging = vals[k];
+            const total = vals[t];
+            const err = Math.abs((crbt - fees - packaging) - total);
+            if (err > EPS) continue;
+            let score = err;
+            if (Math.abs(fees) <= 80) score -= 0.2;
+            if (Math.abs(packaging) <= 80) score -= 0.1;
+            if (best == null || score < best.score) best = { crbt, fees, packaging, total, score };
+          }
+        }
+      }
+    }
+    if (best) return { crbt: best.crbt, fees: best.fees, packaging: best.packaging, total: best.total, method: "identity4" };
+  }
+  // Fallback to 3-value identity: total = crbt - fees
+  const base = pickCrbtFeesTotal(vals);
+  return { ...base, packaging: 0, method: `fallback:${base.method || "none"}` };
+}
+
 function normalizePdfLines(textItems) {
   // textItems: [{str, x, y}]
   const items = (textItems || [])
@@ -216,7 +256,7 @@ function parseLionexInvoice(lines) {
       if (!next) { j++; continue; }
       if (codeRe.test(next)) break; // next row
       // Stop at footer/summary sections to avoid accidentally merging totals into the last shipment row
-      if (/^(Total\b|Total\s+Brut\b|Total\s+Net\b|Sauf\b|Lionex\b|Facture\b|Colis\b|Statut\s*:)/i.test(next)) break;
+      if (/^(Total\b|Total\s+Brut\b|Total\s+Net\b|Sauf\b|Facture\b|Colis\b|Statut\s*:|Vous\s+remerci)/i.test(next)) break;
       // Merge a small number of continuation lines even if they don't contain digits,
       // because some PDFs put "Livré | City" on a separate line.
       if (merges >= 4) break;
@@ -388,9 +428,192 @@ function parse12LiveryInvoice(lines) {
   return { ...hdr, rows };
 }
 
+function parseMetalivraisonInvoice(lines) {
+  // Same table structure as Lionex but includes a dedicated phone column.
+  return parseLionexInvoice(lines);
+}
+
+function parseIbexInvoice(lines) {
+  const hdr = parseInvoiceHeader(lines);
+  const rows = [];
+  const codeRe = /\b\d{1,2}-[0-9A-Z_]{3,}\b/i;
+  const dateRe = /\b\d{4}-\d{2}-\d{2}\b/g;
+  const phoneRe = /\b0\d{9}\b/;
+
+  const list = (lines || []);
+  for (let i = 0; i < list.length; i++) {
+    const base = String(list[i] || "").trim();
+    if (!codeRe.test(base)) continue;
+    const sendCode = (base.match(codeRe) || [])[0] || "";
+    if (!sendCode) continue;
+
+    let combined = base;
+    let monies = parseDhAmounts(combined);
+    let statusMeta = findStatusInText(combined);
+    let statusFound = statusMeta?.label || "";
+    let hasStatus = !!statusFound;
+    let j = i + 1;
+    let merges = 0;
+    while (j < list.length) {
+      const next = String(list[j] || "").trim();
+      if (!next) { j++; continue; }
+      if (codeRe.test(next)) break;
+      if (/^(Total\b|Total\s+Brut\b|Total\s+Net\b|Sauf\b|Facture\b|Colis\b|Statut\s*:|Vous\s+remerci)/i.test(next)) break;
+      if (merges >= 4) break;
+      combined = `${combined} ${next}`.replace(/\s+/g, " ").trim();
+      monies = parseDhAmounts(combined);
+      if (!statusFound) {
+        const m2 = findStatusInText(next) || findStatusInText(combined);
+        statusFound = m2?.label || statusFound;
+        statusMeta = statusMeta || m2 || null;
+      }
+      hasStatus = hasStatus || !!statusFound;
+      merges += 1;
+      if (hasStatus && monies.length >= 3) break;
+      j++;
+    }
+    i = j - 1;
+
+    const dates = (combined.match(dateRe) || []).slice(0, 2);
+    const pickupDate = dates[0] || "";
+    const deliveryDate = dates[1] || "";
+    const phone = (combined.match(phoneRe) || [])[0] || "";
+
+    const metaFinal = statusMeta || findStatusInText(combined);
+    const status = statusFound || metaFinal?.label || "";
+
+    const picked = pickCrbtFeesPackagingTotal(monies);
+    const crbt = picked.crbt != null ? picked.crbt : null;
+    const fees = picked.fees != null ? picked.fees : null;
+    const total = picked.total != null ? picked.total : null;
+
+    let city = "";
+    try {
+      const meta = metaFinal;
+      const idxStatus = meta && meta.index >= 0 ? meta.index : -1;
+      if (idxStatus >= 0) {
+        const afterStatus = combined.slice(idxStatus + (meta?.length || status.length)).trim();
+        const firstNumberIdx = afterStatus.search(/-?\d+(?:[.,]\d+)?/);
+        const cutIdx = firstNumberIdx;
+        city = (cutIdx >= 0 ? afterStatus.slice(0, cutIdx) : afterStatus).replace(/\s+/g, " ").trim();
+        city = city.replace(/^\|+/, "").replace(/^(?:Ã©|é)\s+/i, "").replace(/^[^A-Za-z0-9\u00C0-\u017F]+/, "").trim();
+      }
+    } catch {}
+
+    const orderNumber = extractOrderNumberFromSendCode(sendCode);
+    rows.push({
+      sendCode,
+      orderNumber,
+      pickupDate,
+      deliveryDate,
+      phone,
+      status,
+      city,
+      crbt,
+      fees,
+      total,
+      raw: combined,
+    });
+  }
+
+  return { ...hdr, rows };
+}
+
+function parsePalExpressInvoice(lines) {
+  const hdr = parseInvoiceHeader(lines);
+  const rows = [];
+  const codeRe = /\b\d{1,2}-[0-9A-Z_]{3,}\b/i;
+  const dateRe = /\b\d{4}-\d{2}-\d{2}\b/g;
+  const phoneRe = /\b0\d{9}\b/;
+
+  const list = (lines || []);
+  for (let i = 0; i < list.length; i++) {
+    const base = String(list[i] || "").trim();
+    if (!codeRe.test(base)) continue;
+    const sendCode = (base.match(codeRe) || [])[0] || "";
+    if (!sendCode) continue;
+
+    let combined = base;
+    let monies = parseDhAmounts(combined);
+    let statusMeta = findStatusInText(combined);
+    let statusFound = statusMeta?.label || "";
+    let hasStatus = !!statusFound;
+    let j = i + 1;
+    let merges = 0;
+    while (j < list.length) {
+      const next = String(list[j] || "").trim();
+      if (!next) { j++; continue; }
+      if (codeRe.test(next)) break;
+      if (/^(Total\b|Total\s+Brut\b|Total\s+Net\b|Sauf\b|Facture\b|Colis\b|Statut\s*:|Vous\s+remerci)/i.test(next)) break;
+      if (merges >= 4) break;
+      combined = `${combined} ${next}`.replace(/\s+/g, " ").trim();
+      monies = parseDhAmounts(combined);
+      if (!statusFound) {
+        const m2 = findStatusInText(next) || findStatusInText(combined);
+        statusFound = m2?.label || statusFound;
+        statusMeta = statusMeta || m2 || null;
+      }
+      hasStatus = hasStatus || !!statusFound;
+      merges += 1;
+      if (hasStatus && monies.length >= 3) break;
+      j++;
+    }
+    i = j - 1;
+
+    // PalExpress layout: city is right after sendCode and before customer/phone/date.
+    let city = "";
+    try {
+      const afterCode = combined.split(sendCode).slice(1).join(sendCode).trim();
+      // Cut at first phone or first date
+      const phoneIdx = afterCode.search(phoneRe);
+      const dateIdx = afterCode.search(dateRe);
+      let cut = -1;
+      if (phoneIdx >= 0 && dateIdx >= 0) cut = Math.min(phoneIdx, dateIdx);
+      else cut = (phoneIdx >= 0 ? phoneIdx : dateIdx);
+      const before = (cut >= 0 ? afterCode.slice(0, cut) : afterCode).trim();
+      // First token(s) are city (often uppercase). Keep up to first 3 tokens.
+      const toks = before.split(/\s+/).filter(Boolean);
+      city = toks.slice(0, 3).join(" ").trim();
+    } catch {}
+
+    const dates = (combined.match(dateRe) || []).slice(0, 2);
+    const pickupDate = dates[0] || "";
+    const deliveryDate = dates[1] || "";
+    const phone = (combined.match(phoneRe) || [])[0] || "";
+
+    const metaFinal = statusMeta || findStatusInText(combined);
+    const status = statusFound || metaFinal?.label || "";
+
+    const picked = pickCrbtFeesTotal(monies);
+    const crbt = picked.crbt != null ? picked.crbt : null;
+    const fees = picked.fees != null ? picked.fees : null;
+    const total = picked.total != null ? picked.total : null;
+
+    const orderNumber = extractOrderNumberFromSendCode(sendCode);
+    rows.push({
+      sendCode,
+      orderNumber,
+      pickupDate,
+      deliveryDate,
+      phone,
+      status,
+      city,
+      crbt,
+      fees,
+      total,
+      raw: combined,
+    });
+  }
+
+  return { ...hdr, rows };
+}
+
 function parseByCompany(lines, company) {
   const key = String(company || "lionex").trim().toLowerCase();
   if (key === "12livery" || key === "12-livery" || key === "12_livery") return parse12LiveryInvoice(lines);
+  if (key === "metalivraison") return parseMetalivraisonInvoice(lines);
+  if (key === "ibex") return parseIbexInvoice(lines);
+  if (key === "palexpress" || key === "pal-express" || key === "pal_express") return parsePalExpressInvoice(lines);
   return parseLionexInvoice(lines);
 }
 
@@ -573,7 +796,7 @@ export default function InvoicesVerifier() {
           >Back</button>
           <div className="ml-2">
             <div className="text-sm font-semibold">Invoices Verifier</div>
-            <div className="text-[11px] text-gray-500">Upload Lionex invoice PDF(s) and compare CRBT vs Shopify total</div>
+            <div className="text-[11px] text-gray-500">Upload delivery invoice PDF(s) and compare CRBT vs Shopify total</div>
           </div>
           <div className="ml-auto flex items-center gap-2">
             <select
@@ -584,6 +807,9 @@ export default function InvoicesVerifier() {
             >
               <option value="lionex">Lionex</option>
               <option value="12livery">12Livery</option>
+              <option value="metalivraison">Metalivraison</option>
+              <option value="ibex">IBEX</option>
+              <option value="palexpress">Pal Express</option>
             </select>
             <input
               ref={inputRef}
@@ -720,6 +946,9 @@ export default function InvoicesVerifier() {
                       >
                         <option value="lionex">Lionex</option>
                         <option value="12livery">12Livery</option>
+                        <option value="metalivraison">Metalivraison</option>
+                        <option value="ibex">IBEX</option>
+                        <option value="palexpress">Pal Express</option>
                       </select>
                     </div>
                   ))}
