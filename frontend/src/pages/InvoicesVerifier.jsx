@@ -235,7 +235,9 @@ function extractRowsByAnchorsInColumns({ pages, anchorRe, headerLabels }) {
     for (const it of first) {
       const t = _normText(it.str);
       if (!t) continue;
-      if (t === want) {
+      // Be tolerant: sometimes header labels have extra spaces/words.
+      // Prefer exact match, else substring match.
+      if (t === want || (want && t.includes(want))) {
         if (!best || it.y > best.y) best = it; // pick highest occurrence
       }
     }
@@ -276,7 +278,9 @@ function extractRowsByAnchorsInColumns({ pages, anchorRe, headerLabels }) {
       const a = anchors[i];
       const next = anchors[i + 1] || null;
       const yTop = a.y + Y_TOL;
-      const yBottom = next ? (next.y - Y_TOL) : -Infinity;
+      // IMPORTANT: prevent bleed into the next row.
+      // Other cells in the next row can have y slightly ABOVE the anchor y, so we set the bottom bound ABOVE next.y.
+      const yBottom = next ? (next.y + Y_TOL) : -Infinity;
       const band = items.filter((it) => it.y <= yTop && it.y >= yBottom);
 
       const byKey = {};
@@ -1085,9 +1089,10 @@ function parsePalExpressFromPages(pages) {
     pages,
     anchorRe: /\b7-\d{4,}(?:_[A-Z0-9]+)?\b/i,
     headerLabels: [
+      { key: "code", label: "Code d'envoi" },
       { key: "ville", label: "Ville" },
       { key: "destinataire", label: "Destinataire" },
-      { key: "date_livraison", label: "Date" }, // sometimes split; "Date" is stable on PalExpress headers
+      { key: "date_livraison", label: "Date de livraison" },
       { key: "status", label: "Status" },
       { key: "crbt", label: "Crbt" },
       { key: "frais", label: "Frais" },
@@ -1098,11 +1103,26 @@ function parsePalExpressFromPages(pages) {
     const sendCode = String(r.anchor || "").trim();
     if (!/^7-\d{4,}/.test(sendCode)) continue;
     const c = r.columns || {};
-    const city = String(c.ville || "").replace(/\s+/g, " ").trim();
+    let city = String(c.ville || "").replace(/\s+/g, " ").trim();
+    // Cleanup: sometimes we still get stray row numbers / codes due to PDF quirks.
+    // Remove shipment codes and standalone integers.
+    try {
+      city = city.replace(/\b7-\d{4,}(?:_[A-Z0-9]+)?\b/gi, " ");
+      city = city.replace(/\b\d{1,3}\b/g, " "); // row numbers
+      city = city.replace(/\s+/g, " ").trim();
+    } catch {}
     const status = normalizeStatusLabel(c.status || "");
     const deliveryDate = (() => {
+      // Prefer the date column; fallback to any ISO date in all extracted columns
       const m = String(c.date_livraison || "").match(/\b\d{4}-\d{2}-\d{2}\b/);
-      return m ? m[0] : "";
+      if (m) return m[0];
+      try {
+        const all = Object.values(c).join(" ");
+        const m2 = String(all).match(/\b\d{4}-\d{2}-\d{2}\b/);
+        return m2 ? m2[0] : "";
+      } catch {
+        return "";
+      }
     })();
     const phone = (() => {
       const m = String(c.destinataire || "").match(/\b0\d{9}\b/);
