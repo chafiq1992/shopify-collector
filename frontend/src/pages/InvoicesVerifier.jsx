@@ -48,6 +48,25 @@ function parseDhAmounts(text) {
   return out;
 }
 
+// Dev-only sanity checks for ambiguous (crbt, fees, total) triples like [-3, 15, 18]
+// where both equations 15-18=-3 and 15-(-3)=18 are possible.
+// We must always treat FEES as non-negative and allow TOTAL to be negative.
+try {
+  // eslint-disable-next-line no-undef
+  if (typeof import.meta !== "undefined" && import.meta?.env?.DEV) {
+    // eslint-disable-next-line no-undef
+    if (typeof window !== "undefined" && !window.__invoiceVerifierSelfTestRan) {
+      // eslint-disable-next-line no-undef
+      window.__invoiceVerifierSelfTestRan = true;
+      const picked = pickCrbtFeesTotal([-3, 15, 18]);
+      if (!(picked.crbt === 15 && picked.fees === 18 && picked.total === -3)) {
+        // eslint-disable-next-line no-console
+        console.warn("[InvoicesVerifier] self-test failed for [-3,15,18]:", picked);
+      }
+    }
+  }
+} catch {}
+
 function normalizeStatusLabel(s) {
   const v = String(s || "").trim().toLowerCase();
   if (!v) return "";
@@ -77,6 +96,7 @@ function pickCrbtFeesTotal(monies) {
   // Helper: prefer realistic fees (often 10–40) and prefer exact arithmetic match:
   // total = crbt - fees
   const EPS = 0.6; // allow minor float noise / OCR quirks
+  const commonFees = [10, 15, 18, 20, 25, 30, 35, 40, 45, 50];
   let best = null;
   for (let i = 0; i < vals.length; i++) {
     for (let j = 0; j < vals.length; j++) {
@@ -90,7 +110,15 @@ function pickCrbtFeesTotal(monies) {
         if (err > EPS) continue;
         // scoring: smaller err, fees within common range, crbt typically >= fees in abs
         let score = err;
-        if (Math.abs(fees) <= 80) score -= 0.25;
+        // Fees are almost always non-negative; a negative "fees" is usually the NET total (CRBT-fees) on invoices like 12Livery.
+        if (fees < 0) score += 5;
+        if (Math.abs(fees) <= 120) score -= 0.25;
+        // Prefer fee values close to typical fee buckets (18/25/30...) but keep it weak.
+        const feeAbs = Math.abs(fees);
+        const feeDist = commonFees.reduce((acc, x) => Math.min(acc, Math.abs(feeAbs - x)), Infinity);
+        if (Number.isFinite(feeDist)) score += (feeDist * 0.01);
+        // With non-negative fees, total should not exceed CRBT.
+        if (fees >= 0 && total > (crbt + EPS)) score += 1.5;
         if (Math.abs(crbt) >= Math.abs(fees)) score -= 0.05;
         if (best == null || score < best.score) best = { crbt, fees, total, score, method: "identity" };
       }
@@ -108,7 +136,9 @@ function pickCrbtFeesTotal(monies) {
         if (a === b) continue;
         const fees = vals[a];
         const total = vals[b];
-        if (Math.abs(fees) > 80) continue;
+        // Computed fallback assumes fees is a (small) positive value
+        if (fees < 0) continue;
+        if (Math.abs(fees) > 120) continue;
         const crbt = total + fees;
         // basic sanity: CRBT should be in a reasonable range
         if (!Number.isFinite(crbt)) continue;
@@ -483,7 +513,9 @@ function parse12LiveryInvoice(lines) {
   const hdr = parseInvoiceHeader(lines);
   const rows = [];
   // 12Livery can include suffixes like "7-127295_RMB"
-  const codeRe = /\b\d{1,2}-[0-9A-Z_]{3,}\b/i;
+  // IMPORTANT: avoid matching invoice-number suffixes like "55-125" from "FCT-...-55-125".
+  // Real shipment codes in these PDFs are like "7-127429" or "7-127295_RMB" (>= 4 digits after dash).
+  const codeRe = /\b\d{1,2}-\d{4,}(?:_[A-Z0-9]+)?\b/i;
   const dateRe = /\b\d{4}-\d{2}-\d{2}\b/g;
 
   const list = (lines || []);
