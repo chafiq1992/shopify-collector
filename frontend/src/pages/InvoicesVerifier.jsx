@@ -596,10 +596,21 @@ function parsePalExpressInvoice(lines) {
         seg = (cut >= 0 ? seg.slice(0, cut) : seg);
       }
       seg = String(seg || "").replace(/\s+/g, " ").trim();
-      // Clean common junk and keep up to 5 words (cities can be multi-word)
+      // Clean common junk and keep only ALL-CAPS tokens to avoid swallowing customer names (e.g. "Elmoufid")
       seg = seg.replace(/^[^A-Za-z0-9\u00C0-\u017F\u0600-\u06FF]+/, "").trim();
       const toks = seg.split(/\s+/).filter(Boolean);
-      city = toks.slice(0, 5).join(" ").trim();
+      const out = [];
+      for (const t of toks) {
+        // Stop when token contains lowercase latin (usually customer name)
+        if (/[a-z]/.test(t)) break;
+        // Stop when token is Arabic (customer names sometimes Arabic)
+        if (/[\u0600-\u06FF]/.test(t)) break;
+        // Stop when token starts with a digit/phone
+        if (/^\d/.test(t)) break;
+        out.push(t);
+        if (out.length >= 6) break;
+      }
+      city = (out.length ? out.join(" ") : (toks[0] || "")).trim();
     } catch {}
 
     const dates = (combined.match(dateRe) || []).slice(0, 2);
