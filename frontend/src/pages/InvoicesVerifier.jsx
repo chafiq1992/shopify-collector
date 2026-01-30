@@ -1108,10 +1108,10 @@ function parsePalExpressFromPages(pages) {
   const hdr = parseInvoiceHeader(allLines);
 
   const rows = [];
-  const extracted = extractRowsByAnchorsInColumns({
-    pages,
-    anchorRe: /\b7-\d{4,}(?:_[A-Z0-9]+)?\b/i,
-    headerLabels: [
+  const extracted = (() => {
+    // Pal Express page 2 sometimes splits the code "7-128062" into multiple PDF text items.
+    // So we detect rows by reconstructing the code from the Code d'envoi column (x/y based), not by regex on single items.
+    const headerLabels = [
       { key: "code", label: "Code d'envoi" },
       { key: "ville", label: "Ville" },
       { key: "destinataire", label: "Destinataire" },
@@ -1119,8 +1119,122 @@ function parsePalExpressFromPages(pages) {
       { key: "status", label: "Status" },
       { key: "crbt", label: "Crbt" },
       { key: "frais", label: "Frais" },
-    ],
-  });
+    ];
+    const anchorRe = /\b7-\d{4,}(?:_[A-Z0-9]+)?\b/i;
+
+    // Build column x-ranges from first page header labels
+    const first = pages?.[0]?.items || [];
+    const labelXs = [];
+    for (const hl of headerLabels) {
+      const want = _normText(hl.label);
+      let best = null;
+      for (const it of first) {
+        const t = _normText(it.str);
+        if (!t) continue;
+        if (t === want || (want && t.includes(want))) {
+          if (!best || it.y > best.y) best = it;
+        }
+      }
+      if (best) labelXs.push({ key: hl.key, x: best.x, y: best.y });
+    }
+    labelXs.sort((a, b) => a.x - b.x);
+    if (labelXs.length < 2) {
+      // fallback to generic extractor if we can't infer columns
+      return extractRowsByAnchorsInColumns({ pages, anchorRe, headerLabels });
+    }
+    const headerY0 = Math.max(...labelXs.map((x) => x.y));
+    const ranges = {};
+    for (let i = 0; i < labelXs.length; i++) {
+      const cur = labelXs[i];
+      const prev = labelXs[i - 1] || null;
+      const next = labelXs[i + 1] || null;
+      const left = prev ? (prev.x + cur.x) / 2 : -Infinity;
+      const right = next ? (cur.x + next.x) / 2 : Infinity;
+      ranges[cur.key] = { left, right };
+    }
+    const codeRange = ranges.code;
+    if (!codeRange) {
+      return extractRowsByAnchorsInColumns({ pages, anchorRe, headerLabels });
+    }
+
+    const outRows = [];
+    const Y_LINE_TOL = 4.5;
+    const Y_BAND_TOL = 6.0;
+
+    function groupByLines(items) {
+      const sorted = (items || []).slice().sort((a, b) => (b.y - a.y) || (a.x - b.x));
+      const lines = [];
+      let cur = [];
+      let curY = null;
+      for (const it of sorted) {
+        if (curY == null) { curY = it.y; cur = [it]; continue; }
+        if (Math.abs(it.y - curY) <= Y_LINE_TOL) cur.push(it);
+        else { lines.push(cur); curY = it.y; cur = [it]; }
+      }
+      if (cur.length) lines.push(cur);
+      // normalize each line by x asc
+      return lines.map((ln) => ln.slice().sort((a, b) => a.x - b.x));
+    }
+
+    for (const pg of (pages || [])) {
+      const items = (pg.items || []).filter((it) => String(it.str || "").trim());
+      // Per-page header detection (optional). If it fails, don't filter.
+      let headerYThis = headerY0;
+      let headerFound = false;
+      try {
+        let bestY = null;
+        for (const it of items) {
+          const t = _normText(it.str);
+          if (!t) continue;
+          for (const hl of headerLabels) {
+            const wn = _normText(hl.label);
+            if (!wn) continue;
+            if (t === wn || t.includes(wn)) {
+              if (bestY == null || it.y > bestY) bestY = it.y;
+            }
+          }
+        }
+        if (bestY != null) { headerYThis = bestY; headerFound = true; }
+      } catch {}
+
+      const belowHeader = headerFound ? items.filter((it) => it.y < (headerYThis - 5)) : items;
+      const codeItems = belowHeader.filter((it) => it.x >= codeRange.left && it.x < codeRange.right);
+
+      // Detect anchors by line reconstruction in code column
+      const anchorLines = groupByLines(codeItems);
+      const anchors = [];
+      for (const ln of anchorLines) {
+        const txt = ln.map((x) => String(x.str || "").trim()).join(" ").replace(/\s+/g, " ").trim();
+        const m = txt.match(anchorRe);
+        if (!m) continue;
+        anchors.push({ code: m[0], y: ln[0]?.y ?? 0, x: ln[0]?.x ?? 0 });
+      }
+      anchors.sort((a, b) => b.y - a.y);
+
+      for (let i = 0; i < anchors.length; i++) {
+        const a = anchors[i];
+        const next = anchors[i + 1] || null;
+        const yTop = a.y + Y_BAND_TOL;
+        const yBottom = next ? (next.y + Y_BAND_TOL) : -Infinity;
+        const band = belowHeader.filter((it) => it.y <= yTop && it.y >= yBottom);
+        const columns = {};
+        for (const [key, rg] of Object.entries(ranges)) {
+          const colItems = band.filter((it) => it.x >= rg.left && it.x < rg.right);
+          const lines = groupByLines(colItems);
+          const txt = lines
+            .map((ln) => ln.map((x) => String(x.str || "").trim()).filter(Boolean).join(" ").replace(/\s+/g, " ").trim())
+            .filter(Boolean)
+            .join(" ")
+            .replace(/\s+/g, " ")
+            .trim();
+          columns[key] = txt;
+        }
+        outRows.push({ page: pg.page, anchor: a.code, columns });
+      }
+    }
+
+    return outRows;
+  })();
 
   for (const r of extracted) {
     const sendCode = String(r.anchor || "").trim();
