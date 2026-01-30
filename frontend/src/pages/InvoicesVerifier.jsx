@@ -12,6 +12,20 @@ function safeNum(x) {
   return Number.isFinite(n) ? n : null;
 }
 
+function _normText(s) {
+  try {
+    return String(s || "")
+      .trim()
+      .toLowerCase()
+      // remove accents
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ");
+  } catch {
+    return String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+  }
+}
+
 function extractOrderNumberFromSendCode(sendCode) {
   const s = String(sendCode || "").trim();
   if (!s) return "";
@@ -190,6 +204,95 @@ function normalizePdfLines(textItems) {
     lines.push(current.map((x) => x.str).join(" ").replace(/\s+/g, " ").trim());
   }
   return lines.filter(Boolean);
+}
+
+async function extractPdfPagesTextItems(file) {
+  const buf = await file.arrayBuffer();
+  const pdf = await getDocument({ data: buf }).promise;
+  const pages = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const items = (content.items || []).map((it) => {
+      const tr = it.transform || [];
+      const x = tr[4] || 0;
+      const y = tr[5] || 0;
+      return { str: String(it.str || ""), x: Number(x), y: Number(y) };
+    });
+    pages.push({ page: p, items });
+  }
+  return pages;
+}
+
+function extractRowsByAnchorsInColumns({ pages, anchorRe, headerLabels }) {
+  // headerLabels: [{ key, label }], e.g. { key:"ville", label:"Ville" }
+  // We infer x column boundaries from header label positions on the first page.
+  const first = pages?.[0]?.items || [];
+  const labelXs = [];
+  for (const hl of (headerLabels || [])) {
+    const want = _normText(hl.label);
+    let best = null;
+    for (const it of first) {
+      const t = _normText(it.str);
+      if (!t) continue;
+      if (t === want) {
+        if (!best || it.y > best.y) best = it; // pick highest occurrence
+      }
+    }
+    if (best) labelXs.push({ key: hl.key, x: best.x, y: best.y });
+  }
+  labelXs.sort((a, b) => a.x - b.x);
+  if (labelXs.length < 2) {
+    // Can't infer columns; return empty (caller can fallback to older parsing)
+    return [];
+  }
+  const headerY = Math.max(...labelXs.map((x) => x.y));
+
+  // Build x ranges per label key
+  const ranges = {};
+  for (let i = 0; i < labelXs.length; i++) {
+    const cur = labelXs[i];
+    const prev = labelXs[i - 1] || null;
+    const next = labelXs[i + 1] || null;
+    const left = prev ? (prev.x + cur.x) / 2 : -Infinity;
+    const right = next ? (cur.x + next.x) / 2 : Infinity;
+    ranges[cur.key] = { left, right };
+  }
+
+  const outRows = [];
+  const Y_TOL = 6.0;
+
+  for (const pg of (pages || [])) {
+    const items = (pg.items || []).filter((it) => String(it.str || "").trim());
+    // Find anchor occurrences (e.g. "7-123456")
+    const anchors = items
+      .filter((it) => anchorRe.test(String(it.str || "").trim()))
+      .map((it) => ({ ...it, code: String(it.str || "").trim() }))
+      // ignore anchors that are in the header region
+      .filter((a) => a.y < (headerY - 5))
+      .sort((a, b) => b.y - a.y);
+
+    for (let i = 0; i < anchors.length; i++) {
+      const a = anchors[i];
+      const next = anchors[i + 1] || null;
+      const yTop = a.y + Y_TOL;
+      const yBottom = next ? (next.y - Y_TOL) : -Infinity;
+      const band = items.filter((it) => it.y <= yTop && it.y >= yBottom);
+
+      const byKey = {};
+      for (const [key, rg] of Object.entries(ranges)) {
+        const colItems = band
+          .filter((it) => it.x >= rg.left && it.x < rg.right)
+          .sort((aa, bb) => (bb.y - aa.y) || (aa.x - bb.x));
+        // Join preserving vertical flow (top->bottom) but stable within line
+        const txt = colItems.map((x) => String(x.str || "").trim()).filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+        byKey[key] = txt;
+      }
+      outRows.push({ page: pg.page, anchor: a.code, columns: byKey });
+    }
+  }
+
+  return outRows;
 }
 
 function parseInvoiceHeader(lines) {
@@ -970,6 +1073,68 @@ function parseByCompany(lines, company) {
   return parseLionexInvoice(lines);
 }
 
+function parsePalExpressFromPages(pages) {
+  const allLines = [];
+  for (const pg of (pages || [])) {
+    try { allLines.push(...normalizePdfLines(pg.items || [])); } catch {}
+  }
+  const hdr = parseInvoiceHeader(allLines);
+
+  const rows = [];
+  const extracted = extractRowsByAnchorsInColumns({
+    pages,
+    anchorRe: /\b7-\d{4,}(?:_[A-Z0-9]+)?\b/i,
+    headerLabels: [
+      { key: "ville", label: "Ville" },
+      { key: "destinataire", label: "Destinataire" },
+      { key: "date_livraison", label: "Date" }, // sometimes split; "Date" is stable on PalExpress headers
+      { key: "status", label: "Status" },
+      { key: "crbt", label: "Crbt" },
+      { key: "frais", label: "Frais" },
+    ],
+  });
+
+  for (const r of extracted) {
+    const sendCode = String(r.anchor || "").trim();
+    if (!/^7-\d{4,}/.test(sendCode)) continue;
+    const c = r.columns || {};
+    const city = String(c.ville || "").replace(/\s+/g, " ").trim();
+    const status = normalizeStatusLabel(c.status || "");
+    const deliveryDate = (() => {
+      const m = String(c.date_livraison || "").match(/\b\d{4}-\d{2}-\d{2}\b/);
+      return m ? m[0] : "";
+    })();
+    const phone = (() => {
+      const m = String(c.destinataire || "").match(/\b0\d{9}\b/);
+      return m ? m[0] : "";
+    })();
+    const crbt = (() => {
+      const xs = parseDhAmounts(c.crbt || "").filter((n) => Math.abs(n) <= 5000);
+      return xs.length ? xs[0] : null;
+    })();
+    const fees = (() => {
+      const xs = parseDhAmounts(c.frais || "").filter((n) => Math.abs(n) <= 5000);
+      return xs.length ? xs[0] : null;
+    })();
+
+    rows.push({
+      sendCode,
+      orderNumber: extractOrderNumberFromSendCode(sendCode),
+      pickupDate: "",
+      deliveryDate,
+      phone,
+      status,
+      city,
+      crbt,
+      fees,
+      total: (crbt != null && fees != null) ? (crbt - fees) : null,
+      raw: JSON.stringify(c),
+    });
+  }
+
+  return { ...hdr, rows };
+}
+
 async function extractPdfLines(file) {
   const buf = await file.arrayBuffer();
   const pdf = await getDocument({ data: buf }).promise;
@@ -1050,8 +1215,15 @@ export default function InvoicesVerifier() {
         const f = ent?.file;
         if (!f) continue;
         const company = String(ent?.company || defaultCompany || "lionex");
-        const lines = await extractPdfLines(f);
-        const parsedDoc = parseByCompany(lines, company);
+        const key = company.trim().toLowerCase();
+        let parsedDoc = null;
+        if (key === "palexpress" || key === "pal-express" || key === "pal_express") {
+          const pages = await extractPdfPagesTextItems(f);
+          parsedDoc = parsePalExpressFromPages(pages);
+        } else {
+          const lines = await extractPdfLines(f);
+          parsedDoc = parseByCompany(lines, company);
+        }
         docs.push({
           fileName: f.name,
           company,
