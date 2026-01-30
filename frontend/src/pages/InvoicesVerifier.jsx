@@ -581,23 +581,25 @@ function parsePalExpressInvoice(lines) {
     let city = "";
     try {
       const afterCode = combined.split(sendCode).slice(1).join(sendCode).trim();
-      // Cut at first phone or first date
-      const phoneIdx = afterCode.search(phoneRe);
-      const dateIdx = afterCode.search(dateRe);
-      let cut = -1;
-      if (phoneIdx >= 0 && dateIdx >= 0) cut = Math.min(phoneIdx, dateIdx);
-      else cut = (phoneIdx >= 0 ? phoneIdx : dateIdx);
-      const before = (cut >= 0 ? afterCode.slice(0, cut) : afterCode).trim();
-      // City is the leading ALL-CAPS latin tokens; stop when we hit lowercase or Arabic.
-      const toks = before.split(/\s+/).filter(Boolean);
-      const out = [];
-      for (const t of toks) {
-        if (/[a-z]/.test(t)) break;
-        if (/[\u0600-\u06FF]/.test(t)) break;
-        out.push(t);
-        if (out.length >= 4) break;
+      // Best-effort: the Ville column is usually the very first segment, before the first "|" separator.
+      // This preserves full names like "SIDI BENNOUR", "HAD SOUALEM", "DAR BOUAZZA".
+      let seg = afterCode;
+      if (seg.includes("|")) {
+        seg = seg.split("|")[0];
+      } else {
+        // Fallback: cut at first phone or first date
+        const phoneIdx = seg.search(phoneRe);
+        const dateIdx = seg.search(dateRe);
+        let cut = -1;
+        if (phoneIdx >= 0 && dateIdx >= 0) cut = Math.min(phoneIdx, dateIdx);
+        else cut = (phoneIdx >= 0 ? phoneIdx : dateIdx);
+        seg = (cut >= 0 ? seg.slice(0, cut) : seg);
       }
-      city = (out.length ? out.join(" ") : (toks[0] || "")).trim();
+      seg = String(seg || "").replace(/\s+/g, " ").trim();
+      // Clean common junk and keep up to 5 words (cities can be multi-word)
+      seg = seg.replace(/^[^A-Za-z0-9\u00C0-\u017F\u0600-\u06FF]+/, "").trim();
+      const toks = seg.split(/\s+/).filter(Boolean);
+      city = toks.slice(0, 5).join(" ").trim();
     } catch {}
 
     const dates = (combined.match(dateRe) || []).slice(0, 2);
