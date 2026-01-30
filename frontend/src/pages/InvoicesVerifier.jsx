@@ -596,17 +596,24 @@ function parsePalExpressInvoice(lines) {
         seg = (cut >= 0 ? seg.slice(0, cut) : seg);
       }
       seg = String(seg || "").replace(/\s+/g, " ").trim();
-      // Clean common junk and keep only ALL-CAPS tokens to avoid swallowing customer names (e.g. "Elmoufid")
+      // Clean common junk and keep only ALL-CAPS tokens to avoid swallowing customer names (e.g. "Elmoufid").
+      // IMPORTANT: sometimes the second line of the city (e.g. "BOUAZZA") appears later in the extracted text,
+      // so we collect ALL eligible ALL-CAPS tokens (not necessarily contiguous).
       seg = seg.replace(/^[^A-Za-z0-9\u00C0-\u017F\u0600-\u06FF]+/, "").trim();
       const toks = seg.split(/\s+/).filter(Boolean);
       const out = [];
       for (const t of toks) {
-        // Stop when token contains lowercase latin (usually customer name)
-        if (/[a-z]/.test(t)) break;
-        // Stop when token is Arabic (customer names sometimes Arabic)
-        if (/[\u0600-\u06FF]/.test(t)) break;
+        if (!t) continue;
         // Stop when token starts with a digit/phone
         if (/^\d/.test(t)) break;
+        // Ignore Arabic (destinataire), keep city in latin/uppercase
+        if (/[\u0600-\u06FF]/.test(t)) continue;
+        // Ignore status words if they accidentally appear
+        if (/^livr/i.test(t) || /^refus/i.test(t)) continue;
+        // Only accept ALL-CAPS (no lowercase latin)
+        if (/[a-z]/.test(t)) continue;
+        // Must contain at least one uppercase A-Z (avoid weird symbols)
+        if (!/[A-Z]/.test(t)) continue;
         out.push(t);
         if (out.length >= 6) break;
       }
