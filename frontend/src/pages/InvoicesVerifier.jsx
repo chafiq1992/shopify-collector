@@ -229,6 +229,7 @@ function extractRowsByAnchorsInColumns({ pages, anchorRe, headerLabels }) {
   // We infer x column boundaries from header label positions on the first page.
   const first = pages?.[0]?.items || [];
   const labelXs = [];
+  const headerLabelNorms = (headerLabels || []).map((hl) => ({ key: hl.key, label: hl.label, norm: _normText(hl.label) }));
   for (const hl of (headerLabels || [])) {
     const want = _normText(hl.label);
     let best = null;
@@ -266,12 +267,30 @@ function extractRowsByAnchorsInColumns({ pages, anchorRe, headerLabels }) {
 
   for (const pg of (pages || [])) {
     const items = (pg.items || []).filter((it) => String(it.str || "").trim());
+    // Determine header Y on THIS page (tables repeat headers per page).
+    // If we don't do this, the first few rows on page 2 can be wrongly treated as "header" and dropped.
+    let headerYThisPage = headerY;
+    try {
+      let bestY = null;
+      for (const it of items) {
+        const t = _normText(it.str);
+        if (!t) continue;
+        for (const hl of headerLabelNorms) {
+          if (!hl.norm) continue;
+          if (t === hl.norm || t.includes(hl.norm)) {
+            if (bestY == null || it.y > bestY) bestY = it.y;
+          }
+        }
+      }
+      if (bestY != null) headerYThisPage = bestY;
+    } catch {}
+
     // Find anchor occurrences (e.g. "7-123456")
     const anchors = items
       .filter((it) => anchorRe.test(String(it.str || "").trim()))
       .map((it) => ({ ...it, code: String(it.str || "").trim() }))
       // ignore anchors that are in the header region
-      .filter((a) => a.y < (headerY - 5))
+      .filter((a) => a.y < (headerYThisPage - 5))
       .sort((a, b) => b.y - a.y);
 
     for (let i = 0; i < anchors.length; i++) {
