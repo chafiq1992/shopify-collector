@@ -270,6 +270,7 @@ function extractRowsByAnchorsInColumns({ pages, anchorRe, headerLabels }) {
     // Determine header Y on THIS page (tables repeat headers per page).
     // If we don't do this, the first few rows on page 2 can be wrongly treated as "header" and dropped.
     let headerYThisPage = headerY;
+    let headerYFound = false;
     try {
       let bestY = null;
       for (const it of items) {
@@ -283,6 +284,7 @@ function extractRowsByAnchorsInColumns({ pages, anchorRe, headerLabels }) {
         }
       }
       if (bestY != null) headerYThisPage = bestY;
+      headerYFound = (bestY != null);
     } catch {}
 
     // Find anchor occurrences (e.g. "7-123456")
@@ -290,7 +292,9 @@ function extractRowsByAnchorsInColumns({ pages, anchorRe, headerLabels }) {
       .filter((it) => anchorRe.test(String(it.str || "").trim()))
       .map((it) => ({ ...it, code: String(it.str || "").trim() }))
       // ignore anchors that are in the header region
-      .filter((a) => a.y < (headerYThisPage - 5))
+      // If we can't confidently detect the header on this page (common when header labels are split),
+      // do NOT filter anchors; otherwise we risk dropping all rows on page 2.
+      .filter((a) => !headerYFound || a.y < (headerYThisPage - 5))
       .sort((a, b) => b.y - a.y);
 
     for (let i = 0; i < anchors.length; i++) {
