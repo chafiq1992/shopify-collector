@@ -1159,7 +1159,38 @@ function parsePalExpressFromPages(pages) {
       { key: "crbt", label: "Crbt" },
       { key: "frais", label: "Frais" },
     ];
-    const anchorRe = /\b7-\d{4,}(?:_[A-Z0-9]+)?\b/i;
+    // Don't use strict word-boundaries here because codes can be split into multiple PDF text items
+    // (e.g. "7-" and "128062") which we later normalize by removing whitespace.
+    const anchorRe = /7-\d{4,}(?:_[A-Z0-9]+)?/i;
+
+    function inferRangesFromItems(items) {
+      // Infer x column boundaries from header labels on THIS page.
+      const labelXs = [];
+      for (const hl of headerLabels) {
+        const want = _normText(hl.label);
+        let best = null;
+        for (const it of (items || [])) {
+          const t = _normText(it.str);
+          if (!t) continue;
+          if (t === want || (want && t.includes(want))) {
+            if (!best || it.y > best.y) best = it;
+          }
+        }
+        if (best) labelXs.push({ key: hl.key, x: best.x, y: best.y });
+      }
+      labelXs.sort((a, b) => a.x - b.x);
+      if (labelXs.length < 2) return null;
+      const ranges = {};
+      for (let i = 0; i < labelXs.length; i++) {
+        const cur = labelXs[i];
+        const prev = labelXs[i - 1] || null;
+        const next = labelXs[i + 1] || null;
+        const left = prev ? (prev.x + cur.x) / 2 : -Infinity;
+        const right = next ? (cur.x + next.x) / 2 : Infinity;
+        ranges[cur.key] = { left, right };
+      }
+      return ranges;
+    }
 
     // Build column x-ranges from first page header labels
     const first = pages?.[0]?.items || [];
@@ -1191,10 +1222,6 @@ function parsePalExpressFromPages(pages) {
       const right = next ? (cur.x + next.x) / 2 : Infinity;
       ranges[cur.key] = { left, right };
     }
-    const codeRange = ranges.code;
-    if (!codeRange) {
-      return extractRowsByAnchorsInColumns({ pages, anchorRe, headerLabels });
-    }
 
     const outRows = [];
     const Y_LINE_TOL = 4.5;
@@ -1217,6 +1244,7 @@ function parsePalExpressFromPages(pages) {
 
     for (const pg of (pages || [])) {
       const items = (pg.items || []).filter((it) => String(it.str || "").trim());
+
       // Per-page header detection (optional). If it fails, don't filter.
       let headerYThis = headerY0;
       let headerFound = false;
@@ -1237,14 +1265,21 @@ function parsePalExpressFromPages(pages) {
       } catch {}
 
       const belowHeader = headerFound ? items.filter((it) => it.y < (headerYThis - 5)) : items;
-      const codeItems = belowHeader.filter((it) => it.x >= codeRange.left && it.x < codeRange.right);
+
+      // IMPORTANT: columns can shift slightly on page 2, so infer x ranges per page when possible.
+      const rangesThisPage = inferRangesFromItems(items) || ranges;
+      const codeRange = rangesThisPage?.code || null;
+      const codeItems = codeRange
+        ? belowHeader.filter((it) => it.x >= codeRange.left && it.x < codeRange.right)
+        : [];
 
       // Detect anchors by line reconstruction in code column
-      const anchorLines = groupByLines(codeItems);
+      const anchorLines = groupByLines(codeItems.length ? codeItems : belowHeader);
       const anchors = [];
       for (const ln of anchorLines) {
         const txt = ln.map((x) => String(x.str || "").trim()).join(" ").replace(/\s+/g, " ").trim();
-        const m = txt.match(anchorRe);
+        const compact = txt.replace(/\s+/g, "");
+        const m = compact.match(anchorRe) || txt.match(anchorRe);
         if (!m) continue;
         anchors.push({ code: m[0], y: ln[0]?.y ?? 0, x: ln[0]?.x ?? 0 });
       }
@@ -1257,7 +1292,7 @@ function parsePalExpressFromPages(pages) {
         const yBottom = next ? (next.y + Y_BAND_TOL) : -Infinity;
         const band = belowHeader.filter((it) => it.y <= yTop && it.y >= yBottom);
         const columns = {};
-        for (const [key, rg] of Object.entries(ranges)) {
+        for (const [key, rg] of Object.entries(rangesThisPage || ranges)) {
           const colItems = band.filter((it) => it.x >= rg.left && it.x < rg.right);
           const lines = groupByLines(colItems);
           const txt = lines
