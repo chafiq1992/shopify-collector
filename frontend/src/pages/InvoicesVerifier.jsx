@@ -541,20 +541,9 @@ function parsePalExpressInvoice(lines) {
   const dateRe = /\b\d{4}-\d{2}-\d{2}\b/g;
   const phoneRe = /\b0\d{9}\b/;
 
-  function _pickCrbtFeesIgnoreWeirdTotal(monies) {
-    const vals = (monies || []).map((x) => Number(x)).filter((n) => Number.isFinite(n));
-    // Ignore the last PDF column "Total" which is not reliable in PalExpress (very large IDs like 659829 DH)
-    const filtered = vals.filter((n) => Math.abs(n) <= 5000);
-    // Fees usually small (<= 80)
-    const fees = filtered.find((n) => Math.abs(n) <= 80) ?? null;
-    // CRBT is the largest remaining (<= 5000) excluding fees
-    const crbtCandidates = filtered.filter((n) => fees == null ? true : n !== fees);
-    const crbt = crbtCandidates.length ? Math.max(...crbtCandidates) : null;
-    const net = (crbt != null && fees != null) ? (crbt - fees) : null;
-    return { crbt, fees, total: net };
-  }
-
   const list = (lines || []);
+  // First pass: collect per-row money candidates so we can learn the most common fee value for this invoice.
+  const temps = [];
   for (let i = 0; i < list.length; i++) {
     const base = String(list[i] || "").trim();
     if (!codeRe.test(base)) continue;
@@ -619,13 +608,14 @@ function parsePalExpressInvoice(lines) {
     const metaFinal = statusMeta || findStatusInText(combined);
     const status = statusFound || metaFinal?.label || "";
 
-    const picked = _pickCrbtFeesIgnoreWeirdTotal(monies);
-    const crbt = picked.crbt != null ? picked.crbt : null;
-    const fees = picked.fees != null ? picked.fees : null;
-    const total = picked.total != null ? picked.total : null;
+    // Extract DH amounts; ignore bogus "Total" column values (very large IDs like 659829 DH)
+    const vals = (monies || []).map((x) => Number(x)).filter((n) => Number.isFinite(n));
+    const filtered = vals.filter((n) => Math.abs(n) <= 5000);
+    const small = filtered.filter((n) => Math.abs(n) <= 80);
+    const large = filtered.filter((n) => Math.abs(n) > 80);
 
     const orderNumber = extractOrderNumberFromSendCode(sendCode);
-    rows.push({
+    temps.push({
       sendCode,
       orderNumber,
       pickupDate,
@@ -633,10 +623,102 @@ function parsePalExpressInvoice(lines) {
       phone,
       status,
       city,
-      crbt,
-      fees,
-      total,
+      // temporary candidates
+      _moneySmall: small,
+      _moneyLarge: large,
       raw: combined,
+    });
+  }
+
+  // Learn the most common "fees" value in this invoice (often 20 or 25).
+  const feeCounts = {};
+  for (const t of temps) {
+    for (const n of (t._moneySmall || [])) {
+      const key = String(Number(n).toFixed(2));
+      feeCounts[key] = (feeCounts[key] || 0) + 1;
+    }
+  }
+  let feeMode = null;
+  try {
+    const entries = Object.entries(feeCounts);
+    entries.sort((a, b) => (b[1] - a[1]) || (Number(a[0]) - Number(b[0])));
+    if (entries.length) feeMode = Number(entries[0][0]);
+  } catch {}
+
+  function pickFeesCrbtFromCandidates(small, large) {
+    const sm = Array.isArray(small) ? small.slice() : [];
+    const lg = Array.isArray(large) ? large.slice() : [];
+    const picked = { fees: null, crbt: null, total: null };
+
+    // Typical case: CRBT is large, fees is small.
+    if (lg.length) {
+      picked.crbt = Math.max(...lg);
+      if (sm.length) {
+        if (feeMode != null) {
+          // choose small closest to feeMode
+          let best = sm[0];
+          let bestD = Math.abs(sm[0] - feeMode);
+          for (const x of sm) {
+            const d = Math.abs(x - feeMode);
+            if (d < bestD) { best = x; bestD = d; }
+          }
+          picked.fees = best;
+        } else {
+          // fallback: choose max small as fees (e.g. 25 over 15)
+          picked.fees = Math.max(...sm);
+        }
+      }
+      if (picked.crbt != null && picked.fees != null) picked.total = picked.crbt - picked.fees;
+      return picked;
+    }
+
+    // Edge case: both values are "small" (e.g. CRBT=15, fees=25)
+    if (sm.length >= 2) {
+      const a = sm[0];
+      const b = sm[1];
+      if (feeMode != null) {
+        const da = Math.abs(a - feeMode);
+        const db = Math.abs(b - feeMode);
+        picked.fees = da <= db ? a : b;
+        picked.crbt = da <= db ? b : a;
+      } else {
+        // fallback: fees is the larger, CRBT is the smaller
+        picked.fees = Math.max(a, b);
+        picked.crbt = Math.min(a, b);
+      }
+      picked.total = picked.crbt - picked.fees;
+      return picked;
+    }
+
+    // If only one small value, assume it's fees when it matches feeMode; otherwise treat as crbt.
+    if (sm.length === 1) {
+      const x = sm[0];
+      if (feeMode != null && Math.abs(x - feeMode) < 0.01) {
+        picked.fees = x;
+      } else {
+        picked.crbt = x;
+      }
+      if (picked.crbt != null && picked.fees != null) picked.total = picked.crbt - picked.fees;
+      return picked;
+    }
+
+    return picked;
+  }
+
+  for (const t of temps) {
+    const chosen = pickFeesCrbtFromCandidates(t._moneySmall, t._moneyLarge);
+    rows.push({
+      sendCode: t.sendCode,
+      orderNumber: t.orderNumber,
+      pickupDate: t.pickupDate,
+      deliveryDate: t.deliveryDate,
+      phone: t.phone,
+      status: t.status,
+      city: t.city,
+      fees: (chosen.fees != null ? chosen.fees : null),
+      crbt: (chosen.crbt != null ? chosen.crbt : null),
+      total: (chosen.total != null ? chosen.total : null),
+      raw: t.raw,
     });
   }
 
