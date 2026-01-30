@@ -612,7 +612,9 @@ function parseMetalivraisonInvoice(lines) {
 function parseIbexInvoice(lines) {
   const hdr = parseInvoiceHeader(lines);
   const rows = [];
-  const codeRe = /\b\d{1,2}-[0-9A-Z_]{3,}\b/i;
+  // IBEX "Code d'envoi" is like "7-58537". Avoid matching invoice suffixes like "23-296"
+  // from "FCT-...-23-296" in the header.
+  const codeRe = /\b7-\d{4,}(?:_[A-Z0-9]+)?\b/i;
   const dateRe = /\b\d{4}-\d{2}-\d{2}\b/g;
   const phoneRe = /\b0\d{9}\b/;
 
@@ -634,7 +636,8 @@ function parseIbexInvoice(lines) {
       const next = String(list[j] || "").trim();
       if (!next) { j++; continue; }
       if (codeRe.test(next)) break;
-      if (/^(Total\b|Total\s+Brut\b|Total\s+Net\b|Sauf\b|Facture\b|Colis\b|Statut\s*:|Vous\s+remerci)/i.test(next)) break;
+      // Stop at footer/summary/other tables (e.g. "N° | Désignation ...", "ecart ...")
+      if (/^(?:\|?\s*)?(Total\b|Total\s+Brut\b|Total\s+Net\b|Sauf\b|Facture\b|Colis\b|Statut\s*:|Vous\s+remerci|N°\b|D[ée]signation\b|ecart\b)/i.test(next)) break;
       if (merges >= 4) break;
       combined = `${combined} ${next}`.replace(/\s+/g, " ").trim();
       monies = parseDhAmounts(combined);
@@ -657,6 +660,10 @@ function parseIbexInvoice(lines) {
 
     const metaFinal = statusMeta || findStatusInText(combined);
     const status = statusFound || metaFinal?.label || "";
+
+    // IBEX invoices can contain other tables/lines with a send code (e.g. "ecart 7-58567").
+    // Only consider a row valid if we have a recognizable delivery status.
+    if (!status) continue;
 
     const picked = pickCrbtFeesPackagingTotal(monies);
     const crbt = picked.crbt != null ? picked.crbt : null;
