@@ -572,9 +572,35 @@ function parsePalExpressInvoice(lines) {
       }
       hasStatus = hasStatus || !!statusFound;
       merges += 1;
-      if (hasStatus && monies.length >= 3) break;
+      // Do NOT break early here. PalExpress cities are often split across lines ("DAR" then "BOUAZZA"),
+      // and the money/status can be present before the city continuation line. We'll stop by max merges or next row.
       j++;
     }
+
+    // If the city is split across multiple PDF lines, merge 1-2 extra ALL-CAPS-only lines (no digits/DH/phone/date),
+    // so we can capture "SIDI BENNOUR", "HAD SOUALEM", "DAR BOUAZZA".
+    try {
+      let extra = 0;
+      while (extra < 2 && j < list.length) {
+        const nxt = String(list[j] || "").trim();
+        if (!nxt) { j++; continue; }
+        if (codeRe.test(nxt)) break;
+        if (/^(Total\b|Total\s+Brut\b|Total\s+Net\b|Sauf\b|Facture\b|Colis\b|Statut\s*:|Vous\s+remerci)/i.test(nxt)) break;
+        // Reject anything that clearly belongs to other columns
+        if (/\bDH\b/i.test(nxt)) break;
+        if (phoneRe.test(nxt)) break;
+        if (dateRe.test(nxt)) break;
+        if (findStatusInText(nxt)) break;
+        // Accept only all-caps latin tokens/spaces/dashes (multi-word city continuation)
+        if (/[a-z]/.test(nxt)) break;
+        if (!/[A-Z]/.test(nxt)) break;
+        if (/\d/.test(nxt)) break;
+        combined = `${combined} ${nxt}`.replace(/\s+/g, " ").trim();
+        extra += 1;
+        j += 1;
+      }
+    } catch {}
+
     i = j - 1;
 
     // PalExpress layout: city is right after sendCode and before customer/phone/date.
