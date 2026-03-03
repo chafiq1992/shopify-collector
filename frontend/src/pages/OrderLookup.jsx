@@ -229,6 +229,32 @@ export default function OrderLookup(){
     try { return Number(order?.total_price || 0).toFixed(2); } catch { return String(order?.total_price || 0); }
   }, [order]);
 
+  const screenshotTimeline = useMemo(() => {
+    const text = String(order?.note || "");
+    if (!text) return [];
+    return text
+      .split(/\r?\n/)
+      .map((line) => {
+        const raw = String(line || "").trim();
+        const m = raw.match(/^\[AGENT_SCREENSHOT\]\s+(\S+)\s+(\S+)$/);
+        if (!m) return null;
+        const ts = String(m[1] || "").trim();
+        const url = String(m[2] || "").trim();
+        if (!url) return null;
+        return { ts, url };
+      })
+      .filter(Boolean);
+  }, [order?.note]);
+
+  const commentLines = useMemo(() => {
+    const text = String(order?.note || "").trim();
+    if (!text) return [];
+    return text
+      .split(/\r?\n/)
+      .map((line) => String(line || "").trim())
+      .filter((line) => line && !line.startsWith("[AGENT_SCREENSHOT]"));
+  }, [order?.note]);
+
   function filteredSuggestions(){
     const q = (tagQuery || newTag || "").trim().toLowerCase();
     if (!q) return tagSuggestions.slice(0, 20);
@@ -439,16 +465,13 @@ export default function OrderLookup(){
             <div className="px-4 py-3 border-t border-gray-100">
               <div className="text-sm font-semibold mb-2">Comments</div>
               <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm min-h-[44px]">
-                {(() => {
-                  const text = (order.note || "").trim();
-                  if (!text) return <span className="text-gray-500">No comments</span>;
-                  const lines = text.split(/\r?\n/).filter(l => l && l.trim());
-                  return (
-                    <ul className="list-disc pl-5 space-y-1">
-                      {lines.map((l, i) => (<li key={i}>{l}</li>))}
-                    </ul>
-                  );
-                })()}
+                {!commentLines.length ? (
+                  <span className="text-gray-500">No comments</span>
+                ) : (
+                  <ul className="list-disc pl-5 space-y-1">
+                    {commentLines.map((l, i) => (<li key={i}>{l}</li>))}
+                  </ul>
+                )}
               </div>
               <div className="mt-2 flex items-center gap-2">
                 <input
@@ -462,6 +485,32 @@ export default function OrderLookup(){
                   className="px-3 py-2 rounded-lg bg-gray-900 text-white text-sm font-semibold active:scale-[.98]"
                 >Post</button>
               </div>
+            </div>
+            <div className="px-4 py-3 border-t border-gray-100">
+              <div className="text-sm font-semibold mb-2">Agent screenshots</div>
+              {!screenshotTimeline.length ? (
+                <div className="text-sm text-gray-500">No screenshots yet.</div>
+              ) : (
+                <div className="space-y-3 max-h-96 overflow-auto pr-1">
+                  {screenshotTimeline.map((entry, idx) => (
+                    <div key={`${entry.ts}-${idx}`} className="rounded-lg border border-gray-200 p-2 bg-gray-50">
+                      <div className="text-[11px] text-gray-600 mb-2">
+                        {(() => {
+                          try { return new Date(entry.ts).toLocaleString(); } catch { return entry.ts || "—"; }
+                        })()}
+                      </div>
+                      <a href={entry.url} target="_blank" rel="noreferrer" className="block">
+                        <img
+                          src={entry.url}
+                          alt="Agent screenshot"
+                          className="w-full max-h-72 object-contain rounded border border-gray-200 bg-white"
+                          loading="lazy"
+                        />
+                      </a>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="px-4 py-3 border-t border-gray-100">
               <div className="text-sm font-semibold mb-2">Timeline</div>
