@@ -66,6 +66,7 @@ class DailyUserStats(Base):
     store_key = Column(String(32), primary_key=True)
     collected_count = Column(Integer, nullable=False, default=0)
     out_count = Column(Integer, nullable=False, default=0)
+    fulfilled_count = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     user = relationship("User")

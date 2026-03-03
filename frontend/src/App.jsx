@@ -13,6 +13,7 @@ const OrderBrowserPage = React.lazy(() => import('./pages/OrderBrowser.jsx'));
 const VariantOrdersPage = React.lazy(() => import('./pages/VariantOrders.jsx'));
 const LoginPage = React.lazy(() => import('./pages/Login.jsx'));
 const AdminAnalyticsPage = React.lazy(() => import('./pages/AdminAnalytics.jsx'));
+const MyAnalyticsPage = React.lazy(() => import('./pages/MyAnalytics.jsx'));
 const ShopifyConnectPage = React.lazy(() => import('./pages/ShopifyConnect.jsx'));
 const InvoicesVerifierPage = React.lazy(() => import('./pages/InvoicesVerifier.jsx'));
 
@@ -713,6 +714,13 @@ export default function App(){
         </Suspense>
       );
     }
+    if (currentPath === '/my-analytics'){
+      return (
+        <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
+          <MyAnalyticsPage />
+        </Suspense>
+      );
+    }
     if (currentPath === '/shopify-connect'){
       return (
         <Suspense fallback={<div className="min-h-screen w-full flex items-center justify-center text-gray-600">Loading…</div>}>
@@ -781,6 +789,14 @@ export default function App(){
                   Shopify Connect
                 </button>
               </>
+            )}
+            {auth?.user && (
+              <button
+                onClick={()=>navigate('/my-analytics')}
+                className="text-xs px-3 py-1 rounded-full border border-teal-200 bg-teal-50 text-teal-700 hover:bg-teal-100"
+              >
+                My Analytics
+              </button>
             )}
             {auth?.user && (
               <button

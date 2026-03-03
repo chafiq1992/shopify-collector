@@ -26,7 +26,7 @@ HAVE_AUTH_DB = True
 try:
     from .db import get_session, init_db, SessionLocal
     from .models import User, OrderEvent, DailyUserStats, AppSetting
-    from .auth_routes import router as auth_router, get_current_user, require_admin, hash_password
+    from .auth_routes import router as auth_router, get_current_user, get_current_user_optional, require_admin, hash_password
     from .admin_bootstrap_routes import router as admin_bootstrap_router
     from .shopify_oauth_routes import router as shopify_oauth_router
     from .settings_store import get_shopify_oauth_record
@@ -39,6 +39,8 @@ except Exception:
     admin_bootstrap_router = None  # type: ignore
     def get_current_user():  # type: ignore
         raise HTTPException(status_code=503, detail="auth not configured")
+    def get_current_user_optional():  # type: ignore
+        return None
     def require_admin():  # type: ignore
         raise HTTPException(status_code=503, detail="auth not configured")
     class User(BaseModel):  # type: ignore
@@ -1739,6 +1741,7 @@ async def _bump_daily_stats(session: AsyncSession, *, user_id: str, store_key: s
             store_key=key[2],
             collected_count=1 if action == "collected" else 0,
             out_count=1 if action == "out" else 0,
+            fulfilled_count=1 if action == "fulfilled" else 0,
         )
         session.add(row)
         await session.flush()
@@ -1748,6 +1751,8 @@ async def _bump_daily_stats(session: AsyncSession, *, user_id: str, store_key: s
         row.collected_count = (row.collected_count or 0) + 1
     elif action == "out":
         row.out_count = (row.out_count or 0) + 1
+    elif action == "fulfilled":
+        row.fulfilled_count = (row.fulfilled_count or 0) + 1
     row.updated_at = datetime.now(timezone.utc)
     await session.flush()
 
@@ -1900,6 +1905,7 @@ class StatsRow(BaseModel):
     store: str
     collected: int
     out: int
+    fulfilled: int = 0
     total: int
 
 
@@ -1927,6 +1933,7 @@ if HAVE_AUTH_DB:
                 OrderEvent.store_key,
                 func.sum(case((OrderEvent.action == "collected", 1), else_=0)).label("collected"),
                 func.sum(case((OrderEvent.action == "out", 1), else_=0)).label("out"),
+                func.sum(case((OrderEvent.action == "fulfilled", 1), else_=0)).label("fulfilled"),
             )
             .join(OrderEvent, User.id == OrderEvent.user_id)
             .where(OrderEvent.created_at >= start_dt, OrderEvent.created_at < end_dt_inclusive)
@@ -1938,10 +1945,11 @@ if HAVE_AUTH_DB:
 
         result = await session.execute(stmt)
         rows = []
-        for uid, email, name, day_val, store_val, collected, out in result.fetchall():
+        for uid, email, name, day_val, store_val, collected, out, fulfilled in result.fetchall():
             day_str = day_val.isoformat() if hasattr(day_val, "isoformat") else str(day_val)
             collected_int = int(collected or 0)
             out_int = int(out or 0)
+            fulfilled_int = int(fulfilled or 0)
             rows.append(
                 StatsRow(
                     user_id=uid,
@@ -1951,7 +1959,8 @@ if HAVE_AUTH_DB:
                     store=store_val,
                     collected=collected_int,
                     out=out_int,
-                    total=collected_int + out_int,
+                    fulfilled=fulfilled_int,
+                    total=collected_int + out_int + fulfilled_int,
                 ).dict()
             )
 
@@ -1959,9 +1968,10 @@ if HAVE_AUTH_DB:
         for r in rows:
             user_key = r["user_id"]
             if user_key not in summary:
-                summary[user_key] = {"email": r["email"], "name": r["name"], "collected": 0, "out": 0, "total": 0}
+                summary[user_key] = {"email": r["email"], "name": r["name"], "collected": 0, "out": 0, "fulfilled": 0, "total": 0}
             summary[user_key]["collected"] += r["collected"]
             summary[user_key]["out"] += r["out"]
+            summary[user_key]["fulfilled"] += int(r.get("fulfilled") or 0)
             summary[user_key]["total"] += r["total"]
 
         return {
@@ -1975,6 +1985,75 @@ if HAVE_AUTH_DB:
 else:
     @app.get("/api/admin/users/stats", response_model=Dict[str, Any])
     async def admin_user_stats_unavailable():
+        raise HTTPException(status_code=503, detail="auth/db not configured")
+
+
+if HAVE_AUTH_DB:
+    @app.get("/api/agent/my-stats", response_model=Dict[str, Any])
+    async def agent_my_stats(
+        from_date: Optional[str] = Query(None, description="Inclusive start date (YYYY-MM-DD)"),
+        to_date: Optional[str] = Query(None, description="Inclusive end date (YYYY-MM-DD)"),
+        store: Optional[str] = Query(None, description="Optional store filter"),
+        user: User = Depends(get_current_user),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        start_dt = _parse_date(from_date) or (datetime.now(timezone.utc) - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_dt = _parse_date(to_date) or datetime.now(timezone.utc)
+        end_dt_inclusive = end_dt + timedelta(days=1)
+        store_key = _normalize_store(store) if store else None
+
+        stmt = (
+            select(
+                func.date(OrderEvent.created_at).label("day"),
+                OrderEvent.store_key,
+                func.sum(case((OrderEvent.action == "collected", 1), else_=0)).label("collected"),
+                func.sum(case((OrderEvent.action == "out", 1), else_=0)).label("out"),
+                func.sum(case((OrderEvent.action == "fulfilled", 1), else_=0)).label("fulfilled"),
+            )
+            .where(
+                OrderEvent.user_id == user.id,
+                OrderEvent.created_at >= start_dt,
+                OrderEvent.created_at < end_dt_inclusive,
+            )
+            .group_by(func.date(OrderEvent.created_at), OrderEvent.store_key)
+            .order_by(func.date(OrderEvent.created_at).desc())
+        )
+        if store_key:
+            stmt = stmt.where(OrderEvent.store_key == store_key)
+
+        result = await session.execute(stmt)
+        rows: List[Dict[str, Any]] = []
+        summary = {"collected": 0, "out": 0, "fulfilled": 0, "total": 0}
+        for day_val, store_val, collected, out, fulfilled in result.fetchall():
+            collected_int = int(collected or 0)
+            out_int = int(out or 0)
+            fulfilled_int = int(fulfilled or 0)
+            total_int = collected_int + out_int + fulfilled_int
+            rows.append({
+                "day": day_val.isoformat() if hasattr(day_val, "isoformat") else str(day_val),
+                "store": store_val,
+                "collected": collected_int,
+                "out": out_int,
+                "fulfilled": fulfilled_int,
+                "total": total_int,
+            })
+            summary["collected"] += collected_int
+            summary["out"] += out_int
+            summary["fulfilled"] += fulfilled_int
+            summary["total"] += total_int
+
+        return {
+            "ok": True,
+            "user": {"id": user.id, "email": user.email, "name": user.name, "role": user.role},
+            "rows": rows,
+            "summary": summary,
+            "from": start_dt.date().isoformat(),
+            "to": end_dt.date().isoformat(),
+            "store": store_key or "all",
+        }
+else:
+    @app.get("/api/agent/my-stats", response_model=Dict[str, Any])
+    async def agent_my_stats_unavailable():
         raise HTTPException(status_code=503, detail="auth/db not configured")
 
 
@@ -2140,6 +2219,56 @@ async def fulfill_order(order_gid: str, body: FulfillRequest, store: Optional[st
     except Exception:
         pass
     return {"ok": True, "result": res}
+
+if HAVE_AUTH_DB:
+    @app.post("/api/orders/{order_gid:path}/fulfill-tracked")
+    async def fulfill_order_tracked(
+        order_gid: str,
+        body: FulfillRequest,
+        store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
+        user: User = Depends(get_current_user),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        store_key = _normalize_store(store)
+        result = await fulfill_order(order_gid=order_gid, body=body, store=store_key)
+        if not bool((result or {}).get("ok")):
+            return result
+        if bool((result or {}).get("fulfilled")) is False:
+            return result
+
+        try:
+            existing = await session.scalar(
+                select(OrderEvent).where(
+                    OrderEvent.order_gid == order_gid,
+                    OrderEvent.store_key == store_key,
+                    OrderEvent.action == "fulfilled",
+                )
+            )
+        except Exception:
+            existing = None
+
+        if existing:
+            return {"ok": True, "deduped": True, "result": (result or {}).get("result")}
+
+        await _record_user_action(
+            session,
+            user_id=user.id,
+            order_number=None,
+            order_gid=order_gid,
+            store_key=store_key,
+            action="fulfilled",
+            metadata={"source": "order_lookup"},
+        )
+        try:
+            await session.commit()
+        except IntegrityError:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+            return {"ok": True, "deduped": True, "result": (result or {}).get("result")}
+
+        return {"ok": True, "result": (result or {}).get("result")}
 
 @app.get("/api/orders/{order_gid:path}/fulfillment-orders")
 async def get_fulfillment_orders(order_gid: str, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):

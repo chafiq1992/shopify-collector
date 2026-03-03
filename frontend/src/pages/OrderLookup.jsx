@@ -44,7 +44,7 @@ const API = {
   },
   async fulfill(orderId, store){
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/fulfill${qs}`, {
+    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/fulfill-tracked${qs}`, {
       method: "POST",
       headers: authHeaders({"Content-Type":"application/json"}),
     });
@@ -53,7 +53,7 @@ const API = {
   },
   async fulfillWithSelection(orderId, store, lineItemsByFulfillmentOrder){
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/fulfill${qs}`, {
+    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/fulfill-tracked${qs}`, {
       method: "POST",
       headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ lineItemsByFulfillmentOrder }),
@@ -269,6 +269,10 @@ export default function OrderLookup(){
             onClick={()=>{ try { history.back(); } catch {} }}
             className="px-3 py-1.5 rounded-lg text-sm border border-gray-300 hover:bg-gray-100"
           >Back</button>
+          <button
+            onClick={()=>{ try { location.href = `/my-analytics?store=${encodeURIComponent(store)}`; } catch {} }}
+            className="px-3 py-1.5 rounded-lg text-sm border border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+          >My Analytics</button>
           <div className="ml-2 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
             <button
               onClick={()=>setStore('irrakids')}
