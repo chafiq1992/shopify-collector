@@ -296,18 +296,20 @@ export default function OrderLookup(){
       // New multiline format:
       // Snip by <agent>
       // At: <ts>
-      // Link: <url>
+      // <url> or Link: <url>
       const mSnip = raw.match(/^Snip by\s+(.+)$/i);
       if (mSnip) {
         const agent = String(mSnip[1] || "").trim();
         const atRaw = String(lines[i + 1] || "").trim();
-        const linkRaw = String(lines[i + 2] || "").trim();
+        const urlRaw = String(lines[i + 2] || "").trim();
         const mAt = atRaw.match(/^At:\s*(.+)$/i);
-        const mLink = linkRaw.match(/^Link:\s*(\S+)$/i);
-        if (mLink) {
+        const mLink = urlRaw.match(/^Link:\s*(\S+)$/i);
+        const mUrl = urlRaw.match(/^(https?:\/\/\S+)$/i);
+        const finalUrl = mLink ? String(mLink[1] || "").trim() : (mUrl ? String(mUrl[1] || "").trim() : "");
+        if (finalUrl) {
           out.push({
             ts: mAt ? String(mAt[1] || "").trim() : "",
-            url: String(mLink[1] || "").trim(),
+            url: finalUrl,
             agent,
           });
           i += 2;
@@ -320,6 +322,7 @@ export default function OrderLookup(){
   const commentLines = useMemo(() => {
     const text = String(order?.note || "").trim();
     if (!text) return [];
+    const screenshotUrlSet = new Set((screenshotTimeline || []).map((x) => String(x?.url || "").trim()).filter(Boolean));
     return text
       .split(/\r?\n/)
       .map((line) => String(line || "").trim())
@@ -328,9 +331,10 @@ export default function OrderLookup(){
         !/^Agent screenshot\s*\(/i.test(line) &&
         !/^Snip by\s+/i.test(line) &&
         !/^At:\s+/i.test(line) &&
-        !/^Link:\s+/i.test(line)
+        !/^Link:\s+/i.test(line) &&
+        !screenshotUrlSet.has(line)
       );
-  }, [order?.note]);
+  }, [order?.note, screenshotTimeline]);
 
   function filteredSuggestions(){
     const q = (tagQuery || newTag || "").trim().toLowerCase();
