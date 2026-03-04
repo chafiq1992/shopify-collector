@@ -800,6 +800,10 @@ class OrderVariant(BaseModel):
     qty: int
     status: Optional[str] = None  # fulfilled | unfulfilled | removed | unknown
     unfulfilled_qty: Optional[int] = None
+    unit_price: Optional[float] = None
+    currency_code: Optional[str] = None
+    color: Optional[str] = None
+    size: Optional[str] = None
 
 class OrderDTO(BaseModel):
     id: str
@@ -813,6 +817,14 @@ class OrderDTO(BaseModel):
     shipping_zip: Optional[str] = None
     shipping_province: Optional[str] = None
     shipping_country: Optional[str] = None
+    billing_name: Optional[str] = None
+    billing_phone: Optional[str] = None
+    billing_address1: Optional[str] = None
+    billing_address2: Optional[str] = None
+    billing_city: Optional[str] = None
+    billing_zip: Optional[str] = None
+    billing_province: Optional[str] = None
+    billing_country: Optional[str] = None
     sales_channel: Optional[str] = None
     tags: List[str] = []
     note: Optional[str] = None
@@ -826,6 +838,9 @@ class OrderDTO(BaseModel):
     # Used to match "Fulfilled on <date>" like Shopify Admin (any fulfillment in range, not only the latest).
     fulfillment_times: List[str] = []
     financial_status: Optional[str] = None
+    shipping_price: Optional[float] = None
+    discount_total: Optional[float] = None
+    currency_code: Optional[str] = None
 
 # ---------- Helpers ----------
 def build_query_string(
@@ -955,6 +970,33 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
                     status_val = "fulfilled" if int(unfulfilled_qty) == 0 else "unfulfilled"
         except Exception:
             status_val = "unknown"
+        unit_price_val: Optional[float] = None
+        unit_price_ccy: Optional[str] = None
+        try:
+            up = ((li.get("originalUnitPriceSet") or {}).get("shopMoney") or {})
+            if up.get("amount") is not None:
+                unit_price_val = float(up.get("amount"))
+            unit_price_ccy = up.get("currencyCode")
+        except Exception:
+            unit_price_val = None
+            unit_price_ccy = None
+
+        color_val: Optional[str] = None
+        size_val: Optional[str] = None
+        try:
+            opts = (var or {}).get("selectedOptions") or []
+            for opt in opts:
+                n = str((opt or {}).get("name") or "").strip().lower()
+                v_opt = str((opt or {}).get("value") or "").strip()
+                if not v_opt:
+                    continue
+                if n == "color" and not color_val:
+                    color_val = v_opt
+                if n == "size" and not size_val:
+                    size_val = v_opt
+        except Exception:
+            pass
+
         variants.append(OrderVariant(
             id=(var or {}).get("id"),
             product_id=((var or {}).get("product") or {}).get("id"),
@@ -969,6 +1011,10 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             qty=qty,
             status=status_val,
             unfulfilled_qty=(None if unfulfilled_qty is None else int(unfulfilled_qty)),
+            unit_price=unit_price_val,
+            currency_code=unit_price_ccy,
+            color=color_val,
+            size=size_val,
         ))
     # Prefer currentTotalPriceSet if available, else totalPriceSet
     price = 0.0
@@ -1032,6 +1078,29 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         except Exception:
             cust_name = None
     ship = (node.get("shippingAddress") or {}) or {}
+    bill = (node.get("billingAddress") or {}) or {}
+    shipping_price_val: Optional[float] = None
+    discount_total_val: Optional[float] = None
+    currency_code_val: Optional[str] = None
+    try:
+        ship_money = ((node.get("totalShippingPriceSet") or {}).get("shopMoney") or {})
+        if ship_money.get("amount") is not None:
+            shipping_price_val = float(ship_money.get("amount"))
+        currency_code_val = ship_money.get("currencyCode") or currency_code_val
+    except Exception:
+        shipping_price_val = None
+    try:
+        disc_money = ((node.get("totalDiscountsSet") or {}).get("shopMoney") or {})
+        if disc_money.get("amount") is not None:
+            discount_total_val = float(disc_money.get("amount"))
+        currency_code_val = disc_money.get("currencyCode") or currency_code_val
+    except Exception:
+        discount_total_val = None
+    try:
+        total_money = ((node.get("currentTotalPriceSet") or {}).get("shopMoney") or {})
+        currency_code_val = total_money.get("currencyCode") or currency_code_val
+    except Exception:
+        pass
 
     return OrderDTO(
         id=node["id"],
@@ -1045,6 +1114,14 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         shipping_zip=ship.get("zip"),
         shipping_province=ship.get("province"),
         shipping_country=ship.get("country"),
+        billing_name=bill.get("name"),
+        billing_phone=bill.get("phone"),
+        billing_address1=bill.get("address1"),
+        billing_address2=bill.get("address2"),
+        billing_city=bill.get("city"),
+        billing_zip=bill.get("zip"),
+        billing_province=bill.get("province"),
+        billing_country=bill.get("country"),
         sales_channel=node.get("sourceName"),
         tags=node.get("tags") or [],
         note=node.get("note"),
@@ -1056,6 +1133,9 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         fulfilled_at=fulfilled_at_val,
         fulfillment_times=fulfillment_times,
         financial_status=node.get("displayFinancialStatus"),
+        shipping_price=shipping_price_val,
+        discount_total=discount_total_val,
+        currency_code=currency_code_val,
     )
 
 # ---------- Routes ----------
@@ -1207,9 +1287,12 @@ async def list_orders(
             note
             fulfillments { createdAt status }
             shippingAddress { name city phone address1 address2 zip province country }
+            billingAddress { name city phone address1 address2 zip province country }
             customer { displayName }
             currentTotalPriceSet { shopMoney { amount currencyCode } }
             totalPriceSet { shopMoney { amount currencyCode } }
+            totalShippingPriceSet { shopMoney { amount currencyCode } }
+            totalDiscountsSet { shopMoney { amount currencyCode } }
             displayFinancialStatus
             lineItems(first: 50) {
               edges {
@@ -1217,10 +1300,12 @@ async def list_orders(
                   quantity
                   unfulfilledQuantity
                   sku
+                  originalUnitPriceSet { shopMoney { amount currencyCode } }
                   variant {
                     id
                     title
                     barcode
+                    selectedOptions { name value }
                     inventoryQuantity
                     inventoryItem { id }
                     image { url }
@@ -2274,28 +2359,17 @@ if HAVE_AUTH_DB:
         if bool((result or {}).get("fulfilled")) is False:
             return result
 
-        try:
-            existing = await session.scalar(
-                select(OrderEvent).where(
-                    OrderEvent.order_gid == order_gid,
-                    OrderEvent.store_key == store_key,
-                    OrderEvent.action == "fulfilled",
-                )
-            )
-        except Exception:
-            existing = None
-
-        if existing:
-            return {"ok": True, "deduped": True, "result": (result or {}).get("result")}
-
+        # Record fulfillment per agent.
+        # We intentionally store order_gid as None for this action to avoid
+        # collision with legacy global unique keys that are not per-user.
         await _record_user_action(
             session,
             user_id=user.id,
             order_number=None,
-            order_gid=order_gid,
+            order_gid=None,
             store_key=store_key,
             action="fulfilled",
-            metadata={"source": "order_lookup"},
+            metadata={"source": "order_lookup", "order_gid": order_gid},
         )
         try:
             await session.commit()
@@ -2304,7 +2378,7 @@ if HAVE_AUTH_DB:
                 await session.rollback()
             except Exception:
                 pass
-            return {"ok": True, "deduped": True, "result": (result or {}).get("result")}
+            return {"ok": False, "errors": [{"message": "Failed to persist fulfillment analytics"}], "result": (result or {}).get("result")}
 
         return {"ok": True, "result": (result or {}).get("result")}
 

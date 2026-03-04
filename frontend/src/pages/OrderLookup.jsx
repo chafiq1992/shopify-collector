@@ -253,6 +253,19 @@ export default function OrderLookup(){
   const totalPrice = useMemo(() => {
     try { return Number(order?.total_price || 0).toFixed(2); } catch { return String(order?.total_price || 0); }
   }, [order]);
+  const shippingPrice = useMemo(() => {
+    try {
+      if (order?.shipping_price == null) return null;
+      return Number(order.shipping_price).toFixed(2);
+    } catch { return null; }
+  }, [order]);
+  const discountTotal = useMemo(() => {
+    try {
+      if (order?.discount_total == null) return null;
+      return Number(order.discount_total).toFixed(2);
+    } catch { return null; }
+  }, [order]);
+  const currencyCode = useMemo(() => String(order?.currency_code || "").trim() || "", [order]);
 
   const isOrderFulfilled = useMemo(() => {
     if (!order) return false;
@@ -432,21 +445,41 @@ export default function OrderLookup(){
             </div>
             <div className="px-4 pb-2">
               <div className="text-xs text-gray-500 mb-1">Customer & shipping</div>
-              <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
-                <div className="font-medium">
-                  {(overrideInfo?.shippingAddress?.name || overrideInfo?.customer?.displayName || order.customer || "Unknown customer")}
-                </div>
-                <div className="text-gray-700">
-                  {overrideInfo?.shippingAddress?.address1 || null}{overrideInfo?.shippingAddress?.address2 ? `, ${overrideInfo?.shippingAddress?.address2}` : ""}
-                </div>
-                <div className="text-gray-700">
-                  {[overrideInfo?.shippingAddress?.city || order.shipping_city, overrideInfo?.shippingAddress?.zip].filter(Boolean).join(" ")}
-                </div>
-                {(overrideInfo?.shippingAddress?.phone || overrideInfo?.phone || overrideInfo?.customer?.phone) && (
-                  <div className="text-gray-700 mt-1">
-                    {overrideInfo?.shippingAddress?.phone || overrideInfo?.phone || overrideInfo?.customer?.phone}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                  <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Billing address</div>
+                  <div className="font-medium">
+                    {order?.billing_name || overrideInfo?.customer?.displayName || order.customer || "Unknown customer"}
                   </div>
-                )}
+                  <div className="text-gray-700">
+                    {order?.billing_address1 || "—"}{order?.billing_address2 ? `, ${order.billing_address2}` : ""}
+                  </div>
+                  <div className="text-gray-700">
+                    {[order?.billing_city, order?.billing_zip].filter(Boolean).join(" ") || "—"}
+                  </div>
+                  {(order?.billing_phone || overrideInfo?.phone || overrideInfo?.customer?.phone) && (
+                    <div className="text-gray-700 mt-1">
+                      {order?.billing_phone || overrideInfo?.phone || overrideInfo?.customer?.phone}
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-lg border border-green-300 bg-green-50 p-3">
+                  <div className="text-[11px] uppercase tracking-wide text-green-700 mb-1 font-semibold">Shipping address</div>
+                  <div className="font-semibold text-green-900">
+                    {(overrideInfo?.shippingAddress?.name || overrideInfo?.customer?.displayName || order.customer || "Unknown customer")}
+                  </div>
+                  <div className="text-green-800">
+                    {overrideInfo?.shippingAddress?.address1 || order?.shipping_address1 || "—"}{(overrideInfo?.shippingAddress?.address2 || order?.shipping_address2) ? `, ${overrideInfo?.shippingAddress?.address2 || order?.shipping_address2}` : ""}
+                  </div>
+                  <div className="text-green-800">
+                    {[overrideInfo?.shippingAddress?.city || order.shipping_city, overrideInfo?.shippingAddress?.zip || order?.shipping_zip].filter(Boolean).join(" ")}
+                  </div>
+                  {(overrideInfo?.shippingAddress?.phone || order?.shipping_phone || overrideInfo?.phone || overrideInfo?.customer?.phone) && (
+                    <div className="text-green-800 mt-1">
+                      {overrideInfo?.shippingAddress?.phone || order?.shipping_phone || overrideInfo?.phone || overrideInfo?.customer?.phone}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
             <div className="px-4 py-3">
@@ -460,10 +493,30 @@ export default function OrderLookup(){
                       ) : (
                         <div className="w-full h-60 rounded-md bg-gray-100 border-b border-gray-200" />
                       )}
+                      <div className="px-3 pt-2 flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center px-3 py-1 rounded-xl bg-purple-100 text-purple-800 border border-purple-200 text-sm font-bold">
+                          Qty: {v.unfulfilled_qty ?? v.qty}
+                        </span>
+                        <span className="inline-flex items-center px-3 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-200 text-sm font-bold">
+                          Price: {(() => {
+                            try {
+                              if (v.unit_price == null) return "—";
+                              return `${Number(v.unit_price).toFixed(2)}${v.currency_code ? ` ${v.currency_code}` : ""}`;
+                            } catch { return "—"; }
+                          })()}
+                        </span>
+                      </div>
                       <div className="p-3 flex items-start justify-between gap-3">
                         <div className="flex-1 min-w-0">
                           <div className="text-sm font-medium">{v.title || v.sku || "Item"}</div>
-                          <div className="text-xs text-gray-500">Qty: {v.unfulfilled_qty ?? v.qty}</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <span className="px-3 py-1 rounded-xl border-2 border-sky-300 bg-sky-100 text-sky-900 text-sm font-semibold">
+                              Color: {v.color || "—"}
+                            </span>
+                            <span className="px-3 py-1 rounded-xl border-2 border-fuchsia-300 bg-fuchsia-100 text-fuchsia-900 text-sm font-semibold">
+                              Size: {v.size || "—"}
+                            </span>
+                          </div>
                           {(() => {
                             const list = foData.mapByVariant[v.id] || [];
                             if (!list.length) return null;
@@ -509,50 +562,23 @@ export default function OrderLookup(){
               </ul>
             </div>
             <div className="px-4 py-3 border-t border-gray-100">
-              <div className="text-sm font-semibold mb-2">Tags</div>
-              <div className="flex items-center gap-2 flex-wrap">
-                {(order.tags || []).length === 0 && (
-                  <span className="text-xs text-gray-500">No tags</span>
-                )}
-                {(order.tags || []).map((t, i) => (
-                  <span key={`${t}-${i}`} className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-gray-100 border border-gray-200 text-xs">
-                    <span>{t}</span>
-                    <button
-                      onClick={()=>handleRemoveTag(t)}
-                      className="text-gray-500 hover:text-red-600"
-                      title="Remove tag"
-                    >×</button>
-                  </span>
-                ))}
-              </div>
-              <div className="mt-2 flex items-center gap-2">
-                <input
-                  value={newTag}
-                  onChange={(e)=>{ setNewTag(e.target.value); setTagQuery(e.target.value); setShowTagDropdown(true); }}
-                  placeholder="Add a tag"
-                  className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2"
-                  onFocus={()=>{ setShowTagDropdown(true); }}
-                  onBlur={()=>{ setTimeout(()=>setShowTagDropdown(false), 150); }}
-                />
-                <button
-                  onClick={handleAddTag}
-                  className="px-3 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold active:scale-[.98]"
-                >Add tag</button>
-              </div>
-              {showTagDropdown && filteredSuggestions().length > 0 && (
-                <div className="mt-1 border border-gray-200 rounded-lg bg-white shadow-sm max-h-56 overflow-auto text-sm">
-                  {filteredSuggestions().map((s, i) => (
-                    <button
-                      key={`${s}-${i}`}
-                      onMouseDown={(e)=>{ e.preventDefault(); }}
-                      onClick={()=>{ setNewTag(s); setShowTagDropdown(false); }}
-                      className="w-full text-left px-3 py-2 hover:bg-gray-50"
-                    >
-                      {s}
-                    </button>
-                  ))}
+              <div className="text-sm font-semibold mb-2">Order totals</div>
+              <div className="rounded-xl border-2 border-blue-200 bg-blue-50 p-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm">
+                  <div className="px-3 py-2 rounded-lg bg-white border border-blue-200">
+                    <div className="text-xs text-gray-500">Order total</div>
+                    <div className="text-lg font-extrabold text-blue-900">{totalPrice}{currencyCode ? ` ${currencyCode}` : ""}</div>
+                  </div>
+                  <div className="px-3 py-2 rounded-lg bg-white border border-emerald-200">
+                    <div className="text-xs text-gray-500">Shipping</div>
+                    <div className="text-lg font-extrabold text-emerald-800">{shippingPrice ?? "—"}{currencyCode && shippingPrice != null ? ` ${currencyCode}` : ""}</div>
+                  </div>
+                  <div className="px-3 py-2 rounded-lg bg-white border border-rose-200">
+                    <div className="text-xs text-gray-500">Discount</div>
+                    <div className="text-lg font-extrabold text-rose-800">{discountTotal ?? "—"}{currencyCode && discountTotal != null ? ` ${currencyCode}` : ""}</div>
+                  </div>
                 </div>
-              )}
+              </div>
             </div>
             <div className="px-4 py-3 border-t border-gray-100">
               <div className="text-sm font-semibold mb-2">Comments</div>
@@ -617,6 +643,52 @@ export default function OrderLookup(){
                   <span className="truncate max-w-[60%] text-right">{(order.tags || []).join(", ") || "—"}</span>
                 </div>
               </div>
+            </div>
+            <div className="px-4 py-3 border-t border-gray-100">
+              <div className="text-sm font-semibold mb-2">Tags</div>
+              <div className="flex items-center gap-2 flex-wrap">
+                {(order.tags || []).length === 0 && (
+                  <span className="text-xs text-gray-500">No tags</span>
+                )}
+                {(order.tags || []).map((t, i) => (
+                  <span key={`${t}-${i}`} className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-gray-100 border border-gray-200 text-xs">
+                    <span>{t}</span>
+                    <button
+                      onClick={()=>handleRemoveTag(t)}
+                      className="text-gray-500 hover:text-red-600"
+                      title="Remove tag"
+                    >×</button>
+                  </span>
+                ))}
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <input
+                  value={newTag}
+                  onChange={(e)=>{ setNewTag(e.target.value); setTagQuery(e.target.value); setShowTagDropdown(true); }}
+                  placeholder="Add a tag"
+                  className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2"
+                  onFocus={()=>{ setShowTagDropdown(true); }}
+                  onBlur={()=>{ setTimeout(()=>setShowTagDropdown(false), 150); }}
+                />
+                <button
+                  onClick={handleAddTag}
+                  className="px-3 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold active:scale-[.98]"
+                >Add tag</button>
+              </div>
+              {showTagDropdown && filteredSuggestions().length > 0 && (
+                <div className="mt-1 border border-gray-200 rounded-lg bg-white shadow-sm max-h-56 overflow-auto text-sm">
+                  {filteredSuggestions().map((s, i) => (
+                    <button
+                      key={`${s}-${i}`}
+                      onMouseDown={(e)=>{ e.preventDefault(); }}
+                      onClick={()=>{ setNewTag(s); setShowTagDropdown(false); }}
+                      className="w-full text-left px-3 py-2 hover:bg-gray-50"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
