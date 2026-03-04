@@ -2341,7 +2341,7 @@ async def fulfill_order(order_gid: str, body: FulfillRequest, store: Optional[st
         await manager.broadcast({"type": "order.fulfilled", "id": order_gid})
     except Exception:
         pass
-    return {"ok": True, "result": res}
+    return {"ok": True, "fulfilled": True, "result": res}
 
 if HAVE_AUTH_DB:
     @app.post("/api/orders/{order_gid:path}/fulfill-tracked")
@@ -2356,7 +2356,7 @@ if HAVE_AUTH_DB:
         result = await fulfill_order(order_gid=order_gid, body=body, store=store_key)
         if not bool((result or {}).get("ok")):
             return result
-        if bool((result or {}).get("fulfilled")) is False:
+        if (result or {}).get("fulfilled") is False:
             return result
 
         # Record fulfillment per agent.
