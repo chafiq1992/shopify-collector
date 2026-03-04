@@ -188,6 +188,7 @@ function ActionOverlay({ state }){
 
 export default function App(){
   const [auth, setAuth] = useState(() => loadAuth());
+  const [agentToday, setAgentToday] = useState({ fulfilledToday: 0, loading: false });
   // Lightweight client-side routing: force re-render on history changes
   const [routeTick, setRouteTick] = useState(0);
   const [orders, setOrders] = useState([]);
@@ -293,6 +294,7 @@ export default function App(){
   function handleLogout(){
     clearAuth();
     setAuth(null);
+    setAgentToday({ fulfilledToday: 0, loading: false });
   }
 
   function navigate(path){
@@ -316,10 +318,34 @@ export default function App(){
   useEffect(() => {
     const onCleared = () => {
       try { setAuth(null); } catch {}
+      try { setAgentToday({ fulfilledToday: 0, loading: false }); } catch {}
     };
     try { window.addEventListener("orderCollectorAuthCleared", onCleared); } catch {}
     return () => { try { window.removeEventListener("orderCollectorAuthCleared", onCleared); } catch {} };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadTodaySummary(){
+      if (!auth?.access_token) return;
+      try {
+        if (!cancelled) setAgentToday(prev => ({ ...prev, loading: true }));
+        const qs = store ? `?store=${encodeURIComponent(store)}` : "";
+        const res = await authFetch(`/api/agent/today-summary${qs}`, { headers: authHeaders({ "Accept": "application/json" }) });
+        if (!res.ok) throw new Error("Failed to load summary");
+        const js = await res.json();
+        if (cancelled) return;
+        setAgentToday({
+          fulfilledToday: Number(js?.fulfilled_today || 0),
+          loading: false,
+        });
+      } catch {
+        if (!cancelled) setAgentToday(prev => ({ ...prev, loading: false }));
+      }
+    }
+    loadTodaySummary();
+    return () => { cancelled = true; };
+  }, [auth?.access_token, store, reloadCounter]);
 
   function vibrate(ms = 20){
     try { if (navigator && typeof navigator.vibrate === 'function') navigator.vibrate(ms); } catch {}
@@ -758,6 +784,9 @@ export default function App(){
               <div className="hidden sm:flex items-center gap-2 text-xs text-gray-700 border border-gray-200 rounded-lg px-2 py-1 bg-white">
                 <span className="font-semibold">{auth.user.email}</span>
                 <span className="uppercase text-[10px] px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">{auth.user.role}</span>
+                <span className="uppercase text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 border border-blue-200">
+                  {agentToday.loading ? "Fulfilled today: …" : `Fulfilled today: ${agentToday.fulfilledToday}`}
+                </span>
                 {pendingCount > 0 && (
                   <span className="uppercase text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200">
                     Sync {pendingCount}

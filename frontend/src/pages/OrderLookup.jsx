@@ -119,9 +119,33 @@ export default function OrderLookup(){
   const [tagQuery, setTagQuery] = useState("");
   const [showTagDropdown, setShowTagDropdown] = useState(false);
   const [foData, setFoData] = useState({ orders: [], mapByVariant: {}, selectedLineItemIds: new Set() });
+  const [agentToday, setAgentToday] = useState({ name: "", fulfilledToday: 0, loading: false });
 
   const inputRef = useRef(null);
   useEffect(() => { try { inputRef.current?.focus(); } catch {} }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadAgentToday(){
+      try {
+        if (!cancelled) setAgentToday(prev => ({ ...prev, loading: true }));
+        const qs = store ? `?store=${encodeURIComponent(store)}` : "";
+        const res = await authFetch(`/api/agent/today-summary${qs}`, { headers: authHeaders({ "Accept": "application/json" }) });
+        if (!res.ok) throw new Error("Failed");
+        const js = await res.json();
+        if (cancelled) return;
+        setAgentToday({
+          name: String(js?.user?.name || js?.user?.email || ""),
+          fulfilledToday: Number(js?.fulfilled_today || 0),
+          loading: false,
+        });
+      } catch {
+        if (!cancelled) setAgentToday(prev => ({ ...prev, loading: false }));
+      }
+    }
+    loadAgentToday();
+    return () => { cancelled = true; };
+  }, [store, order?.id, fulfillSuccess]);
 
   async function doSearch(number){
     const n = String(number || query || "").trim().replace(/^#/, "");
@@ -314,6 +338,13 @@ export default function OrderLookup(){
               onClick={()=>doSearch()}
               className="px-3 py-1 rounded-lg bg-blue-600 text-white text-sm font-semibold active:scale-[.98]"
             >Search</button>
+          </div>
+        </div>
+        <div className="max-w-3xl mx-auto px-4 pb-2">
+          <div className="text-[11px] text-gray-600">
+            Agent: <span className="font-semibold">{agentToday.name || "—"}</span>
+            <span className="mx-2">•</span>
+            <span>Fulfilled today: <span className="font-semibold">{agentToday.loading ? "…" : agentToday.fulfilledToday}</span></span>
           </div>
         </div>
       </header>

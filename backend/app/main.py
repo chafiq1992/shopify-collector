@@ -2056,6 +2056,45 @@ else:
         raise HTTPException(status_code=503, detail="auth/db not configured")
 
 
+if HAVE_AUTH_DB:
+    @app.get("/api/agent/today-summary", response_model=Dict[str, Any])
+    async def agent_today_summary(
+        store: Optional[str] = Query(None, description="Optional store filter"),
+        user: User = Depends(get_current_user),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        now_utc = datetime.now(timezone.utc)
+        day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        store_key = _normalize_store(store) if store else None
+
+        stmt = (
+            select(func.count())
+            .select_from(OrderEvent)
+            .where(
+                OrderEvent.user_id == user.id,
+                OrderEvent.action == "fulfilled",
+                OrderEvent.created_at >= day_start,
+                OrderEvent.created_at < day_end,
+            )
+        )
+        if store_key:
+            stmt = stmt.where(OrderEvent.store_key == store_key)
+        fulfilled_today = int((await session.scalar(stmt)) or 0)
+
+        return {
+            "ok": True,
+            "user": {"id": user.id, "email": user.email, "name": user.name, "role": user.role},
+            "store": store_key or "all",
+            "day": day_start.date().isoformat(),
+            "fulfilled_today": fulfilled_today,
+        }
+else:
+    @app.get("/api/agent/today-summary", response_model=Dict[str, Any])
+    async def agent_today_summary_unavailable():
+        raise HTTPException(status_code=503, detail="auth/db not configured")
+
+
 # ---------- Admin: OUT orders details ----------
 if HAVE_AUTH_DB:
     @app.get("/api/admin/out-events", response_model=Dict[str, Any])
