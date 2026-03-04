@@ -114,7 +114,7 @@ export default function OrderLookup(){
   const [message, setMessage] = useState(null);
   const [overrideInfo, setOverrideInfo] = useState(null);
   const [fulfillBusy, setFulfillBusy] = useState(false);
-  const [fulfillDone, setFulfillDone] = useState(false);
+  const [fulfillSuccess, setFulfillSuccess] = useState(false);
   const [tagSuggestions, setTagSuggestions] = useState([]);
   const [tagQuery, setTagQuery] = useState("");
   const [showTagDropdown, setShowTagDropdown] = useState(false);
@@ -129,6 +129,7 @@ export default function OrderLookup(){
     setLoading(true);
     setError(null);
     setOrder(null);
+    setFulfillSuccess(false);
     try {
       const found = await API.searchOneByNumber(n, store);
       if (!found){
@@ -228,6 +229,22 @@ export default function OrderLookup(){
   const totalPrice = useMemo(() => {
     try { return Number(order?.total_price || 0).toFixed(2); } catch { return String(order?.total_price || 0); }
   }, [order]);
+
+  const isOrderFulfilled = useMemo(() => {
+    if (!order) return false;
+    const byFlag = !!order.considered_fulfilled;
+    const variants = Array.isArray(order.variants) ? order.variants : [];
+    const byVariants = variants.length > 0 && variants.every((v) => {
+      const st = String(v?.status || "").toLowerCase();
+      if (st === "fulfilled") return true;
+      const uq = Number(v?.unfulfilled_qty);
+      return Number.isFinite(uq) ? uq <= 0 : false;
+    });
+    const byFO = Array.isArray(foData?.orders) && foData.orders.length > 0 && foData.orders.every((g) =>
+      ((g?.lineItems || []).every((li) => Number(li?.remainingQuantity || 0) <= 0))
+    );
+    return byFlag || byVariants || byFO;
+  }, [order, foData]);
 
   const screenshotTimeline = useMemo(() => {
     const text = String(order?.note || "");
@@ -538,7 +555,7 @@ export default function OrderLookup(){
             <div className="grid grid-cols-1 gap-2">
               <button
                 onClick={async ()=>{
-                  if (fulfillBusy || fulfillDone) return;
+                  if (fulfillBusy || isOrderFulfilled) return;
                   setFulfillBusy(true);
                   setError(null);
                   try {
@@ -601,7 +618,8 @@ export default function OrderLookup(){
                           return prev;
                         }
                       });
-                      setFulfillDone(true);
+                      setFulfillSuccess(true);
+                      try { setTimeout(()=>setFulfillSuccess(false), 2200); } catch {}
                       setMessage("Fulfilled successfully");
                       try { setTimeout(()=>setMessage(null), 2000); } catch {}
                     } else {
@@ -613,10 +631,17 @@ export default function OrderLookup(){
                     setFulfillBusy(false);
                   }
                 }}
-                className={`flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-white text-sm active:scale-[.98] shadow-sm ${fulfillDone ? 'bg-green-700' : 'bg-green-600 hover:bg-green-700'}`}
+                className={`flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-sm active:scale-[.98] shadow-sm ${
+                  isOrderFulfilled
+                    ? 'bg-gray-300 text-gray-700 cursor-not-allowed'
+                    : 'bg-green-600 text-white hover:bg-green-700'
+                }`}
               >
-                <span className="font-semibold">{fulfillDone ? 'Fulfilled' : (fulfillBusy ? 'Fulfilling…' : 'Fulfill')}</span>
+                <span className="font-semibold">{isOrderFulfilled ? 'Fulfilled' : (fulfillBusy ? 'Fulfilling…' : 'Fulfill')}</span>
               </button>
+              {fulfillSuccess && (
+                <div className="text-xs text-green-700 text-center">Success: order fulfilled and saved to analytics.</div>
+              )}
             </div>
           </div>
         </div>

@@ -26,7 +26,7 @@ HAVE_AUTH_DB = True
 try:
     from .db import get_session, init_db, SessionLocal
     from .models import User, OrderEvent, DailyUserStats, AppSetting
-    from .auth_routes import router as auth_router, get_current_user, get_current_user_optional, require_admin, hash_password
+    from .auth_routes import router as auth_router, get_current_user, require_admin, hash_password
     from .admin_bootstrap_routes import router as admin_bootstrap_router
     from .shopify_oauth_routes import router as shopify_oauth_router
     from .settings_store import get_shopify_oauth_record
@@ -39,8 +39,6 @@ except Exception:
     admin_bootstrap_router = None  # type: ignore
     def get_current_user():  # type: ignore
         raise HTTPException(status_code=503, detail="auth not configured")
-    def get_current_user_optional():  # type: ignore
-        return None
     def require_admin():  # type: ignore
         raise HTTPException(status_code=503, detail="auth not configured")
     class User(BaseModel):  # type: ignore
@@ -1727,7 +1725,8 @@ async def _record_user_action(
     )
     session.add(ev)
     await session.flush()
-    await _bump_daily_stats(session, user_id=user_id, store_key=store_key, action=action)
+    # Keep analytics source-of-truth in order_events so action tracking does not depend
+    # on daily_user_stats schema migrations.
 
 
 async def _bump_daily_stats(session: AsyncSession, *, user_id: str, store_key: str, action: str):
