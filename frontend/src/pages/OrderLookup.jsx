@@ -273,18 +273,48 @@ export default function OrderLookup(){
   const screenshotTimeline = useMemo(() => {
     const text = String(order?.note || "");
     if (!text) return [];
-    return text
-      .split(/\r?\n/)
-      .map((line) => {
-        const raw = String(line || "").trim();
-        const m = raw.match(/^\[AGENT_SCREENSHOT\]\s+(\S+)\s+(\S+)$/);
-        if (!m) return null;
-        const ts = String(m[1] || "").trim();
-        const url = String(m[2] || "").trim();
-        if (!url) return null;
-        return { ts, url };
-      })
-      .filter(Boolean);
+    const lines = text.split(/\r?\n/);
+    const out = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      const raw = String(lines[i] || "").trim();
+      if (!raw) continue;
+
+      // Legacy marker format: [AGENT_SCREENSHOT] <ts> <url>
+      const mLegacy = raw.match(/^\[AGENT_SCREENSHOT\]\s+(\S+)\s+(\S+)$/);
+      if (mLegacy) {
+        out.push({ ts: String(mLegacy[1] || "").trim(), url: String(mLegacy[2] || "").trim(), agent: "" });
+        continue;
+      }
+
+      // Human-readable one-line format: Agent screenshot (<ts>): <url>
+      const mHuman = raw.match(/^Agent screenshot\s*\(([^)]+)\):\s*(\S+)$/i);
+      if (mHuman) {
+        out.push({ ts: String(mHuman[1] || "").trim(), url: String(mHuman[2] || "").trim(), agent: "" });
+        continue;
+      }
+
+      // New multiline format:
+      // Snip by <agent>
+      // At: <ts>
+      // Link: <url>
+      const mSnip = raw.match(/^Snip by\s+(.+)$/i);
+      if (mSnip) {
+        const agent = String(mSnip[1] || "").trim();
+        const atRaw = String(lines[i + 1] || "").trim();
+        const linkRaw = String(lines[i + 2] || "").trim();
+        const mAt = atRaw.match(/^At:\s*(.+)$/i);
+        const mLink = linkRaw.match(/^Link:\s*(\S+)$/i);
+        if (mLink) {
+          out.push({
+            ts: mAt ? String(mAt[1] || "").trim() : "",
+            url: String(mLink[1] || "").trim(),
+            agent,
+          });
+          i += 2;
+        }
+      }
+    }
+    return out.filter((x) => x && x.url);
   }, [order?.note]);
 
   const commentLines = useMemo(() => {
@@ -293,7 +323,13 @@ export default function OrderLookup(){
     return text
       .split(/\r?\n/)
       .map((line) => String(line || "").trim())
-      .filter((line) => line && !line.startsWith("[AGENT_SCREENSHOT]"));
+      .filter((line) => line &&
+        !line.startsWith("[AGENT_SCREENSHOT]") &&
+        !/^Agent screenshot\s*\(/i.test(line) &&
+        !/^Snip by\s+/i.test(line) &&
+        !/^At:\s+/i.test(line) &&
+        !/^Link:\s+/i.test(line)
+      );
   }, [order?.note]);
 
   function filteredSuggestions(){
@@ -547,6 +583,7 @@ export default function OrderLookup(){
                   {screenshotTimeline.map((entry, idx) => (
                     <div key={`${entry.ts}-${idx}`} className="rounded-lg border border-gray-200 p-2 bg-gray-50">
                       <div className="text-[11px] text-gray-600 mb-2">
+                        {entry.agent ? <span className="font-semibold mr-2">{entry.agent}</span> : null}
                         {(() => {
                           try { return new Date(entry.ts).toLocaleString(); } catch { return entry.ts || "—"; }
                         })()}
