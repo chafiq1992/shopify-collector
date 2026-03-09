@@ -363,13 +363,33 @@ export default function OrderLookup(){
 
   /* ── Guide logic ─────────────────────────────────────── */
 
+  const unfulfilledItems = useMemo(() => {
+    if (!order || !order.variants) return [];
+    return order.variants.filter(v => {
+      const st = String(v?.status || "").toLowerCase();
+      if (st === "fulfilled") return false;
+      const uq = Number(v?.unfulfilled_qty);
+      return Number.isFinite(uq) ? uq > 0 : true;
+    });
+  }, [order]);
+
+  const fulfilledItems = useMemo(() => {
+    if (!order || !order.variants) return [];
+    return order.variants.filter(v => {
+      const st = String(v?.status || "").toLowerCase();
+      if (st === "fulfilled") return true;
+      const uq = Number(v?.unfulfilled_qty);
+      return Number.isFinite(uq) ? uq <= 0 : false;
+    });
+  }, [order]);
+
   const guideSteps = useMemo(() => {
     if (!order) return [];
     const steps = [
       { key: 'sales-channel', label: 'Sales Channel' },
       { key: 'shipping', label: 'Shipping Address' },
     ];
-    (order.variants || []).forEach((_, i) => {
+    unfulfilledItems.forEach((_, i) => {
       steps.push({ key: `item-${i}`, label: `Item ${i + 1}` });
     });
     steps.push({ key: 'totals', label: 'Order Totals' });
@@ -377,7 +397,7 @@ export default function OrderLookup(){
     steps.push({ key: 'screenshots', label: 'Agent Screenshots' });
     steps.push({ key: 'tags', label: 'Tags' });
     return steps;
-  }, [order]);
+  }, [order, unfulfilledItems]);
 
   const guideStepIndex = useMemo(() => {
     if (!activeGuideSection) return -1;
@@ -558,7 +578,7 @@ export default function OrderLookup(){
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-4 py-4 pb-28">
+      <main className="max-w-3xl mx-auto px-4 py-4 pb-[80vh]">
         {loading && (
           <div className="text-gray-600">Loading…</div>
         )}
@@ -613,17 +633,23 @@ export default function OrderLookup(){
               {guideActive && activeGuideSection === 'sales-channel' && (
                 <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 guide-label-animate">Step {guideStepIndex + 1}: Sales Channel</div>
               )}
-              <div className="text-[11px] text-gray-500 flex items-center justify-between">
-                <span>Sales channel: {order.sales_channel || "—"}</span>
-                <span>{(() => {
-                  try {
-                    if (!order.created_at) return "—";
-                    const d = new Date(order.created_at);
-                    return d.toLocaleString();
-                  } catch { return order.created_at || "—"; }
-                })()}</span>
+              <div className="text-[11px] text-gray-500 flex flex-col gap-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-gray-900">
+                    {(() => {
+                      try {
+                        if (!order.created_at) return "—";
+                        const d = new Date(order.created_at);
+                        return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: 'numeric', hour12: true });
+                      } catch { return order.created_at || "—"; }
+                    })()}
+                  </span>
+                </div>
+                <div>
+                  from <span className="font-semibold text-gray-800">{order.sales_channel || "—"}</span>
+                </div>
               </div>
-              <div className="mt-1 text-sm text-gray-700">
+              <div className="mt-2 text-sm text-gray-700">
                 <span className="font-medium">{order.customer || "Unknown customer"}</span>
                 {order.shipping_city ? <span className="text-gray-500"> • {order.shipping_city}</span> : null}
               </div>
@@ -690,92 +716,138 @@ export default function OrderLookup(){
             {/* Items */}
             <div className="px-4 py-3">
               <div className="text-sm font-semibold mb-2">Items</div>
-              <ul className="space-y-4">
-                {(order.variants || []).map((v, i) => {
-                  const isItemActive = guideActive && activeGuideSection === `item-${i}`;
-                  return (
-                    <li
-                      key={i}
-                      ref={registerSection(`item-${i}`)}
-                      className={`py-2 transition-all duration-500 rounded-xl ${sectionCls(`item-${i}`)}`}
-                    >
-                      {isItemActive && (
-                        <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 px-1 guide-label-animate">Step {guideStepIndex + 1}: Item {i + 1}</div>
-                      )}
-                      <div className="rounded-xl overflow-hidden border border-gray-200">
-                        {v.image ? (
-                          <img src={v.image} alt="" className="w-full max-h-96 object-contain bg-white" />
-                        ) : (
-                          <div className="w-full h-60 rounded-md bg-gray-100 border-b border-gray-200" />
-                        )}
-                        <div className="px-3 pt-2 flex flex-wrap items-center gap-2">
-                          <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow' : ''}`}>
-                            Price: {(() => {
-                              try {
-                                if (v.unit_price == null) return "—";
-                                return `${Number(v.unit_price).toFixed(2)}${v.currency_code ? ` ${v.currency_code}` : ""}`;
-                              } catch { return "—"; }
-                            })()}
-                          </span>
-                          <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-purple-100 text-purple-800 border border-purple-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow guide-badge-delay-1' : ''}`}>
-                            Qty: {v.unfulfilled_qty ?? v.qty}
-                          </span>
-                        </div>
-                        <div className="p-3 flex items-start justify-between gap-3">
-                          <div className="flex-1 min-w-0">
-                            <div className="text-sm font-medium">{v.title || v.sku || "Item"}</div>
-                            <div className="mt-2 flex flex-wrap gap-2">
-                              <span className={`px-3 py-1 rounded-xl border-2 border-sky-300 bg-sky-100 text-sky-900 text-sm font-semibold transition-all duration-300 ${isItemActive && badgeSubStep >= 2 ? 'guide-badge-glow guide-badge-delay-2' : ''}`}>
-                                Color: {v.color || "—"}
+              
+              {/* Unfulfilled Items */}
+              {unfulfilledItems.length > 0 && (
+                <div className="mb-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="bg-yellow-100 text-yellow-800 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide border border-yellow-200">Unfulfilled ({unfulfilledItems.length})</span>
+                  </div>
+                  <ul className="space-y-4">
+                    {unfulfilledItems.map((v, i) => {
+                      const isItemActive = guideActive && activeGuideSection === `item-${i}`;
+                      return (
+                        <li
+                          key={v.id || i}
+                          ref={registerSection(`item-${i}`)}
+                          className={`py-2 transition-all duration-500 rounded-xl ${sectionCls(`item-${i}`)}`}
+                        >
+                          {isItemActive && (
+                            <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 px-1 guide-label-animate">Step {guideStepIndex + 1}: Item {i + 1}</div>
+                          )}
+                          <div className="rounded-xl overflow-hidden border border-gray-200 shadow-sm">
+                            {v.image ? (
+                              <img src={v.image} alt="" className="w-full max-h-96 object-contain bg-white" />
+                            ) : (
+                              <div className="w-full h-60 rounded-md bg-gray-100 border-b border-gray-200" />
+                            )}
+                            <div className="px-3 pt-2 flex flex-wrap items-center gap-2">
+                              <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow' : ''}`}>
+                                Price: {(() => {
+                                  try {
+                                    if (v.unit_price == null) return "—";
+                                    return `${Number(v.unit_price).toFixed(2)}${v.currency_code ? ` ${v.currency_code}` : ""}`;
+                                  } catch { return "—"; }
+                                })()}
                               </span>
-                              <span className={`px-3 py-1 rounded-xl border-2 border-fuchsia-300 bg-fuchsia-100 text-fuchsia-900 text-sm font-semibold transition-all duration-300 ${isItemActive && badgeSubStep >= 2 ? 'guide-badge-glow guide-badge-delay-3' : ''}`}>
-                                Size: {v.size || "—"}
+                              <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-purple-100 text-purple-800 border border-purple-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow guide-badge-delay-1' : ''}`}>
+                                Qty: {v.unfulfilled_qty ?? v.qty}
                               </span>
                             </div>
-                            {(() => {
-                              const list = foData.mapByVariant[v.id] || [];
-                              if (!list.length) return null;
-                              return (
-                                <div className="mt-2 border-t border-gray-200 pt-2">
-                                  <div className="text-xs font-semibold mb-1">Fulfillment</div>
-                                  <div className="space-y-1">
-                                    {list.map((li) => {
-                                      const checked = foData.selectedLineItemIds.has(li.id);
-                                      return (
-                                        <label key={li.id} className="flex items-center gap-2 text-xs">
-                                          <input
-                                            type="checkbox"
-                                            checked={checked}
-                                            onChange={(e)=>{
-                                              setFoData(prev => {
-                                                const nextSel = new Set(prev.selectedLineItemIds);
-                                                if (e.target.checked) nextSel.add(li.id); else nextSel.delete(li.id);
-                                                return { ...prev, selectedLineItemIds: nextSel };
-                                              });
-                                            }}
-                                          />
-                                          <span className="flex-1 truncate">
-                                            {li.title || v.title || v.sku || "Item"} — remaining: {li.remainingQuantity}
-                                          </span>
-                                        </label>
-                                      );
-                                    })}
-                                  </div>
+                            <div className="p-3 flex items-start justify-between gap-3">
+                              <div className="flex-1 min-w-0">
+                                <div className="text-sm font-medium">{v.title || v.sku || "Item"}</div>
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  <span className={`px-3 py-1 rounded-xl border-2 border-sky-300 bg-sky-100 text-sky-900 text-sm font-semibold transition-all duration-300 ${isItemActive && badgeSubStep >= 2 ? 'guide-badge-glow guide-badge-delay-2' : ''}`}>
+                                    Color: {v.color || "—"}
+                                  </span>
+                                  <span className={`px-3 py-1 rounded-xl border-2 border-fuchsia-300 bg-fuchsia-100 text-fuchsia-900 text-sm font-semibold transition-all duration-300 ${isItemActive && badgeSubStep >= 2 ? 'guide-badge-glow guide-badge-delay-3' : ''}`}>
+                                    Size: {v.size || "—"}
+                                  </span>
                                 </div>
-                              );
-                            })()}
+                                {(() => {
+                                  const list = foData.mapByVariant[v.id] || [];
+                                  if (!list.length) return null;
+                                  return (
+                                    <div className="mt-2 border-t border-gray-200 pt-2">
+                                      <div className="text-xs font-semibold mb-1">Fulfillment</div>
+                                      <div className="space-y-1">
+                                        {list.map((li) => {
+                                          const checked = foData.selectedLineItemIds.has(li.id);
+                                          return (
+                                            <label key={li.id} className="flex items-center gap-2 text-xs">
+                                              <input
+                                                type="checkbox"
+                                                checked={checked}
+                                                onChange={(e)=>{
+                                                  setFoData(prev => {
+                                                    const nextSel = new Set(prev.selectedLineItemIds);
+                                                    if (e.target.checked) nextSel.add(li.id); else nextSel.delete(li.id);
+                                                    return { ...prev, selectedLineItemIds: nextSel };
+                                                  });
+                                                }}
+                                              />
+                                              <span className="flex-1 truncate">
+                                                {li.title || v.title || v.sku || "Item"} — remaining: {li.remainingQuantity}
+                                              </span>
+                                            </label>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+                            </div>
                           </div>
-                          <span className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                            (v.status || "unknown") === "fulfilled" ? "bg-green-50 text-green-700 border-green-200" :
-                            (v.status || "unknown") === "unfulfilled" ? "bg-yellow-50 text-yellow-800 border-yellow-200" :
-                            "bg-gray-50 text-gray-700 border-gray-200"
-                          }`}>{v.status || "unknown"}</span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+
+              {/* Fulfilled Items */}
+              {fulfilledItems.length > 0 && (
+                <div className="mt-6 pt-4 border-t border-gray-100">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="bg-green-100 text-green-800 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide border border-green-200">Fulfilled ({fulfilledItems.length})</span>
+                  </div>
+                  <ul className="space-y-3">
+                    {fulfilledItems.map((v, i) => (
+                      <li key={v.id || `fulfilled-${i}`} className="flex gap-3 p-3 rounded-xl bg-gray-50 border border-gray-200 opacity-75">
+                        <div className="w-16 h-16 flex-shrink-0 bg-white rounded-lg border border-gray-200 overflow-hidden">
+                          {v.image ? (
+                            <img src={v.image} alt="" className="w-full h-full object-contain" />
+                          ) : (
+                            <div className="w-full h-full bg-gray-100" />
+                          )}
                         </div>
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs font-medium text-gray-900 line-clamp-2">{v.title || v.sku || "Item"}</div>
+                          <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-gray-500">
+                            {v.color && <span className="px-1.5 py-0.5 bg-gray-200 rounded">Color: {v.color}</span>}
+                            {v.size && <span className="px-1.5 py-0.5 bg-gray-200 rounded">Size: {v.size}</span>}
+                          </div>
+                          <div className="mt-1.5 flex items-center justify-between">
+                            <span className="text-xs font-semibold text-gray-700">
+                              {(() => {
+                                try {
+                                  if (v.unit_price == null) return "—";
+                                  return `${Number(v.unit_price).toFixed(2)}${v.currency_code ? ` ${v.currency_code}` : ""}`;
+                                } catch { return "—"; }
+                              })()}
+                              <span className="text-gray-400 font-normal mx-1">×</span>
+                              {v.qty}
+                            </span>
+                            <span className="text-[10px] font-bold text-green-700 bg-green-50 px-2 py-0.5 rounded-full border border-green-100">Fulfilled</span>
+                          </div>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
 
             {/* Order totals */}
