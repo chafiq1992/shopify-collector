@@ -137,6 +137,8 @@ export default function OrderLookup(){
   const [badgeSubStep, setBadgeSubStep] = useState(0);
   const [companyConfirm, setCompanyConfirm] = useState(null);
 
+  const [fulfillConfirm, setFulfillConfirm] = useState(false);
+
   const inputRef = useRef(null);
   const sectionRefs = useRef({});
   const registerSection = useCallback((key) => (el) => {
@@ -402,10 +404,19 @@ export default function OrderLookup(){
       steps.push({ key: `item-${i}`, label: `Item ${i + 1}` });
     });
     steps.push({ key: 'totals', label: 'Order Totals' });
-    steps.push({ key: 'screenshots', label: 'Agent Screenshots' });
+    
+    // Add individual steps for screenshots
+    if (screenshotTimeline.length > 0) {
+      screenshotTimeline.forEach((_, i) => {
+        steps.push({ key: `screenshot-${i}`, label: `Screenshot ${i + 1}` });
+      });
+    } else {
+      steps.push({ key: 'screenshots', label: 'Agent Screenshots' });
+    }
+    
     steps.push({ key: 'tags', label: 'Tags' });
     return steps;
-  }, [order, unfulfilledItems]);
+  }, [order, unfulfilledItems, screenshotTimeline]);
 
   const guideStepIndex = useMemo(() => {
     if (!activeGuideSection) return -1;
@@ -445,8 +456,9 @@ export default function OrderLookup(){
       ratioMap.forEach((ratio, key) => {
         if (ratio > maxRatio) { maxRatio = ratio; maxKey = key; }
       });
-      if (maxKey && maxRatio > 0.05) setActiveGuideSection(maxKey);
-    }, { threshold: [0, 0.1, 0.25, 0.5, 0.75, 1], rootMargin: '-15% 0px -15% 0px' });
+      // Tighter threshold to prevent skipping and allow returning to top
+      if (maxKey && maxRatio > 0.01) setActiveGuideSection(maxKey);
+    }, { threshold: [0, 0.1, 0.5, 1], rootMargin: '-40% 0px -40% 0px' });
 
     requestAnimationFrame(() => {
       Object.entries(sectionRefs.current).forEach(([key, el]) => {
@@ -942,35 +954,73 @@ export default function OrderLookup(){
               ref={registerSection('screenshots')}
               className={`px-4 py-3 border-t border-gray-100 transition-all duration-500 rounded-xl ${sectionCls('screenshots')}`}
             >
-              {guideActive && activeGuideSection === 'screenshots' && (
-                <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 guide-label-animate">Step {guideStepIndex + 1}: Agent Screenshots</div>
-              )}
               <div className="text-sm font-semibold mb-2">Agent screenshots</div>
               {!screenshotTimeline.length ? (
                 <div className="text-sm text-gray-500">No screenshots yet.</div>
               ) : (
                 <div className="space-y-3 max-h-96 overflow-auto pr-1">
-                  {screenshotTimeline.map((entry, idx) => (
-                    <div key={`${entry.ts}-${idx}`} className="rounded-lg border border-gray-200 p-2 bg-gray-50">
-                      <div className="text-[11px] text-gray-600 mb-2">
-                        {entry.agent ? <span className="font-semibold mr-2">{entry.agent}</span> : null}
-                        {(() => {
-                          try { return new Date(entry.ts).toLocaleString(); } catch { return entry.ts || "—"; }
-                        })()}
+                  {screenshotTimeline.map((entry, idx) => {
+                    const isScreenshotActive = guideActive && activeGuideSection === `screenshot-${idx}`;
+                    return (
+                      <div 
+                        key={`${entry.ts}-${idx}`} 
+                        ref={registerSection(`screenshot-${idx}`)}
+                        className={`rounded-lg border border-gray-200 p-2 bg-gray-50 transition-all duration-300 ${isScreenshotActive ? 'ring-2 ring-blue-500 shadow-lg scale-[1.02]' : ''}`}
+                      >
+                        <div className="text-[11px] text-gray-600 mb-2">
+                          {entry.agent ? <span className="font-semibold mr-2">{entry.agent}</span> : null}
+                          {(() => {
+                            try { return new Date(entry.ts).toLocaleString(); } catch { return entry.ts || "—"; }
+                          })()}
+                        </div>
+                        <a href={entry.url} target="_blank" rel="noreferrer" className="block relative">
+                          <img
+                            src={entry.url}
+                            alt="Agent screenshot"
+                            className="w-full max-h-72 object-contain rounded border border-gray-200 bg-white"
+                            loading="lazy"
+                          />
+                          {isScreenshotActive && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-black/10 pointer-events-none">
+                              <span className="bg-blue-600 text-white text-xs font-bold px-2 py-1 rounded shadow-sm">Active Step</span>
+                            </div>
+                          )}
+                        </a>
                       </div>
-                      <a href={entry.url} target="_blank" rel="noreferrer" className="block">
-                        <img
-                          src={entry.url}
-                          alt="Agent screenshot"
-                          className="w-full max-h-72 object-contain rounded border border-gray-200 bg-white"
-                          loading="lazy"
-                        />
-                      </a>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
+
+            {/* Screenshot Pop-up Overlay */}
+            {guideActive && activeGuideSection?.startsWith('screenshot-') && (
+              <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+                <div className="relative max-w-4xl w-full max-h-[90vh] flex flex-col items-center">
+                  {(() => {
+                    const idx = parseInt(activeGuideSection.replace('screenshot-', ''), 10);
+                    const entry = screenshotTimeline[idx];
+                    if (!entry) return null;
+                    return (
+                      <>
+                        <div className="bg-white rounded-t-xl px-4 py-2 w-full flex items-center justify-between">
+                          <div className="text-sm font-semibold text-gray-900">
+                            Screenshot {idx + 1} of {screenshotTimeline.length}
+                            {entry.agent && <span className="ml-2 text-gray-500 font-normal">by {entry.agent}</span>}
+                          </div>
+                          <div className="text-xs text-gray-500">Scroll to continue ↓</div>
+                        </div>
+                        <img 
+                          src={entry.url} 
+                          alt={`Screenshot ${idx + 1}`}
+                          className="w-full h-auto max-h-[80vh] object-contain bg-black rounded-b-xl shadow-2xl"
+                        />
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+            )}
 
             {/* Timeline */}
             <div className="px-4 py-3 border-t border-gray-100">
@@ -1125,13 +1175,30 @@ export default function OrderLookup(){
         </div>
       )}
 
-      {/* Fulfill bar */}
-      {!!order && (
-        <div className="fixed bottom-0 inset-x-0 z-40 border-t border-gray-200 bg-white/90 backdrop-blur">
-          <div className="max-w-3xl mx-auto px-4 py-3">
-            <div className="grid grid-cols-1 gap-2">
+      {/* Fulfill Confirmation Modal */}
+      {fulfillConfirm && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setFulfillConfirm(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4 border border-gray-200" onClick={e => e.stopPropagation()}>
+            <div className="text-center mb-4">
+              <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-blue-100 flex items-center justify-center text-2xl text-blue-600">📦</div>
+              <div className="text-lg font-bold text-gray-900">Confirm Fulfillment</div>
+            </div>
+            <div className="text-sm text-gray-600 text-center mb-5">
+              Are you sure you want to mark these items as fulfilled?
+              {foData.selectedLineItemIds.size > 0 && (
+                <div className="mt-2 font-semibold text-gray-800">
+                  {foData.selectedLineItemIds.size} item(s) selected
+                </div>
+              )}
+            </div>
+            <div className="flex gap-3">
               <button
-                onClick={async ()=>{
+                onClick={() => setFulfillConfirm(false)}
+                className="flex-1 px-4 py-2.5 rounded-xl border border-gray-300 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+              >Cancel</button>
+              <button
+                onClick={async () => {
+                  setFulfillConfirm(false);
                   if (fulfillBusy || isOrderFulfilled) return;
                   setFulfillBusy(true);
                   setError(null);
@@ -1203,6 +1270,23 @@ export default function OrderLookup(){
                   } finally {
                     setFulfillBusy(false);
                   }
+                }}
+                className="flex-1 px-4 py-2.5 rounded-xl bg-green-600 text-white text-sm font-bold hover:bg-green-700 shadow-md active:scale-[.98]"
+              >Confirm Fulfill</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Fulfill bar */}
+      {!!order && (
+        <div className="fixed bottom-0 inset-x-0 z-40 border-t border-gray-200 bg-white/90 backdrop-blur">
+          <div className="max-w-3xl mx-auto px-4 py-3">
+            <div className="grid grid-cols-1 gap-2">
+              <button
+                onClick={()=>{
+                  if (fulfillBusy || isOrderFulfilled) return;
+                  setFulfillConfirm(true);
                 }}
                 className={`flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-sm active:scale-[.98] shadow-sm ${
                   isOrderFulfilled
