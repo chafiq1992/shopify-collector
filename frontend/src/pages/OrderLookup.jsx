@@ -451,14 +451,31 @@ export default function OrderLookup(){
         const key = e.target.dataset.guideKey;
         if (key) ratioMap.set(key, e.intersectionRatio);
       });
-      let maxRatio = 0;
-      let maxKey = null;
-      ratioMap.forEach((ratio, key) => {
-        if (ratio > maxRatio) { maxRatio = ratio; maxKey = key; }
+      
+      // Find the element closest to the center of the viewport
+      let closestKey = null;
+      let minDistance = Infinity;
+      const viewportCenter = window.innerHeight / 2;
+
+      // We only consider elements that are at least partially visible
+      Object.entries(sectionRefs.current).forEach(([key, el]) => {
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        if (rect.bottom < 0 || rect.top > window.innerHeight) return; // Not visible
+
+        const elCenter = rect.top + (rect.height / 2);
+        const distance = Math.abs(elCenter - viewportCenter);
+        
+        if (distance < minDistance) {
+          minDistance = distance;
+          closestKey = key;
+        }
       });
-      // Tighter threshold to prevent skipping and allow returning to top
-      if (maxKey && maxRatio > 0.01) setActiveGuideSection(maxKey);
-    }, { threshold: [0, 0.1, 0.5, 1], rootMargin: '-40% 0px -40% 0px' });
+
+      if (closestKey && activeGuideSection !== closestKey) {
+        setActiveGuideSection(closestKey);
+      }
+    }, { threshold: [0, 0.1, 0.25, 0.5, 0.75, 1], rootMargin: '-20% 0px -20% 0px' });
 
     requestAnimationFrame(() => {
       Object.entries(sectionRefs.current).forEach(([key, el]) => {
@@ -958,33 +975,31 @@ export default function OrderLookup(){
               {!screenshotTimeline.length ? (
                 <div className="text-sm text-gray-500">No screenshots yet.</div>
               ) : (
-                <div className="space-y-3 max-h-96 overflow-auto pr-1">
+                <div className="space-y-6 max-h-[1200px] overflow-auto pr-1">
                   {screenshotTimeline.map((entry, idx) => {
                     const isScreenshotActive = guideActive && activeGuideSection === `screenshot-${idx}`;
                     return (
                       <div 
                         key={`${entry.ts}-${idx}`} 
                         ref={registerSection(`screenshot-${idx}`)}
-                        className={`rounded-lg border border-gray-200 p-2 bg-gray-50 transition-all duration-300 ${isScreenshotActive ? 'ring-2 ring-blue-500 shadow-lg scale-[1.02]' : ''}`}
+                        className={`rounded-lg border border-gray-200 p-2 bg-gray-50 transition-all duration-500 min-h-[200px] ${isScreenshotActive ? 'ring-4 ring-blue-500 shadow-2xl scale-[1.02] z-10' : 'opacity-80'}`}
                       >
-                        <div className="text-[11px] text-gray-600 mb-2">
-                          {entry.agent ? <span className="font-semibold mr-2">{entry.agent}</span> : null}
-                          {(() => {
-                            try { return new Date(entry.ts).toLocaleString(); } catch { return entry.ts || "—"; }
-                          })()}
+                        <div className="text-[11px] text-gray-600 mb-2 flex justify-between items-center">
+                          <div>
+                            {entry.agent ? <span className="font-semibold mr-2">{entry.agent}</span> : null}
+                            {(() => {
+                              try { return new Date(entry.ts).toLocaleString(); } catch { return entry.ts || "—"; }
+                            })()}
+                          </div>
+                          {isScreenshotActive && <span className="text-blue-600 font-bold text-xs animate-pulse">Active View</span>}
                         </div>
                         <a href={entry.url} target="_blank" rel="noreferrer" className="block relative">
                           <img
                             src={entry.url}
                             alt="Agent screenshot"
-                            className="w-full max-h-72 object-contain rounded border border-gray-200 bg-white"
+                            className={`w-full object-contain rounded border border-gray-200 bg-white transition-all duration-500 ${isScreenshotActive ? 'max-h-[80vh]' : 'max-h-72'}`}
                             loading="lazy"
                           />
-                          {isScreenshotActive && (
-                            <div className="absolute inset-0 flex items-center justify-center bg-black/10 pointer-events-none">
-                              <span className="bg-blue-600 text-white text-xs font-bold px-2 py-1 rounded shadow-sm">Active Step</span>
-                            </div>
-                          )}
                         </a>
                       </div>
                     );
@@ -992,35 +1007,6 @@ export default function OrderLookup(){
                 </div>
               )}
             </div>
-
-            {/* Screenshot Pop-up Overlay */}
-            {guideActive && activeGuideSection?.startsWith('screenshot-') && (
-              <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-                <div className="relative max-w-4xl w-full max-h-[90vh] flex flex-col items-center">
-                  {(() => {
-                    const idx = parseInt(activeGuideSection.replace('screenshot-', ''), 10);
-                    const entry = screenshotTimeline[idx];
-                    if (!entry) return null;
-                    return (
-                      <>
-                        <div className="bg-white rounded-t-xl px-4 py-2 w-full flex items-center justify-between">
-                          <div className="text-sm font-semibold text-gray-900">
-                            Screenshot {idx + 1} of {screenshotTimeline.length}
-                            {entry.agent && <span className="ml-2 text-gray-500 font-normal">by {entry.agent}</span>}
-                          </div>
-                          <div className="text-xs text-gray-500">Scroll to continue ↓</div>
-                        </div>
-                        <img 
-                          src={entry.url} 
-                          alt={`Screenshot ${idx + 1}`}
-                          className="w-full h-auto max-h-[80vh] object-contain bg-black rounded-b-xl shadow-2xl"
-                        />
-                      </>
-                    );
-                  })()}
-                </div>
-              </div>
-            )}
 
             {/* Timeline */}
             <div className="px-4 py-3 border-t border-gray-100">
