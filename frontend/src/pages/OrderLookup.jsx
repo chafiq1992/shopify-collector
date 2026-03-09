@@ -387,13 +387,13 @@ export default function OrderLookup(){
     if (!order) return [];
     const steps = [
       { key: 'sales-channel', label: 'Sales Channel' },
+      { key: 'comments', label: 'Comments' },
       { key: 'shipping', label: 'Shipping Address' },
     ];
     unfulfilledItems.forEach((_, i) => {
       steps.push({ key: `item-${i}`, label: `Item ${i + 1}` });
     });
     steps.push({ key: 'totals', label: 'Order Totals' });
-    steps.push({ key: 'comments', label: 'Comments' });
     steps.push({ key: 'screenshots', label: 'Agent Screenshots' });
     steps.push({ key: 'tags', label: 'Tags' });
     return steps;
@@ -404,8 +404,28 @@ export default function OrderLookup(){
     return guideSteps.findIndex(s => s.key === activeGuideSection);
   }, [activeGuideSection, guideSteps]);
 
+  // Track if guide has been initialized for the current order to prevent re-scrolling on updates
+  const guideInitializedRef = useRef(false);
+
   useEffect(() => {
-    if (!guideActive || !order) return;
+    if (!guideActive) {
+      guideInitializedRef.current = false;
+      return;
+    }
+    if (!order) return;
+
+    // Only scroll to start if we haven't initialized the guide for this session yet
+    if (!guideInitializedRef.current) {
+      const firstKey = guideSteps[0]?.key;
+      if (firstKey && sectionRefs.current[firstKey]) {
+        setTimeout(() => {
+          sectionRefs.current[firstKey]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setActiveGuideSection(firstKey);
+        }, 120);
+      }
+      guideInitializedRef.current = true;
+    }
+
     const ratioMap = new Map();
     const observer = new IntersectionObserver((entries) => {
       entries.forEach(e => {
@@ -425,14 +445,6 @@ export default function OrderLookup(){
         if (el) { el.dataset.guideKey = key; observer.observe(el); }
       });
     });
-
-    const firstKey = guideSteps[0]?.key;
-    if (firstKey && sectionRefs.current[firstKey]) {
-      setTimeout(() => {
-        sectionRefs.current[firstKey]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        setActiveGuideSection(firstKey);
-      }, 120);
-    }
 
     return () => observer.disconnect();
   }, [guideActive, order, guideSteps]);
@@ -625,7 +637,7 @@ export default function OrderLookup(){
               )}
             </div>
 
-            {/* Sales channel */}
+            {/* Sales channel & Header */}
             <div
               ref={registerSection('sales-channel')}
               className={`px-4 pt-4 transition-all duration-500 rounded-xl ${sectionCls('sales-channel')}`}
@@ -633,36 +645,76 @@ export default function OrderLookup(){
               {guideActive && activeGuideSection === 'sales-channel' && (
                 <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 guide-label-animate">Step {guideStepIndex + 1}: Sales Channel</div>
               )}
-              <div className="text-[11px] text-gray-500 flex flex-col gap-1">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium text-gray-900">
-                    {(() => {
-                      try {
-                        if (!order.created_at) return "—";
-                        const d = new Date(order.created_at);
-                        return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: 'numeric', hour12: true });
-                      } catch { return order.created_at || "—"; }
-                    })()}
+              
+              <div className="flex flex-col gap-2 mb-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xl font-bold text-gray-900">#{order.number}</span>
+                  {/* Financial Status Badge */}
+                  <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
+                    (order.financial_status === 'paid') ? 'bg-gray-100 text-gray-700 border-gray-200' :
+                    (order.financial_status === 'pending') ? 'bg-orange-100 text-orange-800 border-orange-200' :
+                    'bg-gray-100 text-gray-700 border-gray-200'
+                  }`}>
+                    {order.financial_status ? order.financial_status.replace(/_/g, ' ') : 'Payment pending'}
+                  </span>
+                  {/* Fulfillment Status Badge */}
+                  <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
+                    (order.fulfillment_status === 'fulfilled') ? 'bg-green-100 text-green-800 border-green-200' :
+                    (order.fulfillment_status === 'partial') ? 'bg-yellow-100 text-yellow-800 border-yellow-200' :
+                    'bg-yellow-100 text-yellow-800 border-yellow-200'
+                  }`}>
+                    {order.fulfillment_status ? order.fulfillment_status.replace(/_/g, ' ') : 'Unfulfilled'}
                   </span>
                 </div>
-                <div>
-                  from <span className="font-semibold text-gray-800">{order.sales_channel || "—"}</span>
+                
+                <div className="text-sm text-gray-600">
+                  <span>{(() => {
+                    try {
+                      if (!order.created_at) return "—";
+                      const d = new Date(order.created_at);
+                      return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: 'numeric', hour12: true });
+                    } catch { return order.created_at || "—"; }
+                  })()}</span>
+                  <span className="mx-1">from</span>
+                  <span className="font-bold text-gray-900 bg-yellow-50 px-1 rounded">{order.sales_channel || "Unknown Source"}</span>
                 </div>
               </div>
+
               <div className="mt-2 text-sm text-gray-700">
                 <span className="font-medium">{order.customer || "Unknown customer"}</span>
                 {order.shipping_city ? <span className="text-gray-500"> • {order.shipping_city}</span> : null}
               </div>
             </div>
 
-            <div className="px-4 py-3 border-t border-gray-100 flex items-baseline justify-between">
-              <div>
-                <div className="text-xs text-gray-500">Order</div>
-                <div className="text-lg font-semibold">{order.number}</div>
+            {/* Comments (Moved up) */}
+            <div
+              ref={registerSection('comments')}
+              className={`px-4 py-3 border-t border-gray-100 transition-all duration-500 rounded-xl ${sectionCls('comments')}`}
+            >
+              {guideActive && activeGuideSection === 'comments' && (
+                <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 guide-label-animate">Step {guideStepIndex + 1}: Comments</div>
+              )}
+              <div className="text-sm font-semibold mb-2">Comments</div>
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm min-h-[44px]">
+                {!commentLines.length ? (
+                  <span className="text-gray-500">No comments</span>
+                ) : (
+                  <ul className="list-disc pl-5 space-y-1">
+                    {commentLines.map((l, i) => (<li key={i}>{l}</li>))}
+                  </ul>
+                )}
               </div>
-              <div className="text-right">
-                <div className="text-xs text-gray-500">Total</div>
-                <div className="text-lg font-semibold">{totalPrice}</div>
+              <div className="mt-2 flex items-center gap-2">
+                <input
+                  value={noteAppend}
+                  onChange={(e)=>setNoteAppend(e.target.value)}
+                  placeholder="Write a comment"
+                  className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2"
+                />
+                <button
+                  onClick={handleAppendNote}
+                  className="px-3 py-2 rounded-lg bg-gray-900 text-white text-sm font-semibold active:scale-[.98]"
+                >Post</button>
               </div>
             </div>
 
@@ -874,38 +926,6 @@ export default function OrderLookup(){
                     <div className="text-lg font-extrabold text-rose-800">{discountTotal ?? "—"}{currencyCode && discountTotal != null ? ` ${currencyCode}` : ""}</div>
                   </div>
                 </div>
-              </div>
-            </div>
-
-            {/* Comments */}
-            <div
-              ref={registerSection('comments')}
-              className={`px-4 py-3 border-t border-gray-100 transition-all duration-500 rounded-xl ${sectionCls('comments')}`}
-            >
-              {guideActive && activeGuideSection === 'comments' && (
-                <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 guide-label-animate">Step {guideStepIndex + 1}: Comments</div>
-              )}
-              <div className="text-sm font-semibold mb-2">Comments</div>
-              <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm min-h-[44px]">
-                {!commentLines.length ? (
-                  <span className="text-gray-500">No comments</span>
-                ) : (
-                  <ul className="list-disc pl-5 space-y-1">
-                    {commentLines.map((l, i) => (<li key={i}>{l}</li>))}
-                  </ul>
-                )}
-              </div>
-              <div className="mt-2 flex items-center gap-2">
-                <input
-                  value={noteAppend}
-                  onChange={(e)=>setNoteAppend(e.target.value)}
-                  placeholder="Write a comment"
-                  className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2"
-                />
-                <button
-                  onClick={handleAppendNote}
-                  className="px-3 py-2 rounded-lg bg-gray-900 text-white text-sm font-semibold active:scale-[.98]"
-                >Post</button>
               </div>
             </div>
 
