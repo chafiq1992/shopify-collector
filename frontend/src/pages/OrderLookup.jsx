@@ -144,6 +144,9 @@ export default function OrderLookup(){
 
   const inputRef = useRef(null);
   const sectionRefs = useRef({});
+  const guideInitializedRef = useRef(false);
+  const guideAnimatingRef = useRef(false);
+  const guideUnlockTimerRef = useRef(null);
   const registerSection = useCallback((key) => (el) => {
     if (el) sectionRefs.current[key] = el;
     else delete sectionRefs.current[key];
@@ -426,68 +429,121 @@ export default function OrderLookup(){
     return guideSteps.findIndex(s => s.key === activeGuideSection);
   }, [activeGuideSection, guideSteps]);
 
-  // Track if guide has been initialized for the current order to prevent re-scrolling on updates
-  const guideInitializedRef = useRef(false);
+  const activeScreenshotIndex = useMemo(() => {
+    if (!activeGuideSection?.startsWith('screenshot-')) return -1;
+    const idx = Number(activeGuideSection.split('-')[1]);
+    return Number.isInteger(idx) ? idx : -1;
+  }, [activeGuideSection]);
+
+  const activeScreenshotEntry = useMemo(() => {
+    if (activeScreenshotIndex < 0) return null;
+    return screenshotTimeline[activeScreenshotIndex] || null;
+  }, [activeScreenshotIndex, screenshotTimeline]);
+
+  useEffect(() => () => {
+    if (guideUnlockTimerRef.current) {
+      clearTimeout(guideUnlockTimerRef.current);
+    }
+  }, []);
+
+  function getGuideScrollTop(el) {
+    const headerEl = document.querySelector('header');
+    const headerHeight = headerEl ? headerEl.getBoundingClientRect().height : 88;
+    const rect = el.getBoundingClientRect();
+    return Math.max(0, window.scrollY + rect.top - headerHeight - 20);
+  }
+
+  function lockGuideScroll() {
+    guideAnimatingRef.current = true;
+    if (guideUnlockTimerRef.current) clearTimeout(guideUnlockTimerRef.current);
+    guideUnlockTimerRef.current = setTimeout(() => {
+      guideAnimatingRef.current = false;
+    }, 520);
+  }
 
   useEffect(() => {
     if (!guideActive) {
       guideInitializedRef.current = false;
+      guideAnimatingRef.current = false;
+      if (guideUnlockTimerRef.current) clearTimeout(guideUnlockTimerRef.current);
       return;
     }
     if (!order) return;
 
-    // Only scroll to start if we haven't initialized the guide for this session yet
     if (!guideInitializedRef.current) {
       const firstKey = guideSteps[0]?.key;
-      if (firstKey && sectionRefs.current[firstKey]) {
+      if (firstKey) {
         setTimeout(() => {
-          sectionRefs.current[firstKey]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          setActiveGuideSection(firstKey);
+          guideGoTo(firstKey);
         }, 120);
       }
       guideInitializedRef.current = true;
     }
-
-    const ratioMap = new Map();
-    const observer = new IntersectionObserver((entries) => {
-      entries.forEach(e => {
-        const key = e.target.dataset.guideKey;
-        if (key) ratioMap.set(key, e.intersectionRatio);
-      });
-      
-      // Find the element closest to the center of the viewport
-      let closestKey = null;
-      let minDistance = Infinity;
-      const viewportCenter = window.innerHeight / 2;
-
-      // We only consider elements that are at least partially visible
-      Object.entries(sectionRefs.current).forEach(([key, el]) => {
-        if (!el) return;
-        const rect = el.getBoundingClientRect();
-        if (rect.bottom < 0 || rect.top > window.innerHeight) return; // Not visible
-
-        const elCenter = rect.top + (rect.height / 2);
-        const distance = Math.abs(elCenter - viewportCenter);
-        
-        if (distance < minDistance) {
-          minDistance = distance;
-          closestKey = key;
-        }
-      });
-
-      if (closestKey && activeGuideSection !== closestKey) {
-        setActiveGuideSection(closestKey);
-      }
-    }, { threshold: [0, 0.1, 0.25, 0.5, 0.75, 1], rootMargin: '-20% 0px -20% 0px' });
-
-    requestAnimationFrame(() => {
-      Object.entries(sectionRefs.current).forEach(([key, el]) => {
-        if (el) { el.dataset.guideKey = key; observer.observe(el); }
-      });
-    });
-
-    return () => observer.disconnect();
   }, [guideActive, order, guideSteps]);
+
+  useEffect(() => {
+    if (!guideActive || !guideSteps.length) return;
+
+    let wheelDelta = 0;
+    let touchStartY = null;
+
+    const onWheel = (e) => {
+      if (Math.abs(e.deltaY) < 6) return;
+      e.preventDefault();
+      if (guideAnimatingRef.current) return;
+      wheelDelta += e.deltaY;
+      if (Math.abs(wheelDelta) < 34) return;
+      const direction = wheelDelta > 0 ? 1 : -1;
+      wheelDelta = 0;
+      if (direction > 0) guideNext();
+      else guidePrev();
+    };
+
+    const onKeyDown = (e) => {
+      if (guideAnimatingRef.current) return;
+      if (["ArrowDown", "PageDown", "Enter", " "].includes(e.key)) {
+        e.preventDefault();
+        guideNext();
+      } else if (["ArrowUp", "PageUp"].includes(e.key)) {
+        e.preventDefault();
+        guidePrev();
+      }
+    };
+
+    const onTouchStart = (e) => {
+      touchStartY = e.touches?.[0]?.clientY ?? null;
+    };
+
+    const onTouchMove = (e) => {
+      const currentY = e.touches?.[0]?.clientY;
+      if (touchStartY == null || currentY == null) return;
+      const delta = touchStartY - currentY;
+      if (Math.abs(delta) < 40) return;
+      e.preventDefault();
+      if (guideAnimatingRef.current) return;
+      touchStartY = currentY;
+      if (delta > 0) guideNext();
+      else guidePrev();
+    };
+
+    const onTouchEnd = () => {
+      touchStartY = null;
+    };
+
+    window.addEventListener('wheel', onWheel, { passive: false });
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: false });
+    window.addEventListener('touchend', onTouchEnd);
+
+    return () => {
+      window.removeEventListener('wheel', onWheel);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', onTouchEnd);
+    };
+  }, [guideActive, guideSteps, guideStepIndex]);
 
   useEffect(() => {
     if (!guideActive) { setBadgeSubStep(0); return; }
@@ -508,10 +564,14 @@ export default function OrderLookup(){
   }
 
   function guideGoTo(key) {
-    if (sectionRefs.current[key]) {
-      sectionRefs.current[key].scrollIntoView({ behavior: 'smooth', block: 'center' });
-      setActiveGuideSection(key);
-    }
+    const el = sectionRefs.current[key];
+    if (!el) return;
+    setActiveGuideSection(key);
+    lockGuideScroll();
+    window.scrollTo({
+      top: getGuideScrollTop(el),
+      behavior: 'smooth',
+    });
   }
 
   function guideNext() {
@@ -978,14 +1038,14 @@ export default function OrderLookup(){
               {!screenshotTimeline.length ? (
                 <div className="text-sm text-gray-500">No screenshots yet.</div>
               ) : (
-                <div className="space-y-6 max-h-[1200px] overflow-auto pr-1">
+                <div className="space-y-6">
                   {screenshotTimeline.map((entry, idx) => {
                     const isScreenshotActive = guideActive && activeGuideSection === `screenshot-${idx}`;
                     return (
                       <div 
                         key={`${entry.ts}-${idx}`} 
                         ref={registerSection(`screenshot-${idx}`)}
-                        className={`rounded-lg border border-gray-200 p-2 bg-gray-50 transition-all duration-500 min-h-[200px] ${isScreenshotActive ? 'ring-4 ring-blue-500 shadow-2xl scale-[1.02] z-10' : 'opacity-80'}`}
+                        className={`rounded-xl border p-3 transition-all duration-300 min-h-[200px] ${isScreenshotActive ? 'border-blue-300 bg-blue-50 shadow-lg' : 'border-gray-200 bg-gray-50 opacity-55'}`}
                       >
                         <div className="text-[11px] text-gray-600 mb-2 flex justify-between items-center">
                           <div>
@@ -994,13 +1054,13 @@ export default function OrderLookup(){
                               try { return new Date(entry.ts).toLocaleString(); } catch { return entry.ts || "—"; }
                             })()}
                           </div>
-                          {isScreenshotActive && <span className="text-blue-600 font-bold text-xs animate-pulse">Active View</span>}
+                          {isScreenshotActive && <span className="text-blue-600 font-bold text-xs">Focused</span>}
                         </div>
                         <a href={entry.url} target="_blank" rel="noreferrer" className="block relative">
                           <img
                             src={entry.url}
                             alt="Agent screenshot"
-                            className={`w-full object-contain rounded border border-gray-200 bg-white transition-all duration-500 ${isScreenshotActive ? 'max-h-[80vh]' : 'max-h-72'}`}
+                            className="w-full max-h-[70vh] object-contain rounded-xl border border-gray-200 bg-white"
                             loading="lazy"
                           />
                         </a>
@@ -1131,6 +1191,34 @@ export default function OrderLookup(){
               disabled={guideStepIndex >= guideSteps.length - 1}
               className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-30 disabled:cursor-not-allowed"
             >Next →</button>
+          </div>
+        </div>
+      )}
+
+      {guideActive && activeScreenshotEntry && (
+        <div className="fixed inset-0 z-[55] flex items-center justify-center px-4 py-6 pointer-events-none">
+          <div className="w-full max-w-4xl overflow-hidden rounded-3xl border border-blue-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-blue-100 bg-blue-50 px-4 py-3">
+              <div>
+                <div className="text-xs font-bold uppercase tracking-wide text-blue-700">Guide Screenshot Focus</div>
+                <div className="text-sm font-semibold text-gray-900">
+                  {guideSteps[guideStepIndex]?.label || "Agent Screenshot"}
+                </div>
+              </div>
+              <div className="text-xs text-gray-600 text-right">
+                {activeScreenshotEntry.agent ? <div className="font-semibold text-gray-800">{activeScreenshotEntry.agent}</div> : null}
+                <div>{(() => {
+                  try { return new Date(activeScreenshotEntry.ts).toLocaleString(); } catch { return activeScreenshotEntry.ts || "—"; }
+                })()}</div>
+              </div>
+            </div>
+            <div className="bg-slate-100 p-4">
+              <img
+                src={activeScreenshotEntry.url}
+                alt="Focused agent screenshot"
+                className="w-full max-h-[78vh] rounded-2xl border border-gray-200 bg-white object-contain shadow-sm"
+              />
+            </div>
           </div>
         </div>
       )}
