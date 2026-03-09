@@ -72,6 +72,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     setError(null);
     try {
       const cfg = await authFetch("/api/delivery-config", { headers: authHeaders() });
+      if (!cfg.ok) { setNotConfigured(true); setBusy(false); return; }
       const cfgJ = await cfg.json();
       if (!cfgJ.configured) { setNotConfigured(true); setBusy(false); return; }
 
