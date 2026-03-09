@@ -307,17 +307,25 @@ export default function OrderLookup(){
     if (!text) return [];
     const lines = text.split(/\r?\n/);
     const out = [];
+    
+    const toProxy = (u) => {
+      if (u && u.startsWith("https://storage.googleapis.com/")) {
+        return `/api/proxy-image?url=${encodeURIComponent(u)}`;
+      }
+      return u;
+    };
+
     for (let i = 0; i < lines.length; i += 1) {
       const raw = String(lines[i] || "").trim();
       if (!raw) continue;
       const mLegacy = raw.match(/^\[AGENT_SCREENSHOT\]\s+(\S+)\s+(\S+)$/);
       if (mLegacy) {
-        out.push({ ts: String(mLegacy[1] || "").trim(), url: String(mLegacy[2] || "").trim(), agent: "" });
+        out.push({ ts: String(mLegacy[1] || "").trim(), url: toProxy(String(mLegacy[2] || "").trim()), agent: "" });
         continue;
       }
       const mHuman = raw.match(/^Agent screenshot\s*\(([^)]+)\):\s*(\S+)$/i);
       if (mHuman) {
-        out.push({ ts: String(mHuman[1] || "").trim(), url: String(mHuman[2] || "").trim(), agent: "" });
+        out.push({ ts: String(mHuman[1] || "").trim(), url: toProxy(String(mHuman[2] || "").trim()), agent: "" });
         continue;
       }
       const mSnip = raw.match(/^Snip by\s+(.+)$/i);
@@ -330,7 +338,7 @@ export default function OrderLookup(){
         const mUrl = urlRaw.match(/^(https?:\/\/\S+)$/i);
         const finalUrl = mLink ? String(mLink[1] || "").trim() : (mUrl ? String(mUrl[1] || "").trim() : "");
         if (finalUrl) {
-          out.push({ ts: mAt ? String(mAt[1] || "").trim() : "", url: finalUrl, agent });
+          out.push({ ts: mAt ? String(mAt[1] || "").trim() : "", url: toProxy(finalUrl), agent });
           i += 2;
         }
       }

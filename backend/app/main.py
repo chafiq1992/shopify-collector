@@ -2,7 +2,7 @@ import os
 import json
 from typing import List, Optional, Dict, Any, Tuple
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header, Request, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header, Request, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -2973,6 +2973,58 @@ async def get_print_data(numbers: str = Query("", description="Comma-separated o
             continue
 
     return {"ok": True, "orders": out}
+
+@app.get("/api/proxy-image")
+async def proxy_image(url: str = Query(..., description="The GCS URL to proxy")):
+    """
+    Proxies an image from Google Cloud Storage, handling authentication if running on Cloud Run.
+    """
+    if not url.startswith("https://storage.googleapis.com/"):
+        raise HTTPException(status_code=400, detail="Invalid URL domain")
+
+    # Try to get GCS access token from metadata server
+    access_token = None
+    try:
+        async with httpx.AsyncClient() as client:
+            # Metadata server URL for Cloud Run / GCE
+            meta_res = await client.get(
+                "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+                headers={"Metadata-Flavor": "Google"},
+                timeout=2.0
+            )
+            if meta_res.status_code == 200:
+                data = meta_res.json()
+                access_token = data.get("access_token")
+    except Exception:
+        # Ignore metadata errors (e.g. running locally)
+        pass
+
+    headers = {}
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers, timeout=15.0)
+            
+        if resp.status_code != 200:
+             # If failed with token, try without (public bucket?)
+            if access_token:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(url, timeout=15.0)
+            
+            if resp.status_code != 200:
+                return JSONResponse(
+                    status_code=resp.status_code, 
+                    content={"detail": f"Upstream error: {resp.status_code}", "body": resp.text[:200]}
+                )
+
+        content_type = resp.headers.get("content-type", "image/jpeg")
+        return Response(content=resp.content, media_type=content_type)
+
+    except Exception as e:
+        print(f"Proxy error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch image")
 
 # --------- SPA client-side routes (serve index.html) ---------
 def _frontend_dist_dir() -> str:
