@@ -1,7 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
 
-// Minimal API client (mirrors endpoints used elsewhere)
 const API = {
   async searchOneByNumber(number, store){
     const params = new URLSearchParams({
@@ -68,7 +67,6 @@ const API = {
     return res.json();
   },
   async fetchRecentTags(store){
-    // Reuse orders endpoint to gather recent tags (approximate suggestions)
     const params = new URLSearchParams({
       limit: "50",
       status_filter: "all",
@@ -80,6 +78,19 @@ const API = {
     return js.tags || [];
   }
 };
+
+const DELIVERY_COMPANIES = [
+  { name: '12livery', bg: 'bg-red-500',     border: 'border-red-600',     text: 'text-white',    hover: 'hover:bg-red-600' },
+  { name: 'ibex',     bg: 'bg-blue-600',    border: 'border-blue-700',    text: 'text-white',    hover: 'hover:bg-blue-700' },
+  { name: 'l24',      bg: 'bg-emerald-500', border: 'border-emerald-600', text: 'text-white',    hover: 'hover:bg-emerald-600' },
+  { name: 'k',        bg: 'bg-amber-400',   border: 'border-amber-500',   text: 'text-gray-900', hover: 'hover:bg-amber-500' },
+  { name: 'lx',       bg: 'bg-purple-600',  border: 'border-purple-700',  text: 'text-white',    hover: 'hover:bg-purple-700' },
+  { name: 'pal',      bg: 'bg-orange-500',  border: 'border-orange-600',  text: 'text-white',    hover: 'hover:bg-orange-600' },
+  { name: 'meta',     bg: 'bg-pink-500',    border: 'border-pink-600',    text: 'text-white',    hover: 'hover:bg-pink-600' },
+  { name: 'fast',     bg: 'bg-teal-500',    border: 'border-teal-600',    text: 'text-white',    hover: 'hover:bg-teal-600' },
+  { name: 'oscario',  bg: 'bg-indigo-600',  border: 'border-indigo-700',  text: 'text-white',    hover: 'hover:bg-indigo-700' },
+];
+const COMPANY_NAMES_LOWER = DELIVERY_COMPANIES.map(c => c.name.toLowerCase());
 
 export default function OrderLookup(){
   const [store, setStore] = useState(() => {
@@ -121,7 +132,18 @@ export default function OrderLookup(){
   const [foData, setFoData] = useState({ orders: [], mapByVariant: {}, selectedLineItemIds: new Set() });
   const [agentToday, setAgentToday] = useState({ name: "", fulfilledToday: 0, loading: false });
 
+  const [guideActive, setGuideActive] = useState(false);
+  const [activeGuideSection, setActiveGuideSection] = useState(null);
+  const [badgeSubStep, setBadgeSubStep] = useState(0);
+  const [companyConfirm, setCompanyConfirm] = useState(null);
+
   const inputRef = useRef(null);
+  const sectionRefs = useRef({});
+  const registerSection = useCallback((key) => (el) => {
+    if (el) sectionRefs.current[key] = el;
+    else delete sectionRefs.current[key];
+  }, []);
+
   useEffect(() => { try { inputRef.current?.focus(); } catch {} }, []);
 
   useEffect(() => {
@@ -154,6 +176,8 @@ export default function OrderLookup(){
     setError(null);
     setOrder(null);
     setFulfillSuccess(false);
+    setGuideActive(false);
+    setActiveGuideSection(null);
     try {
       const found = await API.searchOneByNumber(n, store);
       if (!found){
@@ -162,7 +186,6 @@ export default function OrderLookup(){
         setOverrideInfo(null);
       } else {
         setOrder(found);
-        // fetch enrichments (shipping/customer) best-effort
         try {
           const r = await authFetch(`/api/overrides?orders=${encodeURIComponent(String(found.number).replace(/^#/, ""))}&store=${encodeURIComponent(store)}`, { headers: authHeaders() });
           const js = await r.json();
@@ -171,7 +194,6 @@ export default function OrderLookup(){
         } catch {
           setOverrideInfo(null);
         }
-        // Fetch fulfillment orders and preselect all line items by default
         try {
           const fo = await API.getFulfillmentOrders(found.id, store);
           const byVar = {};
@@ -190,7 +212,6 @@ export default function OrderLookup(){
         } catch {
           setFoData({ orders: [], mapByVariant: {}, selectedLineItemIds: new Set() });
         }
-        // prefetch tag suggestions
         try {
           const all = await API.fetchRecentTags(store);
           setTagSuggestions(all);
@@ -198,7 +219,6 @@ export default function OrderLookup(){
           setTagSuggestions([]);
         }
       }
-      // reflect in URL
       try {
         const params = new URLSearchParams(location.search);
         params.set("q", n);
@@ -219,7 +239,6 @@ export default function OrderLookup(){
       setNewTag("");
       setMessage("Tag added");
       try { setTimeout(()=>setMessage(null), 1400); } catch {}
-      // Optimistic update
       setOrder(prev => prev ? ({ ...prev, tags: Array.from(new Set([...(prev.tags || []), tag])) }) : prev);
     } catch (e){
       setError(e?.message || "Failed to add tag");
@@ -291,25 +310,16 @@ export default function OrderLookup(){
     for (let i = 0; i < lines.length; i += 1) {
       const raw = String(lines[i] || "").trim();
       if (!raw) continue;
-
-      // Legacy marker format: [AGENT_SCREENSHOT] <ts> <url>
       const mLegacy = raw.match(/^\[AGENT_SCREENSHOT\]\s+(\S+)\s+(\S+)$/);
       if (mLegacy) {
         out.push({ ts: String(mLegacy[1] || "").trim(), url: String(mLegacy[2] || "").trim(), agent: "" });
         continue;
       }
-
-      // Human-readable one-line format: Agent screenshot (<ts>): <url>
       const mHuman = raw.match(/^Agent screenshot\s*\(([^)]+)\):\s*(\S+)$/i);
       if (mHuman) {
         out.push({ ts: String(mHuman[1] || "").trim(), url: String(mHuman[2] || "").trim(), agent: "" });
         continue;
       }
-
-      // New multiline format:
-      // Snip by <agent>
-      // At: <ts>
-      // <url> or Link: <url>
       const mSnip = raw.match(/^Snip by\s+(.+)$/i);
       if (mSnip) {
         const agent = String(mSnip[1] || "").trim();
@@ -320,11 +330,7 @@ export default function OrderLookup(){
         const mUrl = urlRaw.match(/^(https?:\/\/\S+)$/i);
         const finalUrl = mLink ? String(mLink[1] || "").trim() : (mUrl ? String(mUrl[1] || "").trim() : "");
         if (finalUrl) {
-          out.push({
-            ts: mAt ? String(mAt[1] || "").trim() : "",
-            url: finalUrl,
-            agent,
-          });
+          out.push({ ts: mAt ? String(mAt[1] || "").trim() : "", url: finalUrl, agent });
           i += 2;
         }
       }
@@ -354,6 +360,156 @@ export default function OrderLookup(){
     if (!q) return tagSuggestions.slice(0, 20);
     return (tagSuggestions || []).filter(t => String(t).toLowerCase().includes(q)).slice(0, 20);
   }
+
+  /* ── Guide logic ─────────────────────────────────────── */
+
+  const guideSteps = useMemo(() => {
+    if (!order) return [];
+    const steps = [
+      { key: 'sales-channel', label: 'Sales Channel' },
+      { key: 'shipping', label: 'Shipping Address' },
+    ];
+    (order.variants || []).forEach((_, i) => {
+      steps.push({ key: `item-${i}`, label: `Item ${i + 1}` });
+    });
+    steps.push({ key: 'totals', label: 'Order Totals' });
+    steps.push({ key: 'comments', label: 'Comments' });
+    steps.push({ key: 'screenshots', label: 'Agent Screenshots' });
+    steps.push({ key: 'tags', label: 'Tags' });
+    return steps;
+  }, [order]);
+
+  const guideStepIndex = useMemo(() => {
+    if (!activeGuideSection) return -1;
+    return guideSteps.findIndex(s => s.key === activeGuideSection);
+  }, [activeGuideSection, guideSteps]);
+
+  useEffect(() => {
+    if (!guideActive || !order) return;
+    const ratioMap = new Map();
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        const key = e.target.dataset.guideKey;
+        if (key) ratioMap.set(key, e.intersectionRatio);
+      });
+      let maxRatio = 0;
+      let maxKey = null;
+      ratioMap.forEach((ratio, key) => {
+        if (ratio > maxRatio) { maxRatio = ratio; maxKey = key; }
+      });
+      if (maxKey && maxRatio > 0.05) setActiveGuideSection(maxKey);
+    }, { threshold: [0, 0.1, 0.25, 0.5, 0.75, 1], rootMargin: '-15% 0px -15% 0px' });
+
+    requestAnimationFrame(() => {
+      Object.entries(sectionRefs.current).forEach(([key, el]) => {
+        if (el) { el.dataset.guideKey = key; observer.observe(el); }
+      });
+    });
+
+    const firstKey = guideSteps[0]?.key;
+    if (firstKey && sectionRefs.current[firstKey]) {
+      setTimeout(() => {
+        sectionRefs.current[firstKey]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setActiveGuideSection(firstKey);
+      }, 120);
+    }
+
+    return () => observer.disconnect();
+  }, [guideActive, order, guideSteps]);
+
+  useEffect(() => {
+    if (!guideActive) { setBadgeSubStep(0); return; }
+    const isItem = activeGuideSection?.startsWith('item-');
+    if (!isItem) { setBadgeSubStep(0); return; }
+    setBadgeSubStep(1);
+    const t = setTimeout(() => setBadgeSubStep(2), 900);
+    return () => clearTimeout(t);
+  }, [activeGuideSection, guideActive]);
+
+  function toggleGuide() {
+    if (guideActive) {
+      setGuideActive(false);
+      setActiveGuideSection(null);
+    } else {
+      setGuideActive(true);
+    }
+  }
+
+  function guideGoTo(key) {
+    if (sectionRefs.current[key]) {
+      sectionRefs.current[key].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setActiveGuideSection(key);
+    }
+  }
+
+  function guideNext() {
+    const idx = guideStepIndex;
+    const next = guideSteps[idx + 1];
+    if (next) guideGoTo(next.key);
+  }
+
+  function guidePrev() {
+    const idx = guideStepIndex;
+    const prev = guideSteps[idx - 1];
+    if (prev) guideGoTo(prev.key);
+  }
+
+  function sectionCls(key) {
+    if (!guideActive) return '';
+    if (activeGuideSection === key) return 'guide-section-active';
+    return 'guide-section-dim';
+  }
+
+  /* ── Delivery company logic ──────────────────────────── */
+
+  function getActiveCompanyTag() {
+    return (order?.tags || []).find(t => COMPANY_NAMES_LOWER.includes(t.toLowerCase()));
+  }
+
+  function handleDeliveryClick(companyName) {
+    if (!order) return;
+    const existing = getActiveCompanyTag();
+    if (existing && existing.toLowerCase() === companyName.toLowerCase()) return;
+    if (existing) {
+      setCompanyConfirm({ from: existing, to: companyName });
+    } else {
+      doAddCompanyTag(companyName);
+    }
+  }
+
+  async function doAddCompanyTag(companyName) {
+    try {
+      await API.addTag(order.id, companyName, store);
+      setOrder(prev => prev ? ({ ...prev, tags: Array.from(new Set([...(prev.tags || []), companyName])) }) : prev);
+      setMessage(`Added ${companyName}`);
+      setTimeout(() => setMessage(null), 1400);
+    } catch (e) {
+      setError(e?.message || "Failed to add tag");
+    }
+  }
+
+  async function handleConfirmSwitch() {
+    if (!companyConfirm || !order) return;
+    try {
+      await API.removeTag(order.id, companyConfirm.from, store);
+      await API.addTag(order.id, companyConfirm.to, store);
+      setOrder(prev => {
+        if (!prev) return prev;
+        const tags = (prev.tags || []).filter(t => t.toLowerCase() !== companyConfirm.from.toLowerCase());
+        return { ...prev, tags: Array.from(new Set([...tags, companyConfirm.to])) };
+      });
+      setMessage(`Switched from ${companyConfirm.from} to ${companyConfirm.to}`);
+      setTimeout(() => setMessage(null), 1400);
+    } catch (e) {
+      setError(e?.message || "Failed to switch delivery company");
+    } finally {
+      setCompanyConfirm(null);
+    }
+  }
+
+  /* ── Render ──────────────────────────────────────────── */
+
+  const activeCompany = order ? getActiveCompanyTag() : null;
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900">
@@ -417,7 +573,46 @@ export default function OrderLookup(){
         )}
         {!loading && order && (
           <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden">
-            <div className="px-4 pt-4">
+
+            {/* Guide controls bar */}
+            <div className="px-4 pt-3 flex items-center justify-between">
+              <button
+                onClick={toggleGuide}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  guideActive
+                    ? 'bg-blue-600 text-white shadow-md shadow-blue-200'
+                    : 'border border-blue-300 text-blue-700 bg-blue-50 hover:bg-blue-100'
+                }`}
+              >
+                {guideActive ? '✕ End Guide' : '▶ Start Guide'}
+              </button>
+              {guideActive && (
+                <div className="flex items-center gap-2 text-xs text-gray-500">
+                  <span>{guideStepIndex + 1} / {guideSteps.length}</span>
+                  <div className="flex gap-1">
+                    {guideSteps.map((s, i) => (
+                      <button
+                        key={s.key}
+                        onClick={() => guideGoTo(s.key)}
+                        className={`w-2 h-2 rounded-full transition-all ${
+                          i === guideStepIndex ? 'bg-blue-600 scale-125' : i < guideStepIndex ? 'bg-blue-300' : 'bg-gray-300'
+                        }`}
+                        title={s.label}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Sales channel */}
+            <div
+              ref={registerSection('sales-channel')}
+              className={`px-4 pt-4 transition-all duration-500 rounded-xl ${sectionCls('sales-channel')}`}
+            >
+              {guideActive && activeGuideSection === 'sales-channel' && (
+                <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 guide-label-animate">Step {guideStepIndex + 1}: Sales Channel</div>
+              )}
               <div className="text-[11px] text-gray-500 flex items-center justify-between">
                 <span>Sales channel: {order.sales_channel || "—"}</span>
                 <span>{(() => {
@@ -433,6 +628,7 @@ export default function OrderLookup(){
                 {order.shipping_city ? <span className="text-gray-500"> • {order.shipping_city}</span> : null}
               </div>
             </div>
+
             <div className="px-4 py-3 border-t border-gray-100 flex items-baseline justify-between">
               <div>
                 <div className="text-xs text-gray-500">Order</div>
@@ -443,7 +639,15 @@ export default function OrderLookup(){
                 <div className="text-lg font-semibold">{totalPrice}</div>
               </div>
             </div>
-            <div className="px-4 pb-2">
+
+            {/* Customer & shipping */}
+            <div
+              ref={registerSection('shipping')}
+              className={`px-4 pb-2 transition-all duration-500 rounded-xl ${sectionCls('shipping')}`}
+            >
+              {guideActive && activeGuideSection === 'shipping' && (
+                <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 guide-label-animate">Step {guideStepIndex + 1}: Shipping Address</div>
+              )}
               <div className="text-xs text-gray-500 mb-1">Customer & shipping</div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
                 <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
@@ -482,86 +686,106 @@ export default function OrderLookup(){
                 </div>
               </div>
             </div>
+
+            {/* Items */}
             <div className="px-4 py-3">
               <div className="text-sm font-semibold mb-2">Items</div>
               <ul className="space-y-4">
-                {(order.variants || []).map((v, i) => (
-                  <li key={i} className="py-2">
-                    <div className="rounded-xl overflow-hidden border border-gray-200">
-                      {v.image ? (
-                        <img src={v.image} alt="" className="w-full max-h-96 object-contain bg-white" />
-                      ) : (
-                        <div className="w-full h-60 rounded-md bg-gray-100 border-b border-gray-200" />
+                {(order.variants || []).map((v, i) => {
+                  const isItemActive = guideActive && activeGuideSection === `item-${i}`;
+                  return (
+                    <li
+                      key={i}
+                      ref={registerSection(`item-${i}`)}
+                      className={`py-2 transition-all duration-500 rounded-xl ${sectionCls(`item-${i}`)}`}
+                    >
+                      {isItemActive && (
+                        <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 px-1 guide-label-animate">Step {guideStepIndex + 1}: Item {i + 1}</div>
                       )}
-                      <div className="px-3 pt-2 flex flex-wrap items-center gap-2">
-                        <span className="inline-flex items-center px-3 py-1 rounded-xl bg-purple-100 text-purple-800 border border-purple-200 text-sm font-bold">
-                          Qty: {v.unfulfilled_qty ?? v.qty}
-                        </span>
-                        <span className="inline-flex items-center px-3 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-200 text-sm font-bold">
-                          Price: {(() => {
-                            try {
-                              if (v.unit_price == null) return "—";
-                              return `${Number(v.unit_price).toFixed(2)}${v.currency_code ? ` ${v.currency_code}` : ""}`;
-                            } catch { return "—"; }
-                          })()}
-                        </span>
-                      </div>
-                      <div className="p-3 flex items-start justify-between gap-3">
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium">{v.title || v.sku || "Item"}</div>
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            <span className="px-3 py-1 rounded-xl border-2 border-sky-300 bg-sky-100 text-sky-900 text-sm font-semibold">
-                              Color: {v.color || "—"}
-                            </span>
-                            <span className="px-3 py-1 rounded-xl border-2 border-fuchsia-300 bg-fuchsia-100 text-fuchsia-900 text-sm font-semibold">
-                              Size: {v.size || "—"}
-                            </span>
-                          </div>
-                          {(() => {
-                            const list = foData.mapByVariant[v.id] || [];
-                            if (!list.length) return null;
-                            return (
-                              <div className="mt-2 border-t border-gray-200 pt-2">
-                                <div className="text-xs font-semibold mb-1">Fulfillment</div>
-                                <div className="space-y-1">
-                                  {list.map((li, idx) => {
-                                    const checked = foData.selectedLineItemIds.has(li.id);
-                                    return (
-                                      <label key={li.id} className="flex items-center gap-2 text-xs">
-                                        <input
-                                          type="checkbox"
-                                          checked={checked}
-                                          onChange={(e)=>{
-                                            setFoData(prev => {
-                                              const nextSel = new Set(prev.selectedLineItemIds);
-                                              if (e.target.checked) nextSel.add(li.id); else nextSel.delete(li.id);
-                                              return { ...prev, selectedLineItemIds: nextSel };
-                                            });
-                                          }}
-                                        />
-                                        <span className="flex-1 truncate">
-                                          {li.title || v.title || v.sku || "Item"} — remaining: {li.remainingQuantity}
-                                        </span>
-                                      </label>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-                            );
-                          })()}
+                      <div className="rounded-xl overflow-hidden border border-gray-200">
+                        {v.image ? (
+                          <img src={v.image} alt="" className="w-full max-h-96 object-contain bg-white" />
+                        ) : (
+                          <div className="w-full h-60 rounded-md bg-gray-100 border-b border-gray-200" />
+                        )}
+                        <div className="px-3 pt-2 flex flex-wrap items-center gap-2">
+                          <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow' : ''}`}>
+                            Price: {(() => {
+                              try {
+                                if (v.unit_price == null) return "—";
+                                return `${Number(v.unit_price).toFixed(2)}${v.currency_code ? ` ${v.currency_code}` : ""}`;
+                              } catch { return "—"; }
+                            })()}
+                          </span>
+                          <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-purple-100 text-purple-800 border border-purple-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow guide-badge-delay-1' : ''}`}>
+                            Qty: {v.unfulfilled_qty ?? v.qty}
+                          </span>
                         </div>
-                        <span className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                          (v.status || "unknown") === "fulfilled" ? "bg-green-50 text-green-700 border-green-200" :
-                          (v.status || "unknown") === "unfulfilled" ? "bg-yellow-50 text-yellow-800 border-yellow-200" :
-                          "bg-gray-50 text-gray-700 border-gray-200"
-                        }`}>{v.status || "unknown"}</span>
+                        <div className="p-3 flex items-start justify-between gap-3">
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-medium">{v.title || v.sku || "Item"}</div>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              <span className={`px-3 py-1 rounded-xl border-2 border-sky-300 bg-sky-100 text-sky-900 text-sm font-semibold transition-all duration-300 ${isItemActive && badgeSubStep >= 2 ? 'guide-badge-glow guide-badge-delay-2' : ''}`}>
+                                Color: {v.color || "—"}
+                              </span>
+                              <span className={`px-3 py-1 rounded-xl border-2 border-fuchsia-300 bg-fuchsia-100 text-fuchsia-900 text-sm font-semibold transition-all duration-300 ${isItemActive && badgeSubStep >= 2 ? 'guide-badge-glow guide-badge-delay-3' : ''}`}>
+                                Size: {v.size || "—"}
+                              </span>
+                            </div>
+                            {(() => {
+                              const list = foData.mapByVariant[v.id] || [];
+                              if (!list.length) return null;
+                              return (
+                                <div className="mt-2 border-t border-gray-200 pt-2">
+                                  <div className="text-xs font-semibold mb-1">Fulfillment</div>
+                                  <div className="space-y-1">
+                                    {list.map((li) => {
+                                      const checked = foData.selectedLineItemIds.has(li.id);
+                                      return (
+                                        <label key={li.id} className="flex items-center gap-2 text-xs">
+                                          <input
+                                            type="checkbox"
+                                            checked={checked}
+                                            onChange={(e)=>{
+                                              setFoData(prev => {
+                                                const nextSel = new Set(prev.selectedLineItemIds);
+                                                if (e.target.checked) nextSel.add(li.id); else nextSel.delete(li.id);
+                                                return { ...prev, selectedLineItemIds: nextSel };
+                                              });
+                                            }}
+                                          />
+                                          <span className="flex-1 truncate">
+                                            {li.title || v.title || v.sku || "Item"} — remaining: {li.remainingQuantity}
+                                          </span>
+                                        </label>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                          <span className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                            (v.status || "unknown") === "fulfilled" ? "bg-green-50 text-green-700 border-green-200" :
+                            (v.status || "unknown") === "unfulfilled" ? "bg-yellow-50 text-yellow-800 border-yellow-200" :
+                            "bg-gray-50 text-gray-700 border-gray-200"
+                          }`}>{v.status || "unknown"}</span>
+                        </div>
                       </div>
-                    </div>
-                  </li>
-                ))}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
-            <div className="px-4 py-3 border-t border-gray-100">
+
+            {/* Order totals */}
+            <div
+              ref={registerSection('totals')}
+              className={`px-4 py-3 border-t border-gray-100 transition-all duration-500 rounded-xl ${sectionCls('totals')}`}
+            >
+              {guideActive && activeGuideSection === 'totals' && (
+                <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 guide-label-animate">Step {guideStepIndex + 1}: Order Totals</div>
+              )}
               <div className="text-sm font-semibold mb-2">Order totals</div>
               <div className="rounded-xl border-2 border-blue-200 bg-blue-50 p-3">
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm">
@@ -580,7 +804,15 @@ export default function OrderLookup(){
                 </div>
               </div>
             </div>
-            <div className="px-4 py-3 border-t border-gray-100">
+
+            {/* Comments */}
+            <div
+              ref={registerSection('comments')}
+              className={`px-4 py-3 border-t border-gray-100 transition-all duration-500 rounded-xl ${sectionCls('comments')}`}
+            >
+              {guideActive && activeGuideSection === 'comments' && (
+                <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 guide-label-animate">Step {guideStepIndex + 1}: Comments</div>
+              )}
               <div className="text-sm font-semibold mb-2">Comments</div>
               <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm min-h-[44px]">
                 {!commentLines.length ? (
@@ -604,7 +836,15 @@ export default function OrderLookup(){
                 >Post</button>
               </div>
             </div>
-            <div className="px-4 py-3 border-t border-gray-100">
+
+            {/* Agent screenshots */}
+            <div
+              ref={registerSection('screenshots')}
+              className={`px-4 py-3 border-t border-gray-100 transition-all duration-500 rounded-xl ${sectionCls('screenshots')}`}
+            >
+              {guideActive && activeGuideSection === 'screenshots' && (
+                <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 guide-label-animate">Step {guideStepIndex + 1}: Agent Screenshots</div>
+              )}
               <div className="text-sm font-semibold mb-2">Agent screenshots</div>
               {!screenshotTimeline.length ? (
                 <div className="text-sm text-gray-500">No screenshots yet.</div>
@@ -631,6 +871,8 @@ export default function OrderLookup(){
                 </div>
               )}
             </div>
+
+            {/* Timeline */}
             <div className="px-4 py-3 border-t border-gray-100">
               <div className="text-sm font-semibold mb-2">Timeline</div>
               <div className="text-sm text-gray-700">
@@ -644,7 +886,15 @@ export default function OrderLookup(){
                 </div>
               </div>
             </div>
-            <div className="px-4 py-3 border-t border-gray-100">
+
+            {/* Tags */}
+            <div
+              ref={registerSection('tags')}
+              className={`px-4 py-3 border-t border-gray-100 transition-all duration-500 rounded-xl ${sectionCls('tags')}`}
+            >
+              {guideActive && activeGuideSection === 'tags' && (
+                <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 guide-label-animate">Step {guideStepIndex + 1}: Tags</div>
+              )}
               <div className="text-sm font-semibold mb-2">Tags</div>
               <div className="flex items-center gap-2 flex-wrap">
                 {(order.tags || []).length === 0 && (
@@ -689,10 +939,93 @@ export default function OrderLookup(){
                   ))}
                 </div>
               )}
+
+              {/* Delivery companies */}
+              <div className="mt-4 pt-3 border-t border-gray-200">
+                <div className="text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">Delivery Company</div>
+                <div className="flex flex-wrap gap-2">
+                  {DELIVERY_COMPANIES.map(c => {
+                    const isActive = activeCompany?.toLowerCase() === c.name.toLowerCase();
+                    return (
+                      <button
+                        key={c.name}
+                        onClick={() => handleDeliveryClick(c.name)}
+                        className={`
+                          relative px-4 py-2 rounded-xl text-sm font-bold border-2 transition-all duration-200 active:scale-95
+                          ${c.bg} ${c.border} ${c.text} ${c.hover}
+                          ${isActive ? 'ring-2 ring-offset-2 ring-blue-500 scale-105 shadow-lg' : 'opacity-80 hover:opacity-100 hover:shadow-md'}
+                        `}
+                      >
+                        {isActive && (
+                          <span className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-white rounded-full border-2 border-blue-500 flex items-center justify-center text-[10px] text-blue-600 font-bold shadow">✓</span>
+                        )}
+                        {c.name}
+                      </button>
+                    );
+                  })}
+                </div>
+                {activeCompany && (
+                  <div className="mt-2 text-xs text-gray-500">
+                    Active: <span className="font-semibold text-gray-800">{activeCompany}</span> — click another to switch
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
       </main>
+
+      {/* Guide floating nav bar */}
+      {guideActive && order && (
+        <div className="fixed bottom-16 inset-x-0 z-50 flex justify-center pointer-events-none">
+          <div className="pointer-events-auto bg-white/95 backdrop-blur-sm border border-gray-200 rounded-2xl shadow-xl px-4 py-2 flex items-center gap-3">
+            <button
+              onClick={guidePrev}
+              disabled={guideStepIndex <= 0}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-300 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+            >← Prev</button>
+            <div className="text-xs text-gray-700 min-w-[120px] text-center">
+              <span className="font-bold text-blue-700">{guideSteps[guideStepIndex]?.label || '…'}</span>
+            </div>
+            <button
+              onClick={guideNext}
+              disabled={guideStepIndex >= guideSteps.length - 1}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-30 disabled:cursor-not-allowed"
+            >Next →</button>
+          </div>
+        </div>
+      )}
+
+      {/* Delivery company switch confirmation modal */}
+      {companyConfirm && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setCompanyConfirm(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4 border border-gray-200" onClick={e => e.stopPropagation()}>
+            <div className="text-center mb-4">
+              <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-amber-100 flex items-center justify-center text-2xl">⚠</div>
+              <div className="text-lg font-bold text-gray-900">Heads up!</div>
+            </div>
+            <div className="text-sm text-gray-600 text-center mb-5">
+              <span>Replace </span>
+              <span className="inline-block px-2 py-0.5 rounded-lg bg-red-100 text-red-800 font-bold border border-red-200">{companyConfirm.from}</span>
+              <span> with </span>
+              <span className="inline-block px-2 py-0.5 rounded-lg bg-green-100 text-green-800 font-bold border border-green-200">{companyConfirm.to}</span>
+              <span> ?</span>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setCompanyConfirm(null)}
+                className="flex-1 px-4 py-2.5 rounded-xl border border-gray-300 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+              >Cancel</button>
+              <button
+                onClick={handleConfirmSwitch}
+                className="flex-1 px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-bold hover:bg-blue-700 shadow-md active:scale-[.98]"
+              >Yes, Switch</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Fulfill bar */}
       {!!order && (
         <div className="fixed bottom-0 inset-x-0 z-40 border-t border-gray-200 bg-white/90 backdrop-blur">
           <div className="max-w-3xl mx-auto px-4 py-3">
@@ -703,7 +1036,6 @@ export default function OrderLookup(){
                   setFulfillBusy(true);
                   setError(null);
                   try {
-                    // Build selection groups if there are any FO items
                     let res;
                     if (foData.orders && foData.orders.length > 0) {
                       const selIds = foData.selectedLineItemIds;
@@ -729,14 +1061,12 @@ export default function OrderLookup(){
                       res = await API.fulfill(order.id, store);
                     }
                     if (res && res.ok !== false){
-                      // Optimistically flip selected items to fulfilled
                       setOrder(prev => {
                         if (!prev) return prev;
                         if (!foData.orders || foData.orders.length === 0){
                           const next = { ...prev, variants: (prev.variants || []).map(v => ({ ...v, status: "fulfilled", unfulfilled_qty: 0 })) };
                           return next;
                         }
-                        // Compute which variant ids were fulfilled from selected FO lines
                         const variantIds = new Set();
                         foData.orders.forEach(g => {
                           (g.lineItems || []).forEach(li => {
@@ -749,7 +1079,6 @@ export default function OrderLookup(){
                         const next = { ...prev, variants: (prev.variants || []).map(v => (variantIds.has(v.id) ? ({ ...v, status: "fulfilled", unfulfilled_qty: 0 }) : v)) };
                         return next;
                       });
-                      // Update local FO data (set remainingQuantity=0 for selected ids and unselect)
                       setFoData(prev => {
                         try {
                           const sel = new Set(prev.selectedLineItemIds);
@@ -793,5 +1122,3 @@ export default function OrderLookup(){
     </div>
   );
 }
-
-
