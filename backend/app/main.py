@@ -3026,6 +3026,53 @@ async def proxy_image(url: str = Query(..., description="The GCS URL to proxy"))
         print(f"Proxy error: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch image")
 
+# --------- Delivery app proxy ---------
+DELVERY_BACKEND_URL = os.environ.get("DELVERY_BACKEND_URL", "").strip().rstrip("/")
+DELVERY_ADMIN_TOKEN = os.environ.get("DELVERY_ADMIN_TOKEN", "").strip()
+
+@app.api_route("/api/delivery/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def delivery_proxy(path: str, request: Request):
+    if not DELVERY_BACKEND_URL:
+        raise HTTPException(status_code=503, detail="Delivery backend not configured. Set DELVERY_BACKEND_URL env var.")
+    target_url = f"{DELVERY_BACKEND_URL}/{path}"
+    if str(request.query_params):
+        target_url += f"?{request.query_params}"
+    headers = {}
+    ct = request.headers.get("content-type")
+    if ct:
+        headers["Content-Type"] = ct
+    if DELVERY_ADMIN_TOKEN:
+        headers["X-Admin-Token"] = DELVERY_ADMIN_TOKEN
+    body = await request.body()
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.request(method=request.method, url=target_url, content=body if body else None, headers=headers)
+    resp_headers = {}
+    for k in ("content-type", "content-disposition"):
+        if k in resp.headers:
+            resp_headers[k] = resp.headers[k]
+    return Response(content=resp.content, status_code=resp.status_code, headers=resp_headers)
+
+@app.get("/api/delivery-label/{order_id}")
+async def delivery_label_proxy(order_id: str, renderer: str = Query("html"), autoprint: bool = Query(True), format: Optional[str] = Query(None)):
+    if not DELVERY_BACKEND_URL:
+        raise HTTPException(status_code=503, detail="Delivery backend not configured.")
+    params = {"renderer": renderer}
+    if autoprint:
+        params["autoprint"] = "true"
+    if format:
+        params["format"] = format
+    headers = {}
+    if DELVERY_ADMIN_TOKEN:
+        headers["X-Admin-Token"] = DELVERY_ADMIN_TOKEN
+    url = f"{DELVERY_BACKEND_URL}/admin/orders/{order_id}/label"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(url, params=params, headers=headers)
+    return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type", "text/html"))
+
+@app.get("/api/delivery-config")
+async def delivery_config_check():
+    return {"configured": bool(DELVERY_BACKEND_URL)}
+
 # --------- SPA client-side routes (serve index.html) ---------
 def _frontend_dist_dir() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))

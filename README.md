@@ -109,6 +109,53 @@ cd frontend && npm run build && cd ..
 uvicorn backend.app.main:app --reload
 ```
 
+## 3.1) LAN “virtual printer” (other PC → auto-print PC) via PDF
+
+If you want another PC to use the normal Windows **Print** dialog and send the job to your auto-print PC, the practical way is:
+
+- Install a **virtual PDF printer** on the other PC (recommended: PDFCreator) so it appears in the print dialog.
+- Configure it to **auto-save PDFs** into a fixed folder (no “Save As” prompt).
+- Run the included **LAN sender** to watch that folder and upload new PDFs to the auto-print PC.
+- Run the included **LAN receiver** on the auto-print PC to print the uploaded PDFs via **SumatraPDF** (silent printing).
+
+Files added in this repo:
+
+- `lan_print/receiver.py` + `lan_print/run-receiver.ps1` (run on the auto-print PC)
+- `lan_print/sender.py` + `lan_print/run-sender.ps1` (run on the other PC)
+
+### Auto-print PC setup
+
+1. Install **SumatraPDF** (so printing can be silent).
+2. (Optional but recommended) set an API key so random devices on LAN can’t print:
+   - Set env: `LAN_PRINT_API_KEY`
+3. Start receiver:
+
+```powershell
+.\lan_print\run-receiver.ps1
+```
+
+Or **double-click**:
+
+- `lan_print\run-receiver.cmd`
+
+By default it listens on `http://0.0.0.0:8790`.
+
+### Other PC setup
+
+1. Install/configure a virtual PDF printer to auto-save PDFs to `C:\AutoPrint\outbox` (or change `LAN_PRINT_WATCH_DIR`).
+2. Point the sender to the auto-print PC IP:
+   - Set env: `LAN_PRINT_DEST_URL=http://<AUTO_PRINT_PC_IP>:8790`
+   - If you set a key on receiver, set the same `LAN_PRINT_API_KEY` here.
+3. Start sender:
+
+```powershell
+.\lan_print\run-sender.ps1
+```
+
+Or **double-click**:
+
+- `lan_print\run-sender.cmd`
+
 ## 4) Docker build & run (single image)
 
 ```bash

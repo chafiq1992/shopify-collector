@@ -1,5 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
+
+const DeliveryLabelPopup = lazy(() => import("../components/DeliveryLabelPopup"));
 
 const API = {
   async searchOneByNumber(number, store){
@@ -138,6 +140,7 @@ export default function OrderLookup(){
   const [companyConfirm, setCompanyConfirm] = useState(null);
 
   const [fulfillConfirm, setFulfillConfirm] = useState(false);
+  const [showDeliveryPopup, setShowDeliveryPopup] = useState(false);
 
   const inputRef = useRef(null);
   const sectionRefs = useRef({});
@@ -1248,6 +1251,7 @@ export default function OrderLookup(){
                       try { setTimeout(()=>setFulfillSuccess(false), 2200); } catch {}
                       setMessage("Fulfilled successfully");
                       try { setTimeout(()=>setMessage(null), 2000); } catch {}
+                      setShowDeliveryPopup(true);
                     } else {
                       setError(`Fulfillment failed: ${((res && res.errors && res.errors[0] && res.errors[0].message) || "Unknown error")}`);
                     }
@@ -1269,25 +1273,41 @@ export default function OrderLookup(){
         <div className="fixed bottom-0 inset-x-0 z-40 border-t border-gray-200 bg-white/90 backdrop-blur">
           <div className="max-w-3xl mx-auto px-4 py-3">
             <div className="grid grid-cols-1 gap-2">
-              <button
-                onClick={()=>{
-                  if (fulfillBusy || isOrderFulfilled) return;
-                  setFulfillConfirm(true);
-                }}
-                className={`flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-sm active:scale-[.98] shadow-sm ${
-                  isOrderFulfilled
-                    ? 'bg-gray-300 text-gray-700 cursor-not-allowed'
-                    : 'bg-green-600 text-white hover:bg-green-700'
-                }`}
-              >
-                <span className="font-semibold">{isOrderFulfilled ? 'Fulfilled' : (fulfillBusy ? 'Fulfilling…' : 'Fulfill')}</span>
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={()=>{
+                    if (fulfillBusy || isOrderFulfilled) return;
+                    setFulfillConfirm(true);
+                  }}
+                  className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-sm active:scale-[.98] shadow-sm ${
+                    isOrderFulfilled
+                      ? 'bg-gray-300 text-gray-700 cursor-not-allowed'
+                      : 'bg-green-600 text-white hover:bg-green-700'
+                  }`}
+                >
+                  <span className="font-semibold">{isOrderFulfilled ? 'Fulfilled' : (fulfillBusy ? 'Fulfilling…' : 'Fulfill')}</span>
+                </button>
+                <button
+                  onClick={() => setShowDeliveryPopup(true)}
+                  className="px-4 py-2 rounded-xl text-sm font-semibold bg-indigo-600 text-white hover:bg-indigo-700 active:scale-[.98] shadow-sm flex items-center gap-1.5"
+                  title="Open delivery label printing"
+                >
+                  <span>&#128424;</span> Label
+                </button>
+              </div>
               {fulfillSuccess && (
                 <div className="text-xs text-green-700 text-center">Success: order fulfilled and saved to analytics.</div>
               )}
             </div>
           </div>
         </div>
+      )}
+
+      {/* Delivery Label Popup */}
+      {showDeliveryPopup && order && (
+        <Suspense fallback={null}>
+          <DeliveryLabelPopup order={order} store={store} onClose={() => setShowDeliveryPopup(false)} />
+        </Suspense>
       )}
     </div>
   );
