@@ -3027,13 +3027,17 @@ async def proxy_image(url: str = Query(..., description="The GCS URL to proxy"))
         raise HTTPException(status_code=500, detail="Failed to fetch image")
 
 # --------- Delivery app proxy ---------
-DELVERY_BACKEND_URL = os.environ.get("DELVERY_BACKEND_URL", "").strip().rstrip("/")
-DELVERY_ADMIN_TOKEN = os.environ.get("DELVERY_ADMIN_TOKEN", "").strip()
+_raw_dlv_url = os.environ.get("DELVERY_BACKEND_URL", "").strip().rstrip("/")
+_raw_dlv_token = os.environ.get("DELVERY_ADMIN_TOKEN", "").strip()
+DELVERY_BACKEND_URL = _raw_dlv_url.encode("ascii", "ignore").decode("ascii") if _raw_dlv_url else ""
+DELVERY_ADMIN_TOKEN = _raw_dlv_token.encode("ascii", "ignore").decode("ascii") if _raw_dlv_token else ""
 
 if DELVERY_BACKEND_URL:
-    print(f"[DELIVERY] Proxy configured → {DELVERY_BACKEND_URL}")
+    print(f"[DELIVERY] Proxy configured -> {DELVERY_BACKEND_URL}")
+    if _raw_dlv_token != DELVERY_ADMIN_TOKEN:
+        print(f"[DELIVERY] WARNING: admin token contained non-ASCII chars that were stripped (len {len(_raw_dlv_token)} -> {len(DELVERY_ADMIN_TOKEN)})")
 else:
-    print("[DELIVERY] DELVERY_BACKEND_URL not set — delivery proxy disabled")
+    print("[DELIVERY] DELVERY_BACKEND_URL not set -- delivery proxy disabled")
 
 @app.api_route("/api/delivery/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def delivery_proxy(path: str, request: Request):
