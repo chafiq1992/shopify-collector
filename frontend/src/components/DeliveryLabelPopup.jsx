@@ -74,6 +74,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
   const [deliveryOrderId, setDeliveryOrderId] = useState(null);
   const [envoyCode, setEnvoyCode] = useState(null);
   const [companyId, setCompanyId] = useState("");
+  const [partnerSendState, setPartnerSendState] = useState({ ok: null, message: "", sentAt: null });
   const [cityName, setCityName] = useState(order?.shipping_city || "");
   const [manualId, setManualId] = useState("");
   const [notConfigured, setNotConfigured] = useState(false);
@@ -99,6 +100,29 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
   const setField = useCallback((k, v) => setEditFields(prev => ({ ...prev, [k]: v })), []);
 
   const addLog = useCallback((msg) => setLog(prev => [...prev, msg]), []);
+  const refreshPartnerSendState = useCallback(async (envCode, orderId) => {
+    const code = String(envCode || "").trim();
+    const oid = Number(orderId || 0);
+    if (!code || !oid) {
+      setPartnerSendState({ ok: null, message: "", sentAt: null });
+      return null;
+    }
+    try {
+      const env = await dlvApi(`admin/envoy-notes/${encodeURIComponent(code)}`);
+      const items = Array.isArray(env?.items) ? env.items : [];
+      const item = items.find(x => Number(x?.orderId || x?.order_id) === oid) || null;
+      const next = {
+        ok: item?.sentOk === true ? true : (item?.sentOk === false ? false : null),
+        message: String(item?.sentMsg || "").trim(),
+        sentAt: item?.sentAt || null,
+      };
+      setPartnerSendState(next);
+      return next;
+    } catch {
+      setPartnerSendState({ ok: null, message: "", sentAt: null });
+      return null;
+    }
+  }, []);
   const applyResolvedCompany = useCallback((companyName) => {
     const wanted = normalizeCompanyName(companyName);
     if (!wanted) return false;
@@ -165,6 +189,21 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     if (!companies.length || companyId) return;
     applyCompanyByCity(cityName || editFields.city || order?.shipping_city || "");
   }, [phase, companies, companyId, cityName, editFields.city, order?.shipping_city, applyCompanyByCity]);
+
+  useEffect(() => {
+    if (!envoyCode || !deliveryOrderId) {
+      setPartnerSendState({ ok: null, message: "", sentAt: null });
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const next = await refreshPartnerSendState(envoyCode, deliveryOrderId);
+        if (cancelled || !next) return;
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [envoyCode, deliveryOrderId, refreshPartnerSendState]);
 
   function populateEditFromRow(row) {
     setEditFields({
@@ -536,8 +575,10 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
 
       await dlvApi(`admin/envoy-notes/items/${deliveryOrderId}/send`, { method: "POST", body: payload });
       addLog("Sent! Ready to print.");
+      await refreshPartnerSendState(envoyCode, deliveryOrderId);
       setPhase("ready_print");
     } catch (e) {
+      setPartnerSendState({ ok: false, message: e?.message || "Send failed", sentAt: null });
       setError(e?.message || "Send failed");
     } finally {
       setBusy(false);
@@ -667,6 +708,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     setPhase("init");
     setQueueRow(null);
     setShowEdit(false);
+    setPartnerSendState({ ok: null, message: "", sentAt: null });
     initRan.current = false;
     init();
   }
@@ -679,6 +721,21 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
   const filteredCities = cityName
     ? cityOptions.filter(c => String(c).toLowerCase().includes(cityName.toLowerCase())).slice(0, 15)
     : cityOptions.slice(0, 15);
+  const companyStepDone = partnerSendState.ok === true;
+  const companyStepActive = phase === "company_select" || ((phase === "ready_print" || phase === "done") && !companyStepDone);
+  const companyStepCls = companyStepDone
+    ? "border-green-300 bg-green-50"
+    : companyStepActive
+      ? "border-blue-300 bg-blue-50 ring-2 ring-blue-200"
+      : "border-gray-200 bg-gray-50 opacity-60";
+  const showPartnerSendControls = Boolean(deliveryOrderId) && (phase === "company_select" || phase === "ready_print" || phase === "done");
+  const showPartnerSendButton = showPartnerSendControls && Boolean(envoyCode) && partnerSendState.ok !== true;
+  const partnerSendLabel = partnerSendState.ok === false ? "Resend to Partner" : "Send to Partner";
+  const partnerSendStatusText = partnerSendState.ok === true
+    ? `Sent successfully${partnerSendState.sentAt ? ` at ${partnerSendState.sentAt}` : ""}`
+    : partnerSendState.ok === false
+      ? (partnerSendState.message || "Last send failed")
+      : (envoyCode ? "Not sent to partner yet" : "Create or assign an envoy note first");
 
   if (notConfigured) {
     return (
@@ -849,14 +906,14 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
           {(phase === "fix_errors" || phase === "company_select" || phase === "ready_print" || phase === "done") && editSection}
 
           {/* Step 2: Company & Send */}
-          <div className={`rounded-xl border p-3 transition-all ${stepCls("company_select")}`}>
+          <div className={`rounded-xl border p-3 transition-all ${companyStepCls}`}>
             <div className="flex items-center gap-2 mb-1">
-              <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${stepDone("company_select") ? "bg-green-500 text-white" : "bg-gray-300 text-white"}`}>
-                {stepDone("company_select") ? "✓" : "2"}
+              <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${companyStepDone ? "bg-green-500 text-white" : "bg-gray-300 text-white"}`}>
+                {companyStepDone ? "✓" : "2"}
               </span>
               <span className="text-sm font-semibold text-gray-800">Send to Partner</span>
             </div>
-            {phase === "company_select" && (
+            {showPartnerSendControls && (
               <div className="ml-8 mt-2 space-y-2">
                 <select value={companyId} onChange={e => setCompanyId(e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
                   <option value="">Select company...</option>
@@ -878,16 +935,20 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
                 <datalist id="dlv-send-city-list">
                   {filteredCities.map((c, i) => <option key={i} value={c} />)}
                 </datalist>
-                <button
-                  onClick={handleSend}
-                  disabled={busy}
-                  className="w-full px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-bold hover:bg-blue-700 disabled:opacity-50 active:scale-[.98] shadow-md"
-                >
-                  {busy ? "Sending..." : "Send to Partner"}
-                </button>
+                {showPartnerSendButton && (
+                  <button
+                    onClick={handleSend}
+                    disabled={busy || !envoyCode}
+                    className="w-full px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-bold hover:bg-blue-700 disabled:opacity-50 active:scale-[.98] shadow-md"
+                  >
+                    {busy ? "Sending..." : partnerSendLabel}
+                  </button>
+                )}
+                <div className={`text-xs ${partnerSendState.ok === true ? "text-green-700" : partnerSendState.ok === false ? "text-red-700" : "text-amber-700"}`}>
+                  {partnerSendStatusText}
+                </div>
               </div>
             )}
-            {stepDone("company_select") && <div className="text-xs text-green-700 ml-8">Sent successfully</div>}
           </div>
 
           {/* Step 3: Print */}
