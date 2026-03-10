@@ -83,6 +83,31 @@ export async function enqueueOrdersToRelay(orders: string[], copies = 1, pcId?: 
   }
 }
 
+export async function enqueueLabelToRelay(deliveryOrderId: string, store?: string): Promise<EnqueueResponse> {
+  const cfg = await getRelayConfig();
+  if (!cfg.base) return { ok: false, error: "Relay URL not configured" };
+
+  try {
+    const r = await fetch(`${cfg.base}/api/enqueue-label`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(cfg.apiKey ? { "x-api-key": cfg.apiKey } : {}),
+      },
+      body: JSON.stringify({
+        delivery_order_id: String(deliveryOrderId),
+        ...(store ? { store } : {}),
+      }),
+      mode: "cors",
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return { ok: false, error: data?.detail || r.statusText };
+    return { ok: true, job_id: data.job_id, queued: data.queued };
+  } catch (err: any) {
+    return { ok: false, error: String(err) };
+  }
+}
+
 export function isRelayConfigured(): boolean {
   return !!RELAY_BASE;
 }

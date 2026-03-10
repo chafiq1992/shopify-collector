@@ -1,4 +1,7 @@
 import os
+import shutil
+import subprocess
+import tempfile
 import time
 import requests
 
@@ -9,6 +12,10 @@ LOCAL_PRINTER_URL = os.getenv("LOCAL_PRINTER_URL", "http://127.0.0.1:8787")
 API_KEY = os.getenv("API_KEY", "")
 
 PULL_INTERVAL_SEC = float(os.getenv("PULL_INTERVAL_SEC", "2"))
+
+SUMATRA_PATH = (os.getenv("SUMATRA_PATH", "") or "").strip()
+LABEL_PRINTER = (os.getenv("LABEL_PRINTER", "") or "").strip()
+EDGE_PATH = (os.getenv("EDGE_PATH", "") or "").strip()
 
 
 def pull_jobs():
@@ -153,13 +160,126 @@ def print_locally(orders, copies, store: str | None = None) -> bool:
     return True
 
 
+def _find_sumatra() -> str:
+    if SUMATRA_PATH and os.path.isfile(SUMATRA_PATH):
+        return SUMATRA_PATH
+    for c in [
+        r"C:\Program Files\SumatraPDF\SumatraPDF.exe",
+        r"C:\Program Files (x86)\SumatraPDF\SumatraPDF.exe",
+    ]:
+        if os.path.isfile(c):
+            return c
+    return ""
+
+
+def _find_edge() -> str:
+    if EDGE_PATH and os.path.isfile(EDGE_PATH):
+        return EDGE_PATH
+    for c in [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    ]:
+        if os.path.isfile(c):
+            return c
+    return ""
+
+
+def _sumatra_print_pdf(pdf_path: str, printer: str = "", copies: int = 1) -> None:
+    exe = _find_sumatra()
+    if not exe:
+        raise RuntimeError("SumatraPDF not found. Install it or set SUMATRA_PATH.")
+    copies = max(1, int(copies or 1))
+    if printer:
+        cmd = [exe, "-print-to", printer, "-silent", "-exit-on-print",
+               "-print-settings", f"copies={copies}", pdf_path]
+    else:
+        cmd = [exe, "-print-to-default", "-silent", "-exit-on-print",
+               "-print-settings", f"copies={copies}", pdf_path]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+    if p.returncode != 0:
+        raise RuntimeError(f"SumatraPDF failed (code={p.returncode}): {(p.stderr or p.stdout or '').strip()}")
+
+
+def _html_to_pdf(html_path: str, pdf_path: str) -> None:
+    """Convert an HTML file to PDF using Edge/Chrome headless."""
+    exe = _find_edge()
+    if not exe:
+        raise RuntimeError("Edge/Chrome not found for HTML-to-PDF conversion. Set EDGE_PATH.")
+    cmd = [exe, "--headless", "--disable-gpu", "--no-sandbox",
+           f"--print-to-pdf={pdf_path}", f"file:///{html_path.replace(os.sep, '/')}"]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if not os.path.isfile(pdf_path) or os.path.getsize(pdf_path) == 0:
+        raise RuntimeError(f"HTML-to-PDF failed: {(p.stderr or p.stdout or 'no output').strip()}")
+
+
+def print_label(delivery_order_id: str) -> bool:
+    """Download a delivery label and print it silently."""
+    url = f"{RELAY_URL}/api/delivery-label/{delivery_order_id}"
+    try:
+        r = requests.get(url, params={"format": "pdf", "autoprint": "false"}, timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"  Failed to fetch label (PDF attempt): {e}")
+        try:
+            r = requests.get(url, params={"autoprint": "false"}, timeout=30)
+            r.raise_for_status()
+        except Exception as e2:
+            print(f"  Failed to fetch label (HTML fallback): {e2}")
+            return False
+
+    content_type = (r.headers.get("content-type") or "").lower()
+    tmp_dir = tempfile.mkdtemp(prefix="label-print-")
+    try:
+        if "application/pdf" in content_type:
+            pdf_path = os.path.join(tmp_dir, "label.pdf")
+            with open(pdf_path, "wb") as f:
+                f.write(r.content)
+            _sumatra_print_pdf(pdf_path, LABEL_PRINTER)
+            print(f"  Printed label PDF for order {delivery_order_id}")
+            return True
+        else:
+            html_path = os.path.join(tmp_dir, "label.html")
+            pdf_path = os.path.join(tmp_dir, "label.pdf")
+            with open(html_path, "wb") as f:
+                f.write(r.content)
+            _html_to_pdf(html_path, pdf_path)
+            _sumatra_print_pdf(pdf_path, LABEL_PRINTER)
+            print(f"  Printed label (HTML→PDF) for order {delivery_order_id}")
+            return True
+    except Exception as e:
+        print(f"  Label print error: {e}")
+        return False
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def main():
     print("Agent poller started.")
+    print(f"  SumatraPDF: {_find_sumatra() or 'NOT FOUND'}")
+    print(f"  Edge/Chrome: {_find_edge() or 'NOT FOUND'}")
     while True:
         try:
             jobs = pull_jobs()
             if jobs:
                 for job in jobs:
+                    job_type = job.get("type", "order")
+
+                    if job_type == "label":
+                        dlv_id = job.get("delivery_order_id", "")
+                        print(f"Label job: delivery_order_id={dlv_id}")
+                        try:
+                            ok = print_label(dlv_id)
+                        except Exception as le:
+                            print(f"  Label print exception: {le}")
+                            ok = False
+                        if ok:
+                            ack_job(job.get("job_id"))
+                        else:
+                            print("  Label print failed; will not re-enqueue")
+                        continue
+
                     orders = job.get("orders", [])
                     copies = int(job.get("copies", 1))
                     store = job.get("store")
@@ -173,7 +293,6 @@ def main():
                     if printed:
                         ack_job(job.get("job_id"))
                     else:
-                        # If we couldn't print (e.g., missing customer info), re-enqueue for later
                         requeued = requeue_job(orders, copies, store)
                         if not requeued:
                             print("Re-enqueue failed; will retry on next poll")

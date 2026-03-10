@@ -283,6 +283,10 @@ class EnqueueBody(BaseModel):
     pdf_url: Optional[str] = None
     store: Optional[str] = None
 
+class EnqueueLabelBody(BaseModel):
+    delivery_order_id: str
+    store: Optional[str] = None
+
 class AckBody(BaseModel):
     pc_id: str
     secret: str
@@ -390,6 +394,21 @@ async def ack(b: AckBody):
     _require_pc(b.pc_id, b.secret)
     # In-memory queue removes on pull; ack is a no-op here
     return {"ok": True}
+
+@app.post("/api/enqueue-label")
+async def enqueue_label(body: EnqueueLabelBody, x_api_key: Optional[str] = Header(default=None)):
+    _require_api_key(x_api_key)
+    import time as _t, uuid as _uuid
+    jid = str(_uuid.uuid4())
+    payload = {
+        "job_id": jid,
+        "ts": int(_t.time()),
+        "type": "label",
+        "delivery_order_id": str(body.delivery_order_id).strip(),
+        "store": (body.store or "").strip() or None,
+    }
+    JOBS.setdefault(DEFAULT_PC_ID, []).append(payload)
+    return {"ok": True, "job_id": jid, "queued": len(JOBS[DEFAULT_PC_ID])}
 
 # ---------- Shopify Webhook (orders/create) for Auto-Tagging by zone ----------
 def _normalize_spaces(text: Optional[str]) -> str:

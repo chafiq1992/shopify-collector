@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
+import { enqueueLabelToRelay } from "../lib/printRelayClient";
 
 const LS_MERCHANT = "dlvMerchantId";
 const LS_ORDER_MAP = "dlvOrderIdMap";
@@ -242,20 +243,42 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     }
   }
 
-  function handlePrint(oid) {
+  async function handlePrint(oid) {
+    const id = oid || deliveryOrderId;
+    if (!id) return;
+    setBusy(true);
+    try {
+      const result = await enqueueLabelToRelay(String(id), store);
+      if (result.ok) {
+        addLog("Label sent to printer queue!");
+        setPhase("done");
+      } else {
+        addLog(`Queue failed: ${result.error || "unknown"} — opening in browser`);
+        window.open(`/api/delivery-label/${encodeURIComponent(id)}`, "_blank", "width=450,height=600,scrollbars=yes");
+        setPhase("done");
+      }
+    } catch (e) {
+      addLog(`Error: ${e?.message || e} — opening in browser`);
+      window.open(`/api/delivery-label/${encodeURIComponent(id)}`, "_blank", "width=450,height=600,scrollbars=yes");
+      setPhase("done");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handlePrintInBrowser(oid) {
     const id = oid || deliveryOrderId;
     if (!id) return;
     window.open(`/api/delivery-label/${encodeURIComponent(id)}`, "_blank", "width=450,height=600,scrollbars=yes");
-    addLog("Print window opened");
-    setPhase("done");
+    addLog("Opened in browser");
   }
 
-  function handleManualPrint() {
+  async function handleManualPrint() {
     const id = String(manualId).trim();
     if (!id) return;
     setDeliveryOrderId(id);
     setOrderMap(orderNum, id);
-    handlePrint(id);
+    await handlePrint(id);
   }
 
   async function handleManualContinue() {
@@ -405,14 +428,21 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
               <span className="text-sm font-semibold text-gray-800">Print Label</span>
             </div>
             {(phase === "ready_print" || phase === "done") && (
-              <div className="ml-8 mt-2">
+              <div className="ml-8 mt-2 space-y-2">
                 <button
                   onClick={() => handlePrint()}
-                  className="w-full px-4 py-2.5 rounded-xl bg-green-600 text-white text-sm font-bold hover:bg-green-700 active:scale-[.98] shadow-md flex items-center justify-center gap-2"
+                  disabled={busy}
+                  className="w-full px-4 py-2.5 rounded-xl bg-green-600 text-white text-sm font-bold hover:bg-green-700 active:scale-[.98] shadow-md flex items-center justify-center gap-2 disabled:opacity-50"
                 >
-                  <span className="text-lg">&#128424;</span> Print Label
+                  <span className="text-lg">&#128424;</span> {busy ? "Sending..." : "Print Label"}
                 </button>
-                {phase === "done" && <div className="text-xs text-green-700 mt-1 text-center">Print window opened. You can print again or close.</div>}
+                <button
+                  onClick={() => handlePrintInBrowser()}
+                  className="w-full px-3 py-1.5 rounded-xl border border-gray-300 text-gray-600 text-xs font-semibold hover:bg-gray-50 flex items-center justify-center gap-1.5"
+                >
+                  Open in Browser
+                </button>
+                {phase === "done" && <div className="text-xs text-green-700 mt-1 text-center">Label sent to printer queue. You can print again or close.</div>}
               </div>
             )}
           </div>
