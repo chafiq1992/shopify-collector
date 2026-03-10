@@ -326,8 +326,12 @@ export default function OrderLookup(){
     return order.variants.filter(_isRemovedVariant);
   }, [order, _isRemovedVariant]);
 
+  const isOrderCancelled = useMemo(() => !!order?.cancelled_at, [order]);
+
   const isOrderFulfilled = useMemo(() => {
-    if (!order) return false;
+    if (!order || isOrderCancelled) return false;
+    const fs = String(order.fulfillment_status || "").toUpperCase();
+    if (fs === "FULFILLED") return true;
     const variants = Array.isArray(order.variants) ? order.variants : [];
     const active = variants.filter(v => !_isRemovedVariant(v));
     if (active.length === 0) return false;
@@ -341,7 +345,7 @@ export default function OrderLookup(){
       ((g?.lineItems || []).every((li) => Number(li?.remainingQuantity || 0) <= 0))
     );
     return byVariants || byFO;
-  }, [order, foData, _isRemovedVariant]);
+  }, [order, foData, _isRemovedVariant, isOrderCancelled]);
 
   const screenshotTimeline = useMemo(() => {
     const text = String(order?.note || "");
@@ -725,6 +729,11 @@ export default function OrderLookup(){
             )}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-2xl font-bold text-gray-900">#{order.number}</span>
+              {order.cancelled_at && (
+                <span className="px-2.5 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border bg-red-600 text-white border-red-700">
+                  Cancelled
+                </span>
+              )}
               <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
                 (order.financial_status === 'VOIDED' || order.financial_status === 'voided') ? 'bg-red-100 text-red-800 border-red-300' :
                 (order.financial_status === 'PAID' || order.financial_status === 'paid') ? 'bg-gray-100 text-gray-700 border-gray-200' :
@@ -736,6 +745,7 @@ export default function OrderLookup(){
                 {order.financial_status ? order.financial_status.replace(/_/g, ' ') : 'Payment pending'}
               </span>
               <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
+                order.cancelled_at ? 'bg-red-100 text-red-800 border-red-200' :
                 (order.fulfillment_status === 'FULFILLED' || order.fulfillment_status === 'fulfilled') ? 'bg-green-100 text-green-800 border-green-200' :
                 (order.fulfillment_status === 'PARTIALLY_FULFILLED' || order.fulfillment_status === 'partial') ? 'bg-yellow-100 text-yellow-800 border-yellow-200' :
                 'bg-yellow-100 text-yellow-800 border-yellow-200'
@@ -1171,7 +1181,11 @@ export default function OrderLookup(){
           <div className="text-gray-500">Search an order by number to see details.</div>
         )}
         {!loading && order && (
-          <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden">
+          <div className={`rounded-2xl border-2 overflow-hidden ${
+            order.cancelled_at ? 'border-red-400 bg-red-50/30' :
+            isOrderFulfilled ? 'border-green-400 bg-green-50/20' :
+            'border-gray-200 bg-white'
+          }`}>
 
             {/* Guide controls bar */}
             <div className="px-4 pt-3 flex items-center justify-between">
@@ -1227,6 +1241,12 @@ export default function OrderLookup(){
               <div className="flex flex-col gap-2 mb-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xl font-bold text-gray-900">#{order.number}</span>
+                  {/* Cancelled Badge */}
+                  {order.cancelled_at && (
+                    <span className="px-2.5 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border bg-red-600 text-white border-red-700">
+                      Cancelled
+                    </span>
+                  )}
                   {/* Financial Status Badge */}
                   <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
                     (order.financial_status === 'VOIDED' || order.financial_status === 'voided') ? 'bg-red-100 text-red-800 border-red-300' :
@@ -1240,6 +1260,7 @@ export default function OrderLookup(){
                   </span>
                   {/* Fulfillment Status Badge */}
                   <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
+                    order.cancelled_at ? 'bg-red-100 text-red-800 border-red-200' :
                     (order.fulfillment_status === 'FULFILLED' || order.fulfillment_status === 'fulfilled') ? 'bg-green-100 text-green-800 border-green-200' :
                     (order.fulfillment_status === 'PARTIALLY_FULFILLED' || order.fulfillment_status === 'partial') ? 'bg-yellow-100 text-yellow-800 border-yellow-200' :
                     'bg-yellow-100 text-yellow-800 border-yellow-200'
@@ -1826,11 +1847,16 @@ export default function OrderLookup(){
                     } else {
                       res = await API.fulfill(order.id, store);
                     }
-                    if (res && res.ok !== false){
+                    if (res && res.fulfilled === false) {
+                      const reason = res.reason === "no_remaining"
+                        ? "Nothing to fulfill — order may be cancelled or already fulfilled."
+                        : (res.reason || "Fulfillment was not completed.");
+                      setError(reason);
+                    } else if (res && res.ok !== false){
                       setOrder(prev => {
                         if (!prev) return prev;
                         if (!foData.orders || foData.orders.length === 0){
-                          const next = { ...prev, variants: (prev.variants || []).map(v => ({ ...v, status: "fulfilled", unfulfilled_qty: 0 })) };
+                          const next = { ...prev, variants: (prev.variants || []).map(v => ({ ...v, status: "fulfilled", unfulfilled_qty: 0 })), fulfillment_status: "FULFILLED" };
                           return next;
                         }
                         const variantIds = new Set();
@@ -1842,7 +1868,7 @@ export default function OrderLookup(){
                             }
                           });
                         });
-                        const next = { ...prev, variants: (prev.variants || []).map(v => (variantIds.has(v.id) ? ({ ...v, status: "fulfilled", unfulfilled_qty: 0 }) : v)) };
+                        const next = { ...prev, variants: (prev.variants || []).map(v => (variantIds.has(v.id) ? ({ ...v, status: "fulfilled", unfulfilled_qty: 0 }) : v)), fulfillment_status: "FULFILLED" };
                         return next;
                       });
                       setFoData(prev => {
@@ -1886,16 +1912,18 @@ export default function OrderLookup(){
               <div className="flex gap-2">
                 <button
                   onClick={()=>{
-                    if (fulfillBusy || isOrderFulfilled || order.cancelled_at) return;
+                    if (fulfillBusy || isOrderFulfilled || isOrderCancelled) return;
                     setFulfillConfirm(true);
                   }}
                   className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-sm active:scale-[.98] shadow-sm ${
-                    (isOrderFulfilled || order.cancelled_at)
-                      ? 'bg-gray-300 text-gray-700 cursor-not-allowed'
-                      : 'bg-green-600 text-white hover:bg-green-700'
+                    isOrderCancelled
+                      ? 'bg-red-500 text-white cursor-not-allowed'
+                      : isOrderFulfilled
+                        ? 'bg-green-200 text-green-800 cursor-not-allowed border border-green-300'
+                        : 'bg-green-600 text-white hover:bg-green-700'
                   }`}
                 >
-                  <span className="font-semibold">{order.cancelled_at ? 'Cancelled' : isOrderFulfilled ? 'Fulfilled' : (fulfillBusy ? 'Fulfilling…' : 'Fulfill')}</span>
+                  <span className="font-semibold">{isOrderCancelled ? 'Cancelled' : isOrderFulfilled ? 'Fulfilled' : (fulfillBusy ? 'Fulfilling…' : 'Fulfill')}</span>
                 </button>
                 <button
                   onClick={() => setShowDeliveryPopup(true)}
