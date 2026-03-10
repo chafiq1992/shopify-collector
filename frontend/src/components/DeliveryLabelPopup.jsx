@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
-import { enqueueLabelToRelay } from "../lib/printRelayClient";
 
 const LS_MERCHANT = "dlvMerchantId";
 const LS_ORDER_MAP = "dlvOrderIdMap";
@@ -50,14 +49,32 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
   const [merchants, setMerchants] = useState([]);
   const [merchantId, setMerchantId] = useState(savedMerchant);
   const [companies, setCompanies] = useState([]);
+  const [cities, setCities] = useState([]);
   const [deliveryOrderId, setDeliveryOrderId] = useState(null);
   const [envoyCode, setEnvoyCode] = useState(null);
   const [companyId, setCompanyId] = useState("");
   const [cityName, setCityName] = useState(order?.shipping_city || "");
   const [manualId, setManualId] = useState("");
   const [notConfigured, setNotConfigured] = useState(false);
+  const [queueRow, setQueueRow] = useState(null);
+  const [showEdit, setShowEdit] = useState(false);
   const logEndRef = useRef(null);
   const initRan = useRef(false);
+
+  const [editFields, setEditFields] = useState({
+    orderName: "",
+    customerName: "",
+    customerPhone: "",
+    city: "",
+    address: "",
+    cashAmount: "",
+    description: "",
+    notes: "",
+    allowOpen: "",
+    isChange: "",
+  });
+
+  const setField = useCallback((k, v) => setEditFields(prev => ({ ...prev, [k]: v })), []);
 
   const addLog = useCallback((msg) => setLog(prev => [...prev, msg]), []);
   useEffect(() => { try { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); } catch {} }, [log]);
@@ -67,6 +84,37 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     initRan.current = true;
     init();
   }, []);
+
+  function populateEditFromRow(row) {
+    setEditFields({
+      orderName: row.orderName || orderName,
+      customerName: row.customerName || order?.customer || "",
+      customerPhone: row.customerPhone || order?.shipping_phone || "",
+      city: row.city || order?.shipping_city || "",
+      address: row.address || order?.shipping_address1 || "",
+      cashAmount: row.cashAmount ?? order?.total_price ?? "",
+      description: row.description || "",
+      notes: row.specialNote || "",
+      allowOpen: "",
+      isChange: "",
+    });
+    setCityName(row.city || order?.shipping_city || "");
+  }
+
+  function populateEditFromOrder() {
+    setEditFields({
+      orderName: orderName,
+      customerName: order?.customer || "",
+      customerPhone: order?.shipping_phone || "",
+      city: order?.shipping_city || "",
+      address: order?.shipping_address1 || "",
+      cashAmount: order?.total_price ?? "",
+      description: "",
+      notes: "",
+      allowOpen: "",
+      isChange: "",
+    });
+  }
 
   async function init() {
     setBusy(true);
@@ -88,8 +136,9 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       }
       if (mid) { setMerchantId(mid); saveMerchant(mid); }
 
-      addLog("Loading companies...");
+      addLog("Loading companies & cities...");
       try { const c = await dlvApi("admin/envoy-companies"); setCompanies(Array.isArray(c) ? c : (c.items || [])); } catch { setCompanies([]); }
+      try { const c = await dlvApi("ext/admin/cities"); setCities((c && c.items) || []); } catch { setCities([]); }
 
       if (!mid) { setPhase("merchant_select"); setBusy(false); return; }
 
@@ -97,6 +146,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       if (cached) {
         addLog(`Cached delivery ID: ${cached}`);
         setDeliveryOrderId(cached);
+        populateEditFromOrder();
         try {
           const env = await dlvApi(`ext/admin/envoy-notes/for-order/${cached}`);
           if (env?.code) {
@@ -128,10 +178,20 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       const row = items.find(r => String(r.orderName || "").replace(/^#/, "").trim() === orderNum);
 
       if (row) {
-        addLog(`Found in queue (row #${row.id})`);
-        await createNote(mid, row);
+        addLog(`Found in queue (row #${row.id})${row.hasError ? ` — HAS ERROR: ${row.errorType || "unknown"}` : ""}`);
+        setQueueRow(row);
+        populateEditFromRow(row);
+
+        if (row.hasError) {
+          addLog("Fix the error fields below, then click Create.");
+          setShowEdit(true);
+          setPhase("fix_errors");
+        } else {
+          await createNote(mid, row);
+        }
       } else {
         addLog("Not found in queue.");
+        populateEditFromOrder();
         const cached = getCachedOrderId(orderNum);
         if (cached) {
           setDeliveryOrderId(cached);
@@ -145,6 +205,43 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     } catch (e) {
       setError(e?.message || "Queue search failed");
       setPhase("error");
+    }
+  }
+
+  async function handleFixAndCreate() {
+    if (!queueRow || !merchantId) return;
+    setBusy(true);
+    setError(null);
+    addLog("Saving fixes...");
+    try {
+      const updated = {
+        ...queueRow,
+        orderName: editFields.orderName || queueRow.orderName,
+        customerName: editFields.customerName || queueRow.customerName,
+        customerPhone: editFields.customerPhone || queueRow.customerPhone,
+        city: editFields.city || queueRow.city,
+        address: editFields.address || queueRow.address,
+        cashAmount: editFields.cashAmount !== "" ? editFields.cashAmount : queueRow.cashAmount,
+        description: editFields.description || queueRow.description,
+        specialNote: editFields.notes || queueRow.specialNote,
+      };
+      const fixRes = await dlvApi(`ext/admin/merchant-queue/${merchantId}/update`, {
+        method: "POST",
+        body: { rows: [{ id: queueRow.id, orderName: updated.orderName, customerName: updated.customerName, customerPhone: updated.customerPhone, address: updated.address, city: updated.city, cashAmount: updated.cashAmount, description: updated.description, specialNote: updated.specialNote }] },
+      });
+      if (fixRes.errors) {
+        setError("Order still has errors. Check the fields and try again.");
+        setBusy(false);
+        return;
+      }
+      addLog("Fixes saved.");
+      setQueueRow(updated);
+      setCityName(updated.city || cityName);
+      await createNote(merchantId, updated);
+    } catch (e) {
+      setError(e?.message || "Fix failed");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -200,6 +297,37 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     }
   }
 
+  async function handleSaveEdit() {
+    if (!deliveryOrderId) return;
+    setBusy(true);
+    setError(null);
+    addLog("Saving order changes...");
+    try {
+      const payload = {};
+      if (editFields.orderName) payload.order_name = editFields.orderName;
+      if (editFields.customerName) payload.customer_name = editFields.customerName;
+      if (editFields.customerPhone) payload.customer_phone = editFields.customerPhone;
+      if (editFields.city) payload.city = editFields.city;
+      if (editFields.address) payload.address = editFields.address;
+      if (editFields.description) payload.description = editFields.description;
+      if (editFields.notes) payload.notes = editFields.notes;
+      if (editFields.cashAmount !== "") payload.cash_amount = editFields.cashAmount;
+      if (editFields.allowOpen === "1") payload.allow_open = true;
+      if (editFields.allowOpen === "0") payload.allow_open = false;
+      if (editFields.isChange === "1") payload.is_change = true;
+      if (editFields.isChange === "0") payload.is_change = false;
+
+      await dlvApi(`admin/verify/${deliveryOrderId}`, { method: "PUT", body: payload });
+      setCityName(editFields.city || cityName);
+      addLog("Order updated.");
+      setShowEdit(false);
+    } catch (e) {
+      setError(e?.message || "Save failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleSend() {
     if (!deliveryOrderId) return;
     setBusy(true);
@@ -218,17 +346,17 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       const item = envDet?.items?.find(x => Number(x.orderId) === Number(deliveryOrderId)) || null;
 
       const payload = {
-        order_name: orderName,
+        order_name: editFields.orderName || orderName,
         code: (item?.code || "").trim() || orderNum,
-        fullname: (item?.fullname || order?.customer || "").trim(),
-        phone: (item?.phone || order?.shipping_phone || "").trim(),
+        fullname: (item?.fullname || editFields.customerName || order?.customer || "").trim(),
+        phone: (item?.phone || editFields.customerPhone || order?.shipping_phone || "").trim(),
         partner_id: envDet?.partnerId || undefined,
-        city: cityName || order?.shipping_city || "",
-        address: (order?.shipping_address1 || cityName || "").trim(),
-        price: Number(item?.price || order?.total_price || 0),
-        product: (item?.product || `Order ${orderName}`).trim(),
+        city: cityName || editFields.city || order?.shipping_city || "",
+        address: (editFields.address || order?.shipping_address1 || cityName || "").trim(),
+        price: Number(item?.price || editFields.cashAmount || order?.total_price || 0),
+        product: (item?.product || editFields.description || `Order ${orderName}`).trim(),
         qty: Number(item?.qty || 1),
-        note: (item?.note || "").trim() || "no",
+        note: (item?.note || editFields.notes || "").trim() || "no",
         change: Number(item?.change || 0),
         openpackage: item?.openpackage != null ? Number(item.openpackage) : 1,
       };
@@ -246,31 +374,9 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
   async function handlePrint(oid) {
     const id = oid || deliveryOrderId;
     if (!id) return;
-    setBusy(true);
-    try {
-      const result = await enqueueLabelToRelay(String(id), store);
-      if (result.ok) {
-        addLog("Label sent to printer queue!");
-        setPhase("done");
-      } else {
-        addLog(`Queue failed: ${result.error || "unknown"} — opening in browser`);
-        window.open(`/api/delivery-label/${encodeURIComponent(id)}`, "_blank", "width=450,height=600,scrollbars=yes");
-        setPhase("done");
-      }
-    } catch (e) {
-      addLog(`Error: ${e?.message || e} — opening in browser`);
-      window.open(`/api/delivery-label/${encodeURIComponent(id)}`, "_blank", "width=450,height=600,scrollbars=yes");
-      setPhase("done");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function handlePrintInBrowser(oid) {
-    const id = oid || deliveryOrderId;
-    if (!id) return;
     window.open(`/api/delivery-label/${encodeURIComponent(id)}`, "_blank", "width=450,height=600,scrollbars=yes");
-    addLog("Opened in browser");
+    addLog("Print window opened");
+    setPhase("done");
   }
 
   async function handleManualPrint() {
@@ -287,6 +393,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     setDeliveryOrderId(Number(id));
     setOrderMap(orderNum, Number(id));
     addLog(`Using order ID: ${id}`);
+    populateEditFromOrder();
     setBusy(true);
     try {
       try {
@@ -315,9 +422,16 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     setError(null);
     setLog([]);
     setPhase("init");
+    setQueueRow(null);
+    setShowEdit(false);
     initRan.current = false;
     init();
   }
+
+  // --- City suggestions filtered by typing ---
+  const filteredCities = cityName
+    ? cities.filter(c => String(c).toLowerCase().includes(cityName.toLowerCase())).slice(0, 15)
+    : cities.slice(0, 15);
 
   if (notConfigured) {
     return (
@@ -336,12 +450,98 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     );
   }
 
-  const stepDone = (s) => {
-    const order = ["init", "searching", "creating", "company_select", "ready_print", "done"];
-    return order.indexOf(phase) > order.indexOf(s);
-  };
+  const stepOrder = ["init", "searching", "fix_errors", "creating", "company_select", "ready_print", "done"];
+  const stepDone = (s) => stepOrder.indexOf(phase) > stepOrder.indexOf(s);
   const stepActive = (s) => phase === s;
   const stepCls = (s) => stepDone(s) ? "border-green-300 bg-green-50" : stepActive(s) ? "border-blue-300 bg-blue-50 ring-2 ring-blue-200" : "border-gray-200 bg-gray-50 opacity-60";
+
+  const editSection = (
+    <div className={`rounded-xl border p-3 transition-all ${showEdit ? "border-indigo-300 bg-indigo-50" : "border-gray-200 bg-gray-50"}`}>
+      <button
+        onClick={() => setShowEdit(!showEdit)}
+        className="w-full flex items-center justify-between text-sm font-semibold text-gray-800"
+      >
+        <span className="flex items-center gap-2">
+          <span className="text-base">&#9998;</span> Edit Order Info
+          {queueRow?.hasError && <span className="text-[10px] font-bold text-red-600 bg-red-100 px-1.5 py-0.5 rounded-full border border-red-200">ERROR: {queueRow.errorType || "fix needed"}</span>}
+        </span>
+        <span className="text-gray-400">{showEdit ? "▲" : "▼"}</span>
+      </button>
+      {showEdit && (
+        <div className="mt-3 space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-[10px] font-semibold text-gray-500 uppercase">Order #</label>
+              <input value={editFields.orderName} onChange={e => setField("orderName", e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5" />
+            </div>
+            <div>
+              <label className="text-[10px] font-semibold text-gray-500 uppercase">Customer</label>
+              <input value={editFields.customerName} onChange={e => setField("customerName", e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5" />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-[10px] font-semibold text-gray-500 uppercase">Phone</label>
+              <input value={editFields.customerPhone} onChange={e => setField("customerPhone", e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5" />
+            </div>
+            <div>
+              <label className="text-[10px] font-semibold text-gray-500 uppercase">City</label>
+              <input
+                value={editFields.city}
+                onChange={e => { setField("city", e.target.value); setCityName(e.target.value); }}
+                list="dlv-city-list"
+                className={`w-full text-sm border rounded-lg px-2 py-1.5 ${queueRow?.hasError && queueRow?.errorType === "city" ? "border-red-400 bg-red-50" : "border-gray-300"}`}
+              />
+              <datalist id="dlv-city-list">
+                {filteredCities.map((c, i) => <option key={i} value={c} />)}
+              </datalist>
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] font-semibold text-gray-500 uppercase">Address</label>
+            <input value={editFields.address} onChange={e => setField("address", e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5" />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-[10px] font-semibold text-gray-500 uppercase">Cash Amount</label>
+              <input type="number" value={editFields.cashAmount} onChange={e => setField("cashAmount", e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5" />
+            </div>
+            <div>
+              <label className="text-[10px] font-semibold text-gray-500 uppercase">Description</label>
+              <input value={editFields.description} onChange={e => setField("description", e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5" />
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] font-semibold text-gray-500 uppercase">Notes</label>
+            <input value={editFields.notes} onChange={e => setField("notes", e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5" />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-[10px] font-semibold text-gray-500 uppercase">Allow Open</label>
+              <select value={editFields.allowOpen} onChange={e => setField("allowOpen", e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+                <option value="">Unchanged</option>
+                <option value="1">Yes</option>
+                <option value="0">No</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] font-semibold text-gray-500 uppercase">Is Change</label>
+              <select value={editFields.isChange} onChange={e => setField("isChange", e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+                <option value="">Unchanged</option>
+                <option value="1">Yes</option>
+                <option value="0">No</option>
+              </select>
+            </div>
+          </div>
+          {deliveryOrderId && (
+            <button onClick={handleSaveEdit} disabled={busy} className="w-full px-3 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold hover:bg-indigo-700 disabled:opacity-50 active:scale-[.98]">
+              {busy ? "Saving..." : "Save Changes"}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
@@ -356,7 +556,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
           {/* Merchant selector */}
           {(phase === "merchant_select" || (merchants.length > 1 && !busy)) && (
             <div className="flex items-center gap-2">
@@ -384,7 +584,18 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
             {stepDone("creating") && deliveryOrderId && (
               <div className="text-xs text-green-700 ml-8">Order ID: {deliveryOrderId} &middot; Envoy: {envoyCode || "—"}</div>
             )}
+            {phase === "fix_errors" && (
+              <div className="ml-8 mt-2">
+                <div className="text-xs text-red-700 mb-2">This order has errors in the queue. Fix the fields below then create.</div>
+                <button onClick={handleFixAndCreate} disabled={busy} className="w-full px-3 py-2 rounded-xl bg-blue-600 text-white text-sm font-bold hover:bg-blue-700 disabled:opacity-50 active:scale-[.98]">
+                  {busy ? "Working..." : "Fix & Create"}
+                </button>
+              </div>
+            )}
           </div>
+
+          {/* Edit Order Info (collapsible) */}
+          {(phase === "fix_errors" || phase === "company_select" || phase === "ready_print" || phase === "done") && editSection}
 
           {/* Step 2: Company & Send */}
           <div className={`rounded-xl border p-3 transition-all ${stepCls("company_select")}`}>
@@ -405,8 +616,12 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
                   value={cityName}
                   onChange={e => setCityName(e.target.value)}
                   placeholder="City"
+                  list="dlv-send-city-list"
                   className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5"
                 />
+                <datalist id="dlv-send-city-list">
+                  {filteredCities.map((c, i) => <option key={i} value={c} />)}
+                </datalist>
                 <button
                   onClick={handleSend}
                   disabled={busy}
@@ -428,21 +643,14 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
               <span className="text-sm font-semibold text-gray-800">Print Label</span>
             </div>
             {(phase === "ready_print" || phase === "done") && (
-              <div className="ml-8 mt-2 space-y-2">
+              <div className="ml-8 mt-2">
                 <button
                   onClick={() => handlePrint()}
-                  disabled={busy}
-                  className="w-full px-4 py-2.5 rounded-xl bg-green-600 text-white text-sm font-bold hover:bg-green-700 active:scale-[.98] shadow-md flex items-center justify-center gap-2 disabled:opacity-50"
+                  className="w-full px-4 py-2.5 rounded-xl bg-green-600 text-white text-sm font-bold hover:bg-green-700 active:scale-[.98] shadow-md flex items-center justify-center gap-2"
                 >
-                  <span className="text-lg">&#128424;</span> {busy ? "Sending..." : "Print Label"}
+                  <span className="text-lg">&#128424;</span> Print Label
                 </button>
-                <button
-                  onClick={() => handlePrintInBrowser()}
-                  className="w-full px-3 py-1.5 rounded-xl border border-gray-300 text-gray-600 text-xs font-semibold hover:bg-gray-50 flex items-center justify-center gap-1.5"
-                >
-                  Open in Browser
-                </button>
-                {phase === "done" && <div className="text-xs text-green-700 mt-1 text-center">Label sent to printer queue. You can print again or close.</div>}
+                {phase === "done" && <div className="text-xs text-green-700 mt-1 text-center">Print window opened. You can print again or close.</div>}
               </div>
             )}
           </div>

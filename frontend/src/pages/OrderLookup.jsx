@@ -313,11 +313,25 @@ export default function OrderLookup(){
   }, [order]);
   const currencyCode = useMemo(() => String(order?.currency_code || "").trim() || "", [order]);
 
+  const _isRemovedVariant = useCallback((v) => {
+    const q = Number(v?.qty);
+    if (Number.isFinite(q) && q <= 0) return true;
+    const st = String(v?.status || "").toLowerCase();
+    return st === "removed" || st === "restocked";
+  }, []);
+
+  const removedItems = useMemo(() => {
+    if (!order || !order.variants) return [];
+    return order.variants.filter(_isRemovedVariant);
+  }, [order, _isRemovedVariant]);
+
   const isOrderFulfilled = useMemo(() => {
     if (!order) return false;
     const byFlag = !!order.considered_fulfilled;
     const variants = Array.isArray(order.variants) ? order.variants : [];
-    const byVariants = variants.length > 0 && variants.every((v) => {
+    const active = variants.filter(v => !_isRemovedVariant(v));
+    if (active.length === 0 && variants.length > 0) return false;
+    const byVariants = active.length > 0 && active.every((v) => {
       const st = String(v?.status || "").toLowerCase();
       if (st === "fulfilled") return true;
       const uq = Number(v?.unfulfilled_qty);
@@ -327,7 +341,7 @@ export default function OrderLookup(){
       ((g?.lineItems || []).every((li) => Number(li?.remainingQuantity || 0) <= 0))
     );
     return byFlag || byVariants || byFO;
-  }, [order, foData]);
+  }, [order, foData, _isRemovedVariant]);
 
   const screenshotTimeline = useMemo(() => {
     const text = String(order?.note || "");
@@ -401,22 +415,24 @@ export default function OrderLookup(){
   const unfulfilledItems = useMemo(() => {
     if (!order || !order.variants) return [];
     return order.variants.filter(v => {
+      if (_isRemovedVariant(v)) return false;
       const st = String(v?.status || "").toLowerCase();
       if (st === "fulfilled") return false;
       const uq = Number(v?.unfulfilled_qty);
       return Number.isFinite(uq) ? uq > 0 : true;
     });
-  }, [order]);
+  }, [order, _isRemovedVariant]);
 
   const fulfilledItems = useMemo(() => {
     if (!order || !order.variants) return [];
     return order.variants.filter(v => {
+      if (_isRemovedVariant(v)) return false;
       const st = String(v?.status || "").toLowerCase();
       if (st === "fulfilled") return true;
       const uq = Number(v?.unfulfilled_qty);
       return Number.isFinite(uq) ? uq <= 0 : false;
     });
-  }, [order]);
+  }, [order, _isRemovedVariant]);
 
   const guideSteps = useMemo(() => {
     if (!order) return [];
@@ -429,7 +445,10 @@ export default function OrderLookup(){
       steps.push({ key: `item-${i}`, label: `Item ${i + 1}` });
     });
     steps.push({ key: 'totals', label: 'Order Totals' });
-    
+    if (removedItems.length > 0) {
+      steps.push({ key: 'removed', label: `Removed (${removedItems.length})` });
+    }
+
     // Add individual steps for screenshots
     if (screenshotTimeline.length > 0) {
       screenshotTimeline.forEach((_, i) => {
@@ -441,7 +460,7 @@ export default function OrderLookup(){
     
     steps.push({ key: 'tags', label: 'Tags' });
     return steps;
-  }, [order, unfulfilledItems, screenshotTimeline]);
+  }, [order, unfulfilledItems, removedItems, screenshotTimeline]);
 
   const guideStepIndex = useMemo(() => {
     if (!activeGuideSection) return -1;
@@ -904,6 +923,46 @@ export default function OrderLookup(){
                 <div className="text-xl font-extrabold text-rose-800">{discountTotal ?? "—"}{currencyCode && discountTotal != null ? ` ${currencyCode}` : ""}</div>
               </div>
             </div>
+          </div>
+        ),
+      });
+    }
+
+    if (key === "removed") {
+      return renderGuideFrame({
+        title: "Removed Items",
+        subtitle: `${removedItems.length} item(s) removed from this order.`,
+        children: (
+          <div className="space-y-3">
+            {removedItems.map((v, i) => (
+              <div key={v.id || `removed-${i}`} className="flex gap-3 p-3 rounded-xl bg-red-50 border border-red-200">
+                <div className="w-16 h-16 flex-shrink-0 bg-white rounded-lg border border-red-200 overflow-hidden">
+                  {v.image ? (
+                    <img src={v.image} alt="" className="w-full h-full object-contain" />
+                  ) : (
+                    <div className="w-full h-full bg-gray-100" />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-medium text-gray-900 line-clamp-2">{v.title || v.sku || "Item"}</div>
+                  <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-gray-500">
+                    {v.color && <span className="px-1.5 py-0.5 bg-red-100 rounded">Color: {v.color}</span>}
+                    {v.size && <span className="px-1.5 py-0.5 bg-red-100 rounded">Size: {v.size}</span>}
+                  </div>
+                  <div className="mt-1.5 flex items-center justify-between">
+                    <span className="text-xs text-gray-500">
+                      {(() => {
+                        try {
+                          if (v.unit_price == null) return "";
+                          return `${Number(v.unit_price).toFixed(2)}${v.currency_code ? ` ${v.currency_code}` : ""}`;
+                        } catch { return ""; }
+                      })()}
+                    </span>
+                    <span className="text-[10px] font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full border border-red-200">Removed</span>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         ),
       });
