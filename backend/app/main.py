@@ -978,7 +978,6 @@ def normalize_sales_channel(node: Dict[str, Any]) -> Optional[str]:
         return text
 
     for candidate in (
-        channel_info.get("displayName"),
         order_app.get("name"),
         channel_def.get("subChannelName"),
         channel_def.get("channelName"),
@@ -1342,7 +1341,6 @@ async def list_orders(
             updatedAt
             app { name }
             channelInformation {
-              displayName
               channelDefinition {
                 subChannelName
                 channelName
