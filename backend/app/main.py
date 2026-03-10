@@ -2395,6 +2395,8 @@ async def fulfill_order(order_gid: str, body: FulfillRequest, store: Optional[st
             return {"ok": False, "errors": [{"message": "No valid selections provided"}]}
     else:
         # Default: fulfill all remaining
+        if not fo_nodes:
+            return {"ok": True, "fulfilled": False, "reason": "no_fulfillment_orders"}
         for fo in fo_nodes:
             try:
                 fo_id = fo.get("id")

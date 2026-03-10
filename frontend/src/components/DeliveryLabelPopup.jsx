@@ -37,6 +37,8 @@ function setOrderMap(num, id) { try { const m = getOrderMap(); m[String(num)] = 
 function getCachedOrderId(num) { return getOrderMap()[String(num)] || null; }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function isDigitsOnly(value) { return /^\d+$/.test(String(value || "").trim()); }
+function normalizeLookupValue(value) { return String(value || "").trim().replace(/^#/, ""); }
 
 export default function DeliveryLabelPopup({ order, store, onClose }) {
   const orderNum = String(order?.number || "").replace(/^#/, "").trim();
@@ -86,6 +88,16 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     init();
   }, []);
 
+  useEffect(() => {
+    if (phase !== "manual") return;
+    setManualId(prev => {
+      const current = String(prev || "").trim();
+      if (current) return prev;
+      if (merchantId && orderNum) return `${merchantId}-${orderNum}`;
+      return orderNum || prev;
+    });
+  }, [phase, merchantId, orderNum]);
+
   function populateEditFromRow(row) {
     setEditFields({
       orderName: row.orderName || orderName,
@@ -115,6 +127,42 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       allowOpen: "",
       isChange: "",
     });
+  }
+
+  async function resolveManualReference(rawValue) {
+    const value = String(rawValue || "").trim();
+    if (!value) throw new Error("Enter a delivery order ID or envoy code.");
+
+    if (isDigitsOnly(value)) {
+      return {
+        deliveryOrderId: Number(value),
+        envoyCode: null,
+        companyAssigned: false,
+        companyName: "",
+      };
+    }
+
+    const envDet = await dlvApi(`admin/envoy-notes/${encodeURIComponent(value)}`);
+    const items = Array.isArray(envDet?.items) ? envDet.items : [];
+    const wantedCode = normalizeLookupValue(value);
+    const wantedOrder = normalizeLookupValue(orderNum);
+    const matchedItem = items.find(item => {
+      const itemCode = normalizeLookupValue(item?.code);
+      const itemOrderName = normalizeLookupValue(item?.order_name || item?.orderName);
+      return itemCode === wantedCode || itemOrderName === wantedOrder;
+    }) || items[0] || null;
+
+    const deliveryOrderId = Number(matchedItem?.orderId || matchedItem?.order_id || 0);
+    if (!deliveryOrderId) {
+      throw new Error("Envoy note found, but no delivery order is attached to it.");
+    }
+
+    return {
+      deliveryOrderId,
+      envoyCode: String(envDet?.code || value).trim(),
+      companyAssigned: Boolean(envDet?.company),
+      companyName: String(envDet?.company || "").trim(),
+    };
   }
 
   async function init() {
@@ -414,22 +462,50 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
   }
 
   async function handleManualPrint() {
-    const id = String(manualId).trim();
-    if (!id) return;
-    setDeliveryOrderId(id);
-    setOrderMap(orderNum, id);
-    await handlePrint(id);
+    const raw = String(manualId).trim();
+    if (!raw) return;
+
+    setBusy(true);
+    setError(null);
+    try {
+      const resolved = await resolveManualReference(raw);
+      setDeliveryOrderId(resolved.deliveryOrderId);
+      setOrderMap(orderNum, resolved.deliveryOrderId);
+      if (resolved.envoyCode) {
+        setEnvoyCode(resolved.envoyCode);
+        addLog(`Envoy: ${resolved.envoyCode}${resolved.companyName ? ` (${resolved.companyName})` : ""}`);
+      }
+      addLog(`Using order ID: ${resolved.deliveryOrderId}`);
+      setBusy(false);
+      await handlePrint(String(resolved.deliveryOrderId));
+      return;
+    } catch (e) {
+      setError(e?.message || "Failed to resolve manual reference");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleManualContinue() {
-    const id = String(manualId).trim();
-    if (!id) return;
-    setDeliveryOrderId(Number(id));
-    setOrderMap(orderNum, Number(id));
-    addLog(`Using order ID: ${id}`);
+    const raw = String(manualId).trim();
+    if (!raw) return;
     populateEditFromOrder();
     setBusy(true);
+    setError(null);
     try {
+      const resolved = await resolveManualReference(raw);
+      const id = String(resolved.deliveryOrderId);
+      setDeliveryOrderId(resolved.deliveryOrderId);
+      setOrderMap(orderNum, resolved.deliveryOrderId);
+      addLog(`Using order ID: ${id}`);
+
+      if (resolved.envoyCode) {
+        setEnvoyCode(resolved.envoyCode);
+        addLog(`Envoy: ${resolved.envoyCode}${resolved.companyName ? ` (${resolved.companyName})` : ""}`);
+        setPhase(resolved.companyAssigned ? "ready_print" : "company_select");
+        return;
+      }
+
       try {
         const env = await dlvApi(`ext/admin/envoy-notes/for-order/${id}`);
         if (env?.code) { setEnvoyCode(env.code); addLog(`Envoy: ${env.code}`); setPhase(env.company ? "ready_print" : "company_select"); return; }
@@ -440,6 +516,8 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       } catch {}
       addLog("No envoy note found. You can print directly.");
       setPhase("ready_print");
+    } catch (e) {
+      setError(e?.message || "Manual lookup failed");
     } finally {
       setBusy(false);
     }
@@ -721,12 +799,12 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
             <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
               <div className="text-sm font-semibold text-amber-900 mb-2">Order not found in queue</div>
               <div className="text-xs text-amber-800 mb-3">
-                The order may have already been processed. Enter the delivery system order ID manually, or print directly.
+                The order may have already been processed. Enter the delivery order ID, or an envoy code like {merchantId ? `${merchantId}-${orderNum}` : `7-${orderNum}`}, to reopen the normal print flow.
               </div>
               <input
                 value={manualId}
                 onChange={e => setManualId(e.target.value)}
-                placeholder="Delivery Order ID"
+                placeholder="Delivery Order ID or Envoy Code"
                 className="w-full text-sm border border-amber-300 rounded-lg px-3 py-2 mb-2"
               />
               <div className="flex gap-2">

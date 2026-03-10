@@ -1850,7 +1850,9 @@ export default function OrderLookup(){
                     if (res && res.fulfilled === false) {
                       const reason = res.reason === "no_remaining"
                         ? "Nothing to fulfill — order may be cancelled or already fulfilled."
-                        : (res.reason || "Fulfillment was not completed.");
+                        : res.reason === "no_fulfillment_orders"
+                          ? "Shopify returned no fulfillment orders for this order. The store connection may be missing fulfillment permissions, or the order is not fulfillable yet."
+                          : (res.reason || "Fulfillment was not completed.");
                       setError(reason);
                     } else if (res && res.ok !== false){
                       setOrder(prev => {
