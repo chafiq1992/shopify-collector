@@ -44,6 +44,19 @@ function parseMerchantOrderReference(value) {
   if (!m) return null;
   return { merchantId: Number(m[1]), orderNumber: m[2] };
 }
+function normalizeCompanyName(value) { return String(value || "").trim().toLowerCase(); }
+function getCompanyCities(company) {
+  const set = new Set();
+  for (const city of (company?.cities || [])) {
+    const text = String(city || "").trim();
+    if (text) set.add(text);
+  }
+  for (const city of Object.values(company?.aliases || {})) {
+    const text = String(city || "").trim();
+    if (text) set.add(text);
+  }
+  return Array.from(set);
+}
 
 export default function DeliveryLabelPopup({ order, store, onClose }) {
   const orderNum = String(order?.number || "").replace(/^#/, "").trim();
@@ -85,6 +98,17 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
   const setField = useCallback((k, v) => setEditFields(prev => ({ ...prev, [k]: v })), []);
 
   const addLog = useCallback((msg) => setLog(prev => [...prev, msg]), []);
+  const applyResolvedCompany = useCallback((companyName) => {
+    const wanted = normalizeCompanyName(companyName);
+    if (!wanted) return false;
+    const match = companies.find(c =>
+      normalizeCompanyName(c?.name) === wanted ||
+      normalizeCompanyName(c?.short) === wanted
+    );
+    if (!match?.id) return false;
+    setCompanyId(String(match.id));
+    return true;
+  }, [companies]);
   useEffect(() => { try { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); } catch {} }, [log]);
 
   useEffect(() => {
@@ -102,6 +126,13 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       return orderNum || prev;
     });
   }, [phase, merchantId, orderNum]);
+
+  useEffect(() => {
+    if (!companies.length) return;
+    if (!companyId || companyId === "unassigned") return;
+    const current = companies.find(c => String(c?.id) === String(companyId));
+    if (!current?.id) setCompanyId("");
+  }, [companies, companyId]);
 
   function populateEditFromRow(row) {
     setEditFields({
@@ -259,6 +290,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
           const env = await dlvApi(`ext/admin/envoy-notes/for-order/${cached}`);
           if (env?.code) {
             setEnvoyCode(env.code);
+            applyResolvedCompany(env.company);
             addLog(`Envoy: ${env.code} (${env.company || "no company"})`);
             setPhase(env.company ? "ready_print" : "company_select");
             setBusy(false);
@@ -305,7 +337,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
           setDeliveryOrderId(cached);
           try {
             const env = await dlvApi(`ext/admin/envoy-notes/assign-order/${cached}`, { method: "POST" });
-            if (env?.code) { setEnvoyCode(env.code); addLog(`Envoy: ${env.code}`); setPhase("company_select"); return; }
+            if (env?.code) { setEnvoyCode(env.code); applyResolvedCompany(env.company); addLog(`Envoy: ${env.code}`); setPhase("company_select"); return; }
           } catch {}
         }
         setPhase("manual");
@@ -392,6 +424,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
 
       if (env?.code) {
         setEnvoyCode(env.code);
+        applyResolvedCompany(env.company);
         addLog(`Envoy: ${env.code} (${env.company || "unassigned"})`);
         setPhase("company_select");
       } else {
@@ -479,7 +512,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     }
   }
 
-  async function enqueueLabelToRelay(dlvOrderId, storeName) {
+  async function enqueueLabelToRelay(dlvOrderId, storeName, envoyLabelCode) {
     const apiKey = localStorage.getItem("relay_api_key") || "";
     const res = await authFetch("/api/enqueue-label", {
       method: "POST",
@@ -487,7 +520,11 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
         ...authHeaders({ "Content-Type": "application/json" }),
         ...(apiKey ? { "x-api-key": apiKey } : {}),
       },
-      body: JSON.stringify({ delivery_order_id: String(dlvOrderId), store: storeName || null }),
+      body: JSON.stringify({
+        delivery_order_id: String(dlvOrderId),
+        store: storeName || null,
+        envoy_code: envoyLabelCode || null,
+      }),
     });
     if (!res.ok) {
       const text = await res.text();
@@ -501,18 +538,19 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
   async function handlePrint(oid) {
     const id = oid || deliveryOrderId;
     if (!id) return;
+    const labelUrl = `/api/delivery-label/${encodeURIComponent(id)}${envoyCode ? `?envoy_code=${encodeURIComponent(envoyCode)}` : ""}`;
 
     setBusy(true);
     setPrintStatus(null);
     try {
       addLog("Sending label to print relay...");
-      const result = await enqueueLabelToRelay(id, store);
+      const result = await enqueueLabelToRelay(id, store, envoyCode);
       addLog(`Queued! Job: ${result.job_id || "ok"} — printer agent will pick it up.`);
       setPrintStatus("success");
       setPhase("done");
     } catch (e) {
       addLog(`Relay failed: ${e.message} — opening in browser instead.`);
-      window.open(`/api/delivery-label/${encodeURIComponent(id)}`, "_blank", "width=450,height=600,scrollbars=yes");
+      window.open(labelUrl, "_blank", "width=450,height=600,scrollbars=yes");
       setPrintStatus("fallback");
       setPhase("done");
     } finally {
@@ -532,6 +570,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       setOrderMap(orderNum, resolved.deliveryOrderId);
       if (resolved.envoyCode) {
         setEnvoyCode(resolved.envoyCode);
+        applyResolvedCompany(resolved.companyName);
         addLog(`Envoy: ${resolved.envoyCode}${resolved.companyName ? ` (${resolved.companyName})` : ""}`);
       }
       addLog(`Using order ID: ${resolved.deliveryOrderId}`);
@@ -560,6 +599,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
 
       if (resolved.envoyCode) {
         setEnvoyCode(resolved.envoyCode);
+        applyResolvedCompany(resolved.companyName);
         addLog(`Envoy: ${resolved.envoyCode}${resolved.companyName ? ` (${resolved.companyName})` : ""}`);
         setPhase(resolved.companyAssigned ? "ready_print" : "company_select");
         return;
@@ -567,11 +607,11 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
 
       try {
         const env = await dlvApi(`ext/admin/envoy-notes/for-order/${id}`);
-        if (env?.code) { setEnvoyCode(env.code); addLog(`Envoy: ${env.code}`); setPhase(env.company ? "ready_print" : "company_select"); return; }
+        if (env?.code) { setEnvoyCode(env.code); applyResolvedCompany(env.company); addLog(`Envoy: ${env.code}`); setPhase(env.company ? "ready_print" : "company_select"); return; }
       } catch {}
       try {
         const env = await dlvApi(`ext/admin/envoy-notes/assign-order/${id}`, { method: "POST" });
-        if (env?.code) { setEnvoyCode(env.code); addLog(`Envoy: ${env.code}`); setPhase("company_select"); return; }
+        if (env?.code) { setEnvoyCode(env.code); applyResolvedCompany(env.company); addLog(`Envoy: ${env.code}`); setPhase("company_select"); return; }
       } catch {}
       addLog("No envoy note found. You can print directly.");
       setPhase("ready_print");
@@ -599,10 +639,14 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     init();
   }
 
-  // --- City suggestions filtered by typing ---
+  const selectedCompany = companyId && companyId !== "unassigned"
+    ? companies.find(c => String(c?.id) === String(companyId)) || null
+    : null;
+  const companyCities = selectedCompany ? getCompanyCities(selectedCompany) : [];
+  const cityOptions = companyCities.length ? companyCities : cities;
   const filteredCities = cityName
-    ? cities.filter(c => String(c).toLowerCase().includes(cityName.toLowerCase())).slice(0, 15)
-    : cities.slice(0, 15);
+    ? cityOptions.filter(c => String(c).toLowerCase().includes(cityName.toLowerCase())).slice(0, 15)
+    : cityOptions.slice(0, 15);
 
   if (notConfigured) {
     return (
@@ -787,6 +831,11 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
                   <option value="unassigned">Unassigned</option>
                   {companies.map(c => <option key={c.id} value={c.id}>{c.name} ({c.short})</option>)}
                 </select>
+                {selectedCompany && (
+                  <div className="text-[11px] text-gray-600">
+                    Using saved envoy company: <span className="font-semibold">{selectedCompany.name}</span>. Change it only if needed.
+                  </div>
+                )}
                 <input
                   value={cityName}
                   onChange={e => setCityName(e.target.value)}
@@ -843,7 +892,10 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
                 <button
                   onClick={() => {
                     const id = deliveryOrderId;
-                    if (id) window.open(`/api/delivery-label/${encodeURIComponent(id)}`, "_blank", "width=450,height=600,scrollbars=yes");
+                    if (id) {
+                      const labelUrl = `/api/delivery-label/${encodeURIComponent(id)}${envoyCode ? `?envoy_code=${encodeURIComponent(envoyCode)}` : ""}`;
+                      window.open(labelUrl, "_blank", "width=450,height=600,scrollbars=yes");
+                    }
                   }}
                   className="w-full px-3 py-1.5 rounded-lg border border-gray-300 text-xs text-gray-600 hover:bg-gray-50"
                 >

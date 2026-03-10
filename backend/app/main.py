@@ -286,6 +286,7 @@ class EnqueueBody(BaseModel):
 class EnqueueLabelBody(BaseModel):
     delivery_order_id: str
     store: Optional[str] = None
+    envoy_code: Optional[str] = None
 
 class AckBody(BaseModel):
     pc_id: str
@@ -420,6 +421,7 @@ async def enqueue_label(
         "type": "label",
         "delivery_order_id": str(body.delivery_order_id).strip(),
         "store": (body.store or "").strip() or None,
+        "envoy_code": (body.envoy_code or "").strip() or None,
     }
     JOBS.setdefault(DEFAULT_PC_ID, []).append(payload)
     return {"ok": True, "job_id": jid, "queued": len(JOBS[DEFAULT_PC_ID])}
@@ -3189,7 +3191,13 @@ async def delivery_proxy(path: str, request: Request):
     return Response(content=resp.content, status_code=resp.status_code, headers=resp_headers)
 
 @app.get("/api/delivery-label/{order_id}")
-async def delivery_label_proxy(order_id: str, renderer: str = Query("html"), autoprint: bool = Query(True), format: Optional[str] = Query(None)):
+async def delivery_label_proxy(
+    order_id: str,
+    renderer: str = Query("html"),
+    autoprint: bool = Query(True),
+    format: Optional[str] = Query(None),
+    envoy_code: Optional[str] = Query(None),
+):
     if not DELVERY_BACKEND_URL:
         return JSONResponse(status_code=503, content={"detail": "Delivery backend not configured."})
     params = {"renderer": renderer}
@@ -3210,7 +3218,38 @@ async def delivery_label_proxy(order_id: str, renderer: str = Query("html"), aut
         return JSONResponse(status_code=504, content={"detail": f"Delivery backend timeout: {e}"})
     except Exception as e:
         return JSONResponse(status_code=502, content={"detail": f"Delivery proxy error: {e}"})
-    return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type", "text/html"))
+    media_type = resp.headers.get("content-type", "text/html")
+
+    # For existing orders reprinted from an Envoy note, keep the same label layout
+    # but replace the embedded QR image with the partner/item code from the Envoy item.
+    if resp.status_code == 200 and envoy_code and "text/html" in media_type.lower():
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                env_resp = await client.get(
+                    f"{DELVERY_BACKEND_URL}/admin/envoy-notes/{envoy_code}",
+                    headers=headers,
+                )
+            env_resp.raise_for_status()
+            env = env_resp.json()
+            items = env.get("items") or []
+            target = None
+            for item in items:
+                if str(item.get("orderId") or "") == str(order_id):
+                    target = item
+                    break
+            qr_value = str((target or {}).get("code") or "").strip()
+            if qr_value:
+                html = resp.text
+                qr_b64 = _qr_png_b64(qr_value)
+                import re as _re
+                pattern = r'(<div class="qr">\s*<img[^>]*src="data:image/png;base64,)([^"]+)(")'
+                html2, n = _re.subn(pattern, rf"\g<1>{qr_b64}\g<3>", html, count=1)
+                if n > 0:
+                    return Response(content=html2.encode("utf-8"), status_code=200, media_type=media_type)
+        except Exception:
+            pass
+
+    return Response(content=resp.content, status_code=resp.status_code, media_type=media_type)
 
 @app.get("/api/delivery-config")
 async def delivery_config_check():

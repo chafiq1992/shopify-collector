@@ -91,52 +91,52 @@ def print_locally(orders, copies, store: str | None = None) -> bool:
         except Exception:
             return {}
 
-	# For irranova (or unknown store), ensure customer info is present before printing
-	store_key = (store or "").strip().lower()
-	require_overrides = (store_key == "irranova" or store_key == "")
-	if require_overrides:
-		# Try up to 3 attempts: cached, then force_live twice with short backoff
-		attempts = [False, True, True]
-		wait_secs = [0.0, 1.0, 2.0]
-		overrides = {}
-		for idx, force in enumerate(attempts):
-			if idx > 0 and wait_secs[idx] > 0:
-				try:
-					time.sleep(wait_secs[idx])
-				except Exception:
-					pass
-			overrides = _fetch_overrides(orders, force)
-			all_ok = True
-			for o in orders:
-				k = str(o).lstrip("#")
-				if not _is_complete(overrides.get(k)):
-					all_ok = False
-					break
-			if all_ok:
-				break
-		# If still missing and store is unknown, try explicit Irranova fallback once
-		missing = [str(o).lstrip("#") for o in orders if not _is_complete(overrides.get(str(o).lstrip("#")))]
-		if missing and store_key == "":
-			try:
-				joined = ",".join([str(o).lstrip("#") for o in missing])
-				headers = {"x-api-key": API_KEY} if API_KEY else {}
-				ro2 = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined, "store": "irranova", "force_live": "1"}, headers=headers, timeout=12)
-				ro2.raise_for_status()
-				ov2 = (ro2.json() or {}).get("overrides") or {}
-				overrides.update(ov2)
-			except Exception:
-				pass
-		# Final check: if still not complete, do not print
-		missing = [str(o).lstrip("#") for o in orders if not _is_complete(overrides.get(str(o).lstrip("#")))]
-		if missing:
-			print("Missing customer info for:", missing, "— re-enqueueing and skipping print")
-			return False
-	else:
-		# Non-irranova: best-effort fetch (no block)
-		try:
-			overrides = _fetch_overrides(orders, False)
-		except Exception:
-			overrides = {}
+    # For irranova (or unknown store), ensure customer info is present before printing
+    store_key = (store or "").strip().lower()
+    require_overrides = (store_key == "irranova" or store_key == "")
+    if require_overrides:
+        # Try up to 3 attempts: cached, then force_live twice with short backoff
+        attempts = [False, True, True]
+        wait_secs = [0.0, 1.0, 2.0]
+        overrides = {}
+        for idx, force in enumerate(attempts):
+            if idx > 0 and wait_secs[idx] > 0:
+                try:
+                    time.sleep(wait_secs[idx])
+                except Exception:
+                    pass
+            overrides = _fetch_overrides(orders, force)
+            all_ok = True
+            for o in orders:
+                k = str(o).lstrip("#")
+                if not _is_complete(overrides.get(k)):
+                    all_ok = False
+                    break
+            if all_ok:
+                break
+        # If still missing and store is unknown, try explicit Irranova fallback once
+        missing = [str(o).lstrip("#") for o in orders if not _is_complete(overrides.get(str(o).lstrip("#")))]
+        if missing and store_key == "":
+            try:
+                joined = ",".join([str(o).lstrip("#") for o in missing])
+                headers = {"x-api-key": API_KEY} if API_KEY else {}
+                ro2 = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined, "store": "irranova", "force_live": "1"}, headers=headers, timeout=12)
+                ro2.raise_for_status()
+                ov2 = (ro2.json() or {}).get("overrides") or {}
+                overrides.update(ov2)
+            except Exception:
+                pass
+        # Final check: if still not complete, do not print
+        missing = [str(o).lstrip("#") for o in orders if not _is_complete(overrides.get(str(o).lstrip("#")))]
+        if missing:
+            print("Missing customer info for:", missing, "— re-enqueueing and skipping print")
+            return False
+    else:
+        # Non-irranova: best-effort fetch (no block)
+        try:
+            overrides = _fetch_overrides(orders, False)
+        except Exception:
+            overrides = {}
 
     payload = {
         "orders": orders,
@@ -214,16 +214,19 @@ def _html_to_pdf(html_path: str, pdf_path: str) -> None:
         raise RuntimeError(f"HTML-to-PDF failed: {(p.stderr or p.stdout or 'no output').strip()}")
 
 
-def print_label(delivery_order_id: str) -> bool:
+def print_label(delivery_order_id: str, envoy_code: str = "") -> bool:
     """Download a delivery label and print it silently."""
     url = f"{RELAY_URL}/api/delivery-label/{delivery_order_id}"
+    params = {"autoprint": "false"}
+    if envoy_code:
+        params["envoy_code"] = envoy_code
     try:
-        r = requests.get(url, params={"format": "pdf", "autoprint": "false"}, timeout=30)
+        r = requests.get(url, params={**params, "format": "pdf"}, timeout=30)
         r.raise_for_status()
     except Exception as e:
         print(f"  Failed to fetch label (PDF attempt): {e}")
         try:
-            r = requests.get(url, params={"autoprint": "false"}, timeout=30)
+            r = requests.get(url, params=params, timeout=30)
             r.raise_for_status()
         except Exception as e2:
             print(f"  Failed to fetch label (HTML fallback): {e2}")
@@ -268,9 +271,10 @@ def main():
 
                     if job_type == "label":
                         dlv_id = job.get("delivery_order_id", "")
+                        envoy_code = job.get("envoy_code", "") or ""
                         print(f"Label job: delivery_order_id={dlv_id}")
                         try:
-                            ok = print_label(dlv_id)
+                            ok = print_label(dlv_id, envoy_code)
                         except Exception as le:
                             print(f"  Label print exception: {le}")
                             ok = False
