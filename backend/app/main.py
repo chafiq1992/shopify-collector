@@ -3252,24 +3252,27 @@ async def delivery_label_proxy(
                     )
                     note_resp.raise_for_status()
                     html = note_resp.text
-                    marker = json.dumps(order_name)
-                    hide_script = (
-                        "<script>(function(){"
-                        f"var target={marker};"
-                        "var pages=Array.prototype.slice.call(document.querySelectorAll('.label_page'));"
-                        "var visible=[];"
-                        "for(var i=0;i<pages.length;i++){"
-                        "var p=pages[i];"
-                        "var keep=((p.textContent||'').indexOf(target)>=0);"
-                        "if(keep){p.classList.remove('_hidden');p.classList.remove('_last_visible');visible.push(p);}else{p.classList.add('_hidden');p.classList.remove('_last_visible');}"
-                        "}"
-                        "if(visible.length){visible[visible.length-1].classList.add('_last_visible');}"
-                        "})();</script>"
-                    )
-                    if "</body>" in html:
-                        html = html.replace("</body>", hide_script + "</body>", 1)
-                    else:
-                        html += hide_script
+                    page_marker = '<div class="label_page'
+                    first_idx = html.find(page_marker)
+                    if first_idx >= 0:
+                        indices = []
+                        pos = first_idx
+                        while pos >= 0:
+                            indices.append(pos)
+                            pos = html.find(page_marker, pos + len(page_marker))
+                        page_blocks: List[tuple[int, int]] = []
+                        for i, start in enumerate(indices):
+                            end = indices[i + 1] if i + 1 < len(indices) else len(html)
+                            page_blocks.append((start, end))
+                        selected = None
+                        for start, end in page_blocks:
+                            block = html[start:end]
+                            if order_name in block:
+                                selected = (start, end, block)
+                                break
+                        if selected:
+                            start, end, block = selected
+                            html = html[:first_idx] + block + html[page_blocks[-1][1]:]
                     return Response(content=html.encode("utf-8"), status_code=200, media_type=media_type)
         except Exception:
             pass

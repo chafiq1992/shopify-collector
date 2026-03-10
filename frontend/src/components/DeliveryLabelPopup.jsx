@@ -45,6 +45,7 @@ function parseMerchantOrderReference(value) {
   return { merchantId: Number(m[1]), orderNumber: m[2] };
 }
 function normalizeCompanyName(value) { return String(value || "").trim().toLowerCase(); }
+function normalizeCityName(value) { return String(value || "").trim().toLowerCase(); }
 function getCompanyCities(company) {
   const set = new Set();
   for (const city of (company?.cities || [])) {
@@ -109,6 +110,16 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     setCompanyId(String(match.id));
     return true;
   }, [companies]);
+  const applyCompanyByCity = useCallback((city) => {
+    const wanted = normalizeCityName(city);
+    if (!wanted) return false;
+    const match = companies.find(c =>
+      getCompanyCities(c).some(name => normalizeCityName(name) === wanted)
+    );
+    if (!match?.id) return false;
+    setCompanyId(String(match.id));
+    return true;
+  }, [companies]);
   useEffect(() => { try { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); } catch {} }, [log]);
 
   useEffect(() => {
@@ -142,11 +153,18 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       try {
         const env = await dlvApi(`admin/envoy-notes/${encodeURIComponent(envoyCode)}`);
         if (cancelled) return;
-        applyResolvedCompany(env?.company || env?.companyShort || env?.partnerSlug);
+        const applied = applyResolvedCompany(env?.company || env?.companyShort || env?.partnerSlug);
+        if (!applied) applyCompanyByCity(cityName || editFields.city || order?.shipping_city || "");
       } catch {}
     })();
     return () => { cancelled = true; };
-  }, [phase, companies, companyId, envoyCode, applyResolvedCompany]);
+  }, [phase, companies, companyId, envoyCode, applyResolvedCompany, applyCompanyByCity, cityName, editFields.city, order?.shipping_city]);
+
+  useEffect(() => {
+    if (phase !== "company_select") return;
+    if (!companies.length || companyId) return;
+    applyCompanyByCity(cityName || editFields.city || order?.shipping_city || "");
+  }, [phase, companies, companyId, cityName, editFields.city, order?.shipping_city, applyCompanyByCity]);
 
   function populateEditFromRow(row) {
     setEditFields({
