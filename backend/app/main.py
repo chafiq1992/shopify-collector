@@ -857,6 +857,8 @@ class OrderDTO(BaseModel):
     # Used to match "Fulfilled on <date>" like Shopify Admin (any fulfillment in range, not only the latest).
     fulfillment_times: List[str] = []
     financial_status: Optional[str] = None
+    fulfillment_status: Optional[str] = None
+    cancelled_at: Optional[str] = None
     shipping_price: Optional[float] = None
     discount_total: Optional[float] = None
     currency_code: Optional[str] = None
@@ -1197,6 +1199,8 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         fulfilled_at=fulfilled_at_val,
         fulfillment_times=fulfillment_times,
         financial_status=node.get("displayFinancialStatus"),
+        fulfillment_status=node.get("displayFulfillmentStatus"),
+        cancelled_at=node.get("cancelledAt"),
         shipping_price=shipping_price_val,
         discount_total=discount_total_val,
         currency_code=currency_code_val,
@@ -1366,6 +1370,8 @@ async def list_orders(
             totalShippingPriceSet { shopMoney { amount currencyCode } }
             totalDiscountsSet { shopMoney { amount currencyCode } }
             displayFinancialStatus
+            displayFulfillmentStatus
+            cancelledAt
             lineItems(first: 50) {
               edges {
                 node {

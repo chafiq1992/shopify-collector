@@ -712,21 +712,32 @@ export default function OrderLookup(){
         subtitle: "The order source, timestamps, and customer summary.",
         children: (
           <div className="space-y-4">
+            {order.cancelled_at && (
+              <div className="rounded-xl border-2 border-red-400 bg-red-50 px-4 py-2.5 flex items-center gap-2 mb-1">
+                <span className="text-red-600 text-lg font-bold">⊘</span>
+                <div>
+                  <span className="text-sm font-bold text-red-800 uppercase tracking-wide">Cancelled</span>
+                  <span className="text-xs text-red-600 ml-2">
+                    {(() => { try { return new Date(order.cancelled_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); } catch { return ''; } })()}
+                  </span>
+                </div>
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-2xl font-bold text-gray-900">#{order.number}</span>
               <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
-                (order.financial_status === 'voided') ? 'bg-red-100 text-red-800 border-red-300' :
-                (order.financial_status === 'paid') ? 'bg-gray-100 text-gray-700 border-gray-200' :
-                (order.financial_status === 'pending') ? 'bg-orange-100 text-orange-800 border-orange-200' :
-                (order.financial_status === 'refunded') ? 'bg-red-50 text-red-700 border-red-200' :
-                (order.financial_status === 'partially_refunded') ? 'bg-orange-50 text-orange-700 border-orange-200' :
+                (order.financial_status === 'VOIDED' || order.financial_status === 'voided') ? 'bg-red-100 text-red-800 border-red-300' :
+                (order.financial_status === 'PAID' || order.financial_status === 'paid') ? 'bg-gray-100 text-gray-700 border-gray-200' :
+                (order.financial_status === 'PENDING' || order.financial_status === 'pending') ? 'bg-orange-100 text-orange-800 border-orange-200' :
+                (order.financial_status === 'REFUNDED' || order.financial_status === 'refunded') ? 'bg-red-50 text-red-700 border-red-200' :
+                (order.financial_status === 'PARTIALLY_REFUNDED' || order.financial_status === 'partially_refunded') ? 'bg-orange-50 text-orange-700 border-orange-200' :
                 'bg-gray-100 text-gray-700 border-gray-200'
               }`}>
                 {order.financial_status ? order.financial_status.replace(/_/g, ' ') : 'Payment pending'}
               </span>
               <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
-                (order.fulfillment_status === 'fulfilled') ? 'bg-green-100 text-green-800 border-green-200' :
-                (order.fulfillment_status === 'partial') ? 'bg-yellow-100 text-yellow-800 border-yellow-200' :
+                (order.fulfillment_status === 'FULFILLED' || order.fulfillment_status === 'fulfilled') ? 'bg-green-100 text-green-800 border-green-200' :
+                (order.fulfillment_status === 'PARTIALLY_FULFILLED' || order.fulfillment_status === 'partial') ? 'bg-yellow-100 text-yellow-800 border-yellow-200' :
                 'bg-yellow-100 text-yellow-800 border-yellow-200'
               }`}>
                 {order.fulfillment_status ? order.fulfillment_status.replace(/_/g, ' ') : 'Unfulfilled'}
@@ -1202,24 +1213,35 @@ export default function OrderLookup(){
                 <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 guide-label-animate">Step {guideStepIndex + 1}: Sales Channel</div>
               )}
               
+              {order.cancelled_at && (
+                <div className="rounded-xl border-2 border-red-400 bg-red-50 px-4 py-2.5 flex items-center gap-2 mb-2">
+                  <span className="text-red-600 text-lg font-bold">⊘</span>
+                  <div>
+                    <span className="text-sm font-bold text-red-800 uppercase tracking-wide">Cancelled</span>
+                    <span className="text-xs text-red-600 ml-2">
+                      {(() => { try { return new Date(order.cancelled_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); } catch { return ''; } })()}
+                    </span>
+                  </div>
+                </div>
+              )}
               <div className="flex flex-col gap-2 mb-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xl font-bold text-gray-900">#{order.number}</span>
                   {/* Financial Status Badge */}
                   <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
-                    (order.financial_status === 'voided') ? 'bg-red-100 text-red-800 border-red-300' :
-                    (order.financial_status === 'paid') ? 'bg-gray-100 text-gray-700 border-gray-200' :
-                    (order.financial_status === 'pending') ? 'bg-orange-100 text-orange-800 border-orange-200' :
-                    (order.financial_status === 'refunded') ? 'bg-red-50 text-red-700 border-red-200' :
-                    (order.financial_status === 'partially_refunded') ? 'bg-orange-50 text-orange-700 border-orange-200' :
+                    (order.financial_status === 'VOIDED' || order.financial_status === 'voided') ? 'bg-red-100 text-red-800 border-red-300' :
+                    (order.financial_status === 'PAID' || order.financial_status === 'paid') ? 'bg-gray-100 text-gray-700 border-gray-200' :
+                    (order.financial_status === 'PENDING' || order.financial_status === 'pending') ? 'bg-orange-100 text-orange-800 border-orange-200' :
+                    (order.financial_status === 'REFUNDED' || order.financial_status === 'refunded') ? 'bg-red-50 text-red-700 border-red-200' :
+                    (order.financial_status === 'PARTIALLY_REFUNDED' || order.financial_status === 'partially_refunded') ? 'bg-orange-50 text-orange-700 border-orange-200' :
                     'bg-gray-100 text-gray-700 border-gray-200'
                   }`}>
                     {order.financial_status ? order.financial_status.replace(/_/g, ' ') : 'Payment pending'}
                   </span>
                   {/* Fulfillment Status Badge */}
                   <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
-                    (order.fulfillment_status === 'fulfilled') ? 'bg-green-100 text-green-800 border-green-200' :
-                    (order.fulfillment_status === 'partial') ? 'bg-yellow-100 text-yellow-800 border-yellow-200' :
+                    (order.fulfillment_status === 'FULFILLED' || order.fulfillment_status === 'fulfilled') ? 'bg-green-100 text-green-800 border-green-200' :
+                    (order.fulfillment_status === 'PARTIALLY_FULFILLED' || order.fulfillment_status === 'partial') ? 'bg-yellow-100 text-yellow-800 border-yellow-200' :
                     'bg-yellow-100 text-yellow-800 border-yellow-200'
                   }`}>
                     {order.fulfillment_status ? order.fulfillment_status.replace(/_/g, ' ') : 'Unfulfilled'}
@@ -1864,16 +1886,16 @@ export default function OrderLookup(){
               <div className="flex gap-2">
                 <button
                   onClick={()=>{
-                    if (fulfillBusy || isOrderFulfilled) return;
+                    if (fulfillBusy || isOrderFulfilled || order.cancelled_at) return;
                     setFulfillConfirm(true);
                   }}
                   className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-sm active:scale-[.98] shadow-sm ${
-                    isOrderFulfilled
+                    (isOrderFulfilled || order.cancelled_at)
                       ? 'bg-gray-300 text-gray-700 cursor-not-allowed'
                       : 'bg-green-600 text-white hover:bg-green-700'
                   }`}
                 >
-                  <span className="font-semibold">{isOrderFulfilled ? 'Fulfilled' : (fulfillBusy ? 'Fulfilling…' : 'Fulfill')}</span>
+                  <span className="font-semibold">{order.cancelled_at ? 'Cancelled' : isOrderFulfilled ? 'Fulfilled' : (fulfillBusy ? 'Fulfilling…' : 'Fulfill')}</span>
                 </button>
                 <button
                   onClick={() => setShowDeliveryPopup(true)}
