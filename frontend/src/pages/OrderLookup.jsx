@@ -48,6 +48,7 @@ const API = {
     const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/fulfill-tracked${qs}`, {
       method: "POST",
       headers: authHeaders({"Content-Type":"application/json"}),
+      body: JSON.stringify({}),
     });
     if (!res.ok) throw new Error("Failed to fulfill order");
     return res.json();

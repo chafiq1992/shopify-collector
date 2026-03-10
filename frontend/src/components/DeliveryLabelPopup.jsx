@@ -3,8 +3,6 @@ import { authFetch, authHeaders } from "../lib/auth";
 
 const LS_MERCHANT = "dlvMerchantId";
 const LS_ORDER_MAP = "dlvOrderIdMap";
-const LS_PRINTER_URL = "dlvLanPrinterUrl";
-const LS_PRINTER_KEY = "dlvLanPrinterKey";
 
 async function dlvApi(path, { method = "GET", body, query } = {}) {
   let url = `/api/delivery/${path.replace(/^\/+/, "")}`;
@@ -60,9 +58,6 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
   const [notConfigured, setNotConfigured] = useState(false);
   const [queueRow, setQueueRow] = useState(null);
   const [showEdit, setShowEdit] = useState(false);
-  const [lanPrinterUrl, setLanPrinterUrl] = useState(() => { try { return localStorage.getItem(LS_PRINTER_URL) || ""; } catch { return ""; } });
-  const [lanPrinterKey, setLanPrinterKey] = useState(() => { try { return localStorage.getItem(LS_PRINTER_KEY) || ""; } catch { return ""; } });
-  const [showPrinterSettings, setShowPrinterSettings] = useState(false);
   const [printStatus, setPrintStatus] = useState(null);
   const logEndRef = useRef(null);
   const initRan = useRef(false);
@@ -377,57 +372,42 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     }
   }
 
-  function savePrinterSettings(url, key) {
-    try { localStorage.setItem(LS_PRINTER_URL, url); } catch {}
-    try { localStorage.setItem(LS_PRINTER_KEY, key); } catch {}
+  async function enqueueLabelToRelay(dlvOrderId, storeName) {
+    const apiKey = localStorage.getItem("relay_api_key") || "";
+    const res = await authFetch("/api/enqueue-label", {
+      method: "POST",
+      headers: {
+        ...authHeaders({ "Content-Type": "application/json" }),
+        ...(apiKey ? { "x-api-key": apiKey } : {}),
+      },
+      body: JSON.stringify({ delivery_order_id: String(dlvOrderId), store: storeName || null }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      let detail = text;
+      try { const j = JSON.parse(text); detail = j.detail || text; } catch {}
+      throw new Error(detail || `Enqueue failed (${res.status})`);
+    }
+    return res.json();
   }
 
   async function handlePrint(oid) {
     const id = oid || deliveryOrderId;
     if (!id) return;
 
-    const printerUrl = lanPrinterUrl.trim().replace(/\/+$/, "");
-    if (!printerUrl) {
-      window.open(`/api/delivery-label/${encodeURIComponent(id)}`, "_blank", "width=450,height=600,scrollbars=yes");
-      addLog("Print window opened (no LAN printer configured)");
-      setPhase("done");
-      return;
-    }
-
     setBusy(true);
     setPrintStatus(null);
     try {
-      addLog("Fetching label HTML...");
-      const labelRes = await fetch(`/api/delivery-label/${encodeURIComponent(id)}`);
-      if (!labelRes.ok) throw new Error(`Failed to fetch label (${labelRes.status})`);
-      const html = await labelRes.text();
-      if (!html || html.length < 50) throw new Error("Label HTML is empty");
-
-      addLog("Sending to LAN printer...");
-      const headers = { "Content-Type": "application/json" };
-      if (lanPrinterKey.trim()) headers["x-api-key"] = lanPrinterKey.trim();
-
-      const printRes = await fetch(`${printerUrl}/print/html`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ html }),
-      });
-
-      if (!printRes.ok) {
-        const errText = await printRes.text();
-        let detail = errText;
-        try { const j = JSON.parse(errText); detail = j.detail || errText; } catch {}
-        throw new Error(`Printer error: ${detail}`);
-      }
-
-      const result = await printRes.json();
-      addLog(`Printed! Job: ${result.job_id || "ok"}, Printer: ${result.printer || "DEFAULT"}`);
+      addLog("Sending label to print relay...");
+      const result = await enqueueLabelToRelay(id, store);
+      addLog(`Queued! Job: ${result.job_id || "ok"} — printer agent will pick it up.`);
       setPrintStatus("success");
       setPhase("done");
     } catch (e) {
-      addLog(`Print failed: ${e.message}`);
-      setPrintStatus("error");
-      setError(e.message);
+      addLog(`Relay failed: ${e.message} — opening in browser instead.`);
+      window.open(`/api/delivery-label/${encodeURIComponent(id)}`, "_blank", "width=450,height=600,scrollbars=yes");
+      setPrintStatus("fallback");
+      setPhase("done");
     } finally {
       setBusy(false);
     }
@@ -694,51 +674,12 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
 
           {/* Step 3: Print */}
           <div className={`rounded-xl border p-3 transition-all ${stepCls("ready_print")}`}>
-            <div className="flex items-center justify-between mb-1">
-              <div className="flex items-center gap-2">
-                <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${stepDone("ready_print") ? "bg-green-500 text-white" : "bg-gray-300 text-white"}`}>
-                  {stepDone("ready_print") ? "✓" : "3"}
-                </span>
-                <span className="text-sm font-semibold text-gray-800">Print Label</span>
-                {lanPrinterUrl.trim() ? (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200 font-bold">LAN</span>
-                ) : (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 border border-gray-200">Browser</span>
-                )}
-              </div>
-              <button
-                onClick={() => setShowPrinterSettings(!showPrinterSettings)}
-                className="text-[10px] text-gray-400 hover:text-gray-600"
-                title="Printer settings"
-              >⚙</button>
+            <div className="flex items-center gap-2 mb-1">
+              <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${stepDone("ready_print") ? "bg-green-500 text-white" : "bg-gray-300 text-white"}`}>
+                {stepDone("ready_print") ? "✓" : "3"}
+              </span>
+              <span className="text-sm font-semibold text-gray-800">Print Label</span>
             </div>
-            {showPrinterSettings && (
-              <div className="ml-8 mt-2 mb-2 p-2.5 rounded-lg bg-gray-50 border border-gray-200 space-y-2">
-                <div>
-                  <label className="text-[10px] font-semibold text-gray-500 uppercase">LAN Printer URL</label>
-                  <input
-                    value={lanPrinterUrl}
-                    onChange={e => { setLanPrinterUrl(e.target.value); savePrinterSettings(e.target.value, lanPrinterKey); }}
-                    placeholder="e.g. http://192.168.1.100:8790"
-                    className="w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] font-semibold text-gray-500 uppercase">API Key (optional)</label>
-                  <input
-                    value={lanPrinterKey}
-                    onChange={e => { setLanPrinterKey(e.target.value); savePrinterSettings(lanPrinterUrl, e.target.value); }}
-                    placeholder="Leave empty if none"
-                    className="w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5"
-                  />
-                </div>
-                <div className="text-[10px] text-gray-400">
-                  {lanPrinterUrl.trim()
-                    ? "Label will be sent to the LAN printer agent for silent printing."
-                    : "No LAN printer set — label will open in a new browser tab."}
-                </div>
-              </div>
-            )}
             {(phase === "ready_print" || phase === "done") && (
               <div className="ml-8 mt-2 space-y-2">
                 <button
@@ -749,23 +690,28 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
                   {busy ? (
                     <><span className="animate-spin">⏳</span> Sending to printer...</>
                   ) : (
-                    <><span className="text-lg">&#128424;</span> {lanPrinterUrl.trim() ? "Print to LAN Printer" : "Print Label"}</>
+                    <><span className="text-lg">&#128424;</span> Print Label</>
                   )}
                 </button>
-                {printStatus === "success" && <div className="text-xs text-green-700 mt-1 text-center font-semibold">Sent to printer successfully! You can print again or close.</div>}
-                {printStatus === "error" && <div className="text-xs text-red-700 mt-1 text-center">Print failed. Check error below or try browser print.</div>}
-                {phase === "done" && !lanPrinterUrl.trim() && printStatus !== "success" && <div className="text-xs text-green-700 mt-1 text-center">Print window opened. You can print again or close.</div>}
-                {printStatus === "error" && (
-                  <button
-                    onClick={() => {
-                      const id = deliveryOrderId;
-                      if (id) window.open(`/api/delivery-label/${encodeURIComponent(id)}`, "_blank", "width=450,height=600,scrollbars=yes");
-                    }}
-                    className="w-full px-3 py-1.5 rounded-lg border border-gray-300 text-xs text-gray-600 hover:bg-gray-50"
-                  >
-                    Open in browser instead
-                  </button>
+                {printStatus === "success" && (
+                  <div className="text-xs text-green-700 mt-1 text-center font-semibold">
+                    Sent to printer agent! The label will print automatically. You can print again or close.
+                  </div>
                 )}
+                {printStatus === "fallback" && (
+                  <div className="text-xs text-amber-700 mt-1 text-center">
+                    Relay unavailable — label opened in browser. Use Ctrl+P to print.
+                  </div>
+                )}
+                <button
+                  onClick={() => {
+                    const id = deliveryOrderId;
+                    if (id) window.open(`/api/delivery-label/${encodeURIComponent(id)}`, "_blank", "width=450,height=600,scrollbars=yes");
+                  }}
+                  className="w-full px-3 py-1.5 rounded-lg border border-gray-300 text-xs text-gray-600 hover:bg-gray-50"
+                >
+                  Open label in browser
+                </button>
               </div>
             )}
           </div>
