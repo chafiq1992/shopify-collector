@@ -3220,8 +3220,9 @@ async def delivery_label_proxy(
         return JSONResponse(status_code=502, content={"detail": f"Delivery proxy error: {e}"})
     media_type = resp.headers.get("content-type", "text/html")
 
-    # For existing orders reprinted from an Envoy note, keep the same label layout
-    # but replace the embedded QR image with the partner/item code from the Envoy item.
+    # For existing orders reprinted from an Envoy note, proxy the actual
+    # envoy-note labels HTML and keep only the selected order's page. This
+    # preserves the same QR/image generation used by the delivery app.
     if resp.status_code == 200 and envoy_code and "text/html" in media_type.lower():
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -3229,23 +3230,47 @@ async def delivery_label_proxy(
                     f"{DELVERY_BACKEND_URL}/admin/envoy-notes/{envoy_code}",
                     headers=headers,
                 )
-            env_resp.raise_for_status()
-            env = env_resp.json()
-            items = env.get("items") or []
-            target = None
-            for item in items:
-                if str(item.get("orderId") or "") == str(order_id):
-                    target = item
-                    break
-            qr_value = str((target or {}).get("code") or "").strip()
-            if qr_value:
-                html = resp.text
-                qr_b64 = _qr_png_b64(qr_value)
-                import re as _re
-                pattern = r'(<div class="qr">\s*<img[^>]*src="data:image/png;base64,)([^"]+)(")'
-                html2, n = _re.subn(pattern, rf"\g<1>{qr_b64}\g<3>", html, count=1)
-                if n > 0:
-                    return Response(content=html2.encode("utf-8"), status_code=200, media_type=media_type)
+                env_resp.raise_for_status()
+                env = env_resp.json()
+                items = env.get("items") or []
+                target = None
+                for item in items:
+                    if str(item.get("orderId") or "") == str(order_id):
+                        target = item
+                        break
+                order_name = str((target or {}).get("orderName") or "").strip()
+                if order_name:
+                    note_params: Dict[str, Any] = {"renderer": "html", "viewer": "false"}
+                    if autoprint:
+                        note_params["autoprint"] = "true"
+                    if format:
+                        note_params["format"] = format
+                    note_resp = await client.get(
+                        f"{DELVERY_BACKEND_URL}/admin/envoy-notes/{envoy_code}/labels",
+                        params=note_params,
+                        headers=headers,
+                    )
+                    note_resp.raise_for_status()
+                    html = note_resp.text
+                    marker = json.dumps(order_name)
+                    hide_script = (
+                        "<script>(function(){"
+                        f"var target={marker};"
+                        "var pages=Array.prototype.slice.call(document.querySelectorAll('.label_page'));"
+                        "var visible=[];"
+                        "for(var i=0;i<pages.length;i++){"
+                        "var p=pages[i];"
+                        "var keep=((p.textContent||'').indexOf(target)>=0);"
+                        "if(keep){p.classList.remove('_hidden');p.classList.remove('_last_visible');visible.push(p);}else{p.classList.add('_hidden');p.classList.remove('_last_visible');}"
+                        "}"
+                        "if(visible.length){visible[visible.length-1].classList.add('_last_visible');}"
+                        "})();</script>"
+                    )
+                    if "</body>" in html:
+                        html = html.replace("</body>", hide_script + "</body>", 1)
+                    else:
+                        html += hide_script
+                    return Response(content=html.encode("utf-8"), status_code=200, media_type=media_type)
         except Exception:
             pass
 

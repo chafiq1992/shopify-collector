@@ -221,7 +221,10 @@ def print_label(delivery_order_id: str, envoy_code: str = "") -> bool:
     if envoy_code:
         params["envoy_code"] = envoy_code
     try:
-        r = requests.get(url, params={**params, "format": "pdf"}, timeout=30)
+        if envoy_code:
+            r = requests.get(url, params=params, timeout=30)
+        else:
+            r = requests.get(url, params={**params, "format": "pdf"}, timeout=30)
         r.raise_for_status()
     except Exception as e:
         print(f"  Failed to fetch label (PDF attempt): {e}")

@@ -134,6 +134,20 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     if (!current?.id) setCompanyId("");
   }, [companies, companyId]);
 
+  useEffect(() => {
+    if (phase !== "company_select") return;
+    if (!companies.length || companyId || !envoyCode) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const env = await dlvApi(`admin/envoy-notes/${encodeURIComponent(envoyCode)}`);
+        if (cancelled) return;
+        applyResolvedCompany(env?.company || env?.companyShort || env?.partnerSlug);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [phase, companies, companyId, envoyCode, applyResolvedCompany]);
+
   function populateEditFromRow(row) {
     setEditFields({
       orderName: row.orderName || orderName,
