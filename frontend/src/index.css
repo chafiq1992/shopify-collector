@@ -105,3 +105,20 @@ html, body { overflow-x: hidden; overflow-y: auto; }
   100% { transform: scale(1.04); box-shadow: 0 0 8px  rgba(59, 130, 246, 0.35); }
 }
 
+.guide-gallery-card {
+  box-shadow:
+    0 28px 80px rgba(15, 23, 42, 0.28),
+    0 8px 24px rgba(15, 23, 42, 0.12);
+}
+
+.guide-gallery-slide-active {
+  transform-origin: center center;
+}
+
+.guide-gallery-slide-up,
+.guide-gallery-slide-down,
+.guide-gallery-slide-up-far,
+.guide-gallery-slide-down-far {
+  transform-origin: center center;
+}
+

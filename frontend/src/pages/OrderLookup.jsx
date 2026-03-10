@@ -155,6 +155,7 @@ export default function OrderLookup(){
   const [guideActive, setGuideActive] = useState(false);
   const [activeGuideSection, setActiveGuideSection] = useState(null);
   const [badgeSubStep, setBadgeSubStep] = useState(0);
+  const [guideDirection, setGuideDirection] = useState(1);
   const [companyConfirm, setCompanyConfirm] = useState(null);
 
   const [fulfillConfirm, setFulfillConfirm] = useState(false);
@@ -447,47 +448,30 @@ export default function OrderLookup(){
     return guideSteps.findIndex(s => s.key === activeGuideSection);
   }, [activeGuideSection, guideSteps]);
 
-  const activeScreenshotIndex = useMemo(() => {
-    if (!activeGuideSection?.startsWith('screenshot-')) return -1;
-    const idx = Number(activeGuideSection.split('-')[1]);
-    return Number.isInteger(idx) ? idx : -1;
-  }, [activeGuideSection]);
-
-  const activeScreenshotEntry = useMemo(() => {
-    if (activeScreenshotIndex < 0) return null;
-    return screenshotTimeline[activeScreenshotIndex] || null;
-  }, [activeScreenshotIndex, screenshotTimeline]);
-
   useEffect(() => () => {
     if (guideUnlockTimerRef.current) {
       clearTimeout(guideUnlockTimerRef.current);
     }
   }, []);
 
-  function getGuideScrollTop(el) {
-    const headerEl = document.querySelector('header');
-    const headerHeight = headerEl ? headerEl.getBoundingClientRect().height : 88;
-    const bottomFixedHeight = order ? 76 : 0;
-    const guideNavHeight = guideActive ? 84 : 0;
-    const viewportHeight = Math.max(320, window.innerHeight - headerHeight - bottomFixedHeight - guideNavHeight - 24);
-    const rect = el.getBoundingClientRect();
-    const visibleElementHeight = Math.min(rect.height, viewportHeight - 24);
-    const centerOffset = Math.max(16, (viewportHeight - visibleElementHeight) / 2);
-    return Math.max(0, window.scrollY + rect.top - headerHeight - centerOffset);
-  }
-
-  function lockGuideScroll() {
+  function lockGuideNavigation() {
     guideAnimatingRef.current = true;
     if (guideUnlockTimerRef.current) clearTimeout(guideUnlockTimerRef.current);
     guideUnlockTimerRef.current = setTimeout(() => {
       guideAnimatingRef.current = false;
-    }, 520);
+    }, 560);
+  }
+
+  function isGuideTypingTarget(target) {
+    const tag = target?.tagName?.toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable;
   }
 
   useEffect(() => {
     if (!guideActive) {
       guideInitializedRef.current = false;
       guideAnimatingRef.current = false;
+      setGuideDirection(1);
       if (guideUnlockTimerRef.current) clearTimeout(guideUnlockTimerRef.current);
       return;
     }
@@ -496,13 +480,20 @@ export default function OrderLookup(){
     if (!guideInitializedRef.current) {
       const firstKey = guideSteps[0]?.key;
       if (firstKey) {
-        setTimeout(() => {
-          guideGoTo(firstKey);
-        }, 120);
+        setActiveGuideSection(firstKey);
       }
       guideInitializedRef.current = true;
     }
   }, [guideActive, order, guideSteps]);
+
+  useEffect(() => {
+    if (!guideActive) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [guideActive]);
 
   useEffect(() => {
     if (!guideActive || !guideSteps.length) return;
@@ -523,8 +514,13 @@ export default function OrderLookup(){
     };
 
     const onKeyDown = (e) => {
+      if (isGuideTypingTarget(e.target)) return;
       if (guideAnimatingRef.current) return;
-      if (["ArrowDown", "PageDown", "Enter", " "].includes(e.key)) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setGuideActive(false);
+        setActiveGuideSection(null);
+      } else if (["ArrowDown", "PageDown", "Enter", " "].includes(e.key)) {
         e.preventDefault();
         guideNext();
       } else if (["ArrowUp", "PageUp"].includes(e.key)) {
@@ -582,37 +578,35 @@ export default function OrderLookup(){
       setGuideActive(false);
       setActiveGuideSection(null);
     } else {
+      setGuideDirection(1);
+      setActiveGuideSection(guideSteps[0]?.key || null);
       setGuideActive(true);
     }
   }
 
-  function guideGoTo(key) {
-    const el = sectionRefs.current[key];
-    if (!el) return;
+  function guideGoTo(key, forcedDirection = 0) {
+    const nextIndex = guideSteps.findIndex((step) => step.key === key);
+    if (nextIndex < 0) return;
+    const resolvedDirection = forcedDirection || (guideStepIndex < 0 ? 1 : (nextIndex > guideStepIndex ? 1 : -1));
+    setGuideDirection(resolvedDirection);
     setActiveGuideSection(key);
-    lockGuideScroll();
-    window.scrollTo({
-      top: getGuideScrollTop(el),
-      behavior: 'smooth',
-    });
+    lockGuideNavigation();
   }
 
   function guideNext() {
     const idx = guideStepIndex;
     const next = guideSteps[idx + 1];
-    if (next) guideGoTo(next.key);
+    if (next) guideGoTo(next.key, 1);
   }
 
   function guidePrev() {
     const idx = guideStepIndex;
     const prev = guideSteps[idx - 1];
-    if (prev) guideGoTo(prev.key);
+    if (prev) guideGoTo(prev.key, -1);
   }
 
   function sectionCls(key) {
-    if (!guideActive) return '';
-    if (activeGuideSection === key) return 'guide-section-active';
-    return 'guide-section-dim';
+    return '';
   }
 
   /* ── Delivery company logic ──────────────────────────── */
@@ -665,6 +659,380 @@ export default function OrderLookup(){
   /* ── Render ──────────────────────────────────────────── */
 
   const activeCompany = order ? getActiveCompanyTag() : null;
+  const currentGuideStep = guideSteps[guideStepIndex] || null;
+
+  function renderGuideFrame({ title, subtitle, children }) {
+    return (
+      <div className="guide-gallery-card w-full overflow-hidden rounded-[28px] border border-white/80 bg-white/95 shadow-2xl">
+        <div className="border-b border-slate-200 bg-gradient-to-r from-slate-900 via-slate-800 to-blue-900 px-5 py-4 text-white">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-blue-100">Order walkthrough</div>
+              <div className="mt-1 text-xl font-bold">{title}</div>
+              {subtitle ? <div className="mt-1 text-sm text-blue-100/90">{subtitle}</div> : null}
+            </div>
+            <div className="rounded-2xl border border-white/15 bg-white/10 px-3 py-2 text-right">
+              <div className="text-[10px] uppercase tracking-[0.22em] text-blue-100/70">Order</div>
+              <div className="text-sm font-bold">#{order?.number || "—"}</div>
+            </div>
+          </div>
+        </div>
+        <div className="max-h-[calc(100vh-15rem)] overflow-y-auto px-5 py-5">
+          {children}
+        </div>
+      </div>
+    );
+  }
+
+  function renderGuideSlide(key) {
+    if (!order) return null;
+
+    if (key === "sales-channel") {
+      return renderGuideFrame({
+        title: "Sales Channel",
+        subtitle: "The order source, timestamps, and customer summary.",
+        children: (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-2xl font-bold text-gray-900">#{order.number}</span>
+              <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
+                (order.financial_status === 'paid') ? 'bg-gray-100 text-gray-700 border-gray-200' :
+                (order.financial_status === 'pending') ? 'bg-orange-100 text-orange-800 border-orange-200' :
+                'bg-gray-100 text-gray-700 border-gray-200'
+              }`}>
+                {order.financial_status ? order.financial_status.replace(/_/g, ' ') : 'Payment pending'}
+              </span>
+              <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
+                (order.fulfillment_status === 'fulfilled') ? 'bg-green-100 text-green-800 border-green-200' :
+                (order.fulfillment_status === 'partial') ? 'bg-yellow-100 text-yellow-800 border-yellow-200' :
+                'bg-yellow-100 text-yellow-800 border-yellow-200'
+              }`}>
+                {order.fulfillment_status ? order.fulfillment_status.replace(/_/g, ' ') : 'Unfulfilled'}
+              </span>
+            </div>
+            <div className="rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-gray-700">
+              <div>
+                {(() => {
+                  try {
+                    if (!order.created_at) return "—";
+                    const d = new Date(order.created_at);
+                    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: 'numeric', hour12: true });
+                  } catch { return order.created_at || "—"; }
+                })()}
+              </div>
+              <div className="mt-2 text-base">
+                from <span className="rounded-lg bg-yellow-100 px-2 py-1 font-bold text-gray-900">{formatSalesChannelLabel(order.sales_channel)}</span>
+              </div>
+            </div>
+            <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4">
+              <div className="text-sm font-semibold text-gray-900">{order.customer || "Unknown customer"}</div>
+              {order.shipping_city ? <div className="mt-1 text-sm text-gray-500">{order.shipping_city}</div> : null}
+            </div>
+          </div>
+        ),
+      });
+    }
+
+    if (key === "comments") {
+      return renderGuideFrame({
+        title: "Comments",
+        subtitle: "Review and add internal notes for the order.",
+        children: (
+          <div className="space-y-3">
+            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm min-h-[140px]">
+              {!commentLines.length ? (
+                <span className="text-gray-500">No comments</span>
+              ) : (
+                <ul className="list-disc pl-5 space-y-2">
+                  {commentLines.map((l, i) => (<li key={i}>{l}</li>))}
+                </ul>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={noteAppend}
+                onChange={(e)=>setNoteAppend(e.target.value)}
+                placeholder="Write a comment"
+                className="flex-1 text-sm border border-gray-300 rounded-xl px-3 py-2.5"
+              />
+              <button
+                onClick={handleAppendNote}
+                className="px-4 py-2.5 rounded-xl bg-gray-900 text-white text-sm font-semibold active:scale-[.98]"
+              >Post</button>
+            </div>
+          </div>
+        ),
+      });
+    }
+
+    if (key === "shipping") {
+      return renderGuideFrame({
+        title: "Shipping Address",
+        subtitle: "Billing and shipping details side by side.",
+        children: (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
+              <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-2">Billing address</div>
+              <div className="font-medium">
+                {order?.billing_name || overrideInfo?.customer?.displayName || order.customer || "Unknown customer"}
+              </div>
+              <div className="text-gray-700">
+                {order?.billing_address1 || "—"}{order?.billing_address2 ? `, ${order.billing_address2}` : ""}
+              </div>
+              <div className="text-gray-700">
+                {[order?.billing_city, order?.billing_zip].filter(Boolean).join(" ") || "—"}
+              </div>
+              {(order?.billing_phone || overrideInfo?.phone || overrideInfo?.customer?.phone) && (
+                <div className="text-gray-700 mt-2">
+                  {order?.billing_phone || overrideInfo?.phone || overrideInfo?.customer?.phone}
+                </div>
+              )}
+            </div>
+            <div className="rounded-2xl border border-green-300 bg-green-50 p-4">
+              <div className="text-[11px] uppercase tracking-wide text-green-700 mb-2 font-semibold">Shipping address</div>
+              <div className="font-semibold text-green-900">
+                {(overrideInfo?.shippingAddress?.name || overrideInfo?.customer?.displayName || order.customer || "Unknown customer")}
+              </div>
+              <div className="text-green-800">
+                {overrideInfo?.shippingAddress?.address1 || order?.shipping_address1 || "—"}{(overrideInfo?.shippingAddress?.address2 || order?.shipping_address2) ? `, ${overrideInfo?.shippingAddress?.address2 || order?.shipping_address2}` : ""}
+              </div>
+              <div className="text-green-800">
+                {[overrideInfo?.shippingAddress?.city || order.shipping_city, overrideInfo?.shippingAddress?.zip || order?.shipping_zip].filter(Boolean).join(" ")}
+              </div>
+              {(overrideInfo?.shippingAddress?.phone || order?.shipping_phone || overrideInfo?.phone || overrideInfo?.customer?.phone) && (
+                <div className="text-green-800 mt-2">
+                  {overrideInfo?.shippingAddress?.phone || order?.shipping_phone || overrideInfo?.phone || overrideInfo?.customer?.phone}
+                </div>
+              )}
+            </div>
+          </div>
+        ),
+      });
+    }
+
+    if (key.startsWith("item-")) {
+      const idx = Number(key.split("-")[1]);
+      const item = unfulfilledItems[idx];
+      if (!item) return null;
+      const list = foData.mapByVariant[item.id] || [];
+      const isItemActive = guideActive && activeGuideSection === key;
+
+      return renderGuideFrame({
+        title: `Item ${idx + 1}`,
+        subtitle: "Image, quantity, price, options, and fulfillment rows.",
+        children: (
+          <div className="rounded-[24px] overflow-hidden border border-gray-200 shadow-sm">
+            {item.image ? (
+              <img src={item.image} alt="" className="w-full max-h-[46vh] object-contain bg-white" />
+            ) : (
+              <div className="w-full h-72 bg-gray-100 border-b border-gray-200" />
+            )}
+            <div className="px-4 pt-4 flex flex-wrap items-center gap-2">
+              <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow' : ''}`}>
+                Price: {(() => {
+                  try {
+                    if (item.unit_price == null) return "—";
+                    return `${Number(item.unit_price).toFixed(2)}${item.currency_code ? ` ${item.currency_code}` : ""}`;
+                  } catch { return "—"; }
+                })()}
+              </span>
+              <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-purple-100 text-purple-800 border border-purple-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow guide-badge-delay-1' : ''}`}>
+                Qty: {item.unfulfilled_qty ?? item.qty}
+              </span>
+            </div>
+            <div className="p-4">
+              <div className="text-base font-medium">{item.title || item.sku || "Item"}</div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <span className={`px-3 py-1 rounded-xl border-2 border-sky-300 bg-sky-100 text-sky-900 text-sm font-semibold transition-all duration-300 ${isItemActive && badgeSubStep >= 2 ? 'guide-badge-glow guide-badge-delay-2' : ''}`}>
+                  Color: {item.color || "—"}
+                </span>
+                <span className={`px-3 py-1 rounded-xl border-2 border-fuchsia-300 bg-fuchsia-100 text-fuchsia-900 text-sm font-semibold transition-all duration-300 ${isItemActive && badgeSubStep >= 2 ? 'guide-badge-glow guide-badge-delay-3' : ''}`}>
+                  Size: {item.size || "—"}
+                </span>
+              </div>
+              {list.length > 0 && (
+                <div className="mt-4 border-t border-gray-200 pt-4">
+                  <div className="text-xs font-semibold mb-2">Fulfillment</div>
+                  <div className="space-y-2">
+                    {list.map((li) => {
+                      const checked = foData.selectedLineItemIds.has(li.id);
+                      return (
+                        <label key={li.id} className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e)=>{
+                              setFoData(prev => {
+                                const nextSel = new Set(prev.selectedLineItemIds);
+                                if (e.target.checked) nextSel.add(li.id); else nextSel.delete(li.id);
+                                return { ...prev, selectedLineItemIds: nextSel };
+                              });
+                            }}
+                          />
+                          <span className="flex-1 truncate">
+                            {li.title || item.title || item.sku || "Item"} — remaining: {li.remainingQuantity}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        ),
+      });
+    }
+
+    if (key === "totals") {
+      return renderGuideFrame({
+        title: "Order Totals",
+        subtitle: "Total, shipping, and discount at a glance.",
+        children: (
+          <div className="rounded-3xl border-2 border-blue-200 bg-blue-50 p-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+              <div className="px-4 py-3 rounded-2xl bg-white border border-blue-200">
+                <div className="text-xs text-gray-500">Order total</div>
+                <div className="text-xl font-extrabold text-blue-900">{totalPrice}{currencyCode ? ` ${currencyCode}` : ""}</div>
+              </div>
+              <div className="px-4 py-3 rounded-2xl bg-white border border-emerald-200">
+                <div className="text-xs text-gray-500">Shipping</div>
+                <div className="text-xl font-extrabold text-emerald-800">{shippingPrice ?? "—"}{currencyCode && shippingPrice != null ? ` ${currencyCode}` : ""}</div>
+              </div>
+              <div className="px-4 py-3 rounded-2xl bg-white border border-rose-200">
+                <div className="text-xs text-gray-500">Discount</div>
+                <div className="text-xl font-extrabold text-rose-800">{discountTotal ?? "—"}{currencyCode && discountTotal != null ? ` ${currencyCode}` : ""}</div>
+              </div>
+            </div>
+          </div>
+        ),
+      });
+    }
+
+    if (key === "screenshots") {
+      return renderGuideFrame({
+        title: "Agent Screenshots",
+        subtitle: "No screenshots are attached to this order yet.",
+        children: (
+          <div className="rounded-3xl border border-dashed border-gray-300 bg-gray-50 px-4 py-14 text-center text-gray-500">
+            No screenshots yet.
+          </div>
+        ),
+      });
+    }
+
+    if (key.startsWith("screenshot-")) {
+      const idx = Number(key.split("-")[1]);
+      const entry = screenshotTimeline[idx];
+      if (!entry) return null;
+      return renderGuideFrame({
+        title: `Screenshot ${idx + 1}`,
+        subtitle: entry.agent ? `Captured by ${entry.agent}` : "Captured by the agent timeline.",
+        children: (
+          <div className="space-y-3">
+            <div className="text-xs text-gray-500">
+              {(() => {
+                try { return new Date(entry.ts).toLocaleString(); } catch { return entry.ts || "—"; }
+              })()}
+            </div>
+            <a href={entry.url} target="_blank" rel="noreferrer" className="block">
+              <img
+                src={entry.url}
+                alt="Agent screenshot"
+                className="w-full max-h-[60vh] object-contain rounded-[24px] border border-gray-200 bg-white"
+                loading="lazy"
+              />
+            </a>
+          </div>
+        ),
+      });
+    }
+
+    if (key === "tags") {
+      return renderGuideFrame({
+        title: "Tags",
+        subtitle: "Review tags, add a new one, or switch the delivery company.",
+        children: (
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 flex-wrap">
+              {(order.tags || []).length === 0 && (
+                <span className="text-xs text-gray-500">No tags</span>
+              )}
+              {(order.tags || []).map((t, i) => (
+                <span key={`${t}-${i}`} className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-gray-100 border border-gray-200 text-xs">
+                  <span>{t}</span>
+                  <button
+                    onClick={()=>handleRemoveTag(t)}
+                    className="text-gray-500 hover:text-red-600"
+                    title="Remove tag"
+                  >×</button>
+                </span>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={newTag}
+                onChange={(e)=>{ setNewTag(e.target.value); setTagQuery(e.target.value); setShowTagDropdown(true); }}
+                placeholder="Add a tag"
+                className="flex-1 text-sm border border-gray-300 rounded-xl px-3 py-2.5"
+                onFocus={()=>{ setShowTagDropdown(true); }}
+                onBlur={()=>{ setTimeout(()=>setShowTagDropdown(false), 150); }}
+              />
+              <button
+                onClick={handleAddTag}
+                className="px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold active:scale-[.98]"
+              >Add tag</button>
+            </div>
+            {showTagDropdown && filteredSuggestions().length > 0 && (
+              <div className="border border-gray-200 rounded-xl bg-white shadow-sm max-h-56 overflow-auto text-sm">
+                {filteredSuggestions().map((s, i) => (
+                  <button
+                    key={`${s}-${i}`}
+                    onMouseDown={(e)=>{ e.preventDefault(); }}
+                    onClick={()=>{ setNewTag(s); setShowTagDropdown(false); }}
+                    className="w-full text-left px-3 py-2 hover:bg-gray-50"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="pt-3 border-t border-gray-200">
+              <div className="text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">Delivery Company</div>
+              <div className="flex flex-wrap gap-2">
+                {DELIVERY_COMPANIES.map(c => {
+                  const isActive = activeCompany?.toLowerCase() === c.name.toLowerCase();
+                  return (
+                    <button
+                      key={c.name}
+                      onClick={() => handleDeliveryClick(c.name)}
+                      className={`
+                        relative px-4 py-2 rounded-xl text-sm font-bold border-2 transition-all duration-200 active:scale-95
+                        ${c.bg} ${c.border} ${c.text} ${c.hover}
+                        ${isActive ? 'ring-2 ring-offset-2 ring-blue-500 scale-105 shadow-lg' : 'opacity-80 hover:opacity-100 hover:shadow-md'}
+                      `}
+                    >
+                      {isActive && (
+                        <span className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-white rounded-full border-2 border-blue-500 flex items-center justify-center text-[10px] text-blue-600 font-bold shadow">✓</span>
+                      )}
+                      {c.name}
+                    </button>
+                  );
+                })}
+              </div>
+              {activeCompany && (
+                <div className="mt-2 text-xs text-gray-500">
+                  Active: <span className="font-semibold text-gray-800">{activeCompany}</span> — click another to switch
+                </div>
+              )}
+            </div>
+          </div>
+        ),
+      });
+    }
+
+    return null;
+  }
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900">
@@ -739,7 +1107,7 @@ export default function OrderLookup(){
                     : 'border border-blue-300 text-blue-700 bg-blue-50 hover:bg-blue-100'
                 }`}
               >
-                {guideActive ? '✕ End Guide' : '▶ Start Guide'}
+                {guideActive ? '✕ End Guide' : '▶ Start Slideshow'}
               </button>
               {guideActive && (
                 <div className="flex items-center gap-2 text-xs text-gray-500">
@@ -1197,50 +1565,88 @@ export default function OrderLookup(){
         )}
       </main>
 
-      {/* Guide floating nav bar */}
       {guideActive && order && (
-        <div className="fixed bottom-16 inset-x-0 z-50 flex justify-center pointer-events-none">
-          <div className="pointer-events-auto bg-white/95 backdrop-blur-sm border border-gray-200 rounded-2xl shadow-xl px-4 py-2 flex items-center gap-3">
-            <button
-              onClick={guidePrev}
-              disabled={guideStepIndex <= 0}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-300 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
-            >← Prev</button>
-            <div className="text-xs text-gray-700 min-w-[120px] text-center">
-              <span className="font-bold text-blue-700">{guideSteps[guideStepIndex]?.label || '…'}</span>
-            </div>
-            <button
-              onClick={guideNext}
-              disabled={guideStepIndex >= guideSteps.length - 1}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-30 disabled:cursor-not-allowed"
-            >Next →</button>
-          </div>
-        </div>
-      )}
-
-      {guideActive && activeScreenshotEntry && (
-        <div className="fixed inset-0 z-[55] flex items-center justify-center px-4 py-6 pointer-events-none">
-          <div className="w-full max-w-4xl overflow-hidden rounded-3xl border border-blue-200 bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b border-blue-100 bg-blue-50 px-4 py-3">
+        <div className="fixed inset-0 z-[55] overflow-hidden bg-slate-950/60 backdrop-blur-md">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(96,165,250,0.18),transparent_38%),radial-gradient(circle_at_bottom,rgba(14,165,233,0.16),transparent_36%)]" />
+          <div className="relative flex h-full flex-col px-4 py-4 sm:px-6 sm:py-5">
+            <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-3 text-white">
               <div>
-                <div className="text-xs font-bold uppercase tracking-wide text-blue-700">Guide Screenshot Focus</div>
-                <div className="text-sm font-semibold text-gray-900">
-                  {guideSteps[guideStepIndex]?.label || "Agent Screenshot"}
-                </div>
+                <div className="text-xs uppercase tracking-[0.26em] text-blue-100/75">Guide Gallery</div>
+                <div className="mt-1 text-lg font-semibold">{currentGuideStep?.label || "Order walkthrough"}</div>
               </div>
-              <div className="text-xs text-gray-600 text-right">
-                {activeScreenshotEntry.agent ? <div className="font-semibold text-gray-800">{activeScreenshotEntry.agent}</div> : null}
-                <div>{(() => {
-                  try { return new Date(activeScreenshotEntry.ts).toLocaleString(); } catch { return activeScreenshotEntry.ts || "—"; }
-                })()}</div>
+              <div className="flex items-center gap-2">
+                <div className="hidden sm:block rounded-2xl border border-white/10 bg-white/10 px-3 py-2 text-xs text-blue-50/90">
+                  Scroll, swipe, or use arrow keys
+                </div>
+                <button
+                  onClick={toggleGuide}
+                  className="rounded-2xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/20"
+                >
+                  Exit
+                </button>
               </div>
             </div>
-            <div className="bg-slate-100 p-4">
-              <img
-                src={activeScreenshotEntry.url}
-                alt="Focused agent screenshot"
-                className="w-full max-h-[78vh] rounded-2xl border border-gray-200 bg-white object-contain shadow-sm"
-              />
+
+            <div className="relative mx-auto mt-4 flex-1 w-full max-w-5xl overflow-hidden">
+              {guideSteps.map((step, idx) => {
+                const offset = idx - guideStepIndex;
+                const absOffset = Math.abs(offset);
+                const isCurrent = offset === 0;
+                const translateY = offset === 0 ? "0%" : (offset < 0 ? "-112%" : "112%");
+                const opacity = isCurrent ? 1 : (absOffset === 1 ? 0.32 : 0);
+                const scale = isCurrent ? 1 : 0.93;
+                const blur = isCurrent ? 0 : (absOffset === 1 ? 3 : 10);
+                const slideClass = isCurrent
+                  ? "guide-gallery-slide-active"
+                  : (offset < 0
+                    ? (guideDirection > 0 ? "guide-gallery-slide-up" : "guide-gallery-slide-up-far")
+                    : (guideDirection > 0 ? "guide-gallery-slide-down" : "guide-gallery-slide-down-far"));
+
+                return (
+                  <div key={step.key} className="pointer-events-none absolute inset-0 flex items-center justify-center px-1 py-2 sm:px-4">
+                    <div
+                      className={`w-full max-w-4xl transition-[transform,opacity,filter] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${slideClass}`}
+                      style={{
+                        transform: `translate3d(0, ${translateY}, 0) scale(${scale})`,
+                        opacity,
+                        filter: `blur(${blur}px)`,
+                        zIndex: 100 - absOffset,
+                      }}
+                    >
+                      <div className={isCurrent ? "pointer-events-auto" : "pointer-events-none"}>
+                        {renderGuideSlide(step.key)}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="mx-auto mt-4 flex w-full max-w-5xl items-center justify-between gap-3 text-white">
+              <button
+                onClick={guidePrev}
+                disabled={guideStepIndex <= 0}
+                className="rounded-2xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-semibold transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                ← Previous
+              </button>
+              <div className="flex max-w-[55vw] items-center gap-1 overflow-x-auto rounded-2xl border border-white/10 bg-white/10 px-3 py-2">
+                {guideSteps.map((s, i) => (
+                  <button
+                    key={s.key}
+                    onClick={() => guideGoTo(s.key, i > guideStepIndex ? 1 : -1)}
+                    className={`h-2.5 rounded-full transition-all ${i === guideStepIndex ? 'w-8 bg-white' : i < guideStepIndex ? 'w-4 bg-blue-200/80' : 'w-4 bg-white/30'}`}
+                    title={s.label}
+                  />
+                ))}
+              </div>
+              <button
+                onClick={guideNext}
+                disabled={guideStepIndex >= guideSteps.length - 1}
+                className="rounded-2xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                Next →
+              </button>
             </div>
           </div>
         </div>
