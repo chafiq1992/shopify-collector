@@ -1,6 +1,5 @@
 import os
 import json
-import re
 from typing import List, Optional, Dict, Any, Tuple
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header, Request, Depends, Response
@@ -310,39 +309,6 @@ def _qr_png_b64(text: str, box_size: int = 8, border: int = 2) -> str:
     except Exception:
         # Fallback: return empty string on any unexpected issue
         return ""
-
-def _replace_label_qr_with_text(html: str, text: str) -> str:
-    """Swap the delivery-label QR image with a freshly generated payload."""
-    qr_b64 = _qr_png_b64(text)
-    if not html or not qr_b64:
-        return html
-
-    new_src = f"data:image/png;base64,{qr_b64}"
-    patterns = [
-        re.compile(
-            r'(<div[^>]*class=(["\'])[^"\']*\bqr\b[^"\']*\2[^>]*>.*?<img[^>]*\bsrc=(["\']))[^"\']*(\3)',
-            re.IGNORECASE | re.DOTALL,
-        ),
-        re.compile(
-            r'(<img[^>]*\balt=(["\'])QR\2[^>]*\bsrc=(["\']))[^"\']*(\3)',
-            re.IGNORECASE | re.DOTALL,
-        ),
-        re.compile(
-            r'(<img[^>]*\bsrc=(["\']))[^"\']*(\2)(?=[^>]*\balt=(["\'])QR\3)',
-            re.IGNORECASE | re.DOTALL,
-        ),
-    ]
-
-    updated = html
-    for pattern in patterns:
-        updated, count = pattern.subn(
-            lambda match: f"{match.group(1)}{new_src}{match.group(match.lastindex or 1)}",
-            updated,
-            count=1,
-        )
-        if count:
-            return updated
-    return html
 
 class EnqueueBody(BaseModel):
     pc_id: str
@@ -3334,7 +3300,6 @@ async def delivery_label_proxy(
     # envoy-note labels HTML and keep only the selected order's page. This
     # preserves the same QR/image generation used by the delivery app.
     if resp.status_code == 200 and envoy_code and "text/html" in media_type.lower():
-        html = resp.text
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 env_resp = await client.get(
@@ -3384,10 +3349,9 @@ async def delivery_label_proxy(
                         if selected:
                             start, end, block = selected
                             html = html[:first_idx] + block + html[page_blocks[-1][1]:]
+                    return Response(content=html.encode("utf-8"), status_code=200, media_type=media_type)
         except Exception:
             pass
-        html = _replace_label_qr_with_text(html, envoy_code)
-        return Response(content=html.encode("utf-8"), status_code=200, media_type=media_type)
 
     return Response(content=resp.content, status_code=resp.status_code, media_type=media_type)
 
