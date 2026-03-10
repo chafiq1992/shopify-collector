@@ -210,8 +210,42 @@ PC_TAG_MIN_CREATED_AT = os.environ.get("PC_TAG_MIN_CREATED_AT", "").strip()  # I
 RECENT_ENQUEUE_SECONDS = int(os.environ.get("RECENT_ENQUEUE_SECONDS", "30").strip() or 30)
 RECENT_ENQUEUED_ORDERS: Dict[str, int] = {}
 
-# In-memory queue: { pc_id -> [ { job_id, ts, orders, copies, pdf_url? } ] }
-JOBS: Dict[str, list] = {}
+# ── Reliable job store with lease semantics, dedup, and auto-reclaim ──
+_JOB_LOCK = asyncio.Lock()
+# { pc_id -> { job_id -> { "payload": {...}, "status": "pending"|"inflight", "leased_at": float|None, "attempts": int } } }
+JOB_STORE: Dict[str, Dict[str, dict]] = {}
+_DEDUP_CACHE: Dict[str, float] = {}
+_DEDUP_WINDOW_SEC = 10
+_INFLIGHT_TIMEOUT_SEC = 90
+_MAX_ATTEMPTS = 4
+
+def _dedup_key_for_label(delivery_order_id: str, store: Optional[str] = None) -> str:
+    return f"label:{delivery_order_id}:{store or ''}"
+
+def _dedup_key_for_orders(orders: list, store: Optional[str] = None) -> str:
+    return f"orders:{','.join(sorted(str(o).lstrip('#') for o in orders))}:{store or ''}"
+
+async def _enqueue_job(pc_id: str, payload: dict, dedup_key: str = "") -> dict:
+    """Add a job to the store. Returns {"ok": True, "job_id": ..., "queued": ..., "dedup": bool}."""
+    import time as _t
+    now = _t.time()
+    async with _JOB_LOCK:
+        if dedup_key:
+            cutoff = now - _DEDUP_WINDOW_SEC
+            to_del = [k for k, v in _DEDUP_CACHE.items() if v < cutoff]
+            for k in to_del:
+                del _DEDUP_CACHE[k]
+            if dedup_key in _DEDUP_CACHE:
+                store_q = JOB_STORE.get(pc_id, {})
+                return {"ok": True, "job_id": "dedup", "queued": len(store_q), "dedup": True}
+            _DEDUP_CACHE[dedup_key] = now
+        store_q = JOB_STORE.setdefault(pc_id, {})
+        jid = payload["job_id"]
+        store_q[jid] = {"payload": payload, "status": "pending", "leased_at": None, "attempts": 0}
+        return {"ok": True, "job_id": jid, "queued": len(store_q)}
+
+# Backward-compat alias so any old code referencing JOBS still works at import-time
+JOBS = JOB_STORE
 # In-memory minimal customer override cache: { order_no -> { customer, shippingAddress, phone, email, tags } }
 ORDER_OVERRIDES: Dict[str, Dict[str, Any]] = {}
 
@@ -395,40 +429,81 @@ async def enqueue(job: EnqueueBody, x_api_key: Optional[str] = Header(default=No
     _require_api_key(x_api_key)
     if job.pc_id not in PCS:
         raise HTTPException(status_code=404, detail="unknown pc_id")
-    import time, uuid
-    jid = str(uuid.uuid4())
+    import time as _t, uuid as _uuid
+    jid = str(_uuid.uuid4())
     payload = {
         "job_id": jid,
-        "ts": int(time.time()),
+        "ts": int(_t.time()),
         "orders": [str(o).lstrip("#") for o in (job.orders or [])],
         "copies": max(1, job.copies),
         "pdf_url": job.pdf_url or None,
         "store": (job.store or None),
     }
-    JOBS.setdefault(job.pc_id, []).append(payload)
-    # Best-effort: tag orders with "cod print" to trigger webhook so overrides cache is populated
-    try:
-        if payload.get("orders"):
-            asyncio.create_task(_tag_orders_before_print(payload["orders"], payload.get("store")))
-    except Exception:
-        pass
-    return {"ok": True, "job_id": jid, "queued": len(JOBS[job.pc_id])}
+    dk = _dedup_key_for_orders(job.orders or [], job.store) if job.orders else ""
+    result = await _enqueue_job(job.pc_id, payload, dk)
+    if not result.get("dedup"):
+        try:
+            if payload.get("orders"):
+                asyncio.create_task(_tag_orders_before_print(payload["orders"], payload.get("store")))
+        except Exception:
+            pass
+    return result
 
 @app.get("/pull")
-async def pull(pc_id: str, secret: str, max_items: int = 5):
+async def pull(pc_id: str, secret: str, max_items: int = 5, wait: int = 0):
     _require_pc(pc_id, secret)
-    q = JOBS.get(pc_id, [])
-    if not q:
-        return {"ok": True, "jobs": []}
-    out = q[:max_items]
-    JOBS[pc_id] = q[max_items:]
-    return {"ok": True, "jobs": out}
+    import time as _t
+    wait = min(max(wait, 0), 25)
+    deadline = _t.time() + wait
+
+    while True:
+        async with _JOB_LOCK:
+            store = JOB_STORE.get(pc_id, {})
+            now = _t.time()
+            for _jid, _job in store.items():
+                if _job["status"] == "inflight" and now - (_job.get("leased_at") or 0) > _INFLIGHT_TIMEOUT_SEC:
+                    _job["status"] = "pending"
+                    _job["leased_at"] = None
+
+            pending = [(jid, j) for jid, j in store.items() if j["status"] == "pending"]
+            pending.sort(key=lambda x: x[1]["payload"].get("ts", 0))
+
+            out = []
+            for jid, j in pending[:max_items]:
+                j["status"] = "inflight"
+                j["leased_at"] = now
+                j["attempts"] = j.get("attempts", 0) + 1
+                out.append(j["payload"])
+
+        if out:
+            return {"ok": True, "jobs": out}
+        if _t.time() >= deadline:
+            return {"ok": True, "jobs": []}
+        await asyncio.sleep(0.5)
 
 @app.post("/ack")
 async def ack(b: AckBody):
     _require_pc(b.pc_id, b.secret)
-    # In-memory queue removes on pull; ack is a no-op here
+    async with _JOB_LOCK:
+        store = JOB_STORE.get(b.pc_id, {})
+        store.pop(b.job_id, None)
     return {"ok": True}
+
+@app.post("/nack")
+async def nack(b: AckBody):
+    """Re-queue a failed job for retry. After _MAX_ATTEMPTS the job is dropped."""
+    _require_pc(b.pc_id, b.secret)
+    async with _JOB_LOCK:
+        store = JOB_STORE.get(b.pc_id, {})
+        job = store.get(b.job_id)
+        if not job:
+            return {"ok": True, "status": "not_found"}
+        if job.get("attempts", 0) >= _MAX_ATTEMPTS:
+            store.pop(b.job_id, None)
+            return {"ok": True, "status": "dropped", "reason": "max_attempts"}
+        job["status"] = "pending"
+        job["leased_at"] = None
+    return {"ok": True, "status": "requeued"}
 
 @app.post("/api/enqueue-label")
 async def enqueue_label(
@@ -449,16 +524,17 @@ async def enqueue_label(
         raise HTTPException(status_code=401, detail="unauthorized")
     import time as _t, uuid as _uuid
     jid = str(_uuid.uuid4())
+    dlv_id = str(body.delivery_order_id).strip()
     payload = {
         "job_id": jid,
         "ts": int(_t.time()),
         "type": "label",
-        "delivery_order_id": str(body.delivery_order_id).strip(),
+        "delivery_order_id": dlv_id,
         "store": (body.store or "").strip() or None,
         "envoy_code": (body.envoy_code or "").strip() or None,
     }
-    JOBS.setdefault(DEFAULT_PC_ID, []).append(payload)
-    return {"ok": True, "job_id": jid, "queued": len(JOBS[DEFAULT_PC_ID])}
+    dk = _dedup_key_for_label(dlv_id, body.store)
+    return await _enqueue_job(DEFAULT_PC_ID, payload, dk)
 
 # ---------- Shopify Webhook (orders/create) for Auto-Tagging by zone ----------
 def _normalize_spaces(text: Optional[str]) -> str:
