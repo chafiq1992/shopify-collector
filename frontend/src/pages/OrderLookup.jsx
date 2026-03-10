@@ -1850,6 +1850,8 @@ export default function OrderLookup(){
                     if (res && res.fulfilled === false) {
                       const reason = res.reason === "no_remaining"
                         ? "Nothing to fulfill — order may be cancelled or already fulfilled."
+                        : res.reason === "missing_read_fulfillment_scope"
+                          ? "The connected Shopify app is missing a read fulfillment-order scope. Reconnect the store with read_assigned_fulfillment_orders or the matching fulfillment read scope."
                         : res.reason === "no_fulfillment_orders"
                           ? "Shopify returned no fulfillment orders for this order. The store connection may be missing fulfillment permissions, or the order is not fulfillable yet."
                           : (res.reason || "Fulfillment was not completed.");

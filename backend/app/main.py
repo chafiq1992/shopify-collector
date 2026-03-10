@@ -2396,6 +2396,28 @@ async def fulfill_order(order_gid: str, body: FulfillRequest, store: Optional[st
     else:
         # Default: fulfill all remaining
         if not fo_nodes:
+            try:
+                sk = _normalize_store(store)
+                if HAVE_AUTH_DB and SessionLocal is not None and sk in _oauth_enabled_stores():
+                    async with SessionLocal() as db:  # type: ignore[misc]
+                        rec = await get_shopify_oauth_record(db, sk)  # type: ignore[arg-type]
+                        scopes_raw = str((rec or {}).get("scopes") or "")
+                        scopes = {s.strip() for s in scopes_raw.split(",") if s.strip()}
+                        required_read_scopes = {
+                            "read_assigned_fulfillment_orders",
+                            "read_merchant_managed_fulfillment_orders",
+                            "read_third_party_fulfillment_orders",
+                        }
+                        if scopes and not (scopes & required_read_scopes):
+                            return {
+                                "ok": True,
+                                "fulfilled": False,
+                                "reason": "missing_read_fulfillment_scope",
+                                "missing_any_of": sorted(required_read_scopes),
+                                "granted_scopes": sorted(scopes),
+                            }
+            except Exception:
+                pass
             return {"ok": True, "fulfilled": False, "reason": "no_fulfillment_orders"}
         for fo in fo_nodes:
             try:

@@ -39,6 +39,11 @@ function getCachedOrderId(num) { return getOrderMap()[String(num)] || null; }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function isDigitsOnly(value) { return /^\d+$/.test(String(value || "").trim()); }
 function normalizeLookupValue(value) { return String(value || "").trim().replace(/^#/, ""); }
+function parseMerchantOrderReference(value) {
+  const m = String(value || "").trim().match(/^(\d+)-(\d+)$/);
+  if (!m) return null;
+  return { merchantId: Number(m[1]), orderNumber: m[2] };
+}
 
 export default function DeliveryLabelPopup({ order, store, onClose }) {
   const orderNum = String(order?.number || "").replace(/^#/, "").trim();
@@ -129,9 +134,48 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     });
   }
 
+  async function lookupExistingDeliveryOrder({ merchant, query }) {
+    if (!merchant || !query) return null;
+    const res = await dlvApi("admin/orders", {
+      query: {
+        merchant_id: Number(merchant),
+        q: String(query),
+        limit: 10,
+        include_total: true,
+      },
+    });
+    const rows = Array.isArray(res?.rows) ? res.rows : [];
+    const wantedOrder = normalizeLookupValue(query);
+    const matched = rows.find(row => normalizeLookupValue(row?.orderName) === wantedOrder) || rows[0] || null;
+    if (!matched?.id) return null;
+    return {
+      deliveryOrderId: Number(matched.id),
+      envoyCode: String(matched.envoyCode || "").trim() || null,
+      companyAssigned: Boolean(matched.envoyCompany),
+      companyName: String(matched.envoyCompany || "").trim(),
+    };
+  }
+
   async function resolveManualReference(rawValue) {
     const value = String(rawValue || "").trim();
     if (!value) throw new Error("Enter a delivery order ID or envoy code.");
+
+    const merchantOrderRef = parseMerchantOrderReference(value);
+    if (merchantOrderRef) {
+      const existing = await lookupExistingDeliveryOrder({
+        merchant: merchantOrderRef.merchantId,
+        query: merchantOrderRef.orderNumber,
+      });
+      if (existing) return existing;
+    }
+
+    if (isDigitsOnly(value) && normalizeLookupValue(value) === normalizeLookupValue(orderNum) && merchantId) {
+      const existing = await lookupExistingDeliveryOrder({
+        merchant: merchantId,
+        query: value,
+      });
+      if (existing) return existing;
+    }
 
     if (isDigitsOnly(value)) {
       return {
@@ -142,27 +186,42 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       };
     }
 
-    const envDet = await dlvApi(`admin/envoy-notes/${encodeURIComponent(value)}`);
-    const items = Array.isArray(envDet?.items) ? envDet.items : [];
-    const wantedCode = normalizeLookupValue(value);
-    const wantedOrder = normalizeLookupValue(orderNum);
-    const matchedItem = items.find(item => {
-      const itemCode = normalizeLookupValue(item?.code);
-      const itemOrderName = normalizeLookupValue(item?.order_name || item?.orderName);
-      return itemCode === wantedCode || itemOrderName === wantedOrder;
-    }) || items[0] || null;
-
-    const deliveryOrderId = Number(matchedItem?.orderId || matchedItem?.order_id || 0);
-    if (!deliveryOrderId) {
-      throw new Error("Envoy note found, but no delivery order is attached to it.");
+    if (merchantId) {
+      const existing = await lookupExistingDeliveryOrder({
+        merchant: merchantId,
+        query: orderNum,
+      });
+      if (existing) return existing;
     }
 
-    return {
-      deliveryOrderId,
-      envoyCode: String(envDet?.code || value).trim(),
-      companyAssigned: Boolean(envDet?.company),
-      companyName: String(envDet?.company || "").trim(),
-    };
+    try {
+      const envDet = await dlvApi(`admin/envoy-notes/${encodeURIComponent(value)}`);
+      const items = Array.isArray(envDet?.items) ? envDet.items : [];
+      const wantedCode = normalizeLookupValue(value);
+      const wantedOrder = normalizeLookupValue(orderNum);
+      const matchedItem = items.find(item => {
+        const itemCode = normalizeLookupValue(item?.code);
+        const itemOrderName = normalizeLookupValue(item?.order_name || item?.orderName);
+        return itemCode === wantedCode || itemOrderName === wantedOrder;
+      }) || items[0] || null;
+
+      const deliveryOrderId = Number(matchedItem?.orderId || matchedItem?.order_id || 0);
+      if (!deliveryOrderId) {
+        throw new Error("Envoy note found, but no delivery order is attached to it.");
+      }
+
+      return {
+        deliveryOrderId,
+        envoyCode: String(envDet?.code || value).trim(),
+        companyAssigned: Boolean(envDet?.company),
+        companyName: String(envDet?.company || "").trim(),
+      };
+    } catch (e) {
+      if (e?.status === 404) {
+        throw new Error("Order not found in delivery records.");
+      }
+      throw e;
+    }
   }
 
   async function init() {
