@@ -87,3 +87,21 @@ class AppSetting(Base):
     value = Column(_json_type(), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class PrintJob(Base):
+    """
+    Shared print job queue — survives across Cloud Run instances.
+    Replaces in-memory JOB_STORE so /enqueue and /pull on different instances see the same queue.
+    """
+    __tablename__ = "print_jobs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(String(64), unique=True, nullable=False, index=True)
+    pc_id = Column(String(64), nullable=False, index=True)
+    payload = Column(_json_type(), nullable=False)
+    status = Column(String(32), nullable=False, default="pending", index=True)
+    leased_at = Column(Integer, nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    dedup_key = Column(String(512), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Irrakids Thermal Label</title>
+  <style>
+    @page { size: 100mm 100mm; margin: 0; }
+    :root { --gap: 1.6mm; }
+    body {
+      width: 100mm; height: 100mm; margin: 0; padding: 2mm;
+      font-family: Arial, sans-serif; font-weight: 700; font-size: 9pt;
+      box-sizing: border-box; display: flex; flex-direction: column; gap: var(--gap);
+    }
+    .header { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--gap); }
+    .logo { width: 30mm; display: flex; flex-direction: column; align-items: center; gap: 1.6mm; }
+    .logo img { width: 100%; height: auto; }
+    .order-block { width: 34mm; display: flex; flex-direction: column; align-items: center; gap: 0.6mm; }
+    .order-num { font-size: 13pt; font-weight: 900; letter-spacing: 0.2pt; }
+    .barcode { width: 80%; max-width: 80mm; }
+    .top-qr { width: 17mm; height: 17mm; }
+    .ship-block { flex: 1; font-size: 8.5pt; line-height: 1.25; text-align: right; }
+    .sep { border-top: 1px dashed #000; margin: 0.5mm 0; }
+    .items-grid { flex: 1; display: flex; flex-wrap: wrap; gap: var(--gap); }
+    .item-card { width: calc(50% - 0.8mm); display: flex; gap: 0.8mm; }
+    .item-img { width: 14mm; height: 14mm; object-fit: cover; border: 1px solid #000; }
+    .item-info { font-size: 8pt; display: flex; flex-direction: column; }
+    .summary { font-size: 8.5pt; }
+    .row { display: flex; justify-content: space-between; }
+    .total-row { font-size: 11pt; margin-top: 0.8mm; border-top: 2px solid #000; padding-top: 0.6mm; }
+    .qr-bar { display: flex; justify-content: space-between; gap: var(--gap); }
+    .qr-block { width: calc(33.33% - 1mm); font-size: 7pt; display: flex; align-items: center; justify-content: center; gap: 1.2mm; }
+    .qr-block img { width: 17mm; height: 17mm; border: 1px solid #000; border-radius: 1.2mm; padding: 0.6mm; }
+    .qr-text { writing-mode: vertical-rl; text-orientation: mixed; }
+  </style>
+</head>
+<body>
+
+  {% assign tags = order.tags | downcase %}
+  {% assign tag_list = order.tags | split: ',' %}
+  {% assign has_exact_ch = false %}
+  {% for t in tag_list %}
+    {% assign t_norm = t | strip | downcase %}
+    {% if t_norm == 'ch' %}
+      {% assign has_exact_ch = true %}
+    {% endif %}
+  {% endfor %}
+
+  <div class="header">
+    <div class="logo">
+      <img src="https://cdn.shopify.com/s/files/1/0573/6726/5337/files/irrakid_5.png?v=1663237924" alt="Irrakids" />
+      <div style="margin-top: 4mm; text-align: center;">
+        {% for t in tag_list %}
+          {% assign t_norm = t | strip | downcase %}
+          {% if logos_available contains t_norm %}
+            {% assign w = '80' %}
+            {% if t_norm == '12livery' %}{% assign w = '117' %}{% endif %}
+            {% if t_norm == 'big' %}{% assign w = '80' %}{% endif %}
+            {% if t_norm == 'fast' %}{% assign w = '46' %}{% endif %}
+            {% if t_norm == 'oscario' %}{% assign w = '70' %}{% endif %}
+            {% if t_norm == 'pal' %}{% assign w = '110' %}{% endif %}
+            {% if t_norm == 'meta' %}{% assign w = '110' %}{% endif %}
+            {% if t_norm == 'l24' %}{% assign w = '92' %}{% endif %}
+            {% if t_norm == 'lx' %}{% assign w = '96' %}{% endif %}
+            {% if t_norm == 'ibex' %}{% assign w = '96' %}{% endif %}
+            <img src="{{ logos_base }}/{{ t_norm }}.png" alt="{{ t_norm }} Logo" style="width: {{ w }}px; height: auto;" />
+          {% endif %}
+        {% endfor %}
+        {% if tags contains 'sandy' %}
+          <img src="https://cdn.shopify.com/s/files/1/0573/6726/5337/files/dsdsdsgsdgdsgsd.png?v=1748722424" alt="Fragile Icon" style="width: 70px; height: auto;" />
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="order-block">
+      <div class="order-num">#{{ order.order_number }}</div>
+      <img class="top-qr" src="{{ order_qr_src }}" alt="QR">
+      <div style="font-size:7pt">{{ order.created_at | date: "%Y-%m-%d" }}</div>
+    </div>
+
+    <div class="ship-block">
+      {{ order.shipping_address.name }} — {{ order.shipping_address.phone }}<br>
+      {{ order.shipping_address | format_address }}
+    </div>
+  </div>
+
+  <div class="sep"></div>
+
+  <div class="items-grid">
+    {% for line_item in order.line_items %}
+      {% if line_item.fulfillable_quantity and line_item.fulfillable_quantity > 0 %}
+      <div class="item-card">
+        {% if line_item.variant.featured_image %}
+          <img src="{{ line_item.variant.featured_image | img_url: 'small' }}" class="item-img" alt="Item">
+        {% endif %}
+        <div class="item-info">
+          <div>{{ line_item.variant.title }}</div>
+          <div>Qty {{ line_item.fulfillable_quantity }}</div>
+          <div>{{ line_item.final_line_price | money }}</div>
+        </div>
+      </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+
+  <div class="sep"></div>
+
+  <div class="summary">
+    <div class="row"><span>Subtotal:</span><span>{{ order.line_items_subtotal_price | money }}</span></div>
+    <div class="row"><span>Shipping:</span><span>{{ order.shipping_price | money }}</span></div>
+    <div class="row"><span>Tax:</span><span>{{ order.tax_price | money }}</span></div>
+    <div class="row total-row"><span>Total:</span><span>{{ order.total_price | money }}</span></div>
+  </div>
+
+  <div class="sep"></div>
+  {% if has_exact_ch %}
+    <div style="margin-top: 0mm; padding: 8px; border: 2px solid black; font-size: 10pt; font-weight: bold; text-align: center;">
+      <div style="font-size: 13pt; font-weight: 900; margin-bottom: 2px;">
+        ⚠️ انتباه لعامل التوصيل ⚠️
+      </div>
+      <div style="font-size: 10pt; line-height: 1; font-weight: bold;">
+        لا يقبل استرجاع منتج مستعمل أو به ضرر.
+        المرجو معاينة المنتج قبل تسليم الاستبدال.
+        أي مشكل في المنتج المسترجع سيتحمل عامل التوصيل ثمن المنتج.
+      </div>
+      <div style="margin-top: 2px; font-size: 10pt; font-weight: 900;">
+        ☎️ 0677624078    ☎️ 0643273055
+      </div>
+    </div>
+  {% else %}
+    <div class="qr-block">
+      <img src="{{ wa_qr_src }}" alt="WhatsApp QR" style="width: 14mm; height: 14mm; border: 1px solid #000; border-radius: 1.2mm; padding: 0.6mm;">
+      <div class="qr-text">Scan for support</div>
+    </div>
+  {% endif %}
+</body>
+</html>

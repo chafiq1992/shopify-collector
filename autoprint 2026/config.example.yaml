@@ -1,0 +1,33 @@
+host: 127.0.0.1
+port: 8787
+shared_secret: ""           # If set, all requests must include header: X-Secret: <shared_secret> (recommended for LAN)
+
+# Printing mode:
+# - local: this PC prints to its connected printer (default)
+# - forward: this PC forwards print jobs to another PC running the agent (printer PC)
+print_mode: "local"
+
+# When print_mode=forward, set the printer PC URL + secret
+forward_to_url: ""          # e.g., http://192.168.1.50:8787
+forward_secret: ""          # usually same as shared_secret on the printer PC
+forward_timeout_seconds: 90
+printer_name: ""           # leave empty to use Windows default printer
+delivery_label_printer: ""  # empty = same as printer_name
+sumatra_path: "C:\\Tools\\SumatraPDF\\SumatraPDF.exe"  # full path to SumatraPDF.exe
+post_print_delay_seconds: 1.5   # wait after each print (reduces dropped jobs)
+
+# HTML→PDF via Edge/Chrome; set one explicitly if detection fails
+chrome_path: ""            # e.g., C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe
+edge_path: ""              # e.g., C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe
+
+shop_domain: "yourstore.myshopify.com"
+admin_api_token: "shpat_..."
+admin_api_version: "2024-07"
+
+currency_suffix: " DH"
+
+relay_url: "https://your-cloud-run.run.app"
+pc_id: "pc-lab-1"
+pc_secret: "YOUR_SECRET"
+# Poller: long_poll_seconds: 20, max_workers: 4, max_items: 10
+# fetch_order_workers: 2  # keep low to avoid Shopify 429 rate limit

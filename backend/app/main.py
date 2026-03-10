@@ -25,7 +25,7 @@ from sqlalchemy.exc import IntegrityError
 HAVE_AUTH_DB = True
 try:
     from .db import get_session, init_db, SessionLocal
-    from .models import User, OrderEvent, DailyUserStats, AppSetting
+    from .models import User, OrderEvent, DailyUserStats, AppSetting, PrintJob
     from .auth_routes import router as auth_router, get_current_user, require_admin, hash_password
     from .admin_bootstrap_routes import router as admin_bootstrap_router
     from .shopify_oauth_routes import router as shopify_oauth_router
@@ -35,6 +35,7 @@ except Exception:
     get_session = None  # type: ignore
     init_db = None  # type: ignore
     SessionLocal = None  # type: ignore
+    PrintJob = None  # type: ignore
     auth_router = None  # type: ignore
     admin_bootstrap_router = None  # type: ignore
     def get_current_user():  # type: ignore
@@ -225,9 +226,51 @@ def _dedup_key_for_orders(orders: list, store: Optional[str] = None) -> str:
     return f"orders:{','.join(sorted(str(o).lstrip('#') for o in orders))}:{store or ''}"
 
 async def _enqueue_job(pc_id: str, payload: dict, dedup_key: str = "") -> dict:
-    """Add a job to the store. Returns {"ok": True, "job_id": ..., "queued": ..., "dedup": bool}."""
+    """Add a job to the store. Uses DB when available (shared across Cloud Run instances)."""
     import time as _t
     now = _t.time()
+    if SessionLocal is not None and PrintJob is not None:
+        try:
+            from datetime import datetime, timezone
+            from datetime import timedelta
+            async with SessionLocal() as session:
+                if dedup_key:
+                    cutoff = datetime.now(timezone.utc) - timedelta(seconds=_DEDUP_WINDOW_SEC)
+                    existing = await session.scalar(
+                        select(PrintJob.id).where(
+                            PrintJob.dedup_key == dedup_key,
+                            PrintJob.pc_id == pc_id,
+                            PrintJob.created_at >= cutoff,
+                        ).limit(1)
+                    )
+                    if existing:
+                        count = await session.scalar(
+                            select(func.count()).select_from(PrintJob).where(
+                                PrintJob.pc_id == pc_id,
+                                PrintJob.status.in_(["pending", "inflight"]),
+                            )
+                        )
+                        return {"ok": True, "job_id": "dedup", "queued": count or 0, "dedup": True}
+                row = PrintJob(
+                    job_id=payload["job_id"],
+                    pc_id=pc_id,
+                    payload=payload,
+                    status="pending",
+                    leased_at=None,
+                    attempts=0,
+                    dedup_key=dedup_key or None,
+                )
+                session.add(row)
+                await session.commit()
+                count = await session.scalar(
+                    select(func.count()).select_from(PrintJob).where(
+                        PrintJob.pc_id == pc_id,
+                        PrintJob.status.in_(["pending", "inflight"]),
+                    )
+                )
+                return {"ok": True, "job_id": payload["job_id"], "queued": count or 1}
+        except Exception as e:
+            print(f"[PRINT_RELAY] DB enqueue failed, using in-memory: {e}")
     async with _JOB_LOCK:
         if dedup_key:
             cutoff = now - _DEDUP_WINDOW_SEC
@@ -423,23 +466,60 @@ async def pull(pc_id: str, secret: str, max_items: int = 5, wait: int = 0):
     deadline = _t.time() + wait
 
     while True:
-        async with _JOB_LOCK:
-            store = JOB_STORE.get(pc_id, {})
-            now = _t.time()
-            for _jid, _job in store.items():
-                if _job["status"] == "inflight" and now - (_job.get("leased_at") or 0) > _INFLIGHT_TIMEOUT_SEC:
-                    _job["status"] = "pending"
-                    _job["leased_at"] = None
+        out: List[dict] = []
+        if SessionLocal is not None and PrintJob is not None:
+            try:
+                now = _t.time()
+                async with SessionLocal() as session:
+                    from sqlalchemy import update, and_
+                    cutoff = int(now) - _INFLIGHT_TIMEOUT_SEC
+                    await session.execute(
+                        update(PrintJob)
+                        .where(
+                            and_(
+                                PrintJob.pc_id == pc_id,
+                                PrintJob.status == "inflight",
+                                PrintJob.leased_at != None,
+                                PrintJob.leased_at < cutoff,
+                            )
+                        )
+                        .values(status="pending", leased_at=None)
+                    )
+                    await session.commit()
+                    rows = (
+                        await session.execute(
+                            select(PrintJob)
+                            .where(PrintJob.pc_id == pc_id, PrintJob.status == "pending")
+                            .order_by(PrintJob.created_at.asc())
+                            .limit(max_items)
+                        )
+                    )
+                    jobs = list(rows.scalars().all())
+                    for j in jobs:
+                        j.status = "inflight"
+                        j.leased_at = int(now)
+                        j.attempts = (j.attempts or 0) + 1
+                        out.append(j.payload)
+                    await session.commit()
+            except Exception as e:
+                print(f"[PRINT_RELAY] DB pull failed: {e}")
+                out = []
 
-            pending = [(jid, j) for jid, j in store.items() if j["status"] == "pending"]
-            pending.sort(key=lambda x: x[1]["payload"].get("ts", 0))
-
-            out = []
-            for jid, j in pending[:max_items]:
-                j["status"] = "inflight"
-                j["leased_at"] = now
-                j["attempts"] = j.get("attempts", 0) + 1
-                out.append(j["payload"])
+        if not out and (SessionLocal is None or PrintJob is None):
+            async with _JOB_LOCK:
+                store = JOB_STORE.get(pc_id, {})
+                now = _t.time()
+                for _jid, _job in store.items():
+                    if _job["status"] == "inflight" and now - (_job.get("leased_at") or 0) > _INFLIGHT_TIMEOUT_SEC:
+                        _job["status"] = "pending"
+                        _job["leased_at"] = None
+                pending = [(jid, j) for jid, j in store.items() if j["status"] == "pending"]
+                pending.sort(key=lambda x: x[1]["payload"].get("ts", 0))
+                for jid, j in pending[:max_items]:
+                    j["status"] = "inflight"
+                    j["leased_at"] = now
+                    j["attempts"] = j.get("attempts", 0) + 1
+                    out.append(j["payload"])
 
         if out:
             return {"ok": True, "jobs": out}
@@ -450,6 +530,20 @@ async def pull(pc_id: str, secret: str, max_items: int = 5, wait: int = 0):
 @app.post("/ack")
 async def ack(b: AckBody):
     _require_pc(b.pc_id, b.secret)
+    if SessionLocal is not None and PrintJob is not None:
+        try:
+            async with SessionLocal() as session:
+                from sqlalchemy import delete
+                await session.execute(
+                    delete(PrintJob).where(
+                        PrintJob.pc_id == b.pc_id,
+                        PrintJob.job_id == b.job_id,
+                    )
+                )
+                await session.commit()
+            return {"ok": True}
+        except Exception as e:
+            print(f"[PRINT_RELAY] DB ack failed: {e}")
     async with _JOB_LOCK:
         store = JOB_STORE.get(b.pc_id, {})
         store.pop(b.job_id, None)
@@ -459,6 +553,27 @@ async def ack(b: AckBody):
 async def nack(b: AckBody):
     """Re-queue a failed job for retry. After _MAX_ATTEMPTS the job is dropped."""
     _require_pc(b.pc_id, b.secret)
+    if SessionLocal is not None and PrintJob is not None:
+        try:
+            async with SessionLocal() as session:
+                row = await session.scalar(
+                    select(PrintJob).where(
+                        PrintJob.pc_id == b.pc_id,
+                        PrintJob.job_id == b.job_id,
+                    )
+                )
+                if not row:
+                    return {"ok": True, "status": "not_found"}
+                if (row.attempts or 0) >= _MAX_ATTEMPTS:
+                    await session.delete(row)
+                    await session.commit()
+                    return {"ok": True, "status": "dropped", "reason": "max_attempts"}
+                row.status = "pending"
+                row.leased_at = None
+                await session.commit()
+            return {"ok": True, "status": "requeued"}
+        except Exception as e:
+            print(f"[PRINT_RELAY] DB nack failed: {e}")
     async with _JOB_LOCK:
         store = JOB_STORE.get(b.pc_id, {})
         job = store.get(b.job_id)
@@ -3432,8 +3547,8 @@ if os.path.isdir(STATIC_DIR):
 else:
     print(f"[WARN] Static directory not found at {STATIC_DIR}. Build the frontend first.")
 
-# Ensure database tables exist on startup (optional)
-if HAVE_AUTH_DB and init_db is not None:
+# Ensure database tables exist on startup (includes print_jobs for relay)
+if init_db is not None:
     @app.on_event("startup")
     async def _init_db_tables():
         try:

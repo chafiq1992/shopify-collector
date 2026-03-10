@@ -9,3 +9,10 @@ frontend/dist/
 # OS / editor
 .DS_Store
 
+# Local config with secrets (use config.example.yaml as template)
+autoprint 2026/config.yaml
+
+# Virtual envs
+.venv/
+venv/
+
