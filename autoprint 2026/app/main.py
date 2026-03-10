@@ -322,6 +322,21 @@ def _fetch_order_with_retry(shop: str, api_version: str, token: str, num: str, m
         raise last_exc
     raise RuntimeError("Failed to fetch order after retries")
 
+_shopify_sem_lock = threading.Lock()
+_shopify_sem_size = 1
+_shopify_sem = threading.BoundedSemaphore(_shopify_sem_size)
+
+def _set_shopify_request_concurrency(value: Any):
+    global _shopify_sem_size, _shopify_sem
+    try:
+        n = max(1, int(value or 1))
+    except Exception:
+        n = 1
+    with _shopify_sem_lock:
+        if n != _shopify_sem_size:
+            _shopify_sem = threading.BoundedSemaphore(n)
+            _shopify_sem_size = n
+
 def _extract_body(html: str, start: str = "<body>", end: str = "</body>") -> str:
     s, e = html.find(start), html.rfind(end)
     return html[s + len(start) : e] if s != -1 and e != -1 and e > s else html
@@ -334,12 +349,13 @@ def _process_single_order(num: str, cfg: dict, overrides_map: dict, store_overri
     """Returns (body_html, style, store_printer). Used for parallel order processing."""
     shop, token, api_version, currency_suffix, template_name, store_printer = _select_store_for_order(cfg, str(num), store_override)
     tpl_path = BASE / "templates" / template_name
-    order = _fetch_order_with_retry(shop, api_version, token, str(num).lstrip("#"))
+    with _shopify_sem:
+        order = _fetch_order_with_retry(shop, api_version, token, str(num).lstrip("#"), max_retries=7)
+        order = ensure_variant_images(order, shop, api_version, token)
     ov = overrides_map.get(str(num).lstrip("#")) if overrides_map else None
     if ov:
         order = apply_overrides(order, ov)
     order = hydrate_order_for_template(order, currency_suffix=currency_suffix)
-    order = ensure_variant_images(order, shop, api_version, token)
     logos_dir = BASE / "logos"
     try:
         logos_available = [p.stem.lower() for p in logos_dir.glob("*.png")]
@@ -571,6 +587,7 @@ def print_orders(
 ):
     try:
         cfg = load_config()
+        _set_shopify_request_concurrency(cfg.get("shopify_request_concurrency", 1))
         check_secret(cfg, x_secret)
         if _is_forward_mode(cfg):
             if x_print_forwarded:
@@ -858,6 +875,7 @@ def start_poller():
     try:
         cfg = load_config()
         set_post_print_delay(cfg.get("post_print_delay_seconds", 1.5))
+        _set_shopify_request_concurrency(cfg.get("shopify_request_concurrency", 1))
     except Exception:
         _plog("[poller] cannot load config; disabled")
         return
