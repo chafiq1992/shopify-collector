@@ -950,6 +950,45 @@ def build_query_string(
                 q += f" line_item.product_id:{pid}"
     return q.strip()
 
+def normalize_sales_channel(node: Dict[str, Any]) -> Optional[str]:
+    channel_info = (node.get("channelInformation") or {}) or {}
+    channel_def = (channel_info.get("channelDefinition") or {}) or {}
+    order_app = (node.get("app") or {}) or {}
+    raw_source = str(node.get("sourceName") or "").strip()
+
+    raw_map = {
+        "web": "Online Store",
+        "online_store": "Online Store",
+        "pos": "Point of Sale",
+        "shopify_draft_order": "Draft Orders",
+        "draft_orders": "Draft Orders",
+        "iphone": "Mobile App",
+        "android": "Mobile App",
+    }
+
+    def _clean(value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.isdigit():
+            return None
+        mapped = raw_map.get(text.lower())
+        if mapped:
+            return mapped
+        return text
+
+    for candidate in (
+        channel_info.get("displayName"),
+        order_app.get("name"),
+        channel_def.get("subChannelName"),
+        channel_def.get("channelName"),
+        raw_source,
+    ):
+        cleaned = _clean(candidate)
+        if cleaned:
+            return cleaned
+    return None
+
 def map_order_node(node: Dict[str, Any]) -> OrderDTO:
     variants: List[OrderVariant] = []
     # Use all lineItems; Shopify 2025-01 removed unfulfilledLineItems on Order
@@ -1141,7 +1180,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         billing_zip=bill.get("zip"),
         billing_province=bill.get("province"),
         billing_country=bill.get("country"),
-        sales_channel=node.get("sourceName"),
+        sales_channel=normalize_sales_channel(node),
         tags=node.get("tags") or [],
         note=node.get("note"),
         variants=variants,
@@ -1301,6 +1340,15 @@ async def list_orders(
             name
             createdAt
             updatedAt
+            app { name }
+            channelInformation {
+              displayName
+              channelDefinition {
+                subChannelName
+                channelName
+                handle
+              }
+            }
             sourceName
             tags
             note

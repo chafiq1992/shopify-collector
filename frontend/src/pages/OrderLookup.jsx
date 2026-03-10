@@ -93,6 +93,24 @@ const DELIVERY_COMPANIES = [
   { name: 'oscario',  bg: 'bg-indigo-600',  border: 'border-indigo-700',  text: 'text-white',    hover: 'hover:bg-indigo-700' },
 ];
 const COMPANY_NAMES_LOWER = DELIVERY_COMPANIES.map(c => c.name.toLowerCase());
+const SALES_CHANNEL_LABELS = {
+  web: "Online Store",
+  online_store: "Online Store",
+  pos: "Point of Sale",
+  shopify_draft_order: "Draft Orders",
+  draft_orders: "Draft Orders",
+  iphone: "Mobile App",
+  android: "Mobile App",
+};
+
+function formatSalesChannelLabel(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "Unknown Source";
+  const mapped = SALES_CHANNEL_LABELS[raw.toLowerCase()];
+  if (mapped) return mapped;
+  if (/^\d+$/.test(raw)) return "Unknown Source";
+  return raw;
+}
 
 export default function OrderLookup(){
   const [store, setStore] = useState(() => {
@@ -449,8 +467,13 @@ export default function OrderLookup(){
   function getGuideScrollTop(el) {
     const headerEl = document.querySelector('header');
     const headerHeight = headerEl ? headerEl.getBoundingClientRect().height : 88;
+    const bottomFixedHeight = order ? 76 : 0;
+    const guideNavHeight = guideActive ? 84 : 0;
+    const viewportHeight = Math.max(320, window.innerHeight - headerHeight - bottomFixedHeight - guideNavHeight - 24);
     const rect = el.getBoundingClientRect();
-    return Math.max(0, window.scrollY + rect.top - headerHeight - 20);
+    const visibleElementHeight = Math.min(rect.height, viewportHeight - 24);
+    const centerOffset = Math.max(16, (viewportHeight - visibleElementHeight) / 2);
+    return Math.max(0, window.scrollY + rect.top - headerHeight - centerOffset);
   }
 
   function lockGuideScroll() {
@@ -690,7 +713,7 @@ export default function OrderLookup(){
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-4 py-4 pb-[80vh]">
+      <main className={`max-w-3xl mx-auto px-4 py-4 ${guideActive && order ? 'pb-[120vh]' : 'pb-[80vh]'}`}>
         {loading && (
           <div className="text-gray-600">Loading…</div>
         )}
@@ -776,7 +799,7 @@ export default function OrderLookup(){
                     } catch { return order.created_at || "—"; }
                   })()}</span>
                   <span className="mx-1">from</span>
-                  <span className="font-bold text-gray-900 bg-yellow-50 px-1 rounded">{order.sales_channel || "Unknown Source"}</span>
+                  <span className="font-bold text-gray-900 bg-yellow-50 px-1 rounded">{formatSalesChannelLabel(order.sales_channel)}</span>
                 </div>
               </div>
 
