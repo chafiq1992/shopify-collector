@@ -1082,7 +1082,14 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         price = float(amt)
     except Exception:
         price = 0.0
-    considered_fulfilled = any((getattr(v, "status", None) or "") == "fulfilled" for v in variants)
+    active_variants = [
+        v for v in variants
+        if (getattr(v, "status", None) or "").lower() not in ("removed", "restocked")
+        and getattr(v, "qty", 1) > 0
+    ]
+    considered_fulfilled = len(active_variants) > 0 and all(
+        (getattr(v, "status", None) or "").lower() == "fulfilled" for v in active_variants
+    )
     # Determine the last fulfillment timestamp from fulfillments nodes if present
     fulfilled_at_val: Optional[str] = None
     fulfillment_times: List[str] = []

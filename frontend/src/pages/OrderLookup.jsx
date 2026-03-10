@@ -327,11 +327,10 @@ export default function OrderLookup(){
 
   const isOrderFulfilled = useMemo(() => {
     if (!order) return false;
-    const byFlag = !!order.considered_fulfilled;
     const variants = Array.isArray(order.variants) ? order.variants : [];
     const active = variants.filter(v => !_isRemovedVariant(v));
-    if (active.length === 0 && variants.length > 0) return false;
-    const byVariants = active.length > 0 && active.every((v) => {
+    if (active.length === 0) return false;
+    const byVariants = active.every((v) => {
       const st = String(v?.status || "").toLowerCase();
       if (st === "fulfilled") return true;
       const uq = Number(v?.unfulfilled_qty);
@@ -340,7 +339,7 @@ export default function OrderLookup(){
     const byFO = Array.isArray(foData?.orders) && foData.orders.length > 0 && foData.orders.every((g) =>
       ((g?.lineItems || []).every((li) => Number(li?.remainingQuantity || 0) <= 0))
     );
-    return byFlag || byVariants || byFO;
+    return byVariants || byFO;
   }, [order, foData, _isRemovedVariant]);
 
   const screenshotTimeline = useMemo(() => {
@@ -715,8 +714,11 @@ export default function OrderLookup(){
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-2xl font-bold text-gray-900">#{order.number}</span>
               <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
+                (order.financial_status === 'voided') ? 'bg-red-100 text-red-800 border-red-300' :
                 (order.financial_status === 'paid') ? 'bg-gray-100 text-gray-700 border-gray-200' :
                 (order.financial_status === 'pending') ? 'bg-orange-100 text-orange-800 border-orange-200' :
+                (order.financial_status === 'refunded') ? 'bg-red-50 text-red-700 border-red-200' :
+                (order.financial_status === 'partially_refunded') ? 'bg-orange-50 text-orange-700 border-orange-200' :
                 'bg-gray-100 text-gray-700 border-gray-200'
               }`}>
                 {order.financial_status ? order.financial_status.replace(/_/g, ' ') : 'Payment pending'}
@@ -1017,16 +1019,19 @@ export default function OrderLookup(){
               {(order.tags || []).length === 0 && (
                 <span className="text-xs text-gray-500">No tags</span>
               )}
-              {(order.tags || []).map((t, i) => (
-                <span key={`${t}-${i}`} className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-gray-100 border border-gray-200 text-xs">
-                  <span>{t}</span>
-                  <button
-                    onClick={()=>handleRemoveTag(t)}
-                    className="text-gray-500 hover:text-red-600"
-                    title="Remove tag"
-                  >×</button>
-                </span>
-              ))}
+              {(order.tags || []).map((t, i) => {
+                const isEnAtt = /en\s*att/i.test(t);
+                return (
+                  <span key={`${t}-${i}`} className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs ${isEnAtt ? 'bg-red-100 border border-red-300 text-red-800 font-bold' : 'bg-gray-100 border border-gray-200'}`}>
+                    <span>{t}</span>
+                    <button
+                      onClick={()=>handleRemoveTag(t)}
+                      className={isEnAtt ? "text-red-500 hover:text-red-700" : "text-gray-500 hover:text-red-600"}
+                      title="Remove tag"
+                    >×</button>
+                  </span>
+                );
+              })}
             </div>
             <div className="flex items-center gap-2">
               <input
@@ -1201,8 +1206,11 @@ export default function OrderLookup(){
                   <span className="text-xl font-bold text-gray-900">#{order.number}</span>
                   {/* Financial Status Badge */}
                   <span className={`px-2 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border ${
+                    (order.financial_status === 'voided') ? 'bg-red-100 text-red-800 border-red-300' :
                     (order.financial_status === 'paid') ? 'bg-gray-100 text-gray-700 border-gray-200' :
                     (order.financial_status === 'pending') ? 'bg-orange-100 text-orange-800 border-orange-200' :
+                    (order.financial_status === 'refunded') ? 'bg-red-50 text-red-700 border-red-200' :
+                    (order.financial_status === 'partially_refunded') ? 'bg-orange-50 text-orange-700 border-orange-200' :
                     'bg-gray-100 text-gray-700 border-gray-200'
                   }`}>
                     {order.financial_status ? order.financial_status.replace(/_/g, ' ') : 'Payment pending'}
@@ -1549,23 +1557,26 @@ export default function OrderLookup(){
                 {(order.tags || []).length === 0 && (
                   <span className="text-xs text-gray-500">No tags</span>
                 )}
-                {(order.tags || []).map((t, i) => (
-                  <span key={`${t}-${i}`} className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-gray-100 border border-gray-200 text-xs">
+              {(order.tags || []).map((t, i) => {
+                const isEnAtt = /en\s*att/i.test(t);
+                return (
+                  <span key={`${t}-${i}`} className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs ${isEnAtt ? 'bg-red-100 border border-red-300 text-red-800 font-bold' : 'bg-gray-100 border border-gray-200'}`}>
                     <span>{t}</span>
                     <button
                       onClick={()=>handleRemoveTag(t)}
-                      className="text-gray-500 hover:text-red-600"
+                      className={isEnAtt ? "text-red-500 hover:text-red-700" : "text-gray-500 hover:text-red-600"}
                       title="Remove tag"
                     >×</button>
                   </span>
-                ))}
-              </div>
-              <div className="mt-2 flex items-center gap-2">
-                <input
-                  value={newTag}
-                  onChange={(e)=>{ setNewTag(e.target.value); setTagQuery(e.target.value); setShowTagDropdown(true); }}
-                  placeholder="Add a tag"
-                  className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2"
+                );
+              })}
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <input
+                value={newTag}
+                onChange={(e)=>{ setNewTag(e.target.value); setTagQuery(e.target.value); setShowTagDropdown(true); }}
+                placeholder="Add a tag"
+                className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2"
                   onFocus={()=>{ setShowTagDropdown(true); }}
                   onBlur={()=>{ setTimeout(()=>setShowTagDropdown(false), 150); }}
                 />
