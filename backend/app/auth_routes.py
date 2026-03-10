@@ -19,7 +19,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=True
 oauth2_optional = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "CHANGE_ME_SECRET").strip()
-JWT_EXPIRES_MINUTES = int(os.environ.get("JWT_EXPIRES_MINUTES", "720").strip() or 720)
+JWT_EXPIRES_MINUTES = int(os.environ.get("JWT_EXPIRES_MINUTES", "43200").strip() or 43200)
 
 
 class TokenResponse(BaseModel):

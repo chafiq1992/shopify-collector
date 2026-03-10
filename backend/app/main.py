@@ -396,8 +396,22 @@ async def ack(b: AckBody):
     return {"ok": True}
 
 @app.post("/api/enqueue-label")
-async def enqueue_label(body: EnqueueLabelBody, x_api_key: Optional[str] = Header(default=None)):
-    _require_api_key(x_api_key)
+async def enqueue_label(
+    body: EnqueueLabelBody,
+    x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    has_api_key = x_api_key and x_api_key == RELAY_API_KEY
+    has_jwt = False
+    if authorization and authorization.startswith("Bearer "):
+        try:
+            from jose import jwt as _jwt
+            _jwt.decode(authorization.split(" ", 1)[1], os.environ.get("JWT_SECRET", ""), algorithms=["HS256"])
+            has_jwt = True
+        except Exception:
+            pass
+    if not has_api_key and not has_jwt:
+        raise HTTPException(status_code=401, detail="unauthorized")
     import time as _t, uuid as _uuid
     jid = str(_uuid.uuid4())
     payload = {
