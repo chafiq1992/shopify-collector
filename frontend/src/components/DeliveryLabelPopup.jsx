@@ -59,7 +59,7 @@ function getCompanyCities(company) {
   return Array.from(set);
 }
 
-export default function DeliveryLabelPopup({ order, store, onClose, onQueued }) {
+export default function DeliveryLabelPopup({ order, store, open = false, onClose, onQueued }) {
   const orderNum = String(order?.number || "").replace(/^#/, "").trim();
   const orderName = `#${orderNum}`;
 
@@ -756,6 +756,8 @@ export default function DeliveryLabelPopup({ order, store, onClose, onQueued }) 
     : partnerSendState.ok === false
       ? (partnerSendState.message || "Last send failed")
       : (envoyCode ? "Not sent to partner yet" : "Create or assign an envoy note first");
+
+  if (!open) return null;
 
   if (notConfigured) {
     return (
