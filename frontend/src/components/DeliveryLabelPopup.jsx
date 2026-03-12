@@ -60,10 +60,11 @@ function getCompanyCities(company) {
   return Array.from(set);
 }
 
-export default function DeliveryLabelPopup({ order, store, open = false, onClose, onQueued }) {
+export default function DeliveryLabelPopup({ order, store, open = false, autoRunWhenHidden = false, onClose, onQueued, onStateChange }) {
   const orderNum = String(order?.number || "").replace(/^#/, "").trim();
   const orderName = `#${orderNum}`;
-  const warmOnly = !open;
+  const shouldRunLiveFlow = open || autoRunWhenHidden;
+  const warmOnly = !shouldRunLiveFlow;
 
   const [phase, setPhase] = useState("init");
   const [busy, setBusy] = useState(false);
@@ -181,17 +182,17 @@ export default function DeliveryLabelPopup({ order, store, open = false, onClose
   }, []);
 
   useEffect(() => {
-    if (!open || !queueRow || !merchantId) return;
+    if (!shouldRunLiveFlow || !queueRow || !merchantId) return;
     if (phase !== "queue_ready") return;
     createNote(merchantId, queueRow);
-  }, [open, phase, queueRow, merchantId]);
+  }, [shouldRunLiveFlow, phase, queueRow, merchantId]);
 
   useEffect(() => {
-    if (!open || !merchantId) return;
+    if (!shouldRunLiveFlow || !merchantId) return;
     if (phase !== "prefetched") return;
     setBusy(true);
     searchQueue(merchantId, { warmOnly: false }).finally(() => setBusy(false));
-  }, [open, phase, merchantId]);
+  }, [shouldRunLiveFlow, phase, merchantId]);
 
   useEffect(() => {
     if (phase !== "manual") return;
@@ -829,6 +830,33 @@ export default function DeliveryLabelPopup({ order, store, open = false, onClose
   const filteredCities = cityName
     ? cityOptions.filter(c => String(c).toLowerCase().includes(cityName.toLowerCase())).slice(0, 15)
     : cityOptions.slice(0, 15);
+  const queueState = useMemo(() => {
+    if (printStatus === "success") return { statusKey: "printed", statusLabel: "Printed" };
+    if (phase === "fix_errors" || phase === "manual" || phase === "error") {
+      return { statusKey: "information_error", statusLabel: "Information error" };
+    }
+    if (phase === "company_select") {
+      return { statusKey: "waiting_partner", statusLabel: "Waiting to send to partner" };
+    }
+    if (phase === "ready_print" || (phase === "done" && printStatus !== "fallback")) {
+      return { statusKey: "ready_to_print", statusLabel: "Ready to print" };
+    }
+    return { statusKey: "preparing", statusLabel: "Preparing" };
+  }, [phase, printStatus]);
+  useEffect(() => {
+    if (typeof onStateChange !== "function") return;
+    onStateChange({
+      orderId: String(order?.id || ""),
+      orderNumber: orderNum,
+      statusKey: queueState.statusKey,
+      statusLabel: queueState.statusLabel,
+      deliveryOrderId: deliveryOrderId ? String(deliveryOrderId) : "",
+      envoyCode: envoyCode || "",
+      companyName: selectedCompany?.name || orderTagMatch?.company?.name || "",
+      deliveryTag: selectedCompanyOrderTag || "",
+      error: error || "",
+    });
+  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error]);
   const companyStepDone = partnerSendState.ok === true;
   const companyStepActive = phase === "company_select" || ((phase === "ready_print" || phase === "done") && !companyStepDone);
   const companyStepCls = companyStepDone

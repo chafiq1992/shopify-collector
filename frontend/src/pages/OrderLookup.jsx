@@ -117,6 +117,33 @@ function createEmptyFoData() {
   return { orders: [], mapByVariant: {}, selectedLineItemIds: new Set() };
 }
 
+function buildFulfilledQueueOrder(baseOrder, foData) {
+  if (!baseOrder) return null;
+  if (!foData?.orders || foData.orders.length === 0) {
+    return {
+      ...baseOrder,
+      fulfillment_status: "FULFILLED",
+      variants: (baseOrder.variants || []).map((variant) => ({ ...variant, status: "fulfilled", unfulfilled_qty: 0 })),
+    };
+  }
+  const variantIds = new Set();
+  foData.orders.forEach((group) => {
+    (group.lineItems || []).forEach((lineItem) => {
+      if (foData.selectedLineItemIds.has(lineItem.id)) {
+        const variantId = String(lineItem.variantId || "").trim();
+        if (variantId) variantIds.add(variantId);
+      }
+    });
+  });
+  return {
+    ...baseOrder,
+    fulfillment_status: "FULFILLED",
+    variants: (baseOrder.variants || []).map((variant) => (
+      variantIds.has(variant.id) ? { ...variant, status: "fulfilled", unfulfilled_qty: 0 } : variant
+    )),
+  };
+}
+
 export default function OrderLookup(){
   const [store, setStore] = useState(() => {
     try {
@@ -168,6 +195,8 @@ export default function OrderLookup(){
   const [printQueue, setPrintQueue] = useState([]);
   const [printQueueFlight, setPrintQueueFlight] = useState(null);
   const [queuePulse, setQueuePulse] = useState(false);
+  const [labelQueueItems, setLabelQueueItems] = useState([]);
+  const [labelQueueOpen, setLabelQueueOpen] = useState(false);
 
   const inputRef = useRef(null);
   const sectionRefs = useRef({});
@@ -188,6 +217,30 @@ export default function OrderLookup(){
     try { if (queuePulseTimerRef.current) clearTimeout(queuePulseTimerRef.current); } catch {}
     try { if (queueFlightTimerRef.current) clearTimeout(queueFlightTimerRef.current); } catch {}
   }, []);
+  useEffect(() => {
+    const items = labelQueueItems.filter((item) => item?.jobId);
+    if (!items.length) return;
+    let cancelled = false;
+    const timer = setInterval(async () => {
+      await Promise.all(items.map(async (item) => {
+        try {
+          const res = await authFetch(`/api/print-job-status?job_id=${encodeURIComponent(item.jobId)}`, {
+            headers: authHeaders({ "Accept": "application/json" }),
+          });
+          if (!res.ok) return;
+          const js = await res.json();
+          if (cancelled) return;
+          if (String(js?.status || "").toLowerCase() === "done") {
+            setLabelQueueItems(prev => prev.filter(entry => entry.queueId !== item.queueId));
+          }
+        } catch {}
+      }));
+    }, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [labelQueueItems]);
   useEffect(() => {
     if (!printQueue.length) return;
     let cancelled = false;
@@ -315,6 +368,66 @@ export default function OrderLookup(){
       ? `Order #${orderNumber} added to print queue. Type order or next order.`
       : "Added to print queue. Type order or next order.");
   }, [order?.number, resetLookupForNextOrder]);
+  const handleQueueItemStateChange = useCallback((queueId, nextState) => {
+    setLabelQueueItems(prev => prev.map((item) => (
+      item.queueId === queueId
+        ? {
+            ...item,
+            statusKey: nextState?.statusKey || item.statusKey,
+            statusLabel: nextState?.statusLabel || item.statusLabel,
+            deliveryOrderId: nextState?.deliveryOrderId || item.deliveryOrderId,
+            envoyCode: nextState?.envoyCode || item.envoyCode,
+            companyName: nextState?.companyName || item.companyName,
+            deliveryTag: nextState?.deliveryTag || item.deliveryTag,
+            error: nextState?.error || "",
+          }
+        : item
+    )));
+  }, []);
+  const handleQueueItemQueued = useCallback((queueId, payload = {}) => {
+    handlePrintedQueued(payload);
+    setLabelQueueItems(prev => prev.map((item) => (
+      item.queueId === queueId
+        ? {
+            ...item,
+            jobId: payload.jobId || item.jobId || null,
+            statusKey: "printed",
+            statusLabel: "Printed",
+            open: false,
+          }
+        : item
+    )));
+  }, [handlePrintedQueued]);
+  const enqueueFulfilledOrder = useCallback((queuedOrder) => {
+    if (!queuedOrder?.id) return;
+    const queueId = `${queuedOrder.id}-${Date.now()}`;
+    setLabelQueueItems(prev => [
+      {
+        queueId,
+        order: queuedOrder,
+        statusKey: "preparing",
+        statusLabel: "Preparing",
+        deliveryOrderId: "",
+        envoyCode: "",
+        companyName: "",
+        deliveryTag: "",
+        error: "",
+        open: false,
+        jobId: null,
+        createdAt: Date.now(),
+      },
+      ...prev,
+    ].slice(0, 12));
+  }, []);
+  const openQueueItem = useCallback((queueId) => {
+    setLabelQueueOpen(true);
+    setLabelQueueItems(prev => prev.map(item => ({ ...item, open: item.queueId === queueId })));
+  }, []);
+  const closeQueueItem = useCallback((queueId) => {
+    setLabelQueueItems(prev => prev.map(item => (
+      item.queueId === queueId ? { ...item, open: false } : item
+    )));
+  }, []);
 
   async function doSearch(number){
     const token = searchTokenRef.current + 1;
@@ -821,6 +934,13 @@ export default function OrderLookup(){
 
   const activeCompany = order ? getActiveCompanyTag() : null;
   const currentGuideStep = guideSteps[guideStepIndex] || null;
+  const queueStatusClass = (statusKey) => {
+    if (statusKey === "printed") return "bg-green-100 text-green-800 border border-green-200";
+    if (statusKey === "ready_to_print") return "bg-indigo-100 text-indigo-800 border border-indigo-200";
+    if (statusKey === "waiting_partner") return "bg-amber-100 text-amber-800 border border-amber-200";
+    if (statusKey === "information_error") return "bg-red-100 text-red-800 border border-red-200";
+    return "bg-gray-100 text-gray-700 border border-gray-200";
+  };
 
   function renderGuideFrame({ title, subtitle, children }) {
     return (
@@ -2098,11 +2218,11 @@ export default function OrderLookup(){
                           return prev;
                         }
                       });
+                      const queuedOrder = buildFulfilledQueueOrder(order, foData);
                       setFulfillSuccess(true);
                       try { setTimeout(()=>setFulfillSuccess(false), 2200); } catch {}
-                      setMessage("Fulfilled successfully");
-                      try { setTimeout(()=>setMessage(null), 2000); } catch {}
-                      setShowDeliveryPopup(true);
+                      enqueueFulfilledOrder(queuedOrder);
+                      resetLookupForNextOrder(`Order #${order?.number || "—"} fulfilled and added to the side queue.`);
                     } else {
                       setError(`Fulfillment failed: ${((res && res.errors && res.errors[0] && res.errors[0].message) || "Unknown error")}`);
                     }
@@ -2156,19 +2276,96 @@ export default function OrderLookup(){
         </div>
       )}
 
+      <div className="fixed right-3 top-24 z-40 flex flex-col items-end gap-2">
+        <button
+          onClick={() => setLabelQueueOpen(prev => !prev)}
+          className="rounded-xl border border-indigo-200 bg-white px-3 py-2 text-sm font-semibold text-indigo-700 shadow-sm hover:bg-indigo-50"
+        >
+          Fulfilled Queue {labelQueueItems.length ? `(${labelQueueItems.length})` : ""}
+        </button>
+        {labelQueueOpen && (
+          <div className="w-[22rem] max-w-[calc(100vw-1.5rem)] rounded-2xl border border-gray-200 bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+              <div>
+                <div className="text-sm font-bold text-gray-900">Latest Fulfilled Orders</div>
+                <div className="text-[11px] text-gray-500">Collapsed by default so agents can keep searching.</div>
+              </div>
+              <button
+                onClick={() => setLabelQueueOpen(false)}
+                className="rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+            <div className="max-h-[70vh] overflow-y-auto p-3 space-y-2">
+              {!labelQueueItems.length && (
+                <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 px-3 py-6 text-center text-sm text-gray-500">
+                  No fulfilled orders in the side queue yet.
+                </div>
+              )}
+              {labelQueueItems.map((item) => (
+                <button
+                  key={item.queueId}
+                  onClick={() => openQueueItem(item.queueId)}
+                  className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-left hover:border-indigo-300 hover:bg-indigo-50"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="text-sm font-bold text-gray-900">#{item.order?.number || item.order?.orderNumber || "—"}</div>
+                      <div className="mt-1 text-[11px] text-gray-500">
+                        {item.companyName || "Delivery workflow in progress"}
+                        {item.deliveryTag ? ` • tag: ${item.deliveryTag}` : ""}
+                      </div>
+                    </div>
+                    <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-bold ${queueStatusClass(item.statusKey)}`}>
+                      {item.statusLabel}
+                    </span>
+                  </div>
+                  {item.error && (
+                    <div className="mt-2 text-xs text-red-600 line-clamp-2">{item.error}</div>
+                  )}
+                  <div className="mt-2 text-[11px] text-gray-500">
+                    {item.statusKey === "ready_to_print"
+                      ? "Tap to open and print."
+                      : item.statusKey === "waiting_partner"
+                        ? "Tap to open and send to partner."
+                        : item.statusKey === "information_error"
+                          ? "Tap to review and fix the information."
+                          : "Working in the background."}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Delivery Label Popup */}
-      {order && (
+      {showDeliveryPopup && order && (
         <Suspense fallback={null}>
           <DeliveryLabelPopup
             key={`${order.id}-${store}`}
             order={order}
             store={store}
-            open={showDeliveryPopup}
+            open={true}
             onClose={() => setShowDeliveryPopup(false)}
             onQueued={handlePrintedQueued}
           />
         </Suspense>
       )}
+      {labelQueueItems.map((item) => (
+        <Suspense key={item.queueId} fallback={null}>
+          <DeliveryLabelPopup
+            order={item.order}
+            store={store}
+            open={item.open}
+            autoRunWhenHidden={true}
+            onClose={() => closeQueueItem(item.queueId)}
+            onQueued={(payload) => handleQueueItemQueued(item.queueId, payload)}
+            onStateChange={(nextState) => handleQueueItemStateChange(item.queueId, nextState)}
+          />
+        </Suspense>
+      ))}
       {printQueueFlight && (
         <div
           key={printQueueFlight.id}
