@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
-import { authFetch, authHeaders } from "../lib/auth";
+import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 
 const DeliveryLabelPopup = lazy(() => import("../components/DeliveryLabelPopup"));
 
@@ -113,6 +113,10 @@ function formatSalesChannelLabel(value) {
   return raw;
 }
 
+function createEmptyFoData() {
+  return { orders: [], mapByVariant: {}, selectedLineItemIds: new Set() };
+}
+
 export default function OrderLookup(){
   const [store, setStore] = useState(() => {
     try {
@@ -161,26 +165,36 @@ export default function OrderLookup(){
 
   const [fulfillConfirm, setFulfillConfirm] = useState(false);
   const [showDeliveryPopup, setShowDeliveryPopup] = useState(false);
+  const [printQueue, setPrintQueue] = useState([]);
+  const [printQueueFlight, setPrintQueueFlight] = useState(null);
+  const [queuePulse, setQueuePulse] = useState(false);
 
   const inputRef = useRef(null);
   const sectionRefs = useRef({});
   const guideInitializedRef = useRef(false);
   const guideAnimatingRef = useRef(false);
   const guideUnlockTimerRef = useRef(null);
+  const searchTokenRef = useRef(0);
+  const printQueueRef = useRef(null);
+  const queuePulseTimerRef = useRef(null);
+  const queueFlightTimerRef = useRef(null);
   const registerSection = useCallback((key) => (el) => {
     if (el) sectionRefs.current[key] = el;
     else delete sectionRefs.current[key];
   }, []);
 
   useEffect(() => { try { inputRef.current?.focus(); } catch {} }, []);
+  useEffect(() => () => {
+    try { if (queuePulseTimerRef.current) clearTimeout(queuePulseTimerRef.current); } catch {}
+    try { if (queueFlightTimerRef.current) clearTimeout(queueFlightTimerRef.current); } catch {}
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     async function loadAgentToday(){
       try {
         if (!cancelled) setAgentToday(prev => ({ ...prev, loading: true }));
-        const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-        const res = await authFetch(`/api/agent/today-summary${qs}`, { headers: authHeaders({ "Accept": "application/json" }) });
+        const res = await authFetch("/api/agent/today-summary", { headers: authHeaders({ "Accept": "application/json" }) });
         if (!res.ok) throw new Error("Failed");
         const js = await res.json();
         if (cancelled) return;
@@ -195,57 +209,148 @@ export default function OrderLookup(){
     }
     loadAgentToday();
     return () => { cancelled = true; };
-  }, [store, order?.id, fulfillSuccess]);
+  }, [order?.id, fulfillSuccess]);
+
+  const handleLogout = useCallback(() => {
+    clearAuth();
+    try {
+      window.dispatchEvent(new CustomEvent("orderCollectorAuthCleared", { detail: { reason: "logout" } }));
+    } catch {}
+    try { location.href = "/login"; } catch {}
+  }, []);
+
+  const resetLookupForNextOrder = useCallback((nextMessage = null) => {
+    searchTokenRef.current += 1;
+    setShowDeliveryPopup(false);
+    setQuery("");
+    setOrder(null);
+    setLoading(false);
+    setError(null);
+    setMessage(nextMessage);
+    setOverrideInfo(null);
+    setFulfillBusy(false);
+    setFulfillSuccess(false);
+    setNewTag("");
+    setNoteAppend("");
+    setTagQuery("");
+    setShowTagDropdown(false);
+    setFoData(createEmptyFoData());
+    setGuideActive(false);
+    setActiveGuideSection(null);
+    setBadgeSubStep(0);
+    setCompanyConfirm(null);
+    setFulfillConfirm(false);
+    try {
+      const params = new URLSearchParams(location.search);
+      params.delete("q");
+      history.replaceState(null, "", `${location.pathname}?${params.toString()}`);
+    } catch {}
+    try {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } catch {}
+    if (nextMessage) {
+      try { setTimeout(() => setMessage(null), 2200); } catch {}
+    }
+  }, []);
+
+  const handlePrintedQueued = useCallback((payload = {}) => {
+    const orderNumber = String(payload.orderNumber || order?.number || "").replace(/^#/, "").trim();
+    const queueItem = {
+      id: payload.jobId || `queued-${Date.now()}`,
+      orderNumber,
+      queuedAt: Date.now(),
+    };
+    setPrintQueue(prev => [queueItem, ...prev].slice(0, 6));
+    setQueuePulse(true);
+    try { if (queuePulseTimerRef.current) clearTimeout(queuePulseTimerRef.current); } catch {}
+    queuePulseTimerRef.current = setTimeout(() => setQueuePulse(false), 1200);
+
+    const sourceRect = payload.sourceRect;
+    const targetRect = printQueueRef.current?.getBoundingClientRect?.();
+    if (sourceRect && targetRect) {
+      setPrintQueueFlight({
+        id: `flight-${Date.now()}`,
+        label: orderNumber ? `#${orderNumber}` : "Queued",
+        left: sourceRect.left + (sourceRect.width / 2),
+        top: sourceRect.top + (sourceRect.height / 2),
+        dx: (targetRect.left + (targetRect.width / 2)) - (sourceRect.left + (sourceRect.width / 2)),
+        dy: (targetRect.top + (targetRect.height / 2)) - (sourceRect.top + (sourceRect.height / 2)),
+      });
+      try { if (queueFlightTimerRef.current) clearTimeout(queueFlightTimerRef.current); } catch {}
+      queueFlightTimerRef.current = setTimeout(() => setPrintQueueFlight(null), 760);
+    }
+
+    resetLookupForNextOrder(orderNumber
+      ? `Order #${orderNumber} added to print queue. Type order or next order.`
+      : "Added to print queue. Type order or next order.");
+  }, [order?.number, resetLookupForNextOrder]);
 
   async function doSearch(number){
+    const token = searchTokenRef.current + 1;
+    searchTokenRef.current = token;
     const n = String(number || query || "").trim().replace(/^#/, "");
     if (!n) return;
     setLoading(true);
     setError(null);
     setOrder(null);
+    setOverrideInfo(null);
+    setFoData(createEmptyFoData());
+    setTagSuggestions([]);
     setFulfillSuccess(false);
     setGuideActive(false);
     setActiveGuideSection(null);
     try {
       const found = await API.searchOneByNumber(n, store);
+      if (searchTokenRef.current !== token) return;
       if (!found){
         setError("Order not found");
         setOrder(null);
         setOverrideInfo(null);
       } else {
         setOrder(found);
-        try {
-          const r = await authFetch(`/api/overrides?orders=${encodeURIComponent(String(found.number).replace(/^#/, ""))}&store=${encodeURIComponent(store)}`, { headers: authHeaders() });
-          const js = await r.json();
-          const ov = (js.overrides || {})[String(found.number).replace(/^#/, "")] || null;
-          setOverrideInfo(ov || null);
-        } catch {
-          setOverrideInfo(null);
-        }
-        try {
-          const fo = await API.getFulfillmentOrders(found.id, store);
-          const byVar = {};
-          const sel = new Set();
-          (fo.fulfillmentOrders || []).forEach(g => {
-            (g.lineItems || []).forEach(li => {
-              const vid = (li.variantId || "").trim();
-              if (vid) {
-                byVar[vid] = byVar[vid] || [];
-                byVar[vid].push({ foId: g.id, id: li.id, remainingQuantity: li.remainingQuantity, sku: li.sku, title: li.title });
-                if (li.remainingQuantity > 0) sel.add(li.id);
+        setLoading(false);
+        Promise.allSettled([
+          (async () => {
+            try {
+              const r = await authFetch(`/api/overrides?orders=${encodeURIComponent(String(found.number).replace(/^#/, ""))}&store=${encodeURIComponent(store)}`, { headers: authHeaders() });
+              const js = await r.json();
+              const ov = (js.overrides || {})[String(found.number).replace(/^#/, "")] || null;
+              if (searchTokenRef.current === token) setOverrideInfo(ov || null);
+            } catch {
+              if (searchTokenRef.current === token) setOverrideInfo(null);
+            }
+          })(),
+          (async () => {
+            try {
+              const fo = await API.getFulfillmentOrders(found.id, store);
+              const byVar = {};
+              const sel = new Set();
+              (fo.fulfillmentOrders || []).forEach(g => {
+                (g.lineItems || []).forEach(li => {
+                  const vid = (li.variantId || "").trim();
+                  if (vid) {
+                    byVar[vid] = byVar[vid] || [];
+                    byVar[vid].push({ foId: g.id, id: li.id, remainingQuantity: li.remainingQuantity, sku: li.sku, title: li.title });
+                    if (li.remainingQuantity > 0) sel.add(li.id);
+                  }
+                });
+              });
+              if (searchTokenRef.current === token) {
+                setFoData({ orders: (fo.fulfillmentOrders || []), mapByVariant: byVar, selectedLineItemIds: sel });
               }
-            });
-          });
-          setFoData({ orders: (fo.fulfillmentOrders || []), mapByVariant: byVar, selectedLineItemIds: sel });
-        } catch {
-          setFoData({ orders: [], mapByVariant: {}, selectedLineItemIds: new Set() });
-        }
-        try {
-          const all = await API.fetchRecentTags(store);
-          setTagSuggestions(all);
-        } catch {
-          setTagSuggestions([]);
-        }
+            } catch {
+              if (searchTokenRef.current === token) setFoData(createEmptyFoData());
+            }
+          })(),
+          (async () => {
+            try {
+              const all = await API.fetchRecentTags(store);
+              if (searchTokenRef.current === token) setTagSuggestions(all);
+            } catch {
+              if (searchTokenRef.current === token) setTagSuggestions([]);
+            }
+          })(),
+        ]);
       }
       try {
         const params = new URLSearchParams(location.search);
@@ -253,9 +358,10 @@ export default function OrderLookup(){
         history.replaceState(null, "", `${location.pathname}?${params.toString()}`);
       } catch {}
     } catch (e){
+      if (searchTokenRef.current !== token) return;
       setError(e?.message || "Search failed");
     } finally {
-      setLoading(false);
+      if (searchTokenRef.current === token) setLoading(false);
     }
   }
 
@@ -1149,7 +1255,7 @@ export default function OrderLookup(){
               value={query}
               onChange={(e)=>setQuery(e.target.value)}
               onKeyDown={(e)=>{ if (e.key === 'Enter') doSearch(); }}
-              placeholder="Enter order number"
+              placeholder="Type order or next order"
               className="bg-transparent outline-none w-full text-sm"
             />
             <button
@@ -1158,11 +1264,32 @@ export default function OrderLookup(){
             >Search</button>
           </div>
         </div>
-        <div className="max-w-3xl mx-auto px-4 pb-2">
+        <div className="max-w-3xl mx-auto px-4 pb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="text-[11px] text-gray-600">
             Agent: <span className="font-semibold">{agentToday.name || "—"}</span>
             <span className="mx-2">•</span>
-            <span>Fulfilled today: <span className="font-semibold">{agentToday.loading ? "…" : agentToday.fulfilledToday}</span></span>
+            <span>Fulfilled today (all stores): <span className="font-semibold">{agentToday.loading ? "…" : agentToday.fulfilledToday}</span></span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div
+              ref={printQueueRef}
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-semibold transition-all ${
+                queuePulse
+                  ? "border-indigo-400 bg-indigo-100 text-indigo-800 shadow-md shadow-indigo-100"
+                  : "border-indigo-200 bg-indigo-50 text-indigo-700"
+              }`}
+            >
+              <span>Print Queue</span>
+              <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-white px-1.5 py-0.5 text-[10px] text-indigo-700 border border-indigo-200">
+                {printQueue.length}
+              </span>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="px-3 py-1.5 rounded-lg text-sm border border-gray-300 hover:bg-gray-100"
+            >
+              Logout
+            </button>
           </div>
         </div>
       </header>
@@ -1178,7 +1305,7 @@ export default function OrderLookup(){
           <div className="text-green-700 mb-3">{message}</div>
         )}
         {!loading && !order && !error && (
-          <div className="text-gray-500">Search an order by number to see details.</div>
+          <div className="text-gray-500">Type order or next order to keep moving.</div>
         )}
         {!loading && order && (
           <div className={`rounded-2xl border-2 overflow-hidden ${
@@ -1948,8 +2075,27 @@ export default function OrderLookup(){
       {/* Delivery Label Popup */}
       {showDeliveryPopup && order && (
         <Suspense fallback={null}>
-          <DeliveryLabelPopup order={order} store={store} onClose={() => setShowDeliveryPopup(false)} />
+          <DeliveryLabelPopup
+            order={order}
+            store={store}
+            onClose={() => setShowDeliveryPopup(false)}
+            onQueued={handlePrintedQueued}
+          />
         </Suspense>
+      )}
+      {printQueueFlight && (
+        <div
+          key={printQueueFlight.id}
+          className="print-queue-flight"
+          style={{
+            left: `${printQueueFlight.left}px`,
+            top: `${printQueueFlight.top}px`,
+            "--print-flight-x": `${printQueueFlight.dx}px`,
+            "--print-flight-y": `${printQueueFlight.dy}px`,
+          }}
+        >
+          {printQueueFlight.label}
+        </div>
       )}
     </div>
   );

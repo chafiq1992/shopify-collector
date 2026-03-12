@@ -59,7 +59,7 @@ function getCompanyCities(company) {
   return Array.from(set);
 }
 
-export default function DeliveryLabelPopup({ order, store, onClose }) {
+export default function DeliveryLabelPopup({ order, store, onClose, onQueued }) {
   const orderNum = String(order?.number || "").replace(/^#/, "").trim();
   const orderName = `#${orderNum}`;
 
@@ -83,6 +83,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
   const [printStatus, setPrintStatus] = useState(null);
   const logEndRef = useRef(null);
   const initRan = useRef(false);
+  const printButtonRef = useRef(null);
 
   const [editFields, setEditFields] = useState({
     orderName: "",
@@ -336,8 +337,12 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       if (!cfgJ.configured) { setNotConfigured(true); setBusy(false); return; }
 
       addLog("Loading merchants...");
-      const m = await dlvApi("ext/admin/merchants");
-      const list = (m && m.items) || [];
+      const [m, companyRes, cityRes] = await Promise.allSettled([
+        dlvApi("ext/admin/merchants"),
+        dlvApi("admin/envoy-companies"),
+        dlvApi("ext/admin/cities"),
+      ]);
+      const list = m.status === "fulfilled" ? ((m.value && m.value.items) || []) : [];
       setMerchants(list);
 
       let mid = savedMerchant();
@@ -347,8 +352,8 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       if (mid) { setMerchantId(mid); saveMerchant(mid); }
 
       addLog("Loading companies & cities...");
-      try { const c = await dlvApi("admin/envoy-companies"); setCompanies(Array.isArray(c) ? c : (c.items || [])); } catch { setCompanies([]); }
-      try { const c = await dlvApi("ext/admin/cities"); setCities((c && c.items) || []); } catch { setCities([]); }
+      setCompanies(companyRes.status === "fulfilled" ? (Array.isArray(companyRes.value) ? companyRes.value : (companyRes.value.items || [])) : []);
+      setCities(cityRes.status === "fulfilled" ? ((cityRes.value && cityRes.value.items) || []) : []);
 
       if (!mid) { setPhase("merchant_select"); setBusy(false); return; }
 
@@ -612,15 +617,27 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
     const id = oid || deliveryOrderId;
     if (!id) return;
     const labelUrl = `/api/delivery-label/${encodeURIComponent(id)}${envoyCode ? `?envoy_code=${encodeURIComponent(envoyCode)}` : ""}`;
+    const sourceRect = printButtonRef.current?.getBoundingClientRect
+      ? (() => {
+          const rect = printButtonRef.current.getBoundingClientRect();
+          return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+        })()
+      : null;
 
     setBusy(true);
     setPrintStatus(null);
+    let queuedPayload = null;
     try {
       addLog("Sending label to print relay...");
       const result = await enqueueLabelToRelay(id, store, envoyCode);
       addLog(`Queued! Job: ${result.job_id || "ok"} — printer agent will pick it up.`);
       setPrintStatus("success");
       setPhase("done");
+      queuedPayload = {
+        orderNumber: orderNum,
+        jobId: result.job_id || null,
+        sourceRect,
+      };
     } catch (e) {
       addLog(`Relay failed: ${e.message} — opening in browser instead.`);
       window.open(labelUrl, "_blank", "width=450,height=600,scrollbars=yes");
@@ -628,6 +645,9 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
       setPhase("done");
     } finally {
       setBusy(false);
+    }
+    if (queuedPayload && typeof onQueued === "function") {
+      onQueued(queuedPayload);
     }
   }
 
@@ -962,6 +982,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
             {(phase === "ready_print" || phase === "done") && (
               <div className="ml-8 mt-2 space-y-2">
                 <button
+                  ref={printButtonRef}
                   onClick={() => handlePrint()}
                   disabled={busy}
                   className="w-full px-4 py-2.5 rounded-xl bg-green-600 text-white text-sm font-bold hover:bg-green-700 disabled:opacity-50 active:scale-[.98] shadow-md flex items-center justify-center gap-2"
@@ -974,7 +995,7 @@ export default function DeliveryLabelPopup({ order, store, onClose }) {
                 </button>
                 {printStatus === "success" && (
                   <div className="text-xs text-green-700 mt-1 text-center font-semibold">
-                    Sent to printer agent! The label will print automatically. You can print again or close.
+                    Sent to printer agent. The order is queued and you can move to the next lookup.
                   </div>
                 )}
                 {printStatus === "fallback" && (

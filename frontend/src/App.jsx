@@ -330,8 +330,7 @@ export default function App(){
       if (!auth?.access_token) return;
       try {
         if (!cancelled) setAgentToday(prev => ({ ...prev, loading: true }));
-        const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-        const res = await authFetch(`/api/agent/today-summary${qs}`, { headers: authHeaders({ "Accept": "application/json" }) });
+        const res = await authFetch("/api/agent/today-summary", { headers: authHeaders({ "Accept": "application/json" }) });
         if (!res.ok) throw new Error("Failed to load summary");
         const js = await res.json();
         if (cancelled) return;
@@ -345,7 +344,7 @@ export default function App(){
     }
     loadTodaySummary();
     return () => { cancelled = true; };
-  }, [auth?.access_token, store, reloadCounter]);
+  }, [auth?.access_token, reloadCounter]);
 
   function vibrate(ms = 20){
     try { if (navigator && typeof navigator.vibrate === 'function') navigator.vibrate(ms); } catch {}
@@ -785,7 +784,7 @@ export default function App(){
                 <span className="font-semibold">{auth.user.email}</span>
                 <span className="uppercase text-[10px] px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">{auth.user.role}</span>
                 <span className="uppercase text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 border border-blue-200">
-                  {agentToday.loading ? "Fulfilled today: …" : `Fulfilled today: ${agentToday.fulfilledToday}`}
+                  {agentToday.loading ? "All stores today: …" : `All stores today: ${agentToday.fulfilledToday}`}
                 </span>
                 {pendingCount > 0 && (
                   <span className="uppercase text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200">
