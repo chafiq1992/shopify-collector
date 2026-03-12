@@ -188,6 +188,36 @@ export default function OrderLookup(){
     try { if (queuePulseTimerRef.current) clearTimeout(queuePulseTimerRef.current); } catch {}
     try { if (queueFlightTimerRef.current) clearTimeout(queueFlightTimerRef.current); } catch {}
   }, []);
+  useEffect(() => {
+    if (!printQueue.length) return;
+    let cancelled = false;
+    const timers = [];
+
+    async function pollQueue() {
+      const items = printQueue.filter(item => item?.jobId);
+      if (!items.length) return;
+      await Promise.all(items.map(async (item) => {
+        try {
+          const res = await authFetch(`/api/print-job-status?job_id=${encodeURIComponent(item.jobId)}`, {
+            headers: authHeaders({ "Accept": "application/json" }),
+          });
+          if (!res.ok) return;
+          const js = await res.json();
+          if (cancelled) return;
+          if (String(js?.status || "").toLowerCase() === "done") {
+            setPrintQueue(prev => prev.filter(entry => entry.id !== item.id));
+          }
+        } catch {}
+      }));
+    }
+
+    pollQueue();
+    timers.push(setInterval(pollQueue, 2000));
+    return () => {
+      cancelled = true;
+      timers.forEach((timer) => clearInterval(timer));
+    };
+  }, [printQueue]);
 
   useEffect(() => {
     let cancelled = false;
@@ -257,6 +287,7 @@ export default function OrderLookup(){
     const orderNumber = String(payload.orderNumber || order?.number || "").replace(/^#/, "").trim();
     const queueItem = {
       id: payload.jobId || `queued-${Date.now()}`,
+      jobId: payload.jobId || null,
       orderNumber,
       queuedAt: Date.now(),
     };

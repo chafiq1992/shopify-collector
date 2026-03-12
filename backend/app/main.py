@@ -617,6 +617,60 @@ async def enqueue_label(
     dk = _dedup_key_for_label(dlv_id, body.store)
     return await _enqueue_job(DEFAULT_PC_ID, payload, dk)
 
+
+@app.get("/api/print-job-status")
+async def print_job_status(
+    job_id: str,
+    x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    has_api_key = x_api_key and x_api_key == RELAY_API_KEY
+    has_jwt = False
+    if authorization and authorization.startswith("Bearer "):
+        try:
+            from jose import jwt as _jwt
+            _jwt.decode(authorization.split(" ", 1)[1], os.environ.get("JWT_SECRET", ""), algorithms=["HS256"])
+            has_jwt = True
+        except Exception:
+            pass
+    if not has_api_key and not has_jwt:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    if SessionLocal is not None and PrintJob is not None:
+        try:
+            async with SessionLocal() as session:
+                row = await session.scalar(
+                    select(PrintJob).where(
+                        PrintJob.pc_id == DEFAULT_PC_ID,
+                        PrintJob.job_id == job_id,
+                    )
+                )
+                queued = int((await session.scalar(
+                    select(func.count()).select_from(PrintJob).where(
+                        PrintJob.pc_id == DEFAULT_PC_ID,
+                        PrintJob.status.in_(["pending", "inflight"]),
+                    )
+                )) or 0)
+                return {
+                    "ok": True,
+                    "job_id": job_id,
+                    "status": (row.status if row else "done"),
+                    "queued": queued,
+                }
+        except Exception as e:
+            print(f"[PRINT_RELAY] DB print-job-status failed: {e}")
+
+    async with _JOB_LOCK:
+        store = JOB_STORE.get(DEFAULT_PC_ID, {})
+        job = store.get(job_id)
+        queued = len([1 for item in store.values() if item.get("status") in ("pending", "inflight")])
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "status": (job.get("status") if job else "done"),
+            "queued": queued,
+        }
+
 # ---------- Shopify Webhook (orders/create) for Auto-Tagging by zone ----------
 def _normalize_spaces(text: Optional[str]) -> str:
     try:
