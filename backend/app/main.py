@@ -2576,9 +2576,57 @@ if HAVE_AUTH_DB:
             )
 
         return {"ok": True, "rows": out_rows, "from": start_dt.date().isoformat(), "to": end_dt.date().isoformat(), "store": store_key or "all"}
+
+    @app.get("/api/admin/order-events", response_model=Dict[str, Any])
+    async def admin_order_events(
+        order_number: str = Query(..., description="Order number to search (e.g. 1001 or #1001)"),
+        admin: User = Depends(require_admin),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        """Look up who collected or fulfilled an order by order number."""
+        norm = (order_number or "").strip().lstrip("#")
+        if not norm:
+            return {"ok": True, "order_number": order_number, "rows": [], "message": "Enter an order number"}
+
+        stmt = (
+            select(
+                OrderEvent.order_number,
+                OrderEvent.order_gid,
+                OrderEvent.store_key,
+                OrderEvent.action,
+                OrderEvent.created_at,
+                User.email,
+                User.name,
+                User.id,
+            )
+            .join(User, User.id == OrderEvent.user_id)
+            .where(
+                OrderEvent.order_number == norm,
+                OrderEvent.action.in_(["collected", "fulfilled", "out"]),
+            )
+            .order_by(OrderEvent.created_at.desc())
+        )
+        result = await session.execute(stmt)
+        rows: List[Dict[str, Any]] = []
+        for ord_num, ord_gid, store_val, action_val, created_at, email, name, uid in result.fetchall():
+            rows.append(
+                {
+                    "order_number": ord_num,
+                    "order_gid": ord_gid,
+                    "store": store_val,
+                    "action": action_val,
+                    "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+                    "user": {"id": uid, "email": email, "name": name},
+                }
+            )
+        return {"ok": True, "order_number": norm, "rows": rows}
 else:
     @app.get("/api/admin/out-events", response_model=Dict[str, Any])
     async def admin_out_events_unavailable():
+        raise HTTPException(status_code=503, detail="auth/db not configured")
+
+    @app.get("/api/admin/order-events", response_model=Dict[str, Any])
+    async def admin_order_events_unavailable():
         raise HTTPException(status_code=503, detail="auth/db not configured")
 
 

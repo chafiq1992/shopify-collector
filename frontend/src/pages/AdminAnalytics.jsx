@@ -28,6 +28,38 @@ export default function AdminAnalytics(){
   const [resetEmail, setResetEmail] = useState("");
   const [resetPassword, setResetPassword] = useState("");
 
+  const [orderSearch, setOrderSearch] = useState("");
+  const [orderSearchResults, setOrderSearchResults] = useState([]);
+  const [orderSearchLoading, setOrderSearchLoading] = useState(false);
+  const [orderSearchError, setOrderSearchError] = useState(null);
+
+  async function searchOrderEvents(){
+    const num = (orderSearch || "").trim().replace(/^#/, "");
+    if (!num) {
+      setOrderSearchError("Enter an order number");
+      return;
+    }
+    setOrderSearchLoading(true);
+    setOrderSearchError(null);
+    setOrderSearchResults([]);
+    try {
+      const res = await authFetch(`/api/admin/order-events?order_number=${encodeURIComponent(num)}`, {
+        headers: authHeaders({"Accept": "application/json"})
+      });
+      if (!res.ok) {
+        const js = await res.json().catch(() => ({ detail: "Failed to search" }));
+        throw new Error(js.detail || "Failed to search");
+      }
+      const js = await res.json();
+      setOrderSearchResults(js.rows || []);
+      if ((js.rows || []).length === 0) setOrderSearchError(`No events found for order #${num}`);
+    } catch (e) {
+      setOrderSearchError(e?.message || "Failed to search");
+    } finally {
+      setOrderSearchLoading(false);
+    }
+  }
+
   async function load(){
     setLoading(true);
     setError(null);
@@ -194,6 +226,29 @@ export default function AdminAnalytics(){
             <button onClick={()=>goto("/shopify-connect")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Connect</button>
           </div>
         </div>
+        <div className="max-w-6xl mx-auto px-4 pb-3 flex flex-wrap items-end gap-3">
+          <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex-1 min-w-[200px]">
+            <div className="text-[11px] uppercase tracking-wide text-amber-700 mb-1">Search order</div>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={orderSearch}
+                onChange={(e) => { setOrderSearch(e.target.value); setOrderSearchError(null); }}
+                onKeyDown={(e) => e.key === "Enter" && searchOrderEvents()}
+                placeholder="e.g. 1001 or #1001"
+                className="flex-1 text-sm border border-amber-300 rounded-lg px-2 py-1 bg-white"
+              />
+              <button
+                onClick={searchOrderEvents}
+                disabled={orderSearchLoading}
+                className="text-sm px-3 py-1 rounded-lg bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-60"
+              >
+                {orderSearchLoading ? "Searching…" : "Search"}
+              </button>
+            </div>
+            {orderSearchError && <div className="mt-1 text-xs text-amber-800">{orderSearchError}</div>}
+          </div>
+        </div>
         <div className="max-w-6xl mx-auto px-4 pb-3 grid sm:grid-cols-4 gap-3">
           <div className="bg-gray-100 rounded-xl px-3 py-2">
             <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Store</div>
@@ -219,6 +274,44 @@ export default function AdminAnalytics(){
       <main className="max-w-6xl mx-auto px-4 py-4">
         {error && <div className="mb-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</div>}
         {adminMsg && <div className="mb-3 text-sm text-blue-800 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">{adminMsg}</div>}
+        {orderSearchResults.length > 0 && (
+          <section className="mb-6">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">Order #{orderSearchResults[0]?.order_number || orderSearch.replace(/^#/, "")} — who collected / fulfilled</h3>
+            <div className="overflow-x-auto border border-gray-200 rounded-xl bg-white">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-100 text-left">
+                  <tr>
+                    <th className="px-3 py-2 border-b border-gray-200">Action</th>
+                    <th className="px-3 py-2 border-b border-gray-200">User</th>
+                    <th className="px-3 py-2 border-b border-gray-200">Store</th>
+                    <th className="px-3 py-2 border-b border-gray-200">Time</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {orderSearchResults.map((r, idx) => (
+                    <tr key={idx} className="border-b last:border-b-0">
+                      <td className="px-3 py-2">
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                          r.action === "collected" ? "bg-green-100 text-green-800 border border-green-200" :
+                          r.action === "fulfilled" ? "bg-blue-100 text-blue-800 border border-blue-200" :
+                          "bg-red-100 text-red-800 border border-red-200"
+                        }`}>
+                          {r.action}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="font-medium">{r?.user?.name || r?.user?.email || r?.user?.id || "—"}</div>
+                        <div className="text-xs text-gray-500">{r?.user?.email || ""}</div>
+                      </td>
+                      <td className="px-3 py-2">{r.store}</td>
+                      <td className="px-3 py-2 text-gray-600">{(r.created_at || "").replace("T", " ").slice(0, 19)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
         {loading ? (
           <div className="text-gray-600">Loading…</div>
         ) : (
