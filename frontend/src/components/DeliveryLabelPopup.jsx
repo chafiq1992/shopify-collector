@@ -60,6 +60,73 @@ function getCompanyCities(company) {
   return Array.from(set);
 }
 
+/* Custom searchable city dropdown — only shows cities from the list, no browser autocomplete */
+function CityDropdown({ value, onChange, options, placeholder = "City", className = "", inputClassName = "" }) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  const wrapRef = useRef(null);
+  const inputRef = useRef(null);
+
+  // Close on outside click
+  useEffect(() => {
+    function handleClick(e) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    }
+    if (open) document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  // Reset filter when options change
+  useEffect(() => { setFilter(""); }, [options]);
+
+  const filtered = useMemo(() => {
+    const q = (filter || "").trim().toLowerCase();
+    if (!q) return options || [];
+    return (options || []).filter(c => String(c).toLowerCase().includes(q));
+  }, [options, filter]);
+
+  return (
+    <div ref={wrapRef} className={`relative ${className}`}>
+      <input
+        ref={inputRef}
+        type="text"
+        autoComplete="off"
+        aria-autocomplete="none"
+        value={open ? filter : (value || "")}
+        placeholder={placeholder}
+        onFocus={() => { setOpen(true); setFilter(value || ""); }}
+        onChange={e => { setFilter(e.target.value); if (!open) setOpen(true); }}
+        className={inputClassName || "w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5"}
+      />
+      {open && (
+        <div className="absolute left-0 right-0 top-full mt-0.5 z-50 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+          {filtered.length === 0 ? (
+            <div className="px-3 py-2 text-xs text-gray-400 italic">No matching cities</div>
+          ) : filtered.map((city, i) => (
+            <button
+              key={i}
+              type="button"
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => {
+                onChange(city);
+                setFilter("");
+                setOpen(false);
+              }}
+              className={`w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50 hover:text-blue-800 ${
+                String(city).toLowerCase() === String(value || "").toLowerCase()
+                  ? "bg-blue-50 text-blue-700 font-semibold"
+                  : "text-gray-700"
+              }`}
+            >
+              {city}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DeliveryLabelPopup({ order, store, open = false, autoRunWhenHidden = false, onClose, onQueued, onStateChange }) {
   const orderNum = String(order?.number || "").replace(/^#/, "").trim();
   const orderName = `#${orderNum}`;
@@ -853,10 +920,10 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     return orderTagMatch?.tag || "";
   }, [selectedCompany, order?.tags, orderTagMatch]);
   const companyCities = selectedCompany ? getCompanyCities(selectedCompany) : [];
-  const cityOptions = companyCities.length ? companyCities : cities;
+  const allCityOptions = companyCities.length ? companyCities : cities;
   const filteredCities = cityName
-    ? cityOptions.filter(c => String(c).toLowerCase().includes(cityName.toLowerCase())).slice(0, 15)
-    : cityOptions.slice(0, 15);
+    ? allCityOptions.filter(c => String(c).toLowerCase().includes(cityName.toLowerCase())).slice(0, 15)
+    : allCityOptions.slice(0, 15);
   const queueState = useMemo(() => {
     if (printStatus === "success") return { statusKey: "printed", statusLabel: "Printed" };
     if (phase === "fix_errors" || phase === "manual" || phase === "error") {
@@ -889,6 +956,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       companyId,
       cityName,
       cityOptions: filteredCities,
+      allCityOptions,
       partnerSendState,
       printStatus,
       // Action methods for side panel
@@ -901,7 +969,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         handleRetry,
       },
     });
-  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, companies, companyId, cityName, filteredCities, partnerSendState, printStatus]);
+  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, companies, companyId, cityName, filteredCities, allCityOptions, partnerSendState, printStatus]);
   const companyStepDone = partnerSendState.ok === true;
   const companyStepActive = phase === "company_select" || ((phase === "ready_print" || phase === "done") && !companyStepDone);
   const companyStepCls = companyStepDone
@@ -973,15 +1041,13 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
             </div>
             <div>
               <label className="text-[10px] font-semibold text-gray-500 uppercase">City</label>
-              <input
+              <CityDropdown
                 value={editFields.city}
-                onChange={e => { setField("city", e.target.value); setCityName(e.target.value); }}
-                list="dlv-city-list"
-                className={`w-full text-sm border rounded-lg px-2 py-1.5 ${queueRow?.hasError && queueRow?.errorType === "city" ? "border-red-400 bg-red-50" : "border-gray-300"}`}
+                onChange={v => { setField("city", v); setCityName(v); }}
+                options={allCityOptions}
+                placeholder="City"
+                inputClassName={`w-full text-sm border rounded-lg px-2 py-1.5 ${queueRow?.hasError && queueRow?.errorType === "city" ? "border-red-400 bg-red-50" : "border-gray-300"}`}
               />
-              <datalist id="dlv-city-list">
-                {filteredCities.map((c, i) => <option key={i} value={c} />)}
-              </datalist>
             </div>
           </div>
           <div>
@@ -1119,16 +1185,13 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
                     Using the envoy company already matched for this order. Change it only if needed.
                   </div>
                 )}
-                <input
+                <CityDropdown
                   value={cityName}
-                  onChange={e => setCityName(e.target.value)}
+                  onChange={v => setCityName(v)}
+                  options={allCityOptions}
                   placeholder="City"
-                  list="dlv-send-city-list"
-                  className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5"
+                  inputClassName="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5"
                 />
-                <datalist id="dlv-send-city-list">
-                  {filteredCities.map((c, i) => <option key={i} value={c} />)}
-                </datalist>
                 {showPartnerSendButton && (
                   <button
                     onClick={handleSend}

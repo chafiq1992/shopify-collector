@@ -387,6 +387,7 @@ export default function OrderLookup(){
             companyId: nextState?.companyId || item.companyId || "",
             cityName: nextState?.cityName || item.cityName || "",
             cityOptions: nextState?.cityOptions || item.cityOptions || [],
+            allCityOptions: nextState?.allCityOptions || item.allCityOptions || [],
             partnerSendState: nextState?.partnerSendState || item.partnerSendState || {},
             printStatus: nextState?.printStatus || item.printStatus || null,
             actions: nextState?.actions || item.actions || null,
@@ -2289,7 +2290,7 @@ export default function OrderLookup(){
 
       {/* Fulfilled Queue Side Panel */}
       {labelQueueItems.length > 0 && (
-        <div className="fixed right-0 top-0 z-40 h-full w-[340px] border-l border-gray-200 bg-white/95 backdrop-blur-sm shadow-xl flex flex-col">
+        <div className="fixed right-0 top-0 z-50 h-full w-[340px] border-l border-gray-200 bg-white/95 backdrop-blur-sm shadow-xl flex flex-col">
           {/* Panel Header */}
           <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3 flex-shrink-0 bg-gradient-to-r from-indigo-50 to-white">
             <div>
@@ -2420,17 +2421,17 @@ export default function OrderLookup(){
                         ))}
                       </select>
 
-                      {/* City input */}
-                      <input
+                      {/* City select */}
+                      <select
                         value={item.cityName || ""}
                         onChange={e => item.actions.setCityName(e.target.value)}
-                        placeholder="City"
-                        list={`dlv-side-city-${item.queueId}`}
-                        className="w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5"
-                      />
-                      <datalist id={`dlv-side-city-${item.queueId}`}>
-                        {(item.cityOptions || []).map((c, i) => <option key={i} value={c} />)}
-                      </datalist>
+                        className="w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 bg-white"
+                      >
+                        <option value="">Select city…</option>
+                        {(item.allCityOptions || item.cityOptions || []).map((c, i) => (
+                          <option key={i} value={c}>{c}</option>
+                        ))}
+                      </select>
 
                       {/* Send to Partner */}
                       {showSendBtn && (
