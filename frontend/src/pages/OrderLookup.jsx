@@ -1400,39 +1400,49 @@ export default function OrderLookup(){
                   ? "This order is cancelled."
                   : isOrderFulfilled
                     ? "This order is already fulfilled."
-                    : "Use the Fulfill button to complete this order."}
+                    : "Tap the button below to fulfill this order."}
               </div>
               <div className="mt-2 text-sm text-gray-600">
                 After fulfillment, the delivery label flow is already warming up in the background, so the popup opens much faster.
               </div>
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className={`rounded-2xl border p-4 ${
-                isOrderCancelled
-                  ? 'border-red-300 bg-red-50 text-red-700'
-                  : isOrderFulfilled
-                    ? 'border-green-300 bg-green-50 text-green-700'
-                    : 'border-green-300 bg-green-600 text-white shadow-lg shadow-green-200'
-              }`}>
+              <button
+                onClick={() => {
+                  if (fulfillBusy || isOrderFulfilled || isOrderCancelled) return;
+                  setFulfillConfirm(true);
+                }}
+                disabled={fulfillBusy || isOrderFulfilled || isOrderCancelled}
+                className={`rounded-2xl border p-4 text-left transition active:scale-[.98] ${
+                  isOrderCancelled
+                    ? 'border-red-300 bg-red-50 text-red-700 cursor-not-allowed'
+                    : isOrderFulfilled
+                      ? 'border-green-300 bg-green-50 text-green-700 cursor-not-allowed'
+                      : 'border-green-300 bg-green-600 text-white shadow-lg shadow-green-200 hover:bg-green-700 cursor-pointer'
+                }`}
+              >
                 <div className="text-xs uppercase tracking-[0.2em] opacity-80">Primary action</div>
                 <div className="mt-2 text-xl font-extrabold">
-                  {isOrderCancelled ? "Cancelled" : isOrderFulfilled ? "Fulfilled" : "Fulfill"}
+                  {isOrderCancelled ? "Cancelled" : isOrderFulfilled ? "✓ Fulfilled" : (fulfillBusy ? "Fulfilling…" : "Fulfill")}
                 </div>
                 <div className="mt-2 text-sm opacity-90">
                   {isOrderCancelled
                     ? "No fulfillment is needed."
                     : isOrderFulfilled
                       ? "You can move on to the next order."
-                      : "Tap this button when every order detail is checked."}
+                      : "Tap here to mark the order as fulfilled."}
                 </div>
-              </div>
-              <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-indigo-900">
+              </button>
+              <button
+                onClick={() => setShowDeliveryPopup(true)}
+                className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-left text-indigo-900 transition hover:bg-indigo-100 active:scale-[.98] cursor-pointer"
+              >
                 <div className="text-xs uppercase tracking-[0.2em] text-indigo-700">Next action</div>
-                <div className="mt-2 text-xl font-extrabold">Label</div>
+                <div className="mt-2 text-xl font-extrabold">🖨 Label</div>
                 <div className="mt-2 text-sm text-indigo-700">
-                  Once fulfillment is done, the label popup is ready to continue with less waiting.
+                  Open the delivery label popup to print.
                 </div>
-              </div>
+              </button>
             </div>
           </div>
         ),

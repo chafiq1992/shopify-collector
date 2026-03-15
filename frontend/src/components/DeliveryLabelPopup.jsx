@@ -704,6 +704,22 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     setError(null);
     addLog("Sending to partner...");
     try {
+      // Persist corrected city (and other editable fields) on the delivery order itself
+      const verifyPayload = {};
+      const effectiveCity = cityName || editFields.city || "";
+      if (effectiveCity) verifyPayload.city = effectiveCity;
+      if (editFields.customerName) verifyPayload.customer_name = editFields.customerName;
+      if (editFields.customerPhone) verifyPayload.customer_phone = editFields.customerPhone;
+      if (editFields.address) verifyPayload.address = editFields.address;
+      if (Object.keys(verifyPayload).length > 0) {
+        try {
+          await dlvApi(`admin/verify/${deliveryOrderId}`, { method: "PUT", body: verifyPayload });
+          addLog("Order details updated");
+        } catch (verifyErr) {
+          addLog(`Warning: could not update order details (${verifyErr?.message || "unknown"})`);
+        }
+      }
+
       if (companyId && companyId !== "unassigned") {
         await dlvApi(`admin/envoy-notes/items/${deliveryOrderId}/company`, { method: "PUT", body: { company_id: Number(companyId) } });
         addLog("Company set");
