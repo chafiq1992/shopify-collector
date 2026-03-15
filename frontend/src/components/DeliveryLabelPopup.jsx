@@ -4,7 +4,7 @@ import { authFetch, authHeaders } from "../lib/auth";
 const LS_MERCHANT = "dlvMerchantId";
 const LS_ORDER_MAP = "dlvOrderIdMap";
 
-async function dlvApi(path, { method = "GET", body, query } = {}) {
+async function dlvApi(path, { method = "GET", body, query, _retries = 3 } = {}) {
   let url = `/api/delivery/${path.replace(/^\/+/, "")}`;
   if (query && typeof query === "object") {
     const params = new URLSearchParams();
@@ -16,18 +16,33 @@ async function dlvApi(path, { method = "GET", body, query } = {}) {
   }
   const opts = { method, headers: authHeaders({ "Content-Type": "application/json" }) };
   if (body) opts.body = JSON.stringify(body);
-  const res = await authFetch(url, opts);
-  if (!res.ok) {
-    const text = await res.text();
-    let detail = text;
-    try { const j = JSON.parse(text); detail = j.detail || j.message || text; } catch {}
-    const err = new Error(String(detail || `Request failed (${res.status})`));
-    err.status = res.status;
-    throw err;
+
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await authFetch(url, opts);
+    } catch (netErr) {
+      // Network error (offline, DNS, etc.) — retry if attempts remain
+      if (attempt < _retries) { await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); continue; }
+      throw netErr;
+    }
+    // Retry on 503 Service Unavailable / 504 Gateway Timeout (Cloud Run cold-start or overload)
+    if ((res.status === 503 || res.status === 504) && attempt < _retries) {
+      await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+      continue;
+    }
+    if (!res.ok) {
+      const text = await res.text();
+      let detail = text;
+      try { const j = JSON.parse(text); detail = j.detail || j.message || text; } catch {}
+      const err = new Error(String(detail || `Request failed (${res.status})`));
+      err.status = res.status;
+      throw err;
+    }
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    if (ct.includes("application/json")) return res.json();
+    return { raw: await res.text() };
   }
-  const ct = (res.headers.get("content-type") || "").toLowerCase();
-  if (ct.includes("application/json")) return res.json();
-  return { raw: await res.text() };
 }
 
 function savedMerchant() { try { return Number(localStorage.getItem(LS_MERCHANT)) || null; } catch { return null; } }
