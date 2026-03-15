@@ -380,6 +380,16 @@ export default function OrderLookup(){
             companyName: nextState?.companyName || item.companyName,
             deliveryTag: nextState?.deliveryTag || item.deliveryTag,
             error: nextState?.error || "",
+            // Extended state for side panel
+            phase: nextState?.phase || item.phase,
+            busy: nextState?.busy || false,
+            companies: nextState?.companies || item.companies || [],
+            companyId: nextState?.companyId || item.companyId || "",
+            cityName: nextState?.cityName || item.cityName || "",
+            cityOptions: nextState?.cityOptions || item.cityOptions || [],
+            partnerSendState: nextState?.partnerSendState || item.partnerSendState || {},
+            printStatus: nextState?.printStatus || item.printStatus || null,
+            actions: nextState?.actions || item.actions || null,
           }
         : item
     )));
@@ -1431,7 +1441,7 @@ export default function OrderLookup(){
   }
 
   return (
-    <div className="min-h-screen w-full bg-gray-50 text-gray-900">
+    <div className={`min-h-screen w-full bg-gray-50 text-gray-900 transition-all ${labelQueueItems.length > 0 ? 'pr-[340px]' : ''}`}>
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur border-b border-gray-200">
         <div className="max-w-3xl mx-auto px-4 py-2 flex items-center gap-2">
           <button
@@ -2276,69 +2286,200 @@ export default function OrderLookup(){
         </div>
       )}
 
-      <div className="fixed right-3 top-24 z-40 flex flex-col items-end gap-2">
-        <button
-          onClick={() => setLabelQueueOpen(prev => !prev)}
-          className="rounded-xl border border-indigo-200 bg-white px-3 py-2 text-sm font-semibold text-indigo-700 shadow-sm hover:bg-indigo-50"
-        >
-          Fulfilled Queue {labelQueueItems.length ? `(${labelQueueItems.length})` : ""}
-        </button>
-        {labelQueueOpen && (
-          <div className="w-[22rem] max-w-[calc(100vw-1.5rem)] rounded-2xl border border-gray-200 bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
-              <div>
-                <div className="text-sm font-bold text-gray-900">Latest Fulfilled Orders</div>
-                <div className="text-[11px] text-gray-500">Collapsed by default so agents can keep searching.</div>
+
+      {/* Fulfilled Queue Side Panel */}
+      {labelQueueItems.length > 0 && (
+        <div className="fixed right-0 top-0 z-40 h-full w-[340px] border-l border-gray-200 bg-white/95 backdrop-blur-sm shadow-xl flex flex-col">
+          {/* Panel Header */}
+          <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3 flex-shrink-0 bg-gradient-to-r from-indigo-50 to-white">
+            <div>
+              <div className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                Fulfilled Queue
+                <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] font-bold text-indigo-700 border border-indigo-200">
+                  {labelQueueItems.length}
+                </span>
               </div>
-              <button
-                onClick={() => setLabelQueueOpen(false)}
-                className="rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
-              >
-                Close
-              </button>
+              <div className="text-[11px] text-gray-500">Orders processing in background</div>
             </div>
-            <div className="max-h-[70vh] overflow-y-auto p-3 space-y-2">
-              {!labelQueueItems.length && (
-                <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 px-3 py-6 text-center text-sm text-gray-500">
-                  No fulfilled orders in the side queue yet.
-                </div>
-              )}
-              {labelQueueItems.map((item) => (
-                <button
+          </div>
+
+          {/* Queue Items */}
+          <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
+            {labelQueueItems.map((item) => {
+              const isError = item.statusKey === "information_error";
+              const isWaiting = item.statusKey === "waiting_partner";
+              const isReadyPrint = item.statusKey === "ready_to_print";
+              const isPrinted = item.statusKey === "printed";
+              const showCompanyControls = isWaiting || isReadyPrint;
+              const showCityError = isError && item.phase === "fix_errors";
+              const partnerOk = item.partnerSendState?.ok === true;
+              const showSendBtn = showCompanyControls && item.envoyCode && !partnerOk;
+              const showPrintBtn = (isReadyPrint || isPrinted) && item.actions;
+
+              return (
+                <div
                   key={item.queueId}
-                  onClick={() => openQueueItem(item.queueId)}
-                  className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-left hover:border-indigo-300 hover:bg-indigo-50"
+                  className={`rounded-xl border px-3 py-2.5 transition-all ${
+                    isError ? 'border-red-300 bg-red-50/60' :
+                    isWaiting ? 'border-amber-200 bg-amber-50/50' :
+                    isReadyPrint ? 'border-green-200 bg-green-50/50' :
+                    isPrinted ? 'border-green-300 bg-green-50/70' :
+                    'border-gray-200 bg-gray-50/50'
+                  }`}
                 >
+                  {/* Order header */}
                   <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="text-sm font-bold text-gray-900">#{item.order?.number || item.order?.orderNumber || "—"}</div>
-                      <div className="mt-1 text-[11px] text-gray-500">
-                        {item.companyName || "Delivery workflow in progress"}
-                        {item.deliveryTag ? ` • tag: ${item.deliveryTag}` : ""}
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold text-gray-900">#{item.order?.number || "—"}</div>
+                      <div className="text-[11px] text-gray-500 truncate">
+                        {item.companyName || item.order?.customer || "Preparing…"}
                       </div>
                     </div>
-                    <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-bold ${queueStatusClass(item.statusKey)}`}>
+                    <span className={`flex-shrink-0 inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${queueStatusClass(item.statusKey)}`}>
                       {item.statusLabel}
                     </span>
                   </div>
+
+                  {/* Error display */}
                   {item.error && (
-                    <div className="mt-2 text-xs text-red-600 line-clamp-2">{item.error}</div>
+                    <div className="mt-1.5 rounded-lg bg-red-100 border border-red-200 px-2 py-1.5 text-[11px] text-red-700">
+                      {item.error}
+                      {item.actions?.handleRetry && (
+                        <button
+                          onClick={() => item.actions.handleRetry()}
+                          className="ml-2 px-2 py-0.5 rounded bg-red-600 text-white text-[10px] font-bold hover:bg-red-700"
+                        >Retry</button>
+                      )}
+                    </div>
                   )}
-                  <div className="mt-2 text-[11px] text-gray-500">
-                    {item.statusKey === "ready_to_print"
-                      ? "Tap to open and print."
-                      : item.statusKey === "waiting_partner"
-                        ? "Tap to open and send to partner."
-                        : item.statusKey === "information_error"
-                          ? "Tap to review and fix the information."
-                          : "Working in the background."}
+
+                  {/* Step Progress Indicator */}
+                  <div className="mt-2 flex items-center gap-1">
+                    {["creating", "company_select", "ready_print", "done"].map((step, i) => {
+                      const steps = ["creating", "company_select", "ready_print", "done"];
+                      const currentIdx = steps.indexOf(item.phase || "init");
+                      const isDone = i < currentIdx || item.phase === "done";
+                      const isActive = i === currentIdx;
+                      return (
+                        <React.Fragment key={step}>
+                          <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold ${
+                            isDone ? 'bg-green-500 text-white' : isActive ? 'bg-blue-500 text-white ring-2 ring-blue-200' : 'bg-gray-200 text-gray-500'
+                          }`}>
+                            {isDone ? "✓" : i + 1}
+                          </div>
+                          {i < 3 && <div className={`flex-1 h-0.5 ${isDone ? 'bg-green-400' : 'bg-gray-200'}`} />}
+                        </React.Fragment>
+                      );
+                    })}
                   </div>
-                </button>
-              ))}
-            </div>
+                  <div className="mt-1 flex justify-between text-[9px] text-gray-400">
+                    <span>Create</span><span>Company</span><span>Send</span><span>Print</span>
+                  </div>
+
+                  {/* Preparing spinner */}
+                  {item.busy && item.statusKey === "preparing" && (
+                    <div className="mt-2 text-[11px] text-blue-600 animate-pulse flex items-center gap-1.5">
+                      <span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                      Setting up delivery note…
+                    </div>
+                  )}
+
+                  {/* City fix (inline for city errors) */}
+                  {showCityError && item.actions && (
+                    <div className="mt-2 space-y-1.5">
+                      <div className="text-[10px] font-semibold text-red-700 uppercase tracking-wide">Fix City</div>
+                      <select
+                        value={item.cityName || ""}
+                        onChange={e => item.actions.setCityName(e.target.value)}
+                        className="w-full text-xs border border-red-300 rounded-lg px-2 py-1.5 bg-white"
+                      >
+                        <option value="">Select city…</option>
+                        {(item.cityOptions || []).map((c, i) => <option key={i} value={c}>{c}</option>)}
+                      </select>
+                      <button
+                        onClick={() => item.actions.handleFixAndCreate()}
+                        disabled={item.busy}
+                        className="w-full px-2 py-1.5 rounded-lg bg-green-600 text-white text-xs font-bold hover:bg-green-700 disabled:opacity-50"
+                      >{item.busy ? "Working…" : "Apply Fix & Create"}</button>
+                    </div>
+                  )}
+
+                  {/* Company Select (inline) */}
+                  {showCompanyControls && item.actions && (
+                    <div className="mt-2 space-y-1.5">
+                      <div className="text-[10px] font-semibold text-indigo-700 uppercase tracking-wide">Envoy Company</div>
+                      <select
+                        value={item.companyId || ""}
+                        onChange={e => item.actions.setCompanyId(e.target.value)}
+                        className="w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 bg-white"
+                      >
+                        <option value="">Select company…</option>
+                        <option value="unassigned">Unassigned</option>
+                        {(item.companies || []).map(c => (
+                          <option key={c.id} value={c.id}>{c.name} ({c.short})</option>
+                        ))}
+                      </select>
+
+                      {/* City input */}
+                      <input
+                        value={item.cityName || ""}
+                        onChange={e => item.actions.setCityName(e.target.value)}
+                        placeholder="City"
+                        list={`dlv-side-city-${item.queueId}`}
+                        className="w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5"
+                      />
+                      <datalist id={`dlv-side-city-${item.queueId}`}>
+                        {(item.cityOptions || []).map((c, i) => <option key={i} value={c} />)}
+                      </datalist>
+
+                      {/* Send to Partner */}
+                      {showSendBtn && (
+                        <button
+                          onClick={() => item.actions.handleSend()}
+                          disabled={item.busy}
+                          className="w-full px-2 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-1"
+                        >
+                          {item.busy ? "Sending…" : (item.partnerSendState?.ok === false ? "Resend to Partner" : "Send to Partner")}
+                        </button>
+                      )}
+                      {partnerOk && (
+                        <div className="text-[10px] text-green-700 font-semibold">✓ Sent to partner</div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Print Button (inline) */}
+                  {showPrintBtn && item.actions && (
+                    <div className="mt-2">
+                      <button
+                        onClick={() => item.actions.handlePrint()}
+                        disabled={item.busy}
+                        className="w-full px-2 py-2 rounded-lg bg-green-600 text-white text-xs font-bold hover:bg-green-700 disabled:opacity-50 flex items-center justify-center gap-1.5 shadow-sm"
+                      >
+                        {item.busy ? (
+                          <><span className="animate-spin">⏳</span> Sending to printer…</>
+                        ) : (
+                          <><span className="text-sm">🖨</span> Print Label</>
+                        )}
+                      </button>
+                      {item.printStatus === "success" && (
+                        <div className="text-[10px] text-green-700 mt-1 text-center font-semibold">✓ Sent to printer</div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Printed done state */}
+                  {isPrinted && !showPrintBtn && (
+                    <div className="mt-2 text-[10px] text-green-700 font-semibold flex items-center gap-1">
+                      <span>✓</span> Label printed
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Delivery Label Popup */}
       {showDeliveryPopup && order && (
@@ -2358,7 +2499,7 @@ export default function OrderLookup(){
           <DeliveryLabelPopup
             order={item.order}
             store={store}
-            open={item.open}
+            open={false}
             autoRunWhenHidden={true}
             onClose={() => closeQueueItem(item.queueId)}
             onQueued={(payload) => handleQueueItemQueued(item.queueId, payload)}

@@ -111,21 +111,28 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       setPartnerSendState({ ok: null, message: "", sentAt: null });
       return null;
     }
-    try {
-      const env = await dlvApi(`admin/envoy-notes/${encodeURIComponent(code)}`);
-      const items = Array.isArray(env?.items) ? env.items : [];
-      const item = items.find(x => Number(x?.orderId || x?.order_id) === oid) || null;
-      const next = {
-        ok: item?.sentOk === true ? true : (item?.sentOk === false ? false : null),
-        message: String(item?.sentMsg || "").trim(),
-        sentAt: item?.sentAt || null,
-      };
-      setPartnerSendState(next);
-      return next;
-    } catch {
-      setPartnerSendState({ ok: null, message: "", sentAt: null });
-      return null;
+    const delays = [0, 600, 1200, 2000, 3000];
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      if (attempt > 0) await sleep(delays[attempt]);
+      try {
+        const env = await dlvApi(`admin/envoy-notes/${encodeURIComponent(code)}`);
+        const items = Array.isArray(env?.items) ? env.items : [];
+        const item = items.find(x => Number(x?.orderId || x?.order_id) === oid) || null;
+        const next = {
+          ok: item?.sentOk === true ? true : (item?.sentOk === false ? false : null),
+          message: String(item?.sentMsg || "").trim(),
+          sentAt: item?.sentAt || null,
+        };
+        setPartnerSendState(next);
+        return next;
+      } catch (e) {
+        if (e?.status === 404 && attempt < delays.length - 1) continue;
+        setPartnerSendState({ ok: null, message: "", sentAt: null });
+        return null;
+      }
     }
+    setPartnerSendState({ ok: null, message: "", sentAt: null });
+    return null;
   }, []);
   const applyResolvedCompany = useCallback((companyName) => {
     const wanted = normalizeCompanyName(companyName);
@@ -216,14 +223,26 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     if (!companies.length || companyId || !envoyCode) return;
     let cancelled = false;
     (async () => {
-      try {
-        const env = await dlvApi(`admin/envoy-notes/${encodeURIComponent(envoyCode)}`);
+      const retryDelays = [0, 800, 1500, 2500, 4000];
+      for (let attempt = 0; attempt < retryDelays.length; attempt++) {
         if (cancelled) return;
-        const applied = applyResolvedCompany(env?.company || env?.companyShort || env?.partnerSlug);
-        if (!applied && !applyCompanyByOrderTags(order?.tags || [])) {
-          applyCompanyByCity(cityName || editFields.city || order?.shipping_city || "");
+        if (attempt > 0) await sleep(retryDelays[attempt]);
+        try {
+          const env = await dlvApi(`admin/envoy-notes/${encodeURIComponent(envoyCode)}`);
+          if (cancelled) return;
+          const applied = applyResolvedCompany(env?.company || env?.companyShort || env?.partnerSlug);
+          if (!applied && !applyCompanyByOrderTags(order?.tags || [])) {
+            applyCompanyByCity(cityName || editFields.city || order?.shipping_city || "");
+          }
+          return;
+        } catch (e) {
+          if (e?.status === 404 && attempt < retryDelays.length - 1) continue;
+          if (cancelled) return;
+          if (!applyCompanyByOrderTags(order?.tags || [])) {
+            applyCompanyByCity(cityName || editFields.city || order?.shipping_city || "");
+          }
         }
-      } catch {}
+      }
     })();
     return () => { cancelled = true; };
   }, [phase, companies, companyId, envoyCode, applyResolvedCompany, applyCompanyByOrderTags, applyCompanyByCity, cityName, editFields.city, order?.shipping_city, order?.tags]);
@@ -546,14 +565,22 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
 
       addLog("Assigning envoy note...");
       let env = null;
-      try {
-        env = await dlvApi(`ext/admin/envoy-notes/assign-order/${oid}`, { method: "POST" });
-      } catch {
-        try { await dlvApi(`ext/admin/merchant-notes/${note.id}/approve`, { method: "POST" }); } catch {}
-        try { await dlvApi(`admin/merchant-notes/${note.id}/receive`, { method: "POST", body: { order_ids: [oid] } }); } catch {}
-        for (let i = 0; i < 15; i++) {
-          await sleep(800);
-          try { env = await dlvApi(`ext/admin/envoy-notes/for-order/${oid}`); if (env?.code) break; env = null; } catch { env = null; }
+      // Retry assign-order up to 3 times (can 404 if propagation is delayed)
+      for (let assignAttempt = 0; assignAttempt < 3; assignAttempt++) {
+        try {
+          if (assignAttempt > 0) { addLog(`Retrying assign (attempt ${assignAttempt + 1})...`); await sleep(1000 * assignAttempt); }
+          env = await dlvApi(`ext/admin/envoy-notes/assign-order/${oid}`, { method: "POST" });
+          break;
+        } catch (assignErr) {
+          if (assignErr?.status === 404 && assignAttempt < 2) continue;
+          if (assignAttempt >= 2) {
+            try { await dlvApi(`ext/admin/merchant-notes/${note.id}/approve`, { method: "POST" }); } catch {}
+            try { await dlvApi(`admin/merchant-notes/${note.id}/receive`, { method: "POST", body: { order_ids: [oid] } }); } catch {}
+            for (let i = 0; i < 20; i++) {
+              await sleep(1000);
+              try { env = await dlvApi(`ext/admin/envoy-notes/for-order/${oid}`); if (env?.code) break; env = null; } catch { env = null; }
+            }
+          }
         }
       }
 
@@ -855,8 +882,26 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       companyName: selectedCompany?.name || orderTagMatch?.company?.name || "",
       deliveryTag: selectedCompanyOrderTag || "",
       error: error || "",
+      // Extended state for side panel
+      phase,
+      busy,
+      companies,
+      companyId,
+      cityName,
+      cityOptions: filteredCities,
+      partnerSendState,
+      printStatus,
+      // Action methods for side panel
+      actions: {
+        setCompanyId,
+        setCityName,
+        handleSend,
+        handlePrint: () => handlePrint(),
+        handleFixAndCreate,
+        handleRetry,
+      },
     });
-  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error]);
+  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, companies, companyId, cityName, filteredCities, partnerSendState, printStatus]);
   const companyStepDone = partnerSendState.ok === true;
   const companyStepActive = phase === "company_select" || ((phase === "ready_print" || phase === "done") && !companyStepDone);
   const companyStepCls = companyStepDone
