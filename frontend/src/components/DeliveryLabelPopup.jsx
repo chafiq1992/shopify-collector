@@ -950,11 +950,12 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     }
     return orderTagMatch?.tag || "";
   }, [selectedCompany, order?.tags, orderTagMatch]);
-  const companyCities = selectedCompany ? getCompanyCities(selectedCompany) : [];
-  const allCityOptions = companyCities.length ? companyCities : cities;
-  const filteredCities = cityName
-    ? allCityOptions.filter(c => String(c).toLowerCase().includes(cityName.toLowerCase())).slice(0, 15)
-    : allCityOptions.slice(0, 15);
+  const companyCities = useMemo(() => selectedCompany ? getCompanyCities(selectedCompany) : [], [selectedCompany]);
+  const allCityOptions = useMemo(() => companyCities.length ? companyCities : cities, [companyCities, cities]);
+  const filteredCities = useMemo(() => {
+    if (!cityName) return allCityOptions.slice(0, 15);
+    return allCityOptions.filter(c => String(c).toLowerCase().includes(cityName.toLowerCase())).slice(0, 15);
+  }, [allCityOptions, cityName]);
   const queueState = useMemo(() => {
     if (printStatus === "success") return { statusKey: "printed", statusLabel: "Printed" };
     if (phase === "fix_errors" || phase === "manual" || phase === "error") {
@@ -968,8 +969,20 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     }
     return { statusKey: "preparing", statusLabel: "Preparing" };
   }, [phase, printStatus]);
+
+  // Use a ref to track the last emitted key values and avoid infinite loops
+  const lastEmitRef = useRef("");
   useEffect(() => {
     if (typeof onStateChange !== "function") return;
+    // Build a lightweight fingerprint of the values that matter for the parent
+    const fingerprint = [
+      order?.id, orderNum, queueState.statusKey, deliveryOrderId, envoyCode,
+      selectedCompany?.name, selectedCompanyOrderTag, error, phase, busy,
+      companyId, cityName, partnerSendState?.ok, partnerSendState?.message, printStatus,
+    ].join("|");
+    if (fingerprint === lastEmitRef.current) return;
+    lastEmitRef.current = fingerprint;
+
     onStateChange({
       orderId: String(order?.id || ""),
       orderNumber: orderNum,
@@ -980,7 +993,6 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       companyName: selectedCompany?.name || orderTagMatch?.company?.name || "",
       deliveryTag: selectedCompanyOrderTag || "",
       error: error || "",
-      // Extended state for side panel
       phase,
       busy,
       companies,
@@ -991,7 +1003,6 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       globalCities: cities,
       partnerSendState,
       printStatus,
-      // Action methods for side panel
       actions: {
         setCompanyId,
         setCityName,
