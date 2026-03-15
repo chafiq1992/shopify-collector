@@ -133,8 +133,8 @@ export default function VariantOrders(){
     try {
       const baseParams = {
         limit: 250,
-        // Only: open + unfulfilled + paid or pending
-        base_query: "status:open fulfillment_status:unfulfilled",
+        // Only: open + unfulfilled + exclude verification-tagged orders
+        base_query: "status:open fulfillment_status:unfulfilled -tag:pc",
         financial_status: "paid_or_pending",
         cod_date: "",
         cod_dates: codDatesCSV || "",
@@ -161,7 +161,9 @@ export default function VariantOrders(){
         const fs = String(o?.financial_status || "").toLowerCase();
         const okPaid = fs.includes("paid");
         const okPending = fs.includes("pending") || fs.includes("authorized") || fs.includes("partially");
-        return okPaid || okPending;
+        const tags = Array.isArray(o?.tags) ? o.tags : [];
+        const hasPcTag = tags.some(t => String(t || "").trim().toLowerCase() === "pc");
+        return (okPaid || okPending) && !hasPcTag;
       });
       setOrders(out);
     } catch (e){
@@ -332,7 +334,7 @@ export default function VariantOrders(){
         )}
 
         <div className="mt-3 text-xs text-gray-600">
-          Showing <span className="font-semibold">products</span> from orders that are <span className="font-semibold">open</span>, <span className="font-semibold">unfulfilled</span>, and <span className="font-semibold">paid or pending</span>, filtered by tags: <span className="font-semibold">{(collectPrefix || "cod").trim()} DD/MM/YY</span> in the selected period.
+          Showing <span className="font-semibold">products</span> from orders that are <span className="font-semibold">open</span>, <span className="font-semibold">unfulfilled</span>, <span className="font-semibold">paid or pending</span>, and <span className="font-semibold">not tagged pc</span>, filtered by tags: <span className="font-semibold">{(collectPrefix || "cod").trim()} DD/MM/YY</span> in the selected period.
         </div>
 
         <div className="mt-4 grid grid-cols-1 gap-3">
