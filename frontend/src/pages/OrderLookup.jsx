@@ -82,6 +82,73 @@ const API = {
   }
 };
 
+/* Custom searchable city dropdown — only shows cities from the list, no browser autocomplete */
+function CityDropdown({ value, onChange, options, placeholder = "City", className = "", inputClassName = "" }) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  const wrapRef = useRef(null);
+  const inputRef = useRef(null);
+
+  // Close on outside click
+  useEffect(() => {
+    function handleClick(e) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    }
+    if (open) document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  // Reset filter when options change
+  useEffect(() => { setFilter(""); }, [options]);
+
+  const filtered = useMemo(() => {
+    const q = (filter || "").trim().toLowerCase();
+    if (!q) return options || [];
+    return (options || []).filter(c => String(c).toLowerCase().includes(q));
+  }, [options, filter]);
+
+  return (
+    <div ref={wrapRef} className={`relative ${className}`}>
+      <input
+        ref={inputRef}
+        type="text"
+        autoComplete="off"
+        aria-autocomplete="none"
+        value={open ? filter : (value || "")}
+        placeholder={placeholder}
+        onFocus={() => { setOpen(true); setFilter(value || ""); }}
+        onChange={e => { setFilter(e.target.value); if (!open) setOpen(true); }}
+        className={inputClassName || "w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5"}
+      />
+      {open && (
+        <div className="absolute left-0 right-0 top-full mt-0.5 z-50 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+          {filtered.length === 0 ? (
+            <div className="px-3 py-2 text-xs text-gray-400 italic">No matching cities</div>
+          ) : filtered.map((city, i) => (
+            <button
+              key={i}
+              type="button"
+              onMouseDown={e => e.preventDefault()}
+              onClick={() => {
+                onChange(city);
+                setFilter("");
+                setOpen(false);
+              }}
+              className={`w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50 hover:text-blue-800 ${
+                String(city).toLowerCase() === String(value || "").toLowerCase()
+                  ? "bg-blue-50 text-blue-700 font-semibold"
+                  : "text-gray-700"
+              }`}
+            >
+              {city}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const DELIVERY_COMPANIES = [
   { name: '12livery', bg: 'bg-red-500',     border: 'border-red-600',     text: 'text-white',    hover: 'hover:bg-red-600' },
   { name: 'ibex',     bg: 'bg-blue-600',    border: 'border-blue-700',    text: 'text-white',    hover: 'hover:bg-blue-700' },
@@ -2398,22 +2465,25 @@ export default function OrderLookup(){
 
                   {/* City fix (inline for city errors) */}
                   {showCityError && item.actions && (
-                    <div className="mt-2 space-y-1.5">
-                      <div className="text-[10px] font-semibold text-red-700 uppercase tracking-wide">Fix City</div>
-                      <select
+                    <div className="mt-2 space-y-1.5 bg-red-50/50 p-2 rounded-lg border border-red-100">
+                      <div className="flex items-center justify-between">
+                        <div className="text-[10px] font-semibold text-red-700 uppercase tracking-wide">Fix City</div>
+                        {(item.deliveryTag || item.companyName) && (
+                          <div className="text-[9px] font-medium text-red-600 bg-red-100 px-1.5 rounded border border-red-200">
+                            Tag: {item.deliveryTag || item.companyName}
+                          </div>
+                        )}
+                      </div>
+                      <CityDropdown
                         value={item.cityName || ""}
-                        onChange={e => {
-                          const v = e.target.value;
+                        onChange={v => {
                           if (item.actions.setEditCity) item.actions.setEditCity(v);
                           else item.actions.setCityName(v);
                         }}
-                        className="w-full text-xs border border-red-300 rounded-lg px-2 py-1.5 bg-white"
-                      >
-                        <option value="">Select city…</option>
-                        {(item.globalCities || item.allCityOptions || item.cityOptions || []).map((c, i) => (
-                          <option key={i} value={c}>{c}</option>
-                        ))}
-                      </select>
+                        options={item.globalCities || item.allCityOptions || item.cityOptions || []}
+                        placeholder="Select city…"
+                        inputClassName="w-full text-xs border border-red-300 rounded-lg px-2 py-1.5 bg-white shadow-sm"
+                      />
                       <button
                         onClick={() => item.actions.handleFixAndCreate()}
                         disabled={item.busy}
@@ -2439,16 +2509,23 @@ export default function OrderLookup(){
                       </select>
 
                       {/* City select */}
-                      <select
-                        value={item.cityName || ""}
-                        onChange={e => item.actions.setCityName(e.target.value)}
-                        className="w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 bg-white"
-                      >
-                        <option value="">Select city…</option>
-                        {(item.allCityOptions || item.cityOptions || []).map((c, i) => (
-                          <option key={i} value={c}>{c}</option>
-                        ))}
-                      </select>
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <div className="text-[10px] font-semibold text-indigo-700 uppercase tracking-wide">Destination City</div>
+                          {(item.companyName || item.deliveryTag) && (
+                            <div className="text-[9px] font-medium text-indigo-700 bg-indigo-100 px-1.5 rounded border border-indigo-200">
+                              For: {item.companyName || item.deliveryTag}
+                            </div>
+                          )}
+                        </div>
+                        <CityDropdown
+                          value={item.cityName || ""}
+                          onChange={v => item.actions.setCityName(v)}
+                          options={item.allCityOptions || item.cityOptions || []}
+                          placeholder="Select city…"
+                          inputClassName="w-full text-xs border border-gray-300 rounded-lg px-2 py-1.5 bg-white shadow-sm"
+                        />
+                      </div>
 
                       {/* Send to Partner */}
                       {showSendBtn && (
