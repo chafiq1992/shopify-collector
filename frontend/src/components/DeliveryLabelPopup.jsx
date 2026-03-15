@@ -957,19 +957,21 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       cityName,
       cityOptions: filteredCities,
       allCityOptions,
+      globalCities: cities,
       partnerSendState,
       printStatus,
       // Action methods for side panel
       actions: {
         setCompanyId,
         setCityName,
+        setEditCity: (v) => { setField("city", v); setCityName(v); },
         handleSend,
         handlePrint: () => handlePrint(),
         handleFixAndCreate,
         handleRetry,
       },
     });
-  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, companies, companyId, cityName, filteredCities, allCityOptions, partnerSendState, printStatus]);
+  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, companies, companyId, cityName, filteredCities, allCityOptions, cities, partnerSendState, printStatus]);
   const companyStepDone = partnerSendState.ok === true;
   const companyStepActive = phase === "company_select" || ((phase === "ready_print" || phase === "done") && !companyStepDone);
   const companyStepCls = companyStepDone
@@ -1044,7 +1046,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
               <CityDropdown
                 value={editFields.city}
                 onChange={v => { setField("city", v); setCityName(v); }}
-                options={allCityOptions}
+                options={cities}
                 placeholder="City"
                 inputClassName={`w-full text-sm border rounded-lg px-2 py-1.5 ${queueRow?.hasError && queueRow?.errorType === "city" ? "border-red-400 bg-red-50" : "border-gray-300"}`}
               />

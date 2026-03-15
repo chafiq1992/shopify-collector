@@ -388,6 +388,7 @@ export default function OrderLookup(){
             cityName: nextState?.cityName || item.cityName || "",
             cityOptions: nextState?.cityOptions || item.cityOptions || [],
             allCityOptions: nextState?.allCityOptions || item.allCityOptions || [],
+            globalCities: nextState?.globalCities || item.globalCities || [],
             partnerSendState: nextState?.partnerSendState || item.partnerSendState || {},
             printStatus: nextState?.printStatus || item.printStatus || null,
             actions: nextState?.actions || item.actions || null,
@@ -2391,11 +2392,17 @@ export default function OrderLookup(){
                       <div className="text-[10px] font-semibold text-red-700 uppercase tracking-wide">Fix City</div>
                       <select
                         value={item.cityName || ""}
-                        onChange={e => item.actions.setCityName(e.target.value)}
+                        onChange={e => {
+                          const v = e.target.value;
+                          if (item.actions.setEditCity) item.actions.setEditCity(v);
+                          else item.actions.setCityName(v);
+                        }}
                         className="w-full text-xs border border-red-300 rounded-lg px-2 py-1.5 bg-white"
                       >
                         <option value="">Select city…</option>
-                        {(item.cityOptions || []).map((c, i) => <option key={i} value={c}>{c}</option>)}
+                        {(item.globalCities || item.allCityOptions || item.cityOptions || []).map((c, i) => (
+                          <option key={i} value={c}>{c}</option>
+                        ))}
                       </select>
                       <button
                         onClick={() => item.actions.handleFixAndCreate()}
