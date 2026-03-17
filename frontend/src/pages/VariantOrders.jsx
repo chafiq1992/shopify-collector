@@ -287,27 +287,34 @@ export default function VariantOrders(){
     const groups = new Map(); // codLabel -> { label, sortKey, orders[] }
     for (const o of (orders || [])) {
       const tags = Array.isArray(o?.tags) ? o.tags : [];
-      let found = null;
+      // Collect ALL matching COD date tags so the order appears in every group
+      const matchedDates = [];
       for (const t of tags) {
         const parsed = parseCodDate(t);
-        if (parsed) { found = parsed; break; }
+        if (parsed) matchedDates.push(parsed);
       }
-      if (!found) continue; // skip orders without a matching COD date tag
-      if (!groups.has(found.label)) {
-        groups.set(found.label, { label: found.label, sortKey: found.sortKey, orders: [] });
+      if (matchedDates.length === 0) continue; // skip orders without any COD date tag
+      for (const found of matchedDates) {
+        if (!groups.has(found.label)) {
+          groups.set(found.label, { label: found.label, sortKey: found.sortKey, orders: [] });
+        }
+        // Avoid duplicate if the same COD tag appears twice
+        const grp = groups.get(found.label);
+        if (!grp.orders.some(x => x.id === o.id)) {
+          grp.orders.push(o);
+        }
       }
-      groups.get(found.label).orders.push(o);
     }
 
     const out = Array.from(groups.values());
-    // Sort groups by date ascending (oldest first)
-    out.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
-    // Within each group sort: more items first, then higher price first
+    // Sort groups by date ascending (oldest first) — sortKey is YYYY-MM-DD so string compare works
+    out.sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0));
+    // Within each group sort: bigger total value first, then more items as tiebreaker
     for (const g of out) {
       g.orders.sort((a, b) => {
-        const itemDiff = orderItemCount(b) - orderItemCount(a);
-        if (itemDiff !== 0) return itemDiff;
-        return (Number(b?.total_price || 0)) - (Number(a?.total_price || 0));
+        const priceDiff = (Number(b?.total_price || 0)) - (Number(a?.total_price || 0));
+        if (priceDiff !== 0) return priceDiff;
+        return orderItemCount(b) - orderItemCount(a);
       });
     }
     return out;
@@ -600,7 +607,7 @@ export default function VariantOrders(){
         {viewMode === "ordersByCod" && (
           <>
             <div className="mt-3 text-xs text-gray-600">
-              Showing <span className="font-semibold">orders</span> grouped by <span className="font-semibold">COD date</span> (oldest first). Within each date, orders with <span className="font-semibold">more items / higher value</span> appear first.
+              Showing <span className="font-semibold">orders</span> grouped by <span className="font-semibold">COD date</span> (oldest first). Within each date, orders with <span className="font-semibold">bigger value</span> appear first.
             </div>
 
             <div className="mt-4 grid grid-cols-1 gap-4">
