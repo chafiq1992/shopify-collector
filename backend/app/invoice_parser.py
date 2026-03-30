@@ -61,7 +61,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 # Chunking
 # ---------------------------------------------------------------------------
 
-PAGES_PER_CHUNK = 4  # ~20-30 rows per page × 4 pages = ~100 rows per chunk (fast LLM processing, avoids timeouts)
+PAGES_PER_CHUNK = 2  # ~10-20 rows per page × 2 pages = ~20-40 rows per chunk (reliable LLM extraction)
 
 
 def chunk_pages(pages: List[Tuple[int, str]], pages_per_chunk: int = PAGES_PER_CHUNK) -> List[str]:
@@ -85,9 +85,20 @@ You will receive raw text extracted from part of a PDF invoice (possibly just a 
 2. Extract invoice-level metadata IF visible in this chunk (invoice number, date, totals). Use null if not visible.
 3. Extract EVERY shipment row from the table in this chunk.
 
+CRITICAL — DUAL-CODE ROWS (YFD invoices):
+Some delivery companies (notably YFD) show TWO codes per shipment row:
+  - A delivery company tracking code like "YFD-10032026-7577862" (this is YFD's internal tracking code)
+  - A merchant/Shopify code like "7-133416" (this is the merchant's code — the number after the dash is the Shopify order number)
+These two codes belong to the SAME shipment row — do NOT create two separate rows for them.
+When both codes are present:
+  - Use the "7-XXXXX" code as the "sendCode" (e.g. "7-133416")
+  - Extract the order number from the "7-XXXXX" code (e.g. "133416")
+  - Store the YFD tracking code in the "yfdCode" field (e.g. "YFD-10032026-7577862")
+
 IMPORTANT FIELD DEFINITIONS:
-- "sendCode": The shipment tracking code (e.g. "7-127130", "7-58537_RMB"). Usually in a column called "Code d'envoi".
-- "orderNumber": The numeric part after the dash in the sendCode (e.g. "127130" from "7-127130"). This is the Shopify order number.
+- "sendCode": The merchant/Shopify tracking code (e.g. "7-127130", "7-58537_RMB"). For YFD invoices, this is the "7-XXXXX" code, NOT the "YFD-DDMMYYYY-NNNNNNN" code.
+- "yfdCode": (YFD invoices only) The YFD tracking code like "YFD-10032026-7577862". Set to null for non-YFD invoices.
+- "orderNumber": The numeric part after the dash in the sendCode (e.g. "127130" from "7-127130"). This is the Shopify order number. NEVER extract this from a YFD tracking code.
 - "status": Delivery status. Normalize to exactly "Livré" (delivered) or "Refusé" (refused/returned). Nothing else.
 - "city": The delivery city (e.g. "CASABLANCA", "SIDI BENNOUR").
 - "phone": Customer phone number if present (e.g. "0612345678").
@@ -104,6 +115,7 @@ RULES:
 - Extract ALL rows visible in this text chunk. Do not skip any.
 - Do NOT include summary/total rows from the bottom of tables.
 - Be thorough — every row with a sendCode pattern like "7-XXXXX" must be extracted.
+- NEVER create two separate rows for what is actually one shipment with two codes (YFD code + merchant code).
 
 Return ONLY valid JSON, no markdown fences, no explanation."""
 
@@ -119,8 +131,9 @@ Return JSON in exactly this format:
   "totalFees": <total fees amount as number or null>,
   "rows": [
     {{
-      "sendCode": "<tracking code>",
-      "orderNumber": "<order number extracted from sendCode>",
+      "sendCode": "<merchant tracking code, e.g. 7-133416>",
+      "yfdCode": "<YFD tracking code if present, e.g. YFD-10032026-7577862, or null>",
+      "orderNumber": "<order number from sendCode, e.g. 133416>",
       "status": "<Livré or Refusé>",
       "city": "<city name or null>",
       "phone": "<phone or null>",
@@ -267,7 +280,12 @@ async def parse_invoice_from_pages(
     results = await asyncio.gather(*[_process(i, c) for i, c in enumerate(chunks)])
 
     # Merge results
-    return _merge_chunk_results(results)
+    merged = _merge_chunk_results(results)
+
+    # Post-processing: catch any 7-XXXXX codes the LLM missed
+    _backfill_missing_codes(merged, pages)
+
+    return merged
 
 
 async def _parse_chunked(pdf_text: str, *, api_key: str) -> Dict[str, Any]:
@@ -355,6 +373,59 @@ def _merge_chunk_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Backfill: catch merchant codes the LLM missed
+# ---------------------------------------------------------------------------
+
+_MERCHANT_CODE_RE = re.compile(r'\b(7-\d{4,6})\b')
+
+def _backfill_missing_codes(
+    merged: Dict[str, Any],
+    pages: List[Tuple[int, str]],
+) -> None:
+    """
+    Scan raw page text for 7-XXXXX merchant codes that the LLM missed.
+    Adds stub rows for any codes not already in the merged result.
+    Modifies `merged` in place.
+    """
+    # Collect codes already extracted by the LLM
+    existing_codes = set()
+    for row in (merged.get("rows") or []):
+        sc = str(row.get("sendCode") or "").strip()
+        if sc:
+            existing_codes.add(sc)
+
+    # Scan all page text for merchant codes
+    all_text = "\n".join(text for _, text in pages)
+    found_in_pdf = set(_MERCHANT_CODE_RE.findall(all_text))
+
+    missing = found_in_pdf - existing_codes
+    if not missing:
+        return
+
+    logger.warning("LLM missed %d merchant codes — backfilling: %s", len(missing), sorted(missing))
+
+    for code in sorted(missing):
+        # Extract order number from the code
+        parts = code.split("-", 1)
+        order_number = parts[1] if len(parts) == 2 else ""
+
+        merged["rows"].append({
+            "sendCode": code,
+            "yfdCode": None,
+            "orderNumber": order_number,
+            "status": "",
+            "city": None,
+            "phone": None,
+            "crbt": None,
+            "fees": None,
+            "total": None,
+            "pickupDate": None,
+            "deliveryDate": None,
+            "_backfilled": True,  # marker so frontend can flag these
+        })
+
+
+# ---------------------------------------------------------------------------
 # Normalization
 # ---------------------------------------------------------------------------
 
@@ -373,15 +444,36 @@ def _normalize_llm_response(data: Dict[str, Any]) -> Dict[str, Any]:
     if data.get("_errors"):
         result["_errors"] = data["_errors"]
 
+    _YFD_PATTERN = re.compile(r'^YFD-\d{8}-\d+$', re.IGNORECASE)
+
     for row in (data.get("rows") or []):
         if not isinstance(row, dict):
             continue
         send_code = str(row.get("sendCode") or "").strip()
+        yfd_code = str(row.get("yfdCode") or "").strip() or None
+
+        # Defensive: if LLM put the YFD tracking code in sendCode, fix it
+        if _YFD_PATTERN.match(send_code):
+            # sendCode is actually a YFD code — swap if we have a merchant code elsewhere
+            if yfd_code and not _YFD_PATTERN.match(yfd_code):
+                # yfdCode has the merchant code — swap them
+                send_code, yfd_code = yfd_code, send_code
+            elif not yfd_code:
+                # Move YFD code to yfdCode, sendCode becomes empty (will be skipped or use orderNumber)
+                yfd_code = send_code
+                send_code = ""
+
         if not send_code:
             continue
 
         # Extract order number from sendCode if LLM didn't provide it
         order_number = str(row.get("orderNumber") or "").strip()
+
+        # Safety: if orderNumber looks like it came from a YFD code (7+ digits), clear it
+        # Shopify order numbers are typically 5-6 digits
+        if order_number and yfd_code and order_number in yfd_code:
+            order_number = ""  # It was extracted from the YFD code, not the merchant code
+
         if not order_number and "-" in send_code:
             parts = send_code.split("-", 1)
             if len(parts) == 2:
@@ -397,6 +489,7 @@ def _normalize_llm_response(data: Dict[str, Any]) -> Dict[str, Any]:
 
         result["rows"].append({
             "sendCode": send_code,
+            "yfdCode": yfd_code,
             "orderNumber": order_number,
             "status": status,
             "city": str(row.get("city") or "").strip() or None,
