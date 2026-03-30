@@ -2842,7 +2842,7 @@ async def get_fulfillment_orders(order_gid: str, store: Optional[str] = Query(No
 
 
 # ---------- Invoice PDF parsing (LLM-based) ----------
-from .invoice_parser import extract_text_from_pdf, parse_invoice_with_llm
+from .invoice_parser import extract_pages_text, parse_invoice_from_pages
 
 @app.post("/api/invoices/parse-pdf", response_model=Dict[str, Any])
 async def invoice_parse_pdf(
@@ -2852,6 +2852,7 @@ async def invoice_parse_pdf(
     """
     Upload one or more delivery company invoice PDFs.
     Each PDF is parsed using LLM (GPT-4o-mini) to extract structured shipment data.
+    Large PDFs are chunked by pages and processed in parallel.
     Then all extracted order numbers are looked up in Shopify.
     Returns combined parse + lookup results.
     """
@@ -2867,20 +2868,20 @@ async def invoice_parse_pdf(
                 docs.append({"fileName": f.filename, "error": "Empty file", "rows": []})
                 continue
 
-            # 1) Extract text from PDF
+            # 1) Extract text from each page
             try:
-                pdf_text = extract_text_from_pdf(raw_bytes)
+                pages = extract_pages_text(raw_bytes)
             except Exception as e:
                 docs.append({"fileName": f.filename, "error": f"PDF extraction failed: {e}", "rows": []})
                 continue
 
-            if not pdf_text or not pdf_text.strip():
+            if not pages:
                 docs.append({"fileName": f.filename, "error": "No text found in PDF", "rows": []})
                 continue
 
-            # 2) Send to LLM for structured extraction
+            # 2) Send to LLM for structured extraction (chunked + parallel for large PDFs)
             try:
-                parsed = await parse_invoice_with_llm(pdf_text)
+                parsed = await parse_invoice_from_pages(pages)
             except Exception as e:
                 docs.append({"fileName": f.filename, "error": f"LLM parsing failed: {e}", "rows": []})
                 continue

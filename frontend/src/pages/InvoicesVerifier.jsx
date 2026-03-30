@@ -69,7 +69,7 @@ export default function InvoicesVerifier() {
 
       // Long timeout — LLM parsing can take 30-60s for large invoices
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 100_000);
+      const timeout = setTimeout(() => controller.abort(), 180_000);
 
       const res = await authFetch("/api/invoices/parse-pdf", {
         method: "POST",

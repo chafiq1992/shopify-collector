@@ -1,16 +1,23 @@
 """
 Invoice PDF parser using LLM (GPT-4o-mini) for structured data extraction.
 
+Handles large invoices (800+ rows) by chunking the PDF text by pages
+and processing chunks in parallel with separate LLM calls.
+
 Flow:
-  1. Extract raw text from PDF using PyMuPDF (fitz)
-  2. Send text to GPT-4o-mini with a structured extraction prompt
-  3. Return clean JSON with invoice header + shipment rows
+  1. Extract raw text from PDF using PyMuPDF (fitz), page by page
+  2. Group pages into chunks (~8 pages each)
+  3. Send each chunk to GPT-4o-mini in parallel
+  4. Merge all extracted rows + deduplicate
+  5. Return clean JSON with invoice header + all shipment rows
 """
 
 import os
+import re
 import json
 import logging
-from typing import Any, Dict, List, Optional
+import asyncio
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -18,40 +25,65 @@ logger = logging.getLogger(__name__)
 # PDF text extraction (PyMuPDF / fitz)
 # ---------------------------------------------------------------------------
 
-def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Extract text from a PDF buffer, preserving spatial layout per page."""
+def extract_pages_text(file_bytes: bytes) -> List[Tuple[int, str]]:
+    """
+    Extract text from each page of a PDF.
+    Returns list of (page_number, page_text) tuples.
+    """
     try:
         import fitz  # PyMuPDF
     except ImportError:
         raise RuntimeError("PyMuPDF is not installed. Add 'PyMuPDF' to requirements.txt.")
 
     doc = fitz.open(stream=file_bytes, filetype="pdf")
-    pages_text: List[str] = []
+    pages: List[Tuple[int, str]] = []
     for page_num in range(doc.page_count):
         page = doc.load_page(page_num)
-        # Use "text" extraction with sort=True to preserve reading order
         text = page.get_text("text", sort=True)
         if text and text.strip():
-            # Compress excessive whitespace to reduce token count
-            import re
+            # Compress whitespace to reduce token count
             lines = [l.strip() for l in text.strip().splitlines()]
-            lines = [l for l in lines if l]  # remove blank lines
+            lines = [l for l in lines if l]
             compressed = "\n".join(lines)
-            pages_text.append(f"--- PAGE {page_num + 1} ---\n{compressed}")
+            pages.append((page_num + 1, compressed))
     doc.close()
-    return "\n\n".join(pages_text)
+    return pages
+
+
+def extract_text_from_pdf(file_bytes: bytes) -> str:
+    """Extract all text from a PDF as a single string (legacy compat)."""
+    pages = extract_pages_text(file_bytes)
+    parts = [f"--- PAGE {pn} ---\n{text}" for pn, text in pages]
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
-# LLM-based invoice parsing
+# Chunking
+# ---------------------------------------------------------------------------
+
+PAGES_PER_CHUNK = 8  # ~20-30 rows per page × 8 pages = ~200 rows per chunk (well within output token limit)
+
+
+def chunk_pages(pages: List[Tuple[int, str]], pages_per_chunk: int = PAGES_PER_CHUNK) -> List[str]:
+    """Group pages into text chunks for parallel LLM processing."""
+    chunks: List[str] = []
+    for i in range(0, len(pages), pages_per_chunk):
+        batch = pages[i:i + pages_per_chunk]
+        parts = [f"--- PAGE {pn} ---\n{text}" for pn, text in batch]
+        chunks.append("\n\n".join(parts))
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# LLM prompts
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """You are an expert at extracting structured data from delivery company invoices (Morocco).
 
-You will receive raw text extracted from a PDF invoice. Your job is to:
+You will receive raw text extracted from part of a PDF invoice (possibly just a few pages). Your job is to:
 1. Auto-detect which delivery company issued the invoice (e.g. Lionex, 12Livery, Metalivraison, IBEX, Pal Express, YFD, Livré24, Oscario, or other).
-2. Extract invoice-level metadata (invoice number, date, totals).
-3. Extract every shipment row from the table.
+2. Extract invoice-level metadata IF visible in this chunk (invoice number, date, totals). Use null if not visible.
+3. Extract EVERY shipment row from the table in this chunk.
 
 IMPORTANT FIELD DEFINITIONS:
 - "sendCode": The shipment tracking code (e.g. "7-127130", "7-58537_RMB"). Usually in a column called "Code d'envoi".
@@ -68,17 +100,18 @@ IMPORTANT FIELD DEFINITIONS:
 RULES:
 - For "Refusé" (refused) shipments, crbt should be 0 (no cash was collected), but still extract the fees.
 - All monetary amounts should be plain numbers (no currency symbols).
-- If a field is not available in the PDF, use null.
-- Extract ALL rows from ALL pages of the invoice. Do not skip any.
-- The invoice may contain summary/total rows at the bottom - do NOT include those as shipment rows.
+- If a field is not available, use null.
+- Extract ALL rows visible in this text chunk. Do not skip any.
+- Do NOT include summary/total rows from the bottom of tables.
+- Be thorough — every row with a sendCode pattern like "7-XXXXX" must be extracted.
 
 Return ONLY valid JSON, no markdown fences, no explanation."""
 
-_USER_PROMPT_TEMPLATE = """Extract structured data from this delivery company invoice.
+_USER_PROMPT_TEMPLATE = """Extract structured data from this chunk of a delivery company invoice.
 
 Return JSON in exactly this format:
 {{
-  "company": "<auto-detected company name>",
+  "company": "<auto-detected company name or null if not visible>",
   "invoiceNumber": "<invoice number or null>",
   "invoiceDate": "<invoice date as string or null>",
   "totalBrut": <total brut/gross amount as number or null>,
@@ -100,32 +133,27 @@ Return JSON in exactly this format:
   ]
 }}
 
---- INVOICE TEXT START ---
+--- INVOICE TEXT (CHUNK) START ---
 {pdf_text}
---- INVOICE TEXT END ---"""
+--- INVOICE TEXT (CHUNK) END ---"""
 
 
-async def parse_invoice_with_llm(pdf_text: str, *, api_key: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Send extracted PDF text to GPT-4o-mini and get structured invoice data back.
-    """
-    try:
-        from openai import AsyncOpenAI
-    except ImportError:
-        raise RuntimeError("openai package is not installed. Add 'openai>=1.30.0' to requirements.txt.")
+# ---------------------------------------------------------------------------
+# LLM call (single chunk)
+# ---------------------------------------------------------------------------
 
-    key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
-    if not key:
-        raise ValueError("OPENAI_API_KEY is not set. Configure it in your environment.")
+async def _call_llm_for_chunk(
+    chunk_text: str,
+    chunk_index: int,
+    total_chunks: int,
+    *,
+    api_key: str,
+) -> Dict[str, Any]:
+    """Process a single text chunk with GPT-4o-mini."""
+    from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(api_key=key)
-
-    # Truncate very long PDFs to avoid token limits (GPT-4o-mini has 128k context)
-    # A typical invoice is 2-10 pages, well under the limit.
-    max_chars = 120_000
-    text = pdf_text[:max_chars] if len(pdf_text) > max_chars else pdf_text
-
-    user_msg = _USER_PROMPT_TEMPLATE.format(pdf_text=text)
+    client = AsyncOpenAI(api_key=api_key)
+    user_msg = _USER_PROMPT_TEMPLATE.format(pdf_text=chunk_text)
 
     try:
         response = await client.chat.completions.create(
@@ -139,21 +167,167 @@ async def parse_invoice_with_llm(pdf_text: str, *, api_key: Optional[str] = None
             timeout=90,
         )
     except Exception as e:
-        logger.error("OpenAI API call failed: %s", e)
-        raise RuntimeError(f"LLM extraction failed: {e}")
+        logger.error("OpenAI API call failed for chunk %d/%d: %s", chunk_index + 1, total_chunks, e)
+        return {"rows": [], "error": f"LLM failed on chunk {chunk_index + 1}: {e}"}
 
     raw = (response.choices[0].message.content or "").strip()
 
-    # Parse the JSON response
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        logger.error("LLM returned invalid JSON: %s\nRaw: %s", e, raw[:500])
-        raise RuntimeError(f"LLM returned invalid JSON: {e}")
+        logger.error("LLM returned invalid JSON for chunk %d: %s", chunk_index + 1, e)
+        return {"rows": [], "error": f"Invalid JSON from chunk {chunk_index + 1}"}
 
-    # Validate and normalize the response
-    return _normalize_llm_response(data)
+    return data
 
+
+# ---------------------------------------------------------------------------
+# Main parser (chunked + parallel)
+# ---------------------------------------------------------------------------
+
+async def parse_invoice_with_llm(pdf_text: str, *, api_key: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Parse invoice text using LLM. For small invoices, uses a single call.
+    For large invoices, chunks by pages and processes in parallel.
+    """
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        raise RuntimeError("openai package is not installed. Add 'openai>=1.30.0' to requirements.txt.")
+
+    key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
+    if not key:
+        raise ValueError("OPENAI_API_KEY is not set. Configure it in your environment.")
+
+    # For legacy calls with pre-joined text, just use single-chunk
+    return await _parse_chunked(pdf_text, api_key=key)
+
+
+async def parse_invoice_from_pages(
+    pages: List[Tuple[int, str]],
+    *,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Parse invoice from page-level text. Chunks pages and processes in parallel.
+    This is the preferred entry point for large PDFs.
+    """
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        raise RuntimeError("openai package is not installed. Add 'openai>=1.30.0' to requirements.txt.")
+
+    key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
+    if not key:
+        raise ValueError("OPENAI_API_KEY is not set. Configure it in your environment.")
+
+    chunks = chunk_pages(pages, PAGES_PER_CHUNK)
+    if not chunks:
+        return {"company": "Unknown", "rows": []}
+
+    logger.info("Invoice has %d pages → %d chunks of ~%d pages each", len(pages), len(chunks), PAGES_PER_CHUNK)
+
+    # Process all chunks in parallel (limit concurrency to avoid rate limits)
+    sem = asyncio.Semaphore(5)
+
+    async def _process(idx: int, text: str) -> Dict[str, Any]:
+        async with sem:
+            logger.info("Processing chunk %d/%d (%d chars)", idx + 1, len(chunks), len(text))
+            return await _call_llm_for_chunk(text, idx, len(chunks), api_key=key)
+
+    results = await asyncio.gather(*[_process(i, c) for i, c in enumerate(chunks)])
+
+    # Merge results
+    return _merge_chunk_results(results)
+
+
+async def _parse_chunked(pdf_text: str, *, api_key: str) -> Dict[str, Any]:
+    """Parse pre-joined text by re-splitting into page chunks."""
+    # Re-split by page markers
+    page_pattern = re.compile(r"--- PAGE (\d+) ---\n")
+    parts = page_pattern.split(pdf_text)
+
+    pages: List[Tuple[int, str]] = []
+    i = 1
+    while i < len(parts):
+        try:
+            page_num = int(parts[i])
+            page_text = parts[i + 1].strip() if (i + 1) < len(parts) else ""
+            if page_text:
+                pages.append((page_num, page_text))
+        except (ValueError, IndexError):
+            pass
+        i += 2
+
+    if not pages:
+        # Couldn't split — treat as single chunk
+        pages = [(1, pdf_text)]
+
+    return await parse_invoice_from_pages(pages, api_key=api_key)
+
+
+def _merge_chunk_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge results from multiple chunk LLM calls into a single response."""
+    merged = {
+        "company": None,
+        "invoiceNumber": None,
+        "invoiceDate": None,
+        "totalBrut": None,
+        "totalNet": None,
+        "totalFees": None,
+        "rows": [],
+    }
+
+    seen_codes = set()
+    errors: List[str] = []
+
+    for chunk_data in results:
+        if not isinstance(chunk_data, dict):
+            continue
+
+        # Collect errors
+        if chunk_data.get("error"):
+            errors.append(str(chunk_data["error"]))
+            continue
+
+        # Take metadata from the first chunk that has it
+        if not merged["company"] and chunk_data.get("company"):
+            merged["company"] = chunk_data["company"]
+        if not merged["invoiceNumber"] and chunk_data.get("invoiceNumber"):
+            merged["invoiceNumber"] = chunk_data["invoiceNumber"]
+        if not merged["invoiceDate"] and chunk_data.get("invoiceDate"):
+            merged["invoiceDate"] = chunk_data["invoiceDate"]
+        if merged["totalBrut"] is None and chunk_data.get("totalBrut") is not None:
+            merged["totalBrut"] = chunk_data["totalBrut"]
+        if merged["totalNet"] is None and chunk_data.get("totalNet") is not None:
+            merged["totalNet"] = chunk_data["totalNet"]
+        if merged["totalFees"] is None and chunk_data.get("totalFees") is not None:
+            merged["totalFees"] = chunk_data["totalFees"]
+
+        # Merge rows (deduplicate by sendCode)
+        for row in (chunk_data.get("rows") or []):
+            if not isinstance(row, dict):
+                continue
+            code = str(row.get("sendCode") or "").strip()
+            if not code:
+                continue
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+            merged["rows"].append(row)
+
+    if errors:
+        merged["_errors"] = errors
+
+    merged["company"] = merged["company"] or "Unknown"
+
+    # Normalize all rows
+    return _normalize_llm_response(merged)
+
+
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
 
 def _normalize_llm_response(data: Dict[str, Any]) -> Dict[str, Any]:
     """Ensure the LLM response has the expected shape and types."""
@@ -167,6 +341,9 @@ def _normalize_llm_response(data: Dict[str, Any]) -> Dict[str, Any]:
         "rows": [],
     }
 
+    if data.get("_errors"):
+        result["_errors"] = data["_errors"]
+
     for row in (data.get("rows") or []):
         if not isinstance(row, dict):
             continue
@@ -179,7 +356,6 @@ def _normalize_llm_response(data: Dict[str, Any]) -> Dict[str, Any]:
         if not order_number and "-" in send_code:
             parts = send_code.split("-", 1)
             if len(parts) == 2:
-                # Take only digits from the second part
                 digits = "".join(c for c in parts[1] if c.isdigit())
                 order_number = digits
 

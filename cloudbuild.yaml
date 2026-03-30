@@ -23,7 +23,7 @@ steps:
         '--platform','managed',
         '--port','8080',
         '--allow-unauthenticated',
-        '--timeout','120',
+        '--timeout','300',
         '--set-env-vars','IRRAKIDS_STORE_DOMAIN=${_IRRAKIDS_STORE_DOMAIN},SHOPIFY_PASSWORD=${_SHOPIFY_PASSWORD},SHOPIFY_API_KEY=${_SHOPIFY_API_KEY},SHOPIFY_API_VERSION=2025-01,API_KEY=${_API_KEY},PC_ID_1=${_PC_ID_1},PC_SECRET_1=${_PC_SECRET_1}'
       ]
 
