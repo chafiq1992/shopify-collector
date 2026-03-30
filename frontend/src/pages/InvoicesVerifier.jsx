@@ -67,11 +67,17 @@ export default function InvoicesVerifier() {
         formData.append("files", f);
       }
 
+      // Long timeout — LLM parsing can take 30-60s for large invoices
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 100_000);
+
       const res = await authFetch("/api/invoices/parse-pdf", {
         method: "POST",
         headers: authHeaders(),  // No Content-Type — browser sets multipart boundary
         body: formData,
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
       const js = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(js?.detail || js?.error || `Server error ${res.status}`);
       if (js.ok !== true) throw new Error(js?.error || "Parse failed");
@@ -85,7 +91,8 @@ export default function InvoicesVerifier() {
         setError(`Warnings: ${errors.map(d => `${d.fileName}: ${d.error}`).join("; ")}`);
       }
     } catch (e) {
-      setError(e?.message || "Failed to parse PDFs");
+      const msg = e?.name === "AbortError" ? "Request timed out — the PDF may be too large. Try a smaller invoice." : (e?.message || "Failed to parse PDFs");
+      setError(msg);
       setParsed([]);
       setLookup({});
     } finally {

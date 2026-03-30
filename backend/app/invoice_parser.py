@@ -32,7 +32,12 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         # Use "text" extraction with sort=True to preserve reading order
         text = page.get_text("text", sort=True)
         if text and text.strip():
-            pages_text.append(f"--- PAGE {page_num + 1} ---\n{text.strip()}")
+            # Compress excessive whitespace to reduce token count
+            import re
+            lines = [l.strip() for l in text.strip().splitlines()]
+            lines = [l for l in lines if l]  # remove blank lines
+            compressed = "\n".join(lines)
+            pages_text.append(f"--- PAGE {page_num + 1} ---\n{compressed}")
     doc.close()
     return "\n\n".join(pages_text)
 
@@ -131,7 +136,7 @@ async def parse_invoice_with_llm(pdf_text: str, *, api_key: Optional[str] = None
             ],
             temperature=0.0,
             response_format={"type": "json_object"},
-            timeout=120,
+            timeout=90,
         )
     except Exception as e:
         logger.error("OpenAI API call failed: %s", e)
