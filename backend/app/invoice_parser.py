@@ -61,7 +61,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 # Chunking
 # ---------------------------------------------------------------------------
 
-PAGES_PER_CHUNK = 8  # ~20-30 rows per page × 8 pages = ~200 rows per chunk (well within output token limit)
+PAGES_PER_CHUNK = 4  # ~20-30 rows per page × 4 pages = ~100 rows per chunk (fast LLM processing, avoids timeouts)
 
 
 def chunk_pages(pages: List[Tuple[int, str]], pages_per_chunk: int = PAGES_PER_CHUNK) -> List[str]:
@@ -142,6 +142,11 @@ Return JSON in exactly this format:
 # LLM call (single chunk)
 # ---------------------------------------------------------------------------
 
+LLM_REQUEST_TIMEOUT = 180  # seconds per OpenAI API call
+LLM_MAX_RETRIES = 2       # retry up to 2 times on transient failures
+LLM_RETRY_BASE_DELAY = 3  # seconds (exponential backoff base)
+
+
 async def _call_llm_for_chunk(
     chunk_text: str,
     chunk_index: int,
@@ -149,36 +154,60 @@ async def _call_llm_for_chunk(
     *,
     api_key: str,
 ) -> Dict[str, Any]:
-    """Process a single text chunk with GPT-4o-mini."""
+    """Process a single text chunk with GPT-4o-mini (with retry on timeout)."""
     from openai import AsyncOpenAI
+    import httpx
 
-    client = AsyncOpenAI(api_key=api_key)
+    client = AsyncOpenAI(
+        api_key=api_key,
+        timeout=httpx.Timeout(LLM_REQUEST_TIMEOUT, connect=30.0),
+        max_retries=0,  # we handle retries ourselves for better logging
+    )
     user_msg = _USER_PROMPT_TEMPLATE.format(pdf_text=chunk_text)
 
-    try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.0,
-            response_format={"type": "json_object"},
-            timeout=90,
-        )
-    except Exception as e:
-        logger.error("OpenAI API call failed for chunk %d/%d: %s", chunk_index + 1, total_chunks, e)
-        return {"rows": [], "error": f"LLM failed on chunk {chunk_index + 1}: {e}"}
+    last_error = None
+    for attempt in range(1 + LLM_MAX_RETRIES):
+        try:
+            if attempt > 0:
+                delay = LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                logger.info("Retrying chunk %d/%d (attempt %d) after %.1fs delay",
+                            chunk_index + 1, total_chunks, attempt + 1, delay)
+                await asyncio.sleep(delay)
 
-    raw = (response.choices[0].message.content or "").strip()
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.0,
+                response_format={"type": "json_object"},
+            )
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.error("LLM returned invalid JSON for chunk %d: %s", chunk_index + 1, e)
-        return {"rows": [], "error": f"Invalid JSON from chunk {chunk_index + 1}"}
+            raw = (response.choices[0].message.content or "").strip()
 
-    return data
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as e:
+                logger.error("LLM returned invalid JSON for chunk %d: %s", chunk_index + 1, e)
+                return {"rows": [], "error": f"Invalid JSON from chunk {chunk_index + 1}"}
+
+            return data
+
+        except Exception as e:
+            last_error = e
+            err_name = type(e).__name__
+            logger.warning("OpenAI API call failed for chunk %d/%d (attempt %d): [%s] %s",
+                           chunk_index + 1, total_chunks, attempt + 1, err_name, e)
+            # Only retry on timeout / connection errors
+            is_retryable = any(kw in str(type(e).__name__).lower() for kw in ("timeout", "connect", "api"))
+            is_retryable = is_retryable or "timed out" in str(e).lower() or "timeout" in str(e).lower()
+            if not is_retryable:
+                break
+
+    logger.error("OpenAI API call permanently failed for chunk %d/%d after %d attempts: %s",
+                 chunk_index + 1, total_chunks, 1 + LLM_MAX_RETRIES, last_error)
+    return {"rows": [], "error": f"LLM failed on chunk {chunk_index + 1}: {last_error}"}
 
 
 # ---------------------------------------------------------------------------
