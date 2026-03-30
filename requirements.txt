@@ -14,5 +14,7 @@ email-validator==2.2.0
 # Passlib 1.7.4 is not compatible with bcrypt>=4 (it expects bcrypt.__about__).
 # Pin bcrypt to avoid runtime 500s on password hashing.
 bcrypt==3.2.2
+openai>=1.30.0
+PyMuPDF>=1.24.0
 
 

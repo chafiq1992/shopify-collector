@@ -2,7 +2,7 @@ import os
 import json
 from typing import List, Optional, Dict, Any, Tuple
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header, Request, Depends, Response
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header, Request, Depends, Response, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -2839,6 +2839,132 @@ async def get_fulfillment_orders(order_gid: str, store: Optional[str] = Query(No
                 continue
         out.append({"id": fo.get("id"), "status": fo.get("status"), "lineItems": items})
     return {"ok": True, "fulfillmentOrders": out}
+
+
+# ---------- Invoice PDF parsing (LLM-based) ----------
+from .invoice_parser import extract_text_from_pdf, parse_invoice_with_llm
+
+@app.post("/api/invoices/parse-pdf", response_model=Dict[str, Any])
+async def invoice_parse_pdf(
+    files: List[UploadFile] = File(..., description="One or more PDF invoice files"),
+    admin: User = Depends(require_admin),  # type: ignore
+):
+    """
+    Upload one or more delivery company invoice PDFs.
+    Each PDF is parsed using LLM (GPT-4o-mini) to extract structured shipment data.
+    Then all extracted order numbers are looked up in Shopify.
+    Returns combined parse + lookup results.
+    """
+    docs: List[Dict[str, Any]] = []
+    all_order_numbers: List[str] = []
+
+    for f in (files or []):
+        if not f.filename:
+            continue
+        try:
+            raw_bytes = await f.read()
+            if not raw_bytes:
+                docs.append({"fileName": f.filename, "error": "Empty file", "rows": []})
+                continue
+
+            # 1) Extract text from PDF
+            try:
+                pdf_text = extract_text_from_pdf(raw_bytes)
+            except Exception as e:
+                docs.append({"fileName": f.filename, "error": f"PDF extraction failed: {e}", "rows": []})
+                continue
+
+            if not pdf_text or not pdf_text.strip():
+                docs.append({"fileName": f.filename, "error": "No text found in PDF", "rows": []})
+                continue
+
+            # 2) Send to LLM for structured extraction
+            try:
+                parsed = await parse_invoice_with_llm(pdf_text)
+            except Exception as e:
+                docs.append({"fileName": f.filename, "error": f"LLM parsing failed: {e}", "rows": []})
+                continue
+
+            doc = {
+                "fileName": f.filename,
+                "company": parsed.get("company", "Unknown"),
+                "invoiceNumber": parsed.get("invoiceNumber"),
+                "invoiceDate": parsed.get("invoiceDate"),
+                "invoiceTotalBrut": parsed.get("totalBrut"),
+                "invoiceTotalNet": parsed.get("totalNet"),
+                "invoiceFeesTotal": parsed.get("totalFees"),
+                "rows": parsed.get("rows", []),
+            }
+            docs.append(doc)
+
+            # Collect order numbers for Shopify lookup
+            for row in (parsed.get("rows") or []):
+                on = str(row.get("orderNumber") or "").strip()
+                if on and on not in all_order_numbers:
+                    all_order_numbers.append(on)
+
+        except Exception as e:
+            docs.append({"fileName": f.filename or "unknown", "error": str(e), "rows": []})
+
+    # 3) Shopify lookup for all order numbers
+    lookup: Dict[str, Any] = {}
+    if all_order_numbers:
+        try:
+            inferred = _infer_store_by_number_cluster(all_order_numbers)
+
+            async def _store_ready(store_key: str) -> bool:
+                try:
+                    domain, token, _ = await resolve_store_settings_effective(store_key)
+                    return bool(domain and token)
+                except Exception:
+                    return False
+
+            store_ready = {
+                "irrakids": await _store_ready("irrakids"),
+                "irranova": await _store_ready("irranova"),
+            }
+
+            sem = asyncio.Semaphore(8)
+
+            async def _lookup_one(n: str) -> Dict[str, Any]:
+                async with sem:
+                    preferred = (inferred.get(n) or "").strip().lower() or None
+                    stores_to_try = []
+                    if preferred in ("irrakids", "irranova"):
+                        stores_to_try = [preferred, ("irranova" if preferred == "irrakids" else "irrakids")]
+                    else:
+                        stores_to_try = ["irrakids", "irranova"]
+                    last_err = None
+                    for st in stores_to_try:
+                        if not store_ready.get(st):
+                            last_err = f"Shopify store '{st}' not configured"
+                            continue
+                        try:
+                            found = await _shopify_find_order_by_number(n, store=st)
+                            if found:
+                                return {
+                                    "order_number": n,
+                                    "store": st,
+                                    "found": True,
+                                    "order_gid": found.get("id"),
+                                    "total_price": float(found.get("total_price") or 0),
+                                    "financial_status": found.get("financial_status"),
+                                }
+                        except Exception as e:
+                            last_err = str(getattr(e, "detail", None) or str(e))
+                            continue
+                    return {"order_number": n, "store": preferred, "found": False, "error": last_err or "Order not found"}
+
+            results = await asyncio.gather(*[_lookup_one(n) for n in all_order_numbers])
+            for r in results:
+                if r:
+                    lookup[str(r.get("order_number", "")).strip()] = r
+        except Exception as e:
+            # Non-fatal: parsing succeeded, lookup failed
+            import traceback
+            traceback.print_exc()
+
+    return {"ok": True, "docs": docs, "lookup": lookup}
 
 
 # ---------- Invoice verifier helpers ----------
