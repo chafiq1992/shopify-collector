@@ -75,6 +75,220 @@ def chunk_pages(pages: List[Tuple[int, str]], pages_per_chunk: int = PAGES_PER_C
 
 
 # ---------------------------------------------------------------------------
+# Deterministic parsers for known invoice layouts
+# ---------------------------------------------------------------------------
+
+_STATUS_TOKEN_RE = r"(?:Livr\S*|Refus\S*)"
+_MERCHANT_CODE_PATTERN = r"7-\d{4,8}(?:_[A-Za-z0-9-]+)?"
+_YFD_TRACKING_PATTERN = r"YFD-\d{8}-\d+"
+
+_YFD_ROW_RE = re.compile(
+    rf"(?P<row>\d+)\s+"
+    rf"(?P<yfdCode>{_YFD_TRACKING_PATTERN})\s+"
+    rf"(?P<sendCode>{_MERCHANT_CODE_PATTERN})\s+"
+    rf"(?P<phone>0\d{{9,10}})\s+"
+    rf"(?P<body>.+?)\s+"
+    rf"(?P<status>{_STATUS_TOKEN_RE})\s+"
+    rf"(?P<crbt>-?\d+(?:[.,]\d+)?)\s*DH\s+"
+    rf"(?P<fees>-?\d+(?:[.,]\d+)?)\s*DH"
+    rf"(?=\s+\d+\s+{_YFD_TRACKING_PATTERN}|\s+Total\b|$)",
+    re.IGNORECASE,
+)
+
+_TWELVE_LIVERY_ROW_RE = re.compile(
+    rf"(?P<row>\d+)\s+"
+    rf"(?P<sendCode>{_MERCHANT_CODE_PATTERN})\s+"
+    rf"(?P<pickupDate>\d{{4}}-\d{{2}}-\d{{2}})\s+"
+    rf"(?P<deliveryDate>\d{{4}}-\d{{2}}-\d{{2}})\s+"
+    rf"(?P<status>{_STATUS_TOKEN_RE})\s+"
+    rf"(?P<city>.+?)\s+"
+    rf"(?P<crbt>-?\d+(?:[.,]\d+)?)\s*DH\s+"
+    rf"(?P<fees>-?\d+(?:[.,]\d+)?)\s*DH\s+"
+    rf"(?P<total>-?\d+(?:[.,]\d+)?)\s*DH"
+    rf"(?=\s+\d+\s+{_MERCHANT_CODE_PATTERN}|\s+Total\b|\s+Powered by\b|$)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_invoice_text(text: str) -> str:
+    cleaned = (text or "").replace("\x00", " ").replace("\u00a0", " ")
+    cleaned = re.sub(r"\b\d+\s*/\s*\d+\b", " ", cleaned)  # page footers like "2 / 8"
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _normalize_company_key(text: str) -> str:
+    raw = (text or "").strip().lower()
+    raw = raw.replace("é", "e").replace("è", "e").replace("ê", "e")
+    return raw
+
+
+def _normalize_status(status: str) -> str:
+    key = _normalize_company_key(status)
+    if key.startswith("livr"):
+        return "Livré"
+    if key.startswith("refus"):
+        return "Refusé"
+    return (status or "").strip()
+
+
+def _extract_order_number(send_code: str) -> str:
+    code = str(send_code or "").strip()
+    if "-" not in code:
+        return ""
+    return "".join(ch for ch in code.split("-", 1)[1] if ch.isdigit())
+
+
+def _extract_named_value(text: str, label: str) -> Optional[str]:
+    m = re.search(rf"{re.escape(label)}\s*:?\s*(.+?)(?=\s+[A-Z][^:]*\s*:|$)", text, re.IGNORECASE)
+    if not m:
+        return None
+    value = (m.group(1) or "").strip()
+    return value or None
+
+
+def _extract_count(text: str, label: str) -> Optional[int]:
+    m = re.search(rf"{re.escape(label)}\s*:?\s*(\d+)", text, re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def _extract_amount(text: str, label: str) -> Optional[float]:
+    m = re.search(rf"{re.escape(label)}\s*:?\s*(-?\d+(?:[.,]\d+)?)\s*DH", text, re.IGNORECASE)
+    if not m:
+        return None
+    return _safe_float(m.group(1))
+
+
+def _split_yfd_city(body: str) -> Optional[str]:
+    tokens = [tok for tok in re.split(r"\s+", (body or "").strip()) if tok]
+    if not tokens:
+        return None
+    if len(tokens) == 1:
+        return tokens[0]
+
+    for idx in range(1, len(tokens)):
+        token = tokens[idx]
+        next_token = tokens[idx + 1] if (idx + 1) < len(tokens) else ""
+        if "/" in token or "/" in next_token:
+            return " ".join(tokens[:idx]).strip() or " ".join(tokens).strip()
+        if re.search(r"\d", token):
+            return " ".join(tokens[:idx]).strip() or " ".join(tokens).strip()
+
+    return " ".join(tokens).strip()
+
+
+def _base_invoice_result(company: str) -> Dict[str, Any]:
+    return {
+        "company": company,
+        "invoiceNumber": None,
+        "invoiceDate": None,
+        "totalBrut": None,
+        "totalNet": None,
+        "totalFees": None,
+        "_expectedRowCount": None,
+        "rows": [],
+    }
+
+
+def _parse_yfd_invoice(text: str) -> Optional[Dict[str, Any]]:
+    if "yfd-" not in _normalize_company_key(text):
+        return None
+
+    parsed = _base_invoice_result("YFD")
+    m_invoice = re.search(r"Facture client\s+N\S*\s*:?\s*([A-Z]+-[A-Za-z0-9-]+)", text, re.IGNORECASE)
+    m_date = re.search(r"Date\s*:?\s*(\d{2}/\d{2}/\d{4})", text, re.IGNORECASE)
+    parsed["invoiceNumber"] = (m_invoice.group(1).strip() if m_invoice else None)
+    parsed["invoiceDate"] = (m_date.group(1).strip() if m_date else None)
+    parsed["totalBrut"] = _extract_amount(text, "Total Brut")
+    parsed["totalNet"] = _extract_amount(text, "Total Net")
+    parsed["totalFees"] = _extract_amount(text, "Frais TTC")
+    parsed["_expectedRowCount"] = _extract_count(text, "Nombre de colis")
+
+    for match in _YFD_ROW_RE.finditer(text):
+        send_code = (match.group("sendCode") or "").strip()
+        crbt = _safe_float(match.group("crbt"))
+        fees = _safe_float(match.group("fees"))
+        parsed["rows"].append({
+            "sendCode": send_code,
+            "yfdCode": (match.group("yfdCode") or "").strip() or None,
+            "orderNumber": _extract_order_number(send_code),
+            "status": _normalize_status(match.group("status") or ""),
+            "city": _split_yfd_city(match.group("body") or ""),
+            "phone": (match.group("phone") or "").strip() or None,
+            "crbt": crbt,
+            "fees": fees,
+            "total": (crbt - fees) if (crbt is not None and fees is not None) else None,
+            "pickupDate": None,
+            "deliveryDate": None,
+        })
+
+    return parsed if parsed["rows"] else None
+
+
+def _parse_twelve_livery_invoice(text: str) -> Optional[Dict[str, Any]]:
+    company_key = _normalize_company_key(text)
+    if "12livery" not in company_key:
+        return None
+
+    parsed = _base_invoice_result("12Livery")
+    m_invoice = re.search(r"Facture\s*:?\s*([A-Z]+-[A-Za-z0-9-]+)", text, re.IGNORECASE)
+    m_date = re.search(r"Date\s*:?\s*(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}:\d{2})?)", text, re.IGNORECASE)
+    parsed["invoiceNumber"] = (m_invoice.group(1).strip() if m_invoice else None)
+    parsed["invoiceDate"] = (m_date.group(1).strip() if m_date else None)
+    parsed["totalBrut"] = _extract_amount(text, "Total Brut")
+    parsed["totalNet"] = _extract_amount(text, "Total Net") or _extract_amount(text, "Total")
+    parsed["totalFees"] = _extract_amount(text, "Frais")
+    parsed["_expectedRowCount"] = _extract_count(text, "Colis")
+
+    for match in _TWELVE_LIVERY_ROW_RE.finditer(text):
+        send_code = (match.group("sendCode") or "").strip()
+        parsed["rows"].append({
+            "sendCode": send_code,
+            "yfdCode": None,
+            "orderNumber": _extract_order_number(send_code),
+            "status": _normalize_status(match.group("status") or ""),
+            "city": (match.group("city") or "").strip() or None,
+            "phone": None,
+            "crbt": _safe_float(match.group("crbt")),
+            "fees": _safe_float(match.group("fees")),
+            "total": _safe_float(match.group("total")),
+            "pickupDate": (match.group("pickupDate") or "").strip() or None,
+            "deliveryDate": (match.group("deliveryDate") or "").strip() or None,
+        })
+
+    return parsed if parsed["rows"] else None
+
+
+def _parse_invoice_deterministically(pages: List[Tuple[int, str]]) -> Optional[Dict[str, Any]]:
+    text = _normalize_invoice_text(" ".join(page_text for _, page_text in (pages or [])))
+    if not text:
+        return None
+
+    for parser in (_parse_yfd_invoice, _parse_twelve_livery_invoice):
+        parsed = parser(text)
+        if parsed and parsed.get("rows"):
+            normalized = _normalize_llm_response(parsed)
+            normalized["_expectedRowCount"] = parsed.get("_expectedRowCount")
+            return normalized
+    return None
+
+
+def _deterministic_parse_is_complete(parsed: Optional[Dict[str, Any]]) -> bool:
+    if not parsed:
+        return False
+    rows = parsed.get("rows") or []
+    expected = parsed.get("_expectedRowCount")
+    if expected is None:
+        return len(rows) > 0
+    return len(rows) >= int(expected)
+
+
+# ---------------------------------------------------------------------------
 # LLM prompts
 # ---------------------------------------------------------------------------
 
@@ -254,6 +468,19 @@ async def parse_invoice_from_pages(
     Parse invoice from page-level text. Chunks pages and processes in parallel.
     This is the preferred entry point for large PDFs.
     """
+    if not pages:
+        return {"company": "Unknown", "rows": []}
+
+    deterministic = _parse_invoice_deterministically(pages)
+    if _deterministic_parse_is_complete(deterministic):
+        logger.info(
+            "Using deterministic invoice parser for %s with %d rows",
+            deterministic.get("company"),
+            len(deterministic.get("rows") or []),
+        )
+        deterministic.pop("_expectedRowCount", None)
+        return deterministic
+
     try:
         from openai import AsyncOpenAI
     except ImportError:
@@ -284,6 +511,18 @@ async def parse_invoice_from_pages(
 
     # Post-processing: catch any 7-XXXXX codes the LLM missed
     _backfill_missing_codes(merged, pages)
+
+    if deterministic and len(deterministic.get("rows") or []) > len(merged.get("rows") or []):
+        logger.warning(
+            "Falling back to deterministic parse result for %s because it produced more rows (%d vs %d)",
+            deterministic.get("company"),
+            len(deterministic.get("rows") or []),
+            len(merged.get("rows") or []),
+        )
+        deterministic.pop("_expectedRowCount", None)
+        if merged.get("_errors"):
+            deterministic["_errors"] = merged["_errors"]
+        return deterministic
 
     return merged
 

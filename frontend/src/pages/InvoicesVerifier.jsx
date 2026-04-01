@@ -1,5 +1,27 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
+
+function getRowKey(row, fallbackIndex = 0) {
+  return [
+    row?._doc?.fileName || "doc",
+    row?.sendCode || "",
+    row?.orderNumber || "",
+    row?._idx || fallbackIndex,
+  ].join("::");
+}
+
+function normalizeFinancialStatus(status) {
+  return String(status || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function isFinancialStatusPaid(status) {
+  const normalized = normalizeFinancialStatus(status);
+  return normalized.includes("paid") || normalized.includes("paye");
+}
 
 
 export default function InvoicesVerifier() {
@@ -10,6 +32,7 @@ export default function InvoicesVerifier() {
   const [error, setError] = useState(null);
   const [paidBusy, setPaidBusy] = useState(false);
   const [paidMsg, setPaidMsg] = useState(null);
+  const [selectedRows, setSelectedRows] = useState({});
   const inputRef = useRef(null);
 
   // Flatten all rows across all documents
@@ -23,9 +46,17 @@ export default function InvoicesVerifier() {
     return out;
   }, [parsed]);
 
+  useEffect(() => {
+    const next = {};
+    flatRows.forEach((row, index) => {
+      next[getRowKey(row, index)] = true;
+    });
+    setSelectedRows(next);
+  }, [flatRows]);
+
   // Enrich rows with Shopify lookup data + compute diff
   const rowsWithShopify = useMemo(() => {
-    return flatRows.map((r) => {
+    return flatRows.map((r, index) => {
       const info = lookup[String(r.orderNumber || "").trim()] || null;
       const shopTotal = info && info.found ? Number(info.total_price || 0) : null;
       const isRefused = String(r.status || "").trim().toLowerCase().startsWith("refus");
@@ -34,17 +65,50 @@ export default function InvoicesVerifier() {
       const shopComparable = isRefused ? 0 : shopTotal;
       const diff = (invComparable != null && shopComparable != null) ? (shopComparable - invComparable) : null;
       const absDiff = diff != null ? Math.abs(diff) : null;
+      const financialStatus = info?.financial_status || null;
+      const canMarkPaid = !!(info?.found && info?.order_gid && info?.store) && !isFinancialStatusPaid(financialStatus);
       return {
         ...r,
+        _rowKey: getRowKey(r, index),
         shopify: info,
         shopTotal,
         invAmount: invComparable,
         isRefused,
         diff,
         absDiff,
+        financialStatus,
+        canMarkPaid,
       };
     });
   }, [flatRows, lookup]);
+
+  const selectedSummary = useMemo(() => {
+    const selected = rowsWithShopify.filter((r) => selectedRows[r._rowKey] !== false);
+    const matched = selected.filter((r) => r.shopify?.found);
+    const payable = selected.filter((r) => r.canMarkPaid);
+    const alreadyPaid = selected.filter((r) => r.shopify?.found && isFinancialStatusPaid(r.financialStatus));
+    const missing = selected.filter((r) => !r.shopify?.found);
+    return {
+      total: selected.length,
+      matched: matched.length,
+      payable: payable.length,
+      alreadyPaid: alreadyPaid.length,
+      missing: missing.length,
+    };
+  }, [rowsWithShopify, selectedRows]);
+
+  const allRowsSelected = rowsWithShopify.length > 0 && rowsWithShopify.every((r) => selectedRows[r._rowKey] !== false);
+
+  function applySelection(mode) {
+    const next = {};
+    rowsWithShopify.forEach((row) => {
+      if (mode === "all") next[row._rowKey] = true;
+      if (mode === "none") next[row._rowKey] = false;
+      if (mode === "matched") next[row._rowKey] = !!row.shopify?.found;
+      if (mode === "payable") next[row._rowKey] = !!row.canMarkPaid;
+    });
+    setSelectedRows(next);
+  }
 
   // Summary stats
   const summary = useMemo(() => {
@@ -95,26 +159,26 @@ export default function InvoicesVerifier() {
       setError(msg);
       setParsed([]);
       setLookup({});
+      setSelectedRows({});
     } finally {
       setBusy(false);
     }
   }
 
-  // Mark all matched orders as paid in Shopify
-  async function markAllPaid() {
+  // Mark the selected matched unpaid orders as paid in Shopify
+  async function markSelectedPaid() {
     setPaidBusy(true);
     setPaidMsg(null);
     setError(null);
     try {
       const toPay = [];
       for (const r of rowsWithShopify) {
-        if (!r.shopify?.found) continue;
-        if (!r.shopify?.order_gid) continue;
-        if (!r.shopify?.store) continue;
+        if (selectedRows[r._rowKey] === false) continue;
+        if (!r.canMarkPaid) continue;
         toPay.push({ order_gid: r.shopify.order_gid, store: r.shopify.store });
       }
       if (!toPay.length) {
-        setPaidMsg("No matched orders to mark as paid.");
+        setPaidMsg("No selected unpaid matched orders to mark as paid.");
         setPaidBusy(false);
         return;
       }
@@ -275,12 +339,23 @@ export default function InvoicesVerifier() {
               </div>
 
               <button
-                onClick={markAllPaid}
-                disabled={paidBusy || busy || rowsWithShopify.length === 0}
+                onClick={markSelectedPaid}
+                disabled={paidBusy || busy || selectedSummary.payable === 0}
                 className="px-4 py-2 rounded-xl text-white text-sm font-semibold bg-green-600 hover:bg-green-700 disabled:opacity-60 active:scale-[.98]"
               >
-                {paidBusy ? "Marking paid…" : "Mark all orders as paid"}
+                {paidBusy ? "Marking paid…" : `Mark selected as paid (${selectedSummary.payable})`}
               </button>
+            </div>
+            <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-gray-200 pt-3 text-xs">
+              <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">Selected rows: {selectedSummary.total}</span>
+              <span className="px-2 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-700">Selected matched: {selectedSummary.matched}</span>
+              <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700">Ready to mark paid: {selectedSummary.payable}</span>
+              <span className="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800">Already paid: {selectedSummary.alreadyPaid}</span>
+              <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">Not matched: {selectedSummary.missing}</span>
+              <button onClick={() => applySelection("all")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Select all</button>
+              <button onClick={() => applySelection("none")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Clear all</button>
+              <button onClick={() => applySelection("matched")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Matched only</button>
+              <button onClick={() => applySelection("payable")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Unpaid matched only</button>
             </div>
           </div>
         )}
@@ -323,10 +398,17 @@ export default function InvoicesVerifier() {
         {/* Results table */}
         {rowsWithShopify.length > 0 && (
           <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden">
-            <div className="overflow-auto">
+            <div className="max-h-[70vh] overflow-auto">
               <table className="min-w-[1200px] w-full text-xs">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
+                    <th className="text-left px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={allRowsSelected}
+                        onChange={(e) => applySelection(e.target.checked ? "all" : "none")}
+                      />
+                    </th>
                     <th className="text-left px-3 py-2">#</th>
                     <th className="text-left px-3 py-2">Invoice</th>
                     <th className="text-left px-3 py-2">Code d&apos;envoi</th>
@@ -348,8 +430,19 @@ export default function InvoicesVerifier() {
                     const isRed = isMatched && r.absDiff != null && r.absDiff >= 3;
                     const bg = isGreen ? "bg-emerald-50" : isRed ? "bg-red-50" : (!isMatched ? "bg-gray-50" : "bg-white");
                     const border = isGreen ? "border-emerald-200" : isRed ? "border-red-200" : "border-gray-200";
+                    const isSelected = selectedRows[r._rowKey] !== false;
                     return (
-                      <tr key={`${r._doc?.fileName || "doc"}-${i}`} className={`${bg} border-b ${border}`}>
+                      <tr key={r._rowKey} className={`${bg} border-b ${border} ${isSelected ? "" : "opacity-55"}`}>
+                        <td className="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setSelectedRows((prev) => ({ ...prev, [r._rowKey]: checked }));
+                            }}
+                          />
+                        </td>
                         <td className="px-3 py-2">{r._idx}</td>
                         <td className="px-3 py-2">
                           <div className="font-medium">{r._doc?.invoiceNumber || r._doc?.fileName}</div>
@@ -367,7 +460,7 @@ export default function InvoicesVerifier() {
                           {r.diff != null ? Number(r.diff).toFixed(2) : "—"}
                         </td>
                         <td className="px-3 py-2">
-                          {r.shopify?.financial_status ? String(r.shopify.financial_status) : "—"}
+                          {r.financialStatus ? String(r.financialStatus) : "—"}
                         </td>
                       </tr>
                     );
@@ -383,6 +476,7 @@ export default function InvoicesVerifier() {
                     const sumDiff = delivered.reduce((acc, x) => acc + Number(x.diff || 0), 0);
                     return (
                       <tr className="bg-gray-900 text-white">
+                        <td className="px-3 py-2 font-extrabold">—</td>
                         <td className="px-3 py-2 font-extrabold" colSpan={7}>TOTALS (delivered only)</td>
                         <td className="px-3 py-2 text-right font-extrabold">{sumFees.toFixed(2)}</td>
                         <td className="px-3 py-2 text-right font-extrabold">{sumCrbt.toFixed(2)}</td>
