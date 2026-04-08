@@ -80,7 +80,10 @@ export default function ShopifyConnect({ store, setStore }) {
           <button
             className="text-sm px-3 py-2 rounded-xl border border-gray-300 bg-white hover:bg-gray-50"
             onClick={() => {
-              try { history.pushState(null, "", "/"); } catch { location.href = "/"; }
+              try {
+                history.pushState(null, "", "/");
+                try { window.dispatchEvent(new PopStateEvent("popstate")); } catch {}
+              } catch { location.href = "/"; }
             }}
           >
             Back

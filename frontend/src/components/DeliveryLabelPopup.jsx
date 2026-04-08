@@ -3,6 +3,7 @@ import { authFetch, authHeaders } from "../lib/auth";
 
 const LS_MERCHANT = "dlvMerchantId";
 const LS_ORDER_MAP = "dlvOrderIdMap";
+let deliveryBootstrapPromise = null;
 
 async function dlvApi(path, { method = "GET", body, query, _retries = 3 } = {}) {
   let url = `/api/delivery/${path.replace(/^\/+/, "")}`;
@@ -73,6 +74,42 @@ function getCompanyCities(company) {
     if (text) set.add(text);
   }
   return Array.from(set);
+}
+
+async function loadDeliveryBootstrap() {
+  if (!deliveryBootstrapPromise) {
+    deliveryBootstrapPromise = (async () => {
+      const cfg = await authFetch("/api/delivery-config", { headers: authHeaders() });
+      if (!cfg.ok) {
+        deliveryBootstrapPromise = null;
+        return { configured: false, merchants: [], companies: [], cities: [] };
+      }
+      const cfgJ = await cfg.json();
+      if (!cfgJ.configured) {
+        deliveryBootstrapPromise = null;
+        return { configured: false, merchants: [], companies: [], cities: [] };
+      }
+
+      const [merchantRes, companyRes, cityRes] = await Promise.allSettled([
+        dlvApi("ext/admin/merchants"),
+        dlvApi("admin/envoy-companies"),
+        dlvApi("ext/admin/cities"),
+      ]);
+
+      return {
+        configured: true,
+        merchants: merchantRes.status === "fulfilled" ? ((merchantRes.value && merchantRes.value.items) || []) : [],
+        companies: companyRes.status === "fulfilled"
+          ? (Array.isArray(companyRes.value) ? companyRes.value : (companyRes.value.items || []))
+          : [],
+        cities: cityRes.status === "fulfilled" ? ((cityRes.value && cityRes.value.items) || []) : [],
+      };
+    })().catch((error) => {
+      deliveryBootstrapPromise = null;
+      throw error;
+    });
+  }
+  return deliveryBootstrapPromise;
 }
 
 /* Custom searchable city dropdown — only shows cities from the list, no browser autocomplete */
@@ -477,18 +514,11 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     setBusy(true);
     setError(null);
     try {
-      const cfg = await authFetch("/api/delivery-config", { headers: authHeaders() });
-      if (!cfg.ok) { setNotConfigured(true); setBusy(false); return; }
-      const cfgJ = await cfg.json();
-      if (!cfgJ.configured) { setNotConfigured(true); setBusy(false); return; }
+      addLog("Loading delivery settings...");
+      const bootstrap = await loadDeliveryBootstrap();
+      if (!bootstrap.configured) { setNotConfigured(true); setBusy(false); return; }
 
-      addLog("Loading merchants...");
-      const [m, companyRes, cityRes] = await Promise.allSettled([
-        dlvApi("ext/admin/merchants"),
-        dlvApi("admin/envoy-companies"),
-        dlvApi("ext/admin/cities"),
-      ]);
-      const list = m.status === "fulfilled" ? ((m.value && m.value.items) || []) : [];
+      const list = bootstrap.merchants || [];
       setMerchants(list);
 
       let mid = savedMerchant();
@@ -498,8 +528,8 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       if (mid) { setMerchantId(mid); saveMerchant(mid); }
 
       addLog("Loading companies & cities...");
-      setCompanies(companyRes.status === "fulfilled" ? (Array.isArray(companyRes.value) ? companyRes.value : (companyRes.value.items || [])) : []);
-      setCities(cityRes.status === "fulfilled" ? ((cityRes.value && cityRes.value.items) || []) : []);
+      setCompanies(bootstrap.companies || []);
+      setCities(bootstrap.cities || []);
 
       if (!mid) { setPhase("merchant_select"); setBusy(false); return; }
       populateEditFromOrder();
@@ -775,7 +805,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
   }
 
   async function enqueueLabelToRelay(dlvOrderId, storeName, envoyLabelCode) {
-    const apiKey = localStorage.getItem("relay_api_key") || "";
+    const apiKey = localStorage.getItem("relayApiKey") || localStorage.getItem("relay_api_key") || "";
     const res = await authFetch("/api/enqueue-label", {
       method: "POST",
       headers: {
@@ -969,6 +999,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     }
     return { statusKey: "preparing", statusLabel: "Preparing" };
   }, [phase, printStatus]);
+  const needsControlPayload = queueState.statusKey === "waiting_partner" || queueState.statusKey === "information_error";
 
   // Use a ref to track the last emitted key values and avoid infinite loops
   const lastEmitRef = useRef("");
@@ -995,12 +1026,12 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       error: error || "",
       phase,
       busy,
-      companies,
+      companies: needsControlPayload ? companies : [],
       companyId,
       cityName,
-      cityOptions: filteredCities,
-      allCityOptions,
-      globalCities: cities,
+      cityOptions: needsControlPayload ? filteredCities : [],
+      allCityOptions: needsControlPayload ? allCityOptions : [],
+      globalCities: needsControlPayload ? cities : [],
       partnerSendState,
       printStatus,
       actions: {
@@ -1013,7 +1044,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         handleRetry,
       },
     });
-  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, companies, companyId, cityName, filteredCities, allCityOptions, cities, partnerSendState, printStatus]);
+  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, needsControlPayload, companies, companyId, cityName, filteredCities, allCityOptions, cities, partnerSendState, printStatus]);
   const companyStepDone = partnerSendState.ok === true;
   const companyStepActive = phase === "company_select" || ((phase === "ready_print" || phase === "done") && !companyStepDone);
   const companyStepCls = companyStepDone

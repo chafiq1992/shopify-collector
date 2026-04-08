@@ -23,6 +23,9 @@ function isFinancialStatusPaid(status) {
   return normalized.includes("paid") || normalized.includes("paye");
 }
 
+const MAX_PARSE_FILE_COUNT = 10;
+const MAX_PARSE_TOTAL_BYTES = 25 * 1024 * 1024;
+
 
 export default function InvoicesVerifier() {
   const [fileList, setFileList] = useState([]);       // File[]
@@ -122,6 +125,15 @@ export default function InvoicesVerifier() {
   // Upload PDFs to backend for LLM-based parsing + Shopify lookup
   async function parseSelectedFiles() {
     if (!fileList.length) return;
+    if (fileList.length > MAX_PARSE_FILE_COUNT) {
+      setError(`Select up to ${MAX_PARSE_FILE_COUNT} PDFs at a time to keep parsing fast and cost-effective.`);
+      return;
+    }
+    const totalBytes = fileList.reduce((sum, file) => sum + Number(file?.size || 0), 0);
+    if (totalBytes > MAX_PARSE_TOTAL_BYTES) {
+      setError(`Selected PDFs are too large (${(totalBytes / (1024 * 1024)).toFixed(1)} MB). Keep batches under ${(MAX_PARSE_TOTAL_BYTES / (1024 * 1024)).toFixed(0)} MB.`);
+      return;
+    }
     setBusy(true);
     setError(null);
     setPaidMsg(null);

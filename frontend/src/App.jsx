@@ -1,21 +1,12 @@
 import React, { useEffect, useRef, useState, Suspense } from "react";
 import { CheckCircle, PackageSearch, PackageCheck, XCircle, ChevronLeft, ChevronRight, Search, Settings, Boxes, Printer, LogOut } from "lucide-react";
-import { authFetch, authHeaders, loadAuth, saveAuth, clearAuth } from "./lib/auth";
+import { authFetch, authHeaders, loadAuth, clearAuth } from "./lib/auth";
 import { printOrdersLocally } from "./lib/localPrintClient";
 import { enqueueOrdersToRelay, isRelayConfigured } from "./lib/printRelayClient";
 
 const OrderCard = React.lazy(() => import('./components/OrderCard.jsx'));
 const PresetSettingsModal = React.lazy(() => import('./components/PresetSettingsModal.jsx'));
 const ProfilePickerModal = React.lazy(() => import('./components/ProfilePickerModal.jsx'));
-const OrderTaggerPage = React.lazy(() => import('./pages/OrderTagger.jsx'));
-const OrderLookupPage = React.lazy(() => import('./pages/OrderLookup.jsx'));
-const OrderBrowserPage = React.lazy(() => import('./pages/OrderBrowser.jsx'));
-const VariantOrdersPage = React.lazy(() => import('./pages/VariantOrders.jsx'));
-const LoginPage = React.lazy(() => import('./pages/Login.jsx'));
-const AdminAnalyticsPage = React.lazy(() => import('./pages/AdminAnalytics.jsx'));
-const MyAnalyticsPage = React.lazy(() => import('./pages/MyAnalytics.jsx'));
-const ShopifyConnectPage = React.lazy(() => import('./pages/ShopifyConnect.jsx'));
-const InvoicesVerifierPage = React.lazy(() => import('./pages/InvoicesVerifier.jsx'));
 
 // Types (JSDoc only)
 /**
@@ -189,8 +180,6 @@ function ActionOverlay({ state }){
 export default function App(){
   const [auth, setAuth] = useState(() => loadAuth());
   const [agentToday, setAgentToday] = useState({ fulfilledToday: 0, loading: false });
-  // Lightweight client-side routing: force re-render on history changes
-  const [routeTick, setRouteTick] = useState(0);
   const [orders, setOrders] = useState([]);
   const [tags, setTags] = useState([]);
   const [apiError, setApiError] = useState(null);
@@ -286,11 +275,6 @@ export default function App(){
 
   const wsRef = useRef(null);
   const requestIdRef = useRef(0);
-  function handleLoginSuccess(data){
-    // Login page controls remember-me storage; this is a harmless fallback
-    saveAuth(data);
-    setAuth(data);
-  }
   function handleLogout(){
     clearAuth();
     setAuth(null);
@@ -301,18 +285,11 @@ export default function App(){
     const p = String(path || "/");
     try {
       history.pushState(null, "", p);
-      // pushState doesn't emit popstate; we force a re-render
-      setRouteTick(x => x + 1);
+      try { window.dispatchEvent(new PopStateEvent("popstate")); } catch {}
     } catch {
       try { location.href = p; } catch {}
     }
   }
-
-  useEffect(() => {
-    const onPop = () => { try { setRouteTick(x => x + 1); } catch {} };
-    try { window.addEventListener("popstate", onPop); } catch {}
-    return () => { try { window.removeEventListener("popstate", onPop); } catch {} };
-  }, []);
 
   // If any API call gets a 401, authFetch() clears storage; this listener makes the UI switch to Login immediately.
   useEffect(() => {
@@ -679,6 +656,7 @@ export default function App(){
 
   // Swipe navigation removed; use buttons below instead
 
+  if (false) {
   // Lightweight routing: render OrderTagger page when path matches
   const currentPath = (typeof location !== 'undefined' ? String(location.pathname || '').trim() : '/');
   if (!auth?.access_token && currentPath !== '/login'){
@@ -754,6 +732,7 @@ export default function App(){
       );
     }
   } catch {}
+  }
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900 overflow-hidden">

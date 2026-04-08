@@ -374,6 +374,18 @@ def _require_api_key(x_api_key: Optional[str]):
     if RELAY_API_KEY and x_api_key != RELAY_API_KEY:
         raise HTTPException(status_code=401, detail="bad api key")
 
+def _has_relay_access(x_api_key: Optional[str], authorization: Optional[str]) -> bool:
+    if x_api_key and x_api_key == RELAY_API_KEY:
+        return True
+    if authorization and authorization.startswith("Bearer "):
+        try:
+            from jose import jwt as _jwt
+            _jwt.decode(authorization.split(" ", 1)[1], os.environ.get("JWT_SECRET", ""), algorithms=["HS256"])
+            return True
+        except Exception:
+            return False
+    return False
+
 def _require_pc(pc_id: str, secret: str):
     expect = PCS.get(pc_id)
     if not expect or secret != expect:
@@ -436,6 +448,36 @@ async def _tag_orders_before_print(numbers: List[str], store: Optional[str]):
 @app.post("/enqueue")
 async def enqueue(job: EnqueueBody, x_api_key: Optional[str] = Header(default=None)):
     _require_api_key(x_api_key)
+    if job.pc_id not in PCS:
+        raise HTTPException(status_code=404, detail="unknown pc_id")
+    import time as _t, uuid as _uuid
+    jid = str(_uuid.uuid4())
+    payload = {
+        "job_id": jid,
+        "ts": int(_t.time()),
+        "orders": [str(o).lstrip("#") for o in (job.orders or [])],
+        "copies": max(1, job.copies),
+        "pdf_url": job.pdf_url or None,
+        "store": (job.store or None),
+    }
+    dk = _dedup_key_for_orders(job.orders or [], job.store) if job.orders else ""
+    result = await _enqueue_job(job.pc_id, payload, dk)
+    if not result.get("dedup"):
+        try:
+            if payload.get("orders"):
+                asyncio.create_task(_tag_orders_before_print(payload["orders"], payload.get("store")))
+        except Exception:
+            pass
+    return result
+
+@app.post("/api/enqueue-orders")
+async def enqueue_orders(
+    job: EnqueueBody,
+    x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    if not _has_relay_access(x_api_key, authorization):
+        raise HTTPException(status_code=401, detail="unauthorized")
     if job.pc_id not in PCS:
         raise HTTPException(status_code=404, detail="unknown pc_id")
     import time as _t, uuid as _uuid
@@ -592,16 +634,7 @@ async def enqueue_label(
     x_api_key: Optional[str] = Header(default=None),
     authorization: Optional[str] = Header(default=None),
 ):
-    has_api_key = x_api_key and x_api_key == RELAY_API_KEY
-    has_jwt = False
-    if authorization and authorization.startswith("Bearer "):
-        try:
-            from jose import jwt as _jwt
-            _jwt.decode(authorization.split(" ", 1)[1], os.environ.get("JWT_SECRET", ""), algorithms=["HS256"])
-            has_jwt = True
-        except Exception:
-            pass
-    if not has_api_key and not has_jwt:
+    if not _has_relay_access(x_api_key, authorization):
         raise HTTPException(status_code=401, detail="unauthorized")
     import time as _t, uuid as _uuid
     jid = str(_uuid.uuid4())
@@ -624,16 +657,7 @@ async def print_job_status(
     x_api_key: Optional[str] = Header(default=None),
     authorization: Optional[str] = Header(default=None),
 ):
-    has_api_key = x_api_key and x_api_key == RELAY_API_KEY
-    has_jwt = False
-    if authorization and authorization.startswith("Bearer "):
-        try:
-            from jose import jwt as _jwt
-            _jwt.decode(authorization.split(" ", 1)[1], os.environ.get("JWT_SECRET", ""), algorithms=["HS256"])
-            has_jwt = True
-        except Exception:
-            pass
-    if not has_api_key and not has_jwt:
+    if not _has_relay_access(x_api_key, authorization):
         raise HTTPException(status_code=401, detail="unauthorized")
 
     if SessionLocal is not None and PrintJob is not None:
@@ -1467,6 +1491,225 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         currency_code=currency_code_val,
     )
 
+def _order_item_count(order: "OrderDTO") -> int:
+    total = 0
+    for variant in (getattr(order, "variants", None) or []):
+        try:
+            qty = int(variant.unfulfilled_qty) if getattr(variant, "unfulfilled_qty", None) is not None else int(getattr(variant, "qty", 0) or 0)
+        except Exception:
+            qty = 0
+        if qty > 0:
+            total += qty
+    return total
+
+def _order_summary_payload(order: "OrderDTO") -> Dict[str, Any]:
+    variants: List[Dict[str, Any]] = []
+    for variant in (getattr(order, "variants", None) or []):
+        variants.append({
+            "id": getattr(variant, "id", None),
+            "title": getattr(variant, "title", None),
+            "sku": getattr(variant, "sku", None),
+            "qty": int(getattr(variant, "qty", 0) or 0),
+            "image": getattr(variant, "image", None),
+            "product_id": getattr(variant, "product_id", None),
+            "product_title": getattr(variant, "product_title", None),
+            "status": getattr(variant, "status", None),
+            "unfulfilled_qty": getattr(variant, "unfulfilled_qty", None),
+        })
+    return {
+        "id": getattr(order, "id", None),
+        "created_at": getattr(order, "created_at", None),
+        "number": getattr(order, "number", None),
+        "financial_status": getattr(order, "financial_status", None),
+        "shipping_phone": getattr(order, "shipping_phone", None),
+        "shipping_name": getattr(order, "shipping_name", None),
+        "customer": getattr(order, "customer", None),
+        "shipping_city": getattr(order, "shipping_city", None),
+        "shipping_zip": getattr(order, "shipping_zip", None),
+        "shipping_address1": getattr(order, "shipping_address1", None),
+        "shipping_address2": getattr(order, "shipping_address2", None),
+        "shipping_province": getattr(order, "shipping_province", None),
+        "shipping_country": getattr(order, "shipping_country", None),
+        "note": getattr(order, "note", None),
+        "tags": list(getattr(order, "tags", None) or []),
+        "totalPrice": float(getattr(order, "total_price", 0.0) or 0.0),
+        "itemCount": _order_item_count(order),
+        "variants": variants,
+    }
+
+def _aggregate_orders_by_product(orders: List["OrderDTO"]) -> List[Dict[str, Any]]:
+    product_map: Dict[str, Dict[str, Any]] = {}
+    order_summary_by_id: Dict[str, Dict[str, Any]] = {}
+    for order in orders:
+        order_id = str(getattr(order, "id", "") or "").strip()
+        if not order_id:
+            continue
+        summary = order_summary_by_id.setdefault(order_id, _order_summary_payload(order))
+        for variant in (getattr(order, "variants", None) or []):
+            variant_id = str(getattr(variant, "id", "") or "").strip()
+            if not variant_id:
+                continue
+            status_val = str(getattr(variant, "status", "") or "").strip().lower()
+            try:
+                uq = int(variant.unfulfilled_qty) if getattr(variant, "unfulfilled_qty", None) is not None else None
+            except Exception:
+                uq = None
+            is_unfulfilled = status_val == "unfulfilled" or (uq is not None and uq > 0)
+            if not is_unfulfilled:
+                continue
+
+            product_id = str(getattr(variant, "product_id", "") or "").strip()
+            product_key = product_id or "__unknown_product__"
+            product_title = str(getattr(variant, "product_title", "") or "").strip()
+            product_group = product_map.setdefault(product_key, {
+                "key": product_key,
+                "productId": product_id,
+                "title": product_title or (f"Product {product_id.split('/')[-1]}" if product_id else "Unknown product"),
+                "image": getattr(variant, "image", None),
+                "order_ids": set(),
+                "variants": {},
+            })
+            product_group["order_ids"].add(order_id)
+            if not product_group.get("image") and getattr(variant, "image", None):
+                product_group["image"] = getattr(variant, "image", None)
+            if str(product_group.get("title") or "").startswith("Product ") and product_title:
+                product_group["title"] = product_title
+
+            variant_group = product_group["variants"].setdefault(variant_id, {
+                "key": f"{product_key}::{variant_id}",
+                "variantId": variant_id,
+                "title": str(getattr(variant, "title", None) or getattr(variant, "sku", None) or "Variant").strip(),
+                "sku": str(getattr(variant, "sku", None) or "").strip(),
+                "image": getattr(variant, "image", None),
+                "order_ids": set(),
+            })
+            variant_group["order_ids"].add(order_id)
+            if not variant_group.get("image") and getattr(variant, "image", None):
+                variant_group["image"] = getattr(variant, "image", None)
+            if (not variant_group.get("title") or variant_group.get("title") == "Variant") and getattr(variant, "title", None):
+                variant_group["title"] = str(getattr(variant, "title", None))
+            if not variant_group.get("sku") and getattr(variant, "sku", None):
+                variant_group["sku"] = str(getattr(variant, "sku", None))
+
+    out: List[Dict[str, Any]] = []
+    for product_group in product_map.values():
+        variants_out: List[Dict[str, Any]] = []
+        for variant_group in product_group["variants"].values():
+            variant_orders = [
+                order_summary_by_id[order_id]
+                for order_id in variant_group["order_ids"]
+                if order_id in order_summary_by_id
+            ]
+            variant_orders.sort(key=lambda order: str(order.get("created_at") or ""))
+            variants_out.append({
+                "key": variant_group["key"],
+                "variantId": variant_group["variantId"],
+                "title": variant_group["title"],
+                "sku": variant_group["sku"],
+                "image": variant_group["image"],
+                "count": len(variant_group["order_ids"]),
+                "orders": variant_orders,
+            })
+        variants_out.sort(key=lambda variant: (-int(variant.get("count") or 0), str(variant.get("title") or "")))
+        out.append({
+            "key": product_group["key"],
+            "productId": product_group["productId"],
+            "title": product_group["title"],
+            "image": product_group["image"],
+            "count": len(product_group["order_ids"]),
+            "variants": variants_out,
+        })
+    out.sort(key=lambda product: (-int(product.get("count") or 0), str(product.get("title") or "")))
+    return out
+
+def _aggregate_orders_by_cod_date(orders: List["OrderDTO"], collect_prefix: Optional[str]) -> List[Dict[str, Any]]:
+    import re
+
+    prefix = str((collect_prefix or "cod")).strip().lower() or "cod"
+    cod_regex = re.compile(rf"^{re.escape(prefix)}\s+(\d{{2}}/\d{{2}}/\d{{2}})$", re.IGNORECASE)
+    order_summary_by_id: Dict[str, Dict[str, Any]] = {}
+    groups: Dict[str, Dict[str, Any]] = {}
+
+    def parse_cod_date(tag: str) -> Optional[Tuple[str, str]]:
+        try:
+            match = cod_regex.match(str(tag or "").strip())
+            if not match:
+                return None
+            dd, mm, yy = match.group(1).split("/")
+            full_year = 2000 + int(yy)
+            return f"{prefix} {match.group(1)}", f"{full_year}-{mm}-{dd}"
+        except Exception:
+            return None
+
+    for order in orders:
+        order_id = str(getattr(order, "id", "") or "").strip()
+        if not order_id:
+            continue
+        summary = order_summary_by_id.setdefault(order_id, _order_summary_payload(order))
+        seen_labels: set = set()
+        for tag in (getattr(order, "tags", None) or []):
+            parsed = parse_cod_date(str(tag or ""))
+            if not parsed:
+                continue
+            label, sort_key = parsed
+            if label in seen_labels:
+                continue
+            seen_labels.add(label)
+            group = groups.setdefault(label, {
+                "label": label,
+                "sortKey": sort_key,
+                "orders": [],
+                "order_ids": set(),
+                "totalItems": 0,
+            })
+            if order_id in group["order_ids"]:
+                continue
+            group["order_ids"].add(order_id)
+            group["orders"].append(summary)
+            group["totalItems"] += int(summary.get("itemCount") or 0)
+
+    out = list(groups.values())
+    out.sort(key=lambda group: str(group.get("sortKey") or ""))
+    for group in out:
+        group["orders"].sort(
+            key=lambda order: (
+                -float(order.get("totalPrice") or 0.0),
+                -int(order.get("itemCount") or 0),
+                str(order.get("created_at") or ""),
+            )
+        )
+        group.pop("order_ids", None)
+    return out
+
+def _apply_cached_order_overrides(items: List["OrderDTO"], store: Optional[str]) -> None:
+    if (store or "irrakids").strip().lower() != "irranova":
+        return
+    try:
+        for order in items:
+            key = (order.number or "").lstrip("#")
+            override = ORDER_OVERRIDES.get(key) or {}
+            if (not order.customer) and ((override.get("customer") or {}).get("displayName")):
+                order.customer = (override.get("customer") or {}).get("displayName")
+            shipping = (override.get("shippingAddress") or {})
+            if (not order.shipping_city) and shipping.get("city"):
+                order.shipping_city = shipping.get("city")
+            if (not order.shipping_name) and shipping.get("name"):
+                order.shipping_name = shipping.get("name")
+            if (not order.shipping_phone) and shipping.get("phone"):
+                order.shipping_phone = shipping.get("phone")
+            if (not order.shipping_address1) and shipping.get("address1"):
+                order.shipping_address1 = shipping.get("address1")
+            if (not order.shipping_address2) and shipping.get("address2"):
+                order.shipping_address2 = shipping.get("address2")
+            if (not order.shipping_zip) and shipping.get("zip"):
+                order.shipping_zip = shipping.get("zip")
+            if (not order.shipping_province) and shipping.get("province"):
+                order.shipping_province = shipping.get("province")
+            if (not order.shipping_country) and shipping.get("country"):
+                order.shipping_country = shipping.get("country")
+    except Exception:
+        pass
+
 # ---------- Routes ----------
 @app.get("/api/health")
 async def health():
@@ -1492,6 +1735,7 @@ async def list_orders(
     fulfillment_from: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD) inclusive start for fulfillment date"),
     fulfillment_to: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD) inclusive end for fulfillment date"),
     financial_status: Optional[str] = Query(None, description="Filter by payment status: paid, pending, or paid_or_pending"),
+    aggregate_by: Optional[str] = Query(None, pattern="^(products|cod_date)$", description="Optional server-side aggregation mode"),
     debug: bool = Query(False, description="If true, include debug metadata (resolved Shopify query, scan stats)"),
 ):
     domain, access_token, _ = await resolve_store_settings_effective(store)
@@ -1589,6 +1833,7 @@ async def list_orders(
         "financial_status": (financial_status or "").strip().lower(),
         "fulfillment_from": (fulfillment_from or "").strip(),
         "fulfillment_to": (fulfillment_to or "").strip(),
+        "aggregate_by": (aggregate_by or "").strip().lower(),
     })
     cached = _orders_cache_get(cache_key)
     # If we are using the fast fulfillment-date query and it cached an empty response,
@@ -1773,6 +2018,7 @@ async def list_orders(
                     "financial_status": (financial_status or "").strip().lower(),
                     "fulfillment_from": (orig_fulfillment_from or ""),
                     "fulfillment_to": (orig_fulfillment_to or ""),
+                    "aggregate_by": (aggregate_by or "").strip().lower(),
                 })
                 cached_fb = _orders_cache_get(cache_key_fb)
                 if cached_fb is not None:
@@ -1892,33 +2138,54 @@ async def list_orders(
         _orders_cache_set(cache_key, resp)
         return resp
 
-    # For Irranova, backfill customer/shipping city from cached overrides when available
-    if (store or "irrakids").strip().lower() == "irranova":
+    _apply_cached_order_overrides(items, store)
+
+    if aggregate_by:
+        all_items: List[OrderDTO] = list(items)
+        local_next = None
         try:
-            for o in items:
-                key = (o.number or "").lstrip("#")
-                ov = ORDER_OVERRIDES.get(key) or {}
-                if (not o.customer) and ((ov.get("customer") or {}).get("displayName")):
-                    o.customer = (ov.get("customer") or {}).get("displayName")
-                shp = (ov.get("shippingAddress") or {})
-                if (not o.shipping_city) and (shp.get("city")):
-                    o.shipping_city = shp.get("city")
-                if (not o.shipping_name) and (shp.get("name")):
-                    o.shipping_name = shp.get("name")
-                if (not o.shipping_phone) and (shp.get("phone")):
-                    o.shipping_phone = shp.get("phone")
-                if (not o.shipping_address1) and (shp.get("address1")):
-                    o.shipping_address1 = shp.get("address1")
-                if (not o.shipping_address2) and (shp.get("address2")):
-                    o.shipping_address2 = shp.get("address2")
-                if (not o.shipping_zip) and (shp.get("zip")):
-                    o.shipping_zip = shp.get("zip")
-                if (not o.shipping_province) and (shp.get("province")):
-                    o.shipping_province = shp.get("province")
-                if (not o.shipping_country) and (shp.get("country")):
-                    o.shipping_country = shp.get("country")
+            if edges:
+                local_next = edges[-1].get("cursor")
         except Exception:
-            pass
+            local_next = None
+        has_more = (ords.get("pageInfo") or {}).get("hasNextPage") or False
+        pages = 1
+        max_pages = 60
+        while has_more and local_next and pages < max_pages:
+            page = await shopify_graphql(query, {"first": 250, "after": local_next, "query": q or None, "reverse": variables["reverse"]}, store=store)
+            ords_page = page["orders"]
+            edges_page = ords_page.get("edges") or []
+            if not edges_page:
+                break
+            page_items: List[OrderDTO] = [map_order_node(edge["node"]) for edge in edges_page if (edge or {}).get("node")]
+            _apply_cached_order_overrides(page_items, store)
+            all_items.extend(page_items)
+            has_more = (ords_page.get("pageInfo") or {}).get("hasNextPage") or False
+            try:
+                local_next = edges_page[-1].get("cursor")
+            except Exception:
+                local_next = None
+            pages += 1
+
+        if search and not search.strip().lstrip("#").isdigit():
+            search_lower = search.lower().strip()
+            all_items = [
+                order for order in all_items
+                if any((variant.sku or "").lower().find(search_lower) >= 0 for variant in order.variants) or search_lower in order.number.lower()
+            ]
+
+        groups = _aggregate_orders_by_product(all_items) if aggregate_by == "products" else _aggregate_orders_by_cod_date(all_items, collect_prefix)
+        unique_tags = sorted({tag for order in all_items for tag in (order.tags or [])})
+        resp = {
+            "groups": groups,
+            "pageInfo": {"hasNextPage": False},
+            "tags": unique_tags,
+            "totalCount": len(all_items),
+            "nextCursor": None,
+            "aggregateBy": aggregate_by,
+        }
+        _orders_cache_set(cache_key, resp)
+        return resp
 
     # Optional client-side SKU filter if search is non-numeric
     if search and not search.strip().lstrip("#").isdigit():

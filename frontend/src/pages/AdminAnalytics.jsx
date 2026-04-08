@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
 
 function todayISO(offsetDays = 0) {
@@ -32,8 +32,13 @@ export default function AdminAnalytics(){
   const [orderSearchResults, setOrderSearchResults] = useState([]);
   const [orderSearchLoading, setOrderSearchLoading] = useState(false);
   const [orderSearchError, setOrderSearchError] = useState(null);
+  const statsRequestIdRef = useRef(0);
+  const outRequestIdRef = useRef(0);
+  const usersRequestIdRef = useRef(0);
+  const orderSearchRequestIdRef = useRef(0);
 
   async function searchOrderEvents(){
+    const requestId = ++orderSearchRequestIdRef.current;
     const num = (orderSearch || "").trim().replace(/^#/, "");
     if (!num) {
       setOrderSearchError("Enter an order number");
@@ -51,16 +56,19 @@ export default function AdminAnalytics(){
         throw new Error(js.detail || "Failed to search");
       }
       const js = await res.json();
+      if (requestId !== orderSearchRequestIdRef.current) return;
       setOrderSearchResults(js.rows || []);
       if ((js.rows || []).length === 0) setOrderSearchError(`No events found for order #${num}`);
     } catch (e) {
+      if (requestId !== orderSearchRequestIdRef.current) return;
       setOrderSearchError(e?.message || "Failed to search");
     } finally {
-      setOrderSearchLoading(false);
+      if (requestId === orderSearchRequestIdRef.current) setOrderSearchLoading(false);
     }
   }
 
   async function load(){
+    const requestId = ++statsRequestIdRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -77,16 +85,19 @@ export default function AdminAnalytics(){
         throw new Error(js.detail || "Failed to load stats");
       }
       const js = await res.json();
+      if (requestId !== statsRequestIdRef.current) return;
       setRows(js.rows || []);
       setSummary(js.summary || {});
     } catch (e){
+      if (requestId !== statsRequestIdRef.current) return;
       setError(e?.message || "Failed to load stats");
     } finally {
-      setLoading(false);
+      if (requestId === statsRequestIdRef.current) setLoading(false);
     }
   }
 
   async function loadOutEvents(){
+    const requestId = ++outRequestIdRef.current;
     setOutLoading(true);
     setAdminMsg(null);
     try {
@@ -103,15 +114,18 @@ export default function AdminAnalytics(){
         throw new Error(js.detail || "Failed to load OUT orders");
       }
       const js = await res.json();
+      if (requestId !== outRequestIdRef.current) return;
       setOutRows(js.rows || []);
     } catch (e){
+      if (requestId !== outRequestIdRef.current) return;
       setAdminMsg(e?.message || "Failed to load OUT orders");
     } finally {
-      setOutLoading(false);
+      if (requestId === outRequestIdRef.current) setOutLoading(false);
     }
   }
 
   async function loadUsers(){
+    const requestId = ++usersRequestIdRef.current;
     try {
       const res = await authFetch(`/api/admin/users`, {
         headers: authHeaders({"Accept":"application/json"})
@@ -121,8 +135,10 @@ export default function AdminAnalytics(){
         throw new Error(js.detail || "Failed to load users");
       }
       const js = await res.json();
+      if (requestId !== usersRequestIdRef.current) return;
       setUsers(js.users || []);
     } catch (e){
+      if (requestId !== usersRequestIdRef.current) return;
       // Keep stats visible even if this fails
       setAdminMsg(e?.message || "Failed to load users");
     }

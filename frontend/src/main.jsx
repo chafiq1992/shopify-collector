@@ -1,7 +1,123 @@
-import React from 'react'
+import React, { Suspense, lazy, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
-import App from './App'
+import { loadAuth, saveAuth } from './lib/auth'
+
+const CollectorPage = lazy(() => import('./App'))
+const LoginPage = lazy(() => import('./pages/Login'))
+const AdminAnalyticsPage = lazy(() => import('./pages/AdminAnalytics'))
+const InvoicesVerifierPage = lazy(() => import('./pages/InvoicesVerifier'))
+const MyAnalyticsPage = lazy(() => import('./pages/MyAnalytics'))
+const OrderBrowserPage = lazy(() => import('./pages/OrderBrowser'))
+const OrderLookupPage = lazy(() => import('./pages/OrderLookup'))
+const OrderTaggerPage = lazy(() => import('./pages/OrderTagger'))
+const ShopifyConnectPage = lazy(() => import('./pages/ShopifyConnect'))
+const VariantOrdersPage = lazy(() => import('./pages/VariantOrders'))
+
+function readCurrentStore() {
+  try {
+    const params = new URLSearchParams(location.search)
+    const fromUrl = String(params.get('store') || '').trim().toLowerCase()
+    if (fromUrl === 'irrakids' || fromUrl === 'irranova') return fromUrl
+  } catch {}
+  try {
+    const fromSession = String(sessionStorage.getItem('orderCollectorStore') || '').trim().toLowerCase()
+    if (fromSession === 'irrakids' || fromSession === 'irranova') return fromSession
+  } catch {}
+  return 'irrakids'
+}
+
+function PageFallback() {
+  return (
+    <div className="min-h-screen w-full flex items-center justify-center text-gray-600">
+      Loading...
+    </div>
+  )
+}
+
+function RouteShell() {
+  const [auth, setAuth] = useState(() => loadAuth())
+  const [store, setStore] = useState(() => readCurrentStore())
+  const [, setRouteTick] = useState(0)
+
+  useEffect(() => {
+    const rerender = () => {
+      setAuth(loadAuth())
+      setStore(readCurrentStore())
+      setRouteTick((tick) => tick + 1)
+    }
+    try { window.addEventListener('popstate', rerender) } catch {}
+    try { window.addEventListener('orderCollectorAuthCleared', rerender) } catch {}
+    return () => {
+      try { window.removeEventListener('popstate', rerender) } catch {}
+      try { window.removeEventListener('orderCollectorAuthCleared', rerender) } catch {}
+    }
+  }, [])
+
+  function handleLoginSuccess(data) {
+    saveAuth(data)
+    setAuth(data)
+    try {
+      if (String(location.pathname || '') === '/login') {
+        history.replaceState(null, '', '/')
+      }
+    } catch {}
+    setRouteTick((tick) => tick + 1)
+  }
+
+  const currentPath = (typeof location !== 'undefined' ? String(location.pathname || '').trim() : '/') || '/'
+  const isAuthed = !!auth?.access_token
+
+  let Page = CollectorPage
+  let pageProps = {}
+
+  if (!isAuthed && currentPath !== '/login') {
+    Page = LoginPage
+    pageProps = { onSuccess: handleLoginSuccess }
+  } else {
+    switch (currentPath) {
+      case '/login':
+        Page = isAuthed ? CollectorPage : LoginPage
+        pageProps = isAuthed ? {} : { onSuccess: handleLoginSuccess }
+        break
+      case '/admin':
+        Page = AdminAnalyticsPage
+        break
+      case '/invoices-verifier':
+        Page = InvoicesVerifierPage
+        break
+      case '/my-analytics':
+        Page = MyAnalyticsPage
+        break
+      case '/order-browser':
+        Page = OrderBrowserPage
+        break
+      case '/order-lookup':
+        Page = OrderLookupPage
+        break
+      case '/order-tagger':
+        Page = OrderTaggerPage
+        break
+      case '/shopify-connect':
+        Page = ShopifyConnectPage
+        pageProps = { store, setStore }
+        break
+      case '/variant-orders':
+        Page = VariantOrdersPage
+        break
+      case '/':
+      default:
+        Page = CollectorPage
+        break
+    }
+  }
+
+  return (
+    <Suspense fallback={<PageFallback />}>
+      <Page {...pageProps} />
+    </Suspense>
+  )
+}
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -58,7 +174,7 @@ class ErrorBoundary extends React.Component {
 createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <App />
+      <RouteShell />
     </ErrorBoundary>
   </React.StrictMode>
 )

@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspens
 import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 
 const DeliveryLabelPopup = lazy(() => import("../components/DeliveryLabelPopup"));
+const RECENT_TAG_CACHE_TTL_MS = 60 * 1000;
+const recentTagsCache = new Map();
 
 const API = {
   async searchOneByNumber(number, store){
@@ -70,6 +72,12 @@ const API = {
     return res.json();
   },
   async fetchRecentTags(store){
+    const cacheKey = String(store || "").trim().toLowerCase() || "default";
+    const now = Date.now();
+    const cached = recentTagsCache.get(cacheKey);
+    if (cached?.value && cached.expiresAt > now) return cached.value;
+    if (cached?.promise) return cached.promise;
+    const request = (async () => {
     const params = new URLSearchParams({
       limit: "50",
       status_filter: "all",
@@ -78,7 +86,15 @@ const API = {
     const res = await authFetch(`/api/orders?${params}`, { headers: authHeaders() });
     if (!res.ok) throw new Error("Failed to fetch tags");
     const js = await res.json();
-    return js.tags || [];
+      const tags = js.tags || [];
+      recentTagsCache.set(cacheKey, { value: tags, expiresAt: Date.now() + RECENT_TAG_CACHE_TTL_MS, promise: null });
+      return tags;
+    })().catch((error) => {
+      recentTagsCache.delete(cacheKey);
+      throw error;
+    });
+    recentTagsCache.set(cacheKey, { value: null, expiresAt: 0, promise: request });
+    return request;
   }
 };
 
@@ -250,6 +266,7 @@ export default function OrderLookup(){
   const [showTagDropdown, setShowTagDropdown] = useState(false);
   const [foData, setFoData] = useState({ orders: [], mapByVariant: {}, selectedLineItemIds: new Set() });
   const [agentToday, setAgentToday] = useState({ name: "", fulfilledToday: 0, loading: false });
+  const [agentTodayReloadKey, setAgentTodayReloadKey] = useState(0);
 
   const [guideActive, setGuideActive] = useState(false);
   const [activeGuideSection, setActiveGuideSection] = useState(null);
@@ -263,7 +280,8 @@ export default function OrderLookup(){
   const [printQueueFlight, setPrintQueueFlight] = useState(null);
   const [queuePulse, setQueuePulse] = useState(false);
   const [labelQueueItems, setLabelQueueItems] = useState([]);
-  const [labelQueueOpen, setLabelQueueOpen] = useState(false);
+  const labelQueuePollItemsRef = useRef([]);
+  const printQueuePollItemsRef = useRef([]);
 
   const inputRef = useRef(null);
   const sectionRefs = useRef({});
@@ -274,6 +292,27 @@ export default function OrderLookup(){
   const printQueueRef = useRef(null);
   const queuePulseTimerRef = useRef(null);
   const queueFlightTimerRef = useRef(null);
+  const labelQueuePollKey = useMemo(
+    () => labelQueueItems
+      .filter((item) => item?.jobId)
+      .map((item) => `${item.queueId}:${item.jobId}`)
+      .sort()
+      .join("|"),
+    [labelQueueItems]
+  );
+  const printQueuePollKey = useMemo(
+    () => printQueue
+      .filter((item) => item?.jobId)
+      .map((item) => `${item.id}:${item.jobId}`)
+      .sort()
+      .join("|"),
+    [printQueue]
+  );
+  const activeLabelQueueItem = useMemo(() => {
+    return [...labelQueueItems]
+      .filter((item) => item && item.statusKey !== "printed")
+      .sort((a, b) => Number(a?.createdAt || 0) - Number(b?.createdAt || 0))[0] || null;
+  }, [labelQueueItems]);
   const registerSection = useCallback((key) => (el) => {
     if (el) sectionRefs.current[key] = el;
     else delete sectionRefs.current[key];
@@ -285,10 +324,14 @@ export default function OrderLookup(){
     try { if (queueFlightTimerRef.current) clearTimeout(queueFlightTimerRef.current); } catch {}
   }, []);
   useEffect(() => {
-    const items = labelQueueItems.filter((item) => item?.jobId);
-    if (!items.length) return;
+    labelQueuePollItemsRef.current = labelQueueItems.filter((item) => item?.jobId);
+  }, [labelQueueItems]);
+  useEffect(() => {
+    if (!labelQueuePollKey) return;
     let cancelled = false;
-    const timer = setInterval(async () => {
+    const pollQueue = async () => {
+      const items = labelQueuePollItemsRef.current;
+      if (!items.length) return;
       await Promise.all(items.map(async (item) => {
         try {
           const res = await authFetch(`/api/print-job-status?job_id=${encodeURIComponent(item.jobId)}`, {
@@ -302,19 +345,24 @@ export default function OrderLookup(){
           }
         } catch {}
       }));
-    }, 2000);
+    };
+    pollQueue();
+    const timer = setInterval(pollQueue, 2000);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [labelQueueItems]);
+  }, [labelQueuePollKey]);
   useEffect(() => {
-    if (!printQueue.length) return;
+    printQueuePollItemsRef.current = printQueue.filter((item) => item?.jobId);
+  }, [printQueue]);
+  useEffect(() => {
+    if (!printQueuePollKey) return;
     let cancelled = false;
     const timers = [];
 
     async function pollQueue() {
-      const items = printQueue.filter(item => item?.jobId);
+      const items = printQueuePollItemsRef.current;
       if (!items.length) return;
       await Promise.all(items.map(async (item) => {
         try {
@@ -337,7 +385,7 @@ export default function OrderLookup(){
       cancelled = true;
       timers.forEach((timer) => clearInterval(timer));
     };
-  }, [printQueue]);
+  }, [printQueuePollKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -359,7 +407,7 @@ export default function OrderLookup(){
     }
     loadAgentToday();
     return () => { cancelled = true; };
-  }, [order?.id, fulfillSuccess]);
+  }, [agentTodayReloadKey]);
 
   const handleLogout = useCallback(() => {
     clearAuth();
@@ -449,7 +497,7 @@ export default function OrderLookup(){
             error: nextState?.error || "",
             // Extended state for side panel
             phase: nextState?.phase || item.phase,
-            busy: nextState?.busy || false,
+            busy: typeof nextState?.busy === "boolean" ? nextState.busy : !!item.busy,
             companies: nextState?.companies || item.companies || [],
             companyId: nextState?.companyId || item.companyId || "",
             cityName: nextState?.cityName || item.cityName || "",
@@ -498,16 +546,6 @@ export default function OrderLookup(){
       ...prev,
     ].slice(0, 12));
   }, []);
-  const openQueueItem = useCallback((queueId) => {
-    setLabelQueueOpen(true);
-    setLabelQueueItems(prev => prev.map(item => ({ ...item, open: item.queueId === queueId })));
-  }, []);
-  const closeQueueItem = useCallback((queueId) => {
-    setLabelQueueItems(prev => prev.map(item => (
-      item.queueId === queueId ? { ...item, open: false } : item
-    )));
-  }, []);
-
   async function doSearch(number){
     const token = searchTokenRef.current + 1;
     searchTokenRef.current = token;
@@ -737,11 +775,11 @@ export default function OrderLookup(){
       );
   }, [order?.note, screenshotTimeline]);
 
-  function filteredSuggestions(){
+  const filteredTagSuggestions = useMemo(() => {
     const q = (tagQuery || newTag || "").trim().toLowerCase();
     if (!q) return tagSuggestions.slice(0, 20);
     return (tagSuggestions || []).filter(t => String(t).toLowerCase().includes(q)).slice(0, 20);
-  }
+  }, [newTag, tagQuery, tagSuggestions]);
 
   /* ── Guide logic ─────────────────────────────────────── */
 
@@ -1406,9 +1444,9 @@ export default function OrderLookup(){
                 className="px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold active:scale-[.98]"
               >Add tag</button>
             </div>
-            {showTagDropdown && filteredSuggestions().length > 0 && (
+            {showTagDropdown && filteredTagSuggestions.length > 0 && (
               <div className="border border-gray-200 rounded-xl bg-white shadow-sm max-h-56 overflow-auto text-sm">
-                {filteredSuggestions().map((s, i) => (
+                {filteredTagSuggestions.map((s, i) => (
                   <button
                     key={`${s}-${i}`}
                     onMouseDown={(e)=>{ e.preventDefault(); }}
@@ -2049,9 +2087,9 @@ export default function OrderLookup(){
                   className="px-3 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold active:scale-[.98]"
                 >Add tag</button>
               </div>
-              {showTagDropdown && filteredSuggestions().length > 0 && (
+              {showTagDropdown && filteredTagSuggestions.length > 0 && (
                 <div className="mt-1 border border-gray-200 rounded-lg bg-white shadow-sm max-h-56 overflow-auto text-sm">
-                  {filteredSuggestions().map((s, i) => (
+                  {filteredTagSuggestions.map((s, i) => (
                     <button
                       key={`${s}-${i}`}
                       onMouseDown={(e)=>{ e.preventDefault(); }}
@@ -2309,6 +2347,7 @@ export default function OrderLookup(){
                       });
                       const queuedOrder = buildFulfilledQueueOrder(order, foData);
                       setFulfillSuccess(true);
+                      setAgentTodayReloadKey((value) => value + 1);
                       try { setTimeout(()=>setFulfillSuccess(false), 2200); } catch {}
                       enqueueFulfilledOrder(queuedOrder);
                       resetLookupForNextOrder(`Order #${order?.number || "—"} fulfilled and added to the side queue.`);
@@ -2589,19 +2628,19 @@ export default function OrderLookup(){
           />
         </Suspense>
       )}
-      {labelQueueItems.map((item) => (
-        <Suspense key={item.queueId} fallback={null}>
+      {activeLabelQueueItem && !showDeliveryPopup && (
+        <Suspense key={activeLabelQueueItem.queueId} fallback={null}>
           <DeliveryLabelPopup
-            order={item.order}
+            order={activeLabelQueueItem.order}
             store={store}
             open={false}
             autoRunWhenHidden={true}
-            onClose={() => closeQueueItem(item.queueId)}
-            onQueued={(payload) => handleQueueItemQueued(item.queueId, payload)}
-            onStateChange={(nextState) => handleQueueItemStateChange(item.queueId, nextState)}
+            onClose={() => {}}
+            onQueued={(payload) => handleQueueItemQueued(activeLabelQueueItem.queueId, payload)}
+            onStateChange={(nextState) => handleQueueItemStateChange(activeLabelQueueItem.queueId, nextState)}
           />
         </Suspense>
-      ))}
+      )}
       {printQueueFlight && (
         <div
           key={printQueueFlight.id}

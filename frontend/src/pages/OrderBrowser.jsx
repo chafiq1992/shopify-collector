@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
 
 // Minimal API client reused across pages
@@ -80,6 +80,7 @@ export default function OrderBrowser(){
   const [pagingBusy, setPagingBusy] = useState(false);
   const [error, setError] = useState(null);
   const requestIdRef = useRef(0);
+  const overrideRequestsRef = useRef(new Set());
 
   // Expanded rows and per-order inputs
   const [expandedIds, setExpandedIds] = useState(() => new Set());
@@ -97,7 +98,7 @@ export default function OrderBrowser(){
     })));
   }
 
-  function buildBaseQuery(){
+  const baseQuery = useMemo(() => {
     let q = "";
     if (fulfillmentFilter === "unfulfilled"){
       q += " fulfillment_status:unfulfilled";
@@ -109,9 +110,9 @@ export default function OrderBrowser(){
       q += " fulfillment_status:fulfilled";
     }
     return q.trim();
-  }
+  }, [fulfillmentFilter, fulfilledFrom, fulfilledTo]);
 
-  async function loadFirstPage(){
+  const loadFirstPage = useCallback(async () => {
     const reqId = ++requestIdRef.current;
     setPages([]);
     setPageIndex(0);
@@ -123,7 +124,7 @@ export default function OrderBrowser(){
         status_filter: "all",
         tag_filter: (tagFilter || "").trim(),
         search: (search || "").trim(),
-        base_query: buildBaseQuery(),
+        base_query: baseQuery,
         fulfillment_from: (fulfilledFrom || "").trim(),
         fulfillment_to: (fulfilledTo || "").trim(),
         financial_status: (financialStatus === "all" ? "" : financialStatus),
@@ -143,7 +144,7 @@ export default function OrderBrowser(){
     } finally {
       setLoading(false);
     }
-  }
+  }, [baseQuery, financialStatus, fulfilledFrom, fulfilledTo, perPage, search, store, tagFilter]);
 
   async function gotoNextPage(){
     // If next page is already cached, just navigate.
@@ -162,7 +163,7 @@ export default function OrderBrowser(){
         status_filter: "all",
         tag_filter: (tagFilter || "").trim(),
         search: (search || "").trim(),
-        base_query: buildBaseQuery(),
+        base_query: baseQuery,
         fulfillment_from: (fulfilledFrom || "").trim(),
         fulfillment_to: (fulfilledTo || "").trim(),
         financial_status: (financialStatus === "all" ? "" : financialStatus),
@@ -188,12 +189,7 @@ export default function OrderBrowser(){
     // Debounce search a bit
     const t = setTimeout(() => { loadFirstPage(); }, 350);
     return () => clearTimeout(t);
-  }, [tagFilter, fulfillmentFilter, store, search, fulfilledFrom, fulfilledTo, perPage]);
-  useEffect(() => {
-    // Reload when financial status changes
-    const t = setTimeout(() => { loadFirstPage(); }, 0);
-    return () => clearTimeout(t);
-  }, [financialStatus]);
+  }, [financialStatus, fulfilledFrom, fulfillmentFilter, fulfilledTo, loadFirstPage, perPage, search, store, tagFilter]);
 
   function toggleExpanded(order){
     setExpandedIds(prev => {
@@ -204,10 +200,16 @@ export default function OrderBrowser(){
     // Fetch overrides when expanding
     try {
       const num = String(order.number || "").replace(/^#/, "");
+      if (!num) return;
+      if (Object.prototype.hasOwnProperty.call(overridesByNumber, num)) return;
+      if (overrideRequestsRef.current.has(num)) return;
+      overrideRequestsRef.current.add(num);
       API.fetchOverrides(num, store, true).then(js => {
         const ov = (js.overrides || {})[num] || null;
         setOverridesByNumber(prev => ({ ...prev, [num]: ov }));
-      }).catch(()=>{});
+      }).catch(()=>{}).finally(() => {
+        overrideRequestsRef.current.delete(num);
+      });
     } catch {}
   }
 
@@ -633,8 +635,6 @@ export default function OrderBrowser(){
                     onClick={()=>{
                       setFulfilledFrom("");
                       setFulfilledTo("");
-                      // Ensure reload uses cleared values
-                      setTimeout(() => { try { loadFirstPage(); } catch {} }, 0);
                     }}
                   >Clear</button>
                 </div>
@@ -719,6 +719,4 @@ function renderShipping(ov){
     </div>
   );
 }
-
-
 

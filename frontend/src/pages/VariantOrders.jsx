@@ -10,7 +10,7 @@ const API = {
   },
 };
 
-function computeCodDatesCSV(from, to){
+function computeCodDatesCSV(from, to) {
   try {
     if (!from && !to) return "";
     const [fy, fm, fd] = (from || to || "").split("-");
@@ -21,57 +21,71 @@ function computeCodDatesCSV(from, to){
     const a = start <= end ? start : end;
     const b = start <= end ? end : start;
     const out = [];
-    for (let dt = new Date(a); dt <= b; dt.setDate(dt.getDate() + 1)){
+    for (let dt = new Date(a); dt <= b; dt.setDate(dt.getDate() + 1)) {
       const y = dt.getFullYear();
       const m = String(dt.getMonth() + 1).padStart(2, "0");
       const d = String(dt.getDate()).padStart(2, "0");
       out.push(`${d}/${m}/${String(y).slice(-2)}`);
     }
     return out.join(",");
-  } catch { return ""; }
+  } catch {
+    return "";
+  }
 }
 
-function fmtShortDate(iso){
+function fmtShortDate(iso) {
   try {
     if (!iso) return "";
     const d = new Date(String(iso));
     if (isNaN(d.getTime())) return "";
-    const dd = String(d.getDate()).padStart(2, "0");
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const yy = String(d.getFullYear()).slice(-2);
-    return `${dd}/${mm}/${yy}`;
-  } catch { return ""; }
+    return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getFullYear()).slice(-2)}`;
+  } catch {
+    return "";
+  }
 }
 
-function compactAddress(o){
+function compactAddress(order) {
   const parts = [];
-  const a1 = (o.shipping_address1 || "").trim();
-  const a2 = (o.shipping_address2 || "").trim();
-  const c = (o.shipping_city || "").trim();
-  const z = (o.shipping_zip || "").trim();
-  const p = (o.shipping_province || "").trim();
-  const co = (o.shipping_country || "").trim();
+  const a1 = String(order?.shipping_address1 || "").trim();
+  const a2 = String(order?.shipping_address2 || "").trim();
+  const city = String(order?.shipping_city || "").trim();
+  const zip = String(order?.shipping_zip || "").trim();
+  const province = String(order?.shipping_province || "").trim();
+  const country = String(order?.shipping_country || "").trim();
   if (a1) parts.push(a1);
   if (a2) parts.push(a2);
-  const cityLine = [z, c, p].filter(Boolean).join(" ");
+  const cityLine = [zip, city, province].filter(Boolean).join(" ");
   if (cityLine) parts.push(cityLine);
-  if (co) parts.push(co);
+  if (country) parts.push(country);
   return parts.join(", ");
 }
 
-export default function VariantOrders(){
+function tagClass(tag) {
+  const tagLower = String(tag || "").trim().toLowerCase();
+  if (!tagLower) return "bg-white text-gray-700 border-gray-200";
+  if (tagLower.startsWith("cod ")) return "bg-blue-50 text-blue-800 border-blue-200";
+  if (tagLower === "out") return "bg-red-50 text-red-800 border-red-200";
+  if (tagLower === "urgent") return "bg-amber-50 text-amber-900 border-amber-200";
+  if (tagLower === "pc") return "bg-emerald-50 text-emerald-800 border-emerald-200";
+  if (tagLower.includes("print")) return "bg-indigo-50 text-indigo-800 border-indigo-200";
+  return "bg-gray-50 text-gray-700 border-gray-200";
+}
+
+export default function VariantOrders() {
   const [store, setStore] = useState(() => {
     try {
       const params = new URLSearchParams(location.search);
-      const s = (params.get("store") || sessionStorage.getItem("orderCollectorStore") || "irrakids").trim().toLowerCase();
-      return (s === "irranova" ? "irranova" : "irrakids");
-    } catch { return "irrakids"; }
+      const selected = (params.get("store") || sessionStorage.getItem("orderCollectorStore") || "irrakids").trim().toLowerCase();
+      return selected === "irranova" ? "irranova" : "irrakids";
+    } catch {
+      return "irrakids";
+    }
   });
   useEffect(() => {
     try { sessionStorage.setItem("orderCollectorStore", store); } catch {}
     try {
       const params = new URLSearchParams(location.search);
-      if ((params.get("store") || "").trim().toLowerCase() !== store){
+      if ((params.get("store") || "").trim().toLowerCase() !== store) {
         params.set("store", store);
         history.replaceState(null, "", `${location.pathname}?${params.toString()}`);
       }
@@ -81,271 +95,124 @@ export default function VariantOrders(){
   const [fromDate, setFromDate] = useState(() => {
     try {
       const d = new Date();
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, "0");
-      const dd = String(d.getDate()).padStart(2, "0");
-      return `${y}-${m}-${dd}`;
-    } catch { return ""; }
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    } catch {
+      return "";
+    }
   });
   const [toDate, setToDate] = useState(() => {
     try {
       const d = new Date();
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, "0");
-      const dd = String(d.getDate()).padStart(2, "0");
-      return `${y}-${m}-${dd}`;
-    } catch { return ""; }
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    } catch {
+      return "";
+    }
   });
   const [collectPrefix, setCollectPrefix] = useState(() => {
     try {
       const raw = localStorage.getItem("orderCollectorPreset");
       const preset = raw ? JSON.parse(raw) : null;
       return String(preset?.collectPrefix || "cod");
-    } catch { return "cod"; }
+    } catch {
+      return "cod";
+    }
   });
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [orders, setOrders] = useState([]);
+  const [viewMode, setViewMode] = useState("products");
+  const [products, setProducts] = useState([]);
+  const [ordersByCod, setOrdersByCod] = useState([]);
+  const [totalOrders, setTotalOrders] = useState(0);
   const requestIdRef = useRef(0);
-  const [viewMode, setViewMode] = useState("products"); // "products" | "ordersByCod"
+  const cacheRef = useRef(new Map());
 
   const codDatesCSV = useMemo(() => computeCodDatesCSV(fromDate, toDate), [fromDate, toDate]);
   const codDatesCount = useMemo(() => {
     try { return codDatesCSV ? codDatesCSV.split(",").filter(Boolean).length : 0; } catch { return 0; }
   }, [codDatesCSV]);
+  const aggregateMode = viewMode === "products" ? "products" : "cod_date";
 
-  function tagClass(t){
-    const tl = String(t || "").trim().toLowerCase();
-    if (!tl) return "bg-white text-gray-700 border-gray-200";
-    if (tl.startsWith("cod ")) return "bg-blue-50 text-blue-800 border-blue-200";
-    if (tl === "out") return "bg-red-50 text-red-800 border-red-200";
-    if (tl === "urgent") return "bg-amber-50 text-amber-900 border-amber-200";
-    if (tl === "pc") return "bg-emerald-50 text-emerald-800 border-emerald-200";
-    if (tl.includes("print")) return "bg-indigo-50 text-indigo-800 border-indigo-200";
-    return "bg-gray-50 text-gray-700 border-gray-200";
+  const [expandedCodGroups, setExpandedCodGroups] = useState(() => new Set());
+  const [expandedProducts, setExpandedProducts] = useState(() => new Set());
+  const [expandedVariants, setExpandedVariants] = useState(() => new Set());
+
+  function toggleCodGroup(label) {
+    setExpandedCodGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
   }
 
-  async function loadAll(){
-    const reqId = ++requestIdRef.current;
+  function toggleProduct(key) {
+    setExpandedProducts((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function toggleVariant(key) {
+    setExpandedVariants((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  async function loadData({ force = false } = {}) {
+    const requestId = ++requestIdRef.current;
+    const cacheKey = JSON.stringify({
+      mode: aggregateMode,
+      store,
+      codDatesCSV,
+      collectPrefix: String(collectPrefix || "").trim().toLowerCase(),
+    });
+    if (!force && cacheRef.current.has(cacheKey)) {
+      const cached = cacheRef.current.get(cacheKey);
+      setError(null);
+      setLoading(false);
+      setTotalOrders(Number(cached?.totalCount || 0));
+      if (aggregateMode === "products") setProducts(Array.isArray(cached?.groups) ? cached.groups : []);
+      else setOrdersByCod(Array.isArray(cached?.groups) ? cached.groups : []);
+      return;
+    }
+
     setLoading(true);
     setError(null);
-    setOrders([]);
     try {
-      const baseParams = {
+      const data = await API.getOrders({
         limit: 250,
-        // Only: open + unfulfilled + exclude verification-tagged orders
         base_query: "status:open fulfillment_status:unfulfilled -tag:pc",
         financial_status: "paid_or_pending",
         cod_date: "",
         cod_dates: codDatesCSV || "",
-        collect_prefix: (collectPrefix || "cod").trim(),
+        collect_prefix: String(collectPrefix || "cod").trim(),
         store,
-      };
-      let data = await API.getOrders(baseParams);
-      if (reqId !== requestIdRef.current) return;
-      if (data?.error) throw new Error(String(data.error));
-      let out = Array.isArray(data?.orders) ? data.orders : [];
-      let next = data?.nextCursor || null;
-      let hasNext = !!(data?.pageInfo || {}).hasNextPage;
-      // Auto-paginate to fetch ALL matching orders in the chosen period
-      while (hasNext && next) {
-        const page = await API.getOrders({ ...baseParams, cursor: next });
-        if (reqId !== requestIdRef.current) return;
-        const ords = Array.isArray(page?.orders) ? page.orders : [];
-        out = out.concat(ords);
-        next = page?.nextCursor || null;
-        hasNext = !!(page?.pageInfo || {}).hasNextPage;
-      }
-      // Safety: in case backend didn't enforce (older deployments), filter here too.
-      out = out.filter(o => {
-        const fs = String(o?.financial_status || "").toLowerCase();
-        const okPaid = fs.includes("paid");
-        const okPending = fs.includes("pending") || fs.includes("authorized") || fs.includes("partially");
-        const tags = Array.isArray(o?.tags) ? o.tags : [];
-        const hasPcTag = tags.some(t => String(t || "").trim().toLowerCase() === "pc");
-        return (okPaid || okPending) && !hasPcTag;
+        aggregate_by: aggregateMode,
       });
-      setOrders(out);
-    } catch (e){
-      setError(e?.message || "Failed to load orders");
+      if (requestId !== requestIdRef.current) return;
+      if (data?.error) throw new Error(String(data.error));
+      cacheRef.current.set(cacheKey, data);
+      setTotalOrders(Number(data?.totalCount || 0));
+      if (aggregateMode === "products") setProducts(Array.isArray(data?.groups) ? data.groups : []);
+      else setOrdersByCod(Array.isArray(data?.groups) ? data.groups : []);
+    } catch (e) {
+      if (requestId !== requestIdRef.current) return;
+      setError(e?.message || "Failed to load grouped orders");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }
 
   useEffect(() => {
-    // Always reload when period/prefix/store changes
-    const t = setTimeout(() => { loadAll(); }, 150);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store, codDatesCSV, collectPrefix]);
-
-  const products = useMemo(() => {
-    /**
-     * productKey -> {
-     *   key, productId, title, image,
-     *   orderIds:Set, variants: Map<variantId, { key, variantId, title, sku, image, orderIds:Set, orders:any[] }>
-     * }
-     */
-    const pm = new Map();
-
-    for (const o of (orders || [])) {
-      const vs = Array.isArray(o?.variants) ? o.variants : [];
-      for (const v of vs) {
-        // Only count unfulfilled line items (variant must still be needed)
-        const st = String(v?.status || "").toLowerCase();
-        const uq = (v?.unfulfilled_qty != null ? Number(v.unfulfilled_qty) : null);
-        const isUnfulfilled = (st === "unfulfilled") || (uq != null && uq > 0);
-        if (!isUnfulfilled) continue;
-
-        const productId = String(v?.product_id || "").trim();
-        const productKey = productId || "__unknown_product__";
-        const productTitle = String(v?.product_title || "").trim();
-        const variantId = String(v?.id || "").trim();
-        if (!variantId) continue;
-
-        if (!pm.has(productKey)) {
-          pm.set(productKey, {
-            key: productKey,
-            productId,
-            title: productTitle || (productId ? `Product ${productId.split("/").pop()}` : "Unknown product"),
-            image: v?.image || null,
-            orderIds: new Set(),
-            variants: new Map(),
-          });
-        }
-        const pg = pm.get(productKey);
-        pg.orderIds.add(o.id);
-        if (!pg.image && v?.image) pg.image = v.image;
-        if ((pg.title || "").startsWith("Product ") && productTitle) pg.title = productTitle;
-
-        if (!pg.variants.has(variantId)) {
-          pg.variants.set(variantId, {
-            key: `${productKey}::${variantId}`,
-            variantId,
-            title: String(v?.title || v?.sku || "Variant").trim(),
-            sku: String(v?.sku || "").trim(),
-            image: v?.image || null,
-            orderIds: new Set(),
-            orders: [],
-          });
-        }
-        const vg = pg.variants.get(variantId);
-        if (!vg.orderIds.has(o.id)) {
-          vg.orderIds.add(o.id);
-          vg.orders.push(o);
-        }
-        if (!vg.image && v?.image) vg.image = v.image;
-        if ((!vg.title || vg.title === "Variant") && v?.title) vg.title = String(v.title);
-        if (!vg.sku && v?.sku) vg.sku = String(v.sku);
-      }
-    }
-
-    const out = Array.from(pm.values()).map(p => {
-      const variants = Array.from(p.variants.values()).map(v => ({
-        ...v,
-        count: v.orderIds.size,
-        // Orders old -> new for variant drilldown
-        orders: (v.orders || []).slice().sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || ""))),
-      }));
-      variants.sort((a, b) => (b.count - a.count) || String(a.title).localeCompare(String(b.title)));
-      return {
-        ...p,
-        count: p.orderIds.size,
-        variants,
-      };
-    });
-    out.sort((a, b) => (b.count - a.count) || String(a.title).localeCompare(String(b.title)));
-    return out;
-  }, [orders]);
-
-  /* ── Orders grouped by COD date ── */
-  const ordersByCod = useMemo(() => {
-    const prefix = (collectPrefix || "cod").trim().toLowerCase();
-    const codRegex = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+(\\d{2}[\\/]\\d{2}[\\/]\\d{2})$`, "i");
-
-    function parseCodDate(tag) {
-      try {
-        const m = codRegex.exec(String(tag || "").trim());
-        if (!m) return null;
-        const [dd, mm, yy] = m[1].split("/");
-        const full = 2000 + parseInt(yy, 10);
-        return { label: `${prefix} ${m[1]}`, sortKey: `${full}-${mm}-${dd}` };
-      } catch { return null; }
-    }
-
-    function orderItemCount(o) {
-      try {
-        return (Array.isArray(o?.variants) ? o.variants : []).reduce((s, v) => {
-          const uq = v?.unfulfilled_qty != null ? Number(v.unfulfilled_qty) : Number(v?.qty || 0);
-          return s + (uq > 0 ? uq : 0);
-        }, 0);
-      } catch { return 0; }
-    }
-
-    const groups = new Map(); // codLabel -> { label, sortKey, orders[] }
-    for (const o of (orders || [])) {
-      const tags = Array.isArray(o?.tags) ? o.tags : [];
-      // Collect ALL matching COD date tags so the order appears in every group
-      const matchedDates = [];
-      for (const t of tags) {
-        const parsed = parseCodDate(t);
-        if (parsed) matchedDates.push(parsed);
-      }
-      if (matchedDates.length === 0) continue; // skip orders without any COD date tag
-      for (const found of matchedDates) {
-        if (!groups.has(found.label)) {
-          groups.set(found.label, { label: found.label, sortKey: found.sortKey, orders: [] });
-        }
-        // Avoid duplicate if the same COD tag appears twice
-        const grp = groups.get(found.label);
-        if (!grp.orders.some(x => x.id === o.id)) {
-          grp.orders.push(o);
-        }
-      }
-    }
-
-    const out = Array.from(groups.values());
-    // Sort groups by date ascending (oldest first) — sortKey is YYYY-MM-DD so string compare works
-    out.sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0));
-    // Within each group sort: bigger total value first, then more items as tiebreaker
-    for (const g of out) {
-      g.orders.sort((a, b) => {
-        const priceDiff = (Number(b?.total_price || 0)) - (Number(a?.total_price || 0));
-        if (priceDiff !== 0) return priceDiff;
-        return orderItemCount(b) - orderItemCount(a);
-      });
-    }
-    return out;
-  }, [orders, collectPrefix]);
-
-  const [expandedCodGroups, setExpandedCodGroups] = useState(() => new Set());
-  function toggleCodGroup(label) {
-    setExpandedCodGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(label)) next.delete(label); else next.add(label);
-      return next;
-    });
-  }
-
-  const [expandedProducts, setExpandedProducts] = useState(() => new Set());
-  const [expandedVariants, setExpandedVariants] = useState(() => new Set()); // productKey::variantId
-
-  function toggleProduct(key){
-    setExpandedProducts(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
-    });
-  }
-  function toggleVariant(key){
-    setExpandedVariants(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
-    });
-  }
+    const timer = setTimeout(() => { loadData(); }, 150);
+    return () => clearTimeout(timer);
+  }, [store, codDatesCSV, collectPrefix, aggregateMode]);
 
   return (
     <div className="min-h-screen w-full bg-gradient-to-b from-slate-50 to-gray-50 text-gray-900">
@@ -353,42 +220,29 @@ export default function VariantOrders(){
         <div className="max-w-7xl mx-auto px-4 py-2 flex items-center gap-2">
           <div className="text-sm font-extrabold tracking-tight">Product Orders</div>
           <div className="ml-3 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
-            <button
-              onClick={()=>setStore("irrakids")}
-              className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === "irrakids" ? "bg-blue-600 text-white" : "text-gray-700 hover:bg-gray-100"}`}
-            >Irrakids</button>
-            <button
-              onClick={()=>setStore("irranova")}
-              className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === "irranova" ? "bg-blue-600 text-white" : "text-gray-700 hover:bg-gray-100"}`}
-            >Irranova</button>
+            <button onClick={() => setStore("irrakids")} className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === "irrakids" ? "bg-blue-600 text-white" : "text-gray-700 hover:bg-gray-100"}`}>Irrakids</button>
+            <button onClick={() => setStore("irranova")} className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === "irranova" ? "bg-blue-600 text-white" : "text-gray-700 hover:bg-gray-100"}`}>Irranova</button>
           </div>
-          {/* View mode toggle */}
           <div className="ml-3 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
-            <button
-              onClick={() => setViewMode("products")}
-              className={`px-2 py-0.5 rounded-lg text-xs font-medium ${viewMode === "products" ? "bg-indigo-600 text-white" : "text-gray-700 hover:bg-gray-100"}`}
-            >Products</button>
-            <button
-              onClick={() => setViewMode("ordersByCod")}
-              className={`px-2 py-0.5 rounded-lg text-xs font-medium ${viewMode === "ordersByCod" ? "bg-indigo-600 text-white" : "text-gray-700 hover:bg-gray-100"}`}
-            >Orders by COD</button>
+            <button onClick={() => setViewMode("products")} className={`px-2 py-0.5 rounded-lg text-xs font-medium ${viewMode === "products" ? "bg-indigo-600 text-white" : "text-gray-700 hover:bg-gray-100"}`}>Products</button>
+            <button onClick={() => setViewMode("ordersByCod")} className={`px-2 py-0.5 rounded-lg text-xs font-medium ${viewMode === "ordersByCod" ? "bg-indigo-600 text-white" : "text-gray-700 hover:bg-gray-100"}`}>Orders by COD</button>
           </div>
           <div className="ml-auto flex items-center gap-2 text-xs">
-            <span className="px-2 py-0.5 rounded-full bg-slate-900 text-white font-medium">{loading ? "…" : orders.length}</span>
+            <span className="px-2 py-0.5 rounded-full bg-slate-900 text-white font-medium">{loading ? "..." : totalOrders}</span>
           </div>
         </div>
         <div className="max-w-7xl mx-auto px-4 pb-3 grid grid-cols-1 sm:grid-cols-4 gap-2">
           <div className="bg-white rounded-2xl border border-gray-200 px-3 py-2 shadow-sm">
             <div className="text-[11px] text-gray-600 font-semibold">From</div>
-            <input type="date" value={fromDate} onChange={(e)=>setFromDate(e.target.value)} className="mt-1 w-full text-sm border border-gray-300 rounded-lg px-2 py-1 bg-white" />
+            <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="mt-1 w-full text-sm border border-gray-300 rounded-lg px-2 py-1 bg-white" />
           </div>
           <div className="bg-white rounded-2xl border border-gray-200 px-3 py-2 shadow-sm">
             <div className="text-[11px] text-gray-600 font-semibold">To</div>
-            <input type="date" value={toDate} onChange={(e)=>setToDate(e.target.value)} className="mt-1 w-full text-sm border border-gray-300 rounded-lg px-2 py-1 bg-white" />
+            <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="mt-1 w-full text-sm border border-gray-300 rounded-lg px-2 py-1 bg-white" />
           </div>
           <div className="bg-white rounded-2xl border border-gray-200 px-3 py-2 shadow-sm">
             <div className="text-[11px] text-gray-600 font-semibold">COD prefix</div>
-            <input value={collectPrefix} onChange={(e)=>setCollectPrefix(e.target.value)} className="mt-1 w-full text-sm border border-gray-300 rounded-lg px-2 py-1 bg-white" placeholder="cod" />
+            <input value={collectPrefix} onChange={(e) => setCollectPrefix(e.target.value)} className="mt-1 w-full text-sm border border-gray-300 rounded-lg px-2 py-1 bg-white" placeholder="cod" />
           </div>
           <div className="bg-white rounded-2xl border border-gray-200 px-3 py-2 flex items-center justify-between shadow-sm">
             <div>
@@ -396,7 +250,10 @@ export default function VariantOrders(){
               <div className="mt-1 text-sm font-bold">{codDatesCount || 0}</div>
             </div>
             <button
-              onClick={()=>loadAll()}
+              onClick={() => {
+                cacheRef.current.clear();
+                loadData({ force: true });
+              }}
               className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-100 active:scale-[.98]"
               disabled={loading}
             >
@@ -421,21 +278,21 @@ export default function VariantOrders(){
             </div>
 
             <div className="mt-4 grid grid-cols-1 gap-3">
-              {(products || []).map(p => {
-                const isOpen = expandedProducts.has(p.key);
+              {products.map((product) => {
+                const isOpen = expandedProducts.has(product.key);
                 return (
-                  <div key={p.key} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-                    <button onClick={()=>toggleProduct(p.key)} className="w-full text-left px-4 py-3 hover:bg-gray-50">
+                  <div key={product.key} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                    <button onClick={() => toggleProduct(product.key)} className="w-full text-left px-4 py-3 hover:bg-gray-50">
                       <div className="flex items-center gap-3">
                         <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-slate-100 to-gray-100 border border-gray-200 overflow-hidden flex items-center justify-center">
-                          {p.image ? <img src={p.image} alt="" className="w-full h-full object-cover" /> : <div className="text-[10px] text-gray-500">No image</div>}
+                          {product.image ? <img src={product.image} alt="" className="w-full h-full object-cover" /> : <div className="text-[10px] text-gray-500">No image</div>}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <div className="font-extrabold tracking-tight truncate">{p.title}</div>
-                          <div className="mt-0.5 text-[11px] text-gray-600 truncate">{p.productId ? <span className="font-semibold">Product ID:</span> : null} {p.productId ? p.productId.split("/").pop() : "—"}</div>
+                          <div className="font-extrabold tracking-tight truncate">{product.title}</div>
+                          <div className="mt-0.5 text-[11px] text-gray-600 truncate">{product.productId ? <span className="font-semibold">Product ID:</span> : null} {product.productId ? String(product.productId).split("/").pop() : "—"}</div>
                         </div>
                         <div className="flex items-center gap-2">
-                          <div className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-xs font-bold">{p.count}</div>
+                          <div className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-xs font-bold">{product.count}</div>
                           <div className="text-xs text-gray-600">{isOpen ? "Hide" : "Show"}</div>
                         </div>
                       </div>
@@ -459,35 +316,30 @@ export default function VariantOrders(){
                               </div>
 
                               <div className="mt-2 space-y-2">
-                                {(p.variants || []).map(v => {
-                                  const openV = expandedVariants.has(v.key);
+                                {(product.variants || []).map((variant) => {
+                                  const variantOpen = expandedVariants.has(variant.key);
                                   return (
-                                    <div key={v.key} className="border border-gray-200 rounded-2xl overflow-hidden">
-                                      <button
-                                        onClick={()=>toggleVariant(v.key)}
-                                        className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 ${openV ? "bg-white" : "bg-white"}`}
-                                      >
+                                    <div key={variant.key} className="border border-gray-200 rounded-2xl overflow-hidden">
+                                      <button onClick={() => toggleVariant(variant.key)} className="w-full text-left px-3 py-2.5 hover:bg-gray-50 bg-white">
                                         <div className="grid grid-cols-12 gap-2 items-center">
                                           <div className="col-span-6 flex items-center gap-2 min-w-0">
                                             <div className="w-10 h-10 rounded-xl bg-gray-100 border border-gray-200 overflow-hidden flex items-center justify-center shrink-0">
-                                              {v.image ? <img src={v.image} alt="" className="w-full h-full object-cover" /> : <div className="text-[10px] text-gray-500">—</div>}
+                                              {variant.image ? <img src={variant.image} alt="" className="w-full h-full object-cover" /> : <div className="text-[10px] text-gray-500">—</div>}
                                             </div>
                                             <div className="min-w-0">
-                                              <div className="text-sm font-extrabold tracking-tight truncate">{v.title || "Variant"}</div>
-                                              <div className="text-[11px] text-gray-600 truncate">Variant ID: {String(v.variantId || "").split("/").pop()}</div>
+                                              <div className="text-sm font-extrabold tracking-tight truncate">{variant.title || "Variant"}</div>
+                                              <div className="text-[11px] text-gray-600 truncate">Variant ID: {String(variant.variantId || "").split("/").pop()}</div>
                                             </div>
                                           </div>
-                                          <div className="col-span-3 text-[12px] text-gray-800 truncate">{v.sku || "—"}</div>
+                                          <div className="col-span-3 text-[12px] text-gray-800 truncate">{variant.sku || "—"}</div>
                                           <div className="col-span-2 text-right">
-                                            <span className="inline-flex items-center justify-center px-2 py-0.5 rounded-full bg-blue-600 text-white text-xs font-bold">
-                                              {v.count}
-                                            </span>
+                                            <span className="inline-flex items-center justify-center px-2 py-0.5 rounded-full bg-blue-600 text-white text-xs font-bold">{variant.count}</span>
                                           </div>
-                                          <div className="col-span-1 text-right text-xs text-gray-600">{openV ? "▾" : "▸"}</div>
+                                          <div className="col-span-1 text-right text-xs text-gray-600">{variantOpen ? "▾" : "▸"}</div>
                                         </div>
                                       </button>
 
-                                      {openV && (
+                                      {variantOpen && (
                                         <div className="border-t border-gray-200 bg-white">
                                           <div className="px-3 py-2 bg-gradient-to-r from-indigo-50 to-white border-b border-gray-200">
                                             <div className="text-xs font-bold text-gray-900">Orders for this variant</div>
@@ -508,59 +360,48 @@ export default function VariantOrders(){
                                                 </tr>
                                               </thead>
                                               <tbody>
-                                                {(v.orders || []).map((o, idx) => {
-                                                  const created = fmtShortDate(o.created_at);
-                                                  const phone = (o.shipping_phone || "").trim();
-                                                  const name = (o.shipping_name || o.customer || "").trim();
-                                                  const addr = compactAddress(o);
-                                                  const tags = Array.isArray(o.tags) ? o.tags : [];
-                                                  const rowBg = (idx % 2 === 0) ? "bg-white" : "bg-slate-50/40";
+                                                {(variant.orders || []).map((order, index) => {
+                                                  const created = fmtShortDate(order.created_at);
+                                                  const phone = String(order.shipping_phone || "").trim();
+                                                  const name = String(order.shipping_name || order.customer || "").trim();
+                                                  const addr = compactAddress(order);
+                                                  const tags = Array.isArray(order.tags) ? order.tags : [];
+                                                  const rowBg = index % 2 === 0 ? "bg-white" : "bg-slate-50/40";
                                                   return (
-                                                    <React.Fragment key={o.id}>
+                                                    <React.Fragment key={order.id}>
                                                       <tr className={`${rowBg} border-b border-gray-100`}>
                                                         <td className="px-3 py-2 whitespace-nowrap font-semibold text-gray-800">{created || "—"}</td>
                                                         <td className="px-3 py-2 whitespace-nowrap">
-                                                          <div className="font-extrabold text-gray-900">{o.number || "—"}</div>
-                                                          <div className="text-[11px] text-gray-600">{String(o.financial_status || "").replace(/_/g," ")}</div>
+                                                          <div className="font-extrabold text-gray-900">{order.number || "—"}</div>
+                                                          <div className="text-[11px] text-gray-600">{String(order.financial_status || "").replace(/_/g, " ")}</div>
                                                         </td>
-                                                        <td className="px-3 py-2">
-                                                          <div className="font-semibold text-gray-900">{name || "—"}</div>
-                                                        </td>
+                                                        <td className="px-3 py-2"><div className="font-semibold text-gray-900">{name || "—"}</div></td>
                                                         <td className="px-3 py-2 whitespace-nowrap text-gray-800">{phone || "—"}</td>
-                                                        <td className="px-3 py-2 whitespace-nowrap text-gray-800">{o.shipping_city || "—"}</td>
+                                                        <td className="px-3 py-2 whitespace-nowrap text-gray-800">{order.shipping_city || "—"}</td>
                                                         <td className="px-3 py-2 text-gray-800">
                                                           <div className="max-w-[420px] truncate">{addr || "—"}</div>
-                                                          {o.note ? (
-                                                            <div className="mt-1 text-[11px] text-gray-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 inline-block max-w-[520px] truncate">
-                                                              <span className="font-semibold">Note:</span> {String(o.note)}
-                                                            </div>
-                                                          ) : null}
+                                                          {order.note ? <div className="mt-1 text-[11px] text-gray-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 inline-block max-w-[520px] truncate"><span className="font-semibold">Note:</span> {String(order.note)}</div> : null}
                                                         </td>
                                                         <td className="px-3 py-2">
                                                           <div className="flex flex-wrap gap-1 max-w-[420px]">
-                                                            {tags.slice(0, 10).map(t => (
-                                                              <span key={t} className={`text-[11px] px-2 py-0.5 rounded-full border ${tagClass(t)}`}>{t}</span>
+                                                            {tags.slice(0, 10).map((tag) => (
+                                                              <span key={tag} className={`text-[11px] px-2 py-0.5 rounded-full border ${tagClass(tag)}`}>{tag}</span>
                                                             ))}
-                                                            {tags.length > 10 ? (
-                                                              <span className="text-[11px] px-2 py-0.5 rounded-full border bg-white text-gray-700 border-gray-200">+{tags.length - 10}</span>
-                                                            ) : null}
+                                                            {tags.length > 10 ? <span className="text-[11px] px-2 py-0.5 rounded-full border bg-white text-gray-700 border-gray-200">+{tags.length - 10}</span> : null}
                                                           </div>
                                                         </td>
                                                       </tr>
                                                       <tr className={`${rowBg} border-b border-gray-200`}>
                                                         <td className="px-3 pb-3 pt-0" colSpan={7}>
                                                           <div className="mt-2 flex flex-wrap gap-2">
-                                                            {(Array.isArray(o.variants) ? o.variants : []).map((li, liIdx) => (
-                                                              <div key={`${o.id}-${li.id || liIdx}`} className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-2 py-1.5">
+                                                            {(Array.isArray(order.variants) ? order.variants : []).map((lineItem, lineIndex) => (
+                                                              <div key={`${order.id}-${lineItem.id || lineIndex}`} className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-2 py-1.5">
                                                                 <div className="w-9 h-9 rounded-lg bg-gray-100 border border-gray-200 overflow-hidden flex items-center justify-center shrink-0">
-                                                                  {li.image ? <img src={li.image} alt="" className="w-full h-full object-cover" /> : <div className="text-[10px] text-gray-500">—</div>}
+                                                                  {lineItem.image ? <img src={lineItem.image} alt="" className="w-full h-full object-cover" /> : <div className="text-[10px] text-gray-500">—</div>}
                                                                 </div>
                                                                 <div className="min-w-0">
-                                                                  <div className="text-[11px] font-semibold text-gray-900 truncate max-w-[260px]">{li.title || li.sku || "Item"}</div>
-                                                                  <div className="text-[10px] text-gray-600">
-                                                                    {li.sku ? <span className="font-semibold">SKU:</span> : null} {li.sku || ""}{" "}
-                                                                    <span className="ml-2 font-semibold">Qty:</span> {Number(li.qty || 0)}
-                                                                  </div>
+                                                                  <div className="text-[11px] font-semibold text-gray-900 truncate max-w-[260px]">{lineItem.title || lineItem.sku || "Item"}</div>
+                                                                  <div className="text-[10px] text-gray-600">{lineItem.sku ? <span className="font-semibold">SKU:</span> : null} {lineItem.sku || ""} <span className="ml-2 font-semibold">Qty:</span> {Number(lineItem.qty || 0)}</div>
                                                                 </div>
                                                               </div>
                                                             ))}
@@ -570,9 +411,7 @@ export default function VariantOrders(){
                                                     </React.Fragment>
                                                   );
                                                 })}
-                                                {(v.orders || []).length === 0 ? (
-                                                  <tr><td className="px-3 py-3 text-sm text-gray-600" colSpan={7}>No orders.</td></tr>
-                                                ) : null}
+                                                {(variant.orders || []).length === 0 ? <tr><td className="px-3 py-3 text-sm text-gray-600" colSpan={7}>No orders.</td></tr> : null}
                                               </tbody>
                                             </table>
                                           </div>
@@ -581,9 +420,7 @@ export default function VariantOrders(){
                                     </div>
                                   );
                                 })}
-                                {(p.variants || []).length === 0 ? (
-                                  <div className="text-sm text-gray-600 px-2 py-3">No variants.</div>
-                                ) : null}
+                                {(product.variants || []).length === 0 ? <div className="text-sm text-gray-600 px-2 py-3">No variants.</div> : null}
                               </div>
                             </div>
                           </div>
@@ -594,16 +431,11 @@ export default function VariantOrders(){
                 );
               })}
 
-              {!loading && (!products || products.length === 0) ? (
-                <div className="bg-white rounded-2xl border border-gray-200 px-4 py-6 text-sm text-gray-600">
-                  No products found for this period.
-                </div>
-              ) : null}
+              {!loading && products.length === 0 ? <div className="bg-white rounded-2xl border border-gray-200 px-4 py-6 text-sm text-gray-600">No products found for this period.</div> : null}
             </div>
           </>
         )}
 
-        {/* ── Orders by COD date view ── */}
         {viewMode === "ordersByCod" && (
           <>
             <div className="mt-3 text-xs text-gray-600">
@@ -611,33 +443,23 @@ export default function VariantOrders(){
             </div>
 
             <div className="mt-4 grid grid-cols-1 gap-4">
-              {ordersByCod.map(g => {
-                const isGroupOpen = expandedCodGroups.has(g.label);
-                const totalItems = g.orders.reduce((s, o) => {
-                  return s + (Array.isArray(o?.variants) ? o.variants : []).reduce((vs, v) => {
-                    const uq = v?.unfulfilled_qty != null ? Number(v.unfulfilled_qty) : Number(v?.qty || 0);
-                    return vs + (uq > 0 ? uq : 0);
-                  }, 0);
-                }, 0);
+              {ordersByCod.map((group) => {
+                const isGroupOpen = expandedCodGroups.has(group.label);
+                const totalItems = Number(group.totalItems || 0);
                 return (
-                  <div key={g.label} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-                    <button
-                      onClick={() => toggleCodGroup(g.label)}
-                      className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center justify-between"
-                    >
+                  <div key={group.label} className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                    <button onClick={() => toggleCodGroup(group.label)} className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center justify-between">
                       <div className="flex items-center gap-3">
                         <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-xs font-bold shadow-sm">
-                          {g.label.replace(/^\w+\s+/, "").split("/")[0]}
+                          {String(group.label || "").replace(/^\w+\s+/, "").split("/")[0]}
                         </div>
                         <div>
-                          <div className="font-extrabold tracking-tight text-gray-900">{g.label}</div>
-                          <div className="text-[11px] text-gray-600 mt-0.5">
-                            {g.orders.length} order{g.orders.length !== 1 ? "s" : ""} · {totalItems} item{totalItems !== 1 ? "s" : ""}
-                          </div>
+                          <div className="font-extrabold tracking-tight text-gray-900">{group.label}</div>
+                          <div className="text-[11px] text-gray-600 mt-0.5">{group.orders.length} order{group.orders.length !== 1 ? "s" : ""} · {totalItems} item{totalItems !== 1 ? "s" : ""}</div>
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="px-2.5 py-0.5 rounded-full bg-blue-600 text-white text-xs font-bold">{g.orders.length}</span>
+                        <span className="px-2.5 py-0.5 rounded-full bg-blue-600 text-white text-xs font-bold">{group.orders.length}</span>
                         <span className="text-xs text-gray-600">{isGroupOpen ? "▾" : "▸"}</span>
                       </div>
                     </button>
@@ -659,70 +481,50 @@ export default function VariantOrders(){
                               </tr>
                             </thead>
                             <tbody>
-                              {g.orders.map((o, idx) => {
-                                const created = fmtShortDate(o.created_at);
-                                const phone = (o.shipping_phone || "").trim();
-                                const name = (o.shipping_name || o.customer || "").trim();
-                                const addr = compactAddress(o);
-                                const tags = Array.isArray(o.tags) ? o.tags : [];
-                                const rowBg = (idx % 2 === 0) ? "bg-white" : "bg-slate-50/40";
-                                const itemCount = (Array.isArray(o?.variants) ? o.variants : []).reduce((s, v) => {
-                                  const uq = v?.unfulfilled_qty != null ? Number(v.unfulfilled_qty) : Number(v?.qty || 0);
-                                  return s + (uq > 0 ? uq : 0);
-                                }, 0);
-                                const totalPrice = Number(o?.total_price || 0);
+                              {(group.orders || []).map((order, index) => {
+                                const created = fmtShortDate(order.created_at);
+                                const phone = String(order.shipping_phone || "").trim();
+                                const name = String(order.shipping_name || order.customer || "").trim();
+                                const addr = compactAddress(order);
+                                const tags = Array.isArray(order.tags) ? order.tags : [];
+                                const rowBg = index % 2 === 0 ? "bg-white" : "bg-slate-50/40";
+                                const itemCount = Number(order.itemCount || 0);
+                                const totalPrice = Number(order.totalPrice || 0);
                                 return (
-                                  <React.Fragment key={o.id}>
+                                  <React.Fragment key={order.id}>
                                     <tr className={`${rowBg} border-b border-gray-100`}>
                                       <td className="px-3 py-2 whitespace-nowrap font-semibold text-gray-800">{created || "—"}</td>
                                       <td className="px-3 py-2 whitespace-nowrap">
-                                        <div className="font-extrabold text-gray-900">{o.number || "—"}</div>
-                                        <div className="text-[11px] text-gray-600">{String(o.financial_status || "").replace(/_/g, " ")}</div>
+                                        <div className="font-extrabold text-gray-900">{order.number || "—"}</div>
+                                        <div className="text-[11px] text-gray-600">{String(order.financial_status || "").replace(/_/g, " ")}</div>
                                       </td>
-                                      <td className="px-3 py-2">
-                                        <div className="font-semibold text-gray-900">{name || "—"}</div>
-                                      </td>
+                                      <td className="px-3 py-2"><div className="font-semibold text-gray-900">{name || "—"}</div></td>
                                       <td className="px-3 py-2 whitespace-nowrap text-gray-800">{phone || "—"}</td>
-                                      <td className="px-3 py-2 whitespace-nowrap text-gray-800">{o.shipping_city || "—"}</td>
-                                      <td className="px-3 py-2 whitespace-nowrap">
-                                        <span className={`inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-bold ${
-                                          itemCount >= 3 ? "bg-amber-100 text-amber-900 border border-amber-300" : "bg-gray-100 text-gray-800 border border-gray-200"
-                                        }`}>{itemCount}</span>
-                                      </td>
-                                      <td className="px-3 py-2 whitespace-nowrap font-semibold text-gray-900">
-                                        {totalPrice > 0 ? `${totalPrice.toLocaleString()} DZD` : "—"}
-                                      </td>
+                                      <td className="px-3 py-2 whitespace-nowrap text-gray-800">{order.shipping_city || "—"}</td>
+                                      <td className="px-3 py-2 whitespace-nowrap"><span className={`inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-bold ${itemCount >= 3 ? "bg-amber-100 text-amber-900 border border-amber-300" : "bg-gray-100 text-gray-800 border border-gray-200"}`}>{itemCount}</span></td>
+                                      <td className="px-3 py-2 whitespace-nowrap font-semibold text-gray-900">{totalPrice > 0 ? `${totalPrice.toLocaleString()} DZD` : "—"}</td>
                                       <td className="px-3 py-2">
                                         <div className="flex flex-wrap gap-1 max-w-[350px]">
-                                          {tags.slice(0, 8).map(t => (
-                                            <span key={t} className={`text-[11px] px-2 py-0.5 rounded-full border ${tagClass(t)}`}>{t}</span>
+                                          {tags.slice(0, 8).map((tag) => (
+                                            <span key={tag} className={`text-[11px] px-2 py-0.5 rounded-full border ${tagClass(tag)}`}>{tag}</span>
                                           ))}
-                                          {tags.length > 8 ? (
-                                            <span className="text-[11px] px-2 py-0.5 rounded-full border bg-white text-gray-700 border-gray-200">+{tags.length - 8}</span>
-                                          ) : null}
+                                          {tags.length > 8 ? <span className="text-[11px] px-2 py-0.5 rounded-full border bg-white text-gray-700 border-gray-200">+{tags.length - 8}</span> : null}
                                         </div>
                                       </td>
                                     </tr>
                                     <tr className={`${rowBg} border-b border-gray-200`}>
                                       <td className="px-3 pb-3 pt-0" colSpan={8}>
-                                        {o.note ? (
-                                          <div className="mt-1 mb-1 text-[11px] text-gray-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 inline-block max-w-[520px] truncate">
-                                            <span className="font-semibold">Note:</span> {String(o.note)}
-                                          </div>
-                                        ) : null}
+                                        {order.note ? <div className="mt-1 mb-1 text-[11px] text-gray-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 inline-block max-w-[520px] truncate"><span className="font-semibold">Note:</span> {String(order.note)}</div> : null}
                                         <div className="mt-1 text-[11px] text-gray-500 truncate max-w-[600px]">{addr || ""}</div>
                                         <div className="mt-2 flex flex-wrap gap-2">
-                                          {(Array.isArray(o.variants) ? o.variants : []).map((li, liIdx) => (
-                                            <div key={`${o.id}-${li.id || liIdx}`} className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-2 py-1.5">
+                                          {(Array.isArray(order.variants) ? order.variants : []).map((lineItem, lineIndex) => (
+                                            <div key={`${order.id}-${lineItem.id || lineIndex}`} className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-2 py-1.5">
                                               <div className="w-9 h-9 rounded-lg bg-gray-100 border border-gray-200 overflow-hidden flex items-center justify-center shrink-0">
-                                                {li.image ? <img src={li.image} alt="" className="w-full h-full object-cover" /> : <div className="text-[10px] text-gray-500">—</div>}
+                                                {lineItem.image ? <img src={lineItem.image} alt="" className="w-full h-full object-cover" /> : <div className="text-[10px] text-gray-500">—</div>}
                                               </div>
                                               <div className="min-w-0">
-                                                <div className="text-[11px] font-semibold text-gray-900 truncate max-w-[260px]">{li.title || li.sku || "Item"}</div>
-                                                <div className="text-[10px] text-gray-600">
-                                                  {li.sku ? <span className="font-semibold">SKU:</span> : null} {li.sku || ""}{" "}
-                                                  <span className="ml-2 font-semibold">Qty:</span> {Number(li.qty || 0)}
-                                                </div>
+                                                <div className="text-[11px] font-semibold text-gray-900 truncate max-w-[260px]">{lineItem.title || lineItem.sku || "Item"}</div>
+                                                <div className="text-[10px] text-gray-600">{lineItem.sku ? <span className="font-semibold">SKU:</span> : null} {lineItem.sku || ""} <span className="ml-2 font-semibold">Qty:</span> {Number(lineItem.qty || 0)}</div>
                                               </div>
                                             </div>
                                           ))}
@@ -732,9 +534,7 @@ export default function VariantOrders(){
                                   </React.Fragment>
                                 );
                               })}
-                              {g.orders.length === 0 ? (
-                                <tr><td className="px-3 py-3 text-sm text-gray-600" colSpan={8}>No orders.</td></tr>
-                              ) : null}
+                              {group.orders.length === 0 ? <tr><td className="px-3 py-3 text-sm text-gray-600" colSpan={8}>No orders.</td></tr> : null}
                             </tbody>
                           </table>
                         </div>
@@ -744,11 +544,7 @@ export default function VariantOrders(){
                 );
               })}
 
-              {!loading && ordersByCod.length === 0 ? (
-                <div className="bg-white rounded-2xl border border-gray-200 px-4 py-6 text-sm text-gray-600">
-                  No orders with COD date tags found for this period.
-                </div>
-              ) : null}
+              {!loading && ordersByCod.length === 0 ? <div className="bg-white rounded-2xl border border-gray-200 px-4 py-6 text-sm text-gray-600">No orders with COD date tags found for this period.</div> : null}
             </div>
           </>
         )}
@@ -756,5 +552,3 @@ export default function VariantOrders(){
     </div>
   );
 }
-
-

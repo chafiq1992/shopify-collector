@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
 
 function todayISO(offsetDays = 0) {
@@ -24,8 +24,10 @@ export default function MyAnalytics(){
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const requestIdRef = useRef(0);
 
   async function load(){
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -42,13 +44,15 @@ export default function MyAnalytics(){
         throw new Error(js.detail || "Failed to load analytics");
       }
       const js = await res.json();
+      if (requestId !== requestIdRef.current) return;
       setUser(js.user || null);
       setSummary(js.summary || { collected: 0, out: 0, fulfilled: 0, total: 0 });
       setRows(js.rows || []);
     } catch (e) {
+      if (requestId !== requestIdRef.current) return;
       setError(e?.message || "Failed to load analytics");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }
 
