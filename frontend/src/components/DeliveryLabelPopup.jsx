@@ -5,6 +5,12 @@ const LS_MERCHANT = "dlvMerchantId";
 const LS_ORDER_MAP = "dlvOrderIdMap";
 let deliveryBootstrapPromise = null;
 
+/* ── Store → Merchant mapping (hardcoded, stable IDs) ── */
+const STORE_MERCHANT_MAP = {
+  irrakids: 7,
+  irranova: 9,
+};
+
 async function dlvApi(path, { method = "GET", body, query, _retries = 3 } = {}) {
   let url = `/api/delivery/${path.replace(/^\/+/, "")}`;
   if (query && typeof query === "object") {
@@ -46,8 +52,27 @@ async function dlvApi(path, { method = "GET", body, query, _retries = 3 } = {}) 
   }
 }
 
-function savedMerchant() { try { return Number(localStorage.getItem(LS_MERCHANT)) || null; } catch { return null; } }
-function saveMerchant(id) { try { localStorage.setItem(LS_MERCHANT, String(id)); } catch {} }
+function savedMerchant(store) {
+  try {
+    const storeKey = String(store || "").trim().toLowerCase();
+    if (storeKey) {
+      const perStore = Number(localStorage.getItem(LS_MERCHANT + "_" + storeKey));
+      if (perStore) return perStore;
+    }
+    return Number(localStorage.getItem(LS_MERCHANT)) || null;
+  } catch { return null; }
+}
+function saveMerchant(id, store) {
+  try {
+    const storeKey = String(store || "").trim().toLowerCase();
+    localStorage.setItem(LS_MERCHANT, String(id));
+    if (storeKey) localStorage.setItem(LS_MERCHANT + "_" + storeKey, String(id));
+  } catch {}
+}
+function merchantForStore(store) {
+  const key = String(store || "").trim().toLowerCase();
+  return STORE_MERCHANT_MAP[key] || null;
+}
 function getOrderMap() { try { return JSON.parse(localStorage.getItem(LS_ORDER_MAP) || "{}"); } catch { return {}; } }
 function setOrderMap(num, id) { try { const m = getOrderMap(); m[String(num)] = id; localStorage.setItem(LS_ORDER_MAP, JSON.stringify(m)); } catch {} }
 function getCachedOrderId(num) { return getOrderMap()[String(num)] || null; }
@@ -521,11 +546,15 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       const list = bootstrap.merchants || [];
       setMerchants(list);
 
-      let mid = savedMerchant();
+      // Resolve merchant: per-store saved → store map → global saved → first available
+      let mid = savedMerchant(store);
       if (!mid || !list.some(x => Number(x.id) === Number(mid))) {
-        mid = list.some(x => Number(x.id) === 7) ? 7 : (list.length ? Number(list[0].id) : null);
+        mid = merchantForStore(store);
       }
-      if (mid) { setMerchantId(mid); saveMerchant(mid); }
+      if (!mid || !list.some(x => Number(x.id) === Number(mid))) {
+        mid = list.length ? Number(list[0].id) : null;
+      }
+      if (mid) { setMerchantId(mid); saveMerchant(mid, store); }
 
       addLog("Loading companies & cities...");
       setCompanies(bootstrap.companies || []);
@@ -931,7 +960,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
 
   function selectMerchant(mid) {
     setMerchantId(Number(mid));
-    saveMerchant(Number(mid));
+    saveMerchant(Number(mid), store);
     if (!open) {
       populateEditFromOrder();
       setPhase("prefetched");

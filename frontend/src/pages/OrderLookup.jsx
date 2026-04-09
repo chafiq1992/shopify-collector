@@ -532,6 +532,7 @@ export default function OrderLookup(){
       {
         queueId,
         order: queuedOrder,
+        store: store, // track originating store for correct merchant resolution
         statusKey: "preparing",
         statusLabel: "Preparing",
         deliveryOrderId: "",
@@ -545,7 +546,7 @@ export default function OrderLookup(){
       },
       ...prev,
     ].slice(0, 12));
-  }, []);
+  }, [store]);
   async function doSearch(number){
     const token = searchTokenRef.current + 1;
     searchTokenRef.current = token;
@@ -2417,7 +2418,18 @@ export default function OrderLookup(){
                   {labelQueueItems.length}
                 </span>
               </div>
-              <div className="text-[11px] text-gray-500">Orders processing in background</div>
+              <div className="text-[11px] text-gray-500 flex items-center gap-2 mt-0.5">
+                {(() => {
+                  const kids = labelQueueItems.filter(i => i.store === 'irrakids').length;
+                  const nova = labelQueueItems.filter(i => i.store === 'irranova').length;
+                  return (
+                    <>
+                      {kids > 0 && <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-semibold border border-blue-200">Irrakids {kids}</span>}
+                      {nova > 0 && <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] font-semibold border border-purple-200">Irranova {nova}</span>}
+                    </>
+                  );
+                })()}
+              </div>
             </div>
           </div>
 
@@ -2434,10 +2446,13 @@ export default function OrderLookup(){
               const showSendBtn = showCompanyControls && item.envoyCode && !partnerOk;
               const showPrintBtn = (isReadyPrint || isPrinted) && item.actions;
 
+              const isIrranova = item.store === 'irranova';
+              const storeBorderAccent = isIrranova ? 'border-l-purple-400' : 'border-l-blue-400';
+
               return (
                 <div
                   key={item.queueId}
-                  className={`rounded-xl border px-3 py-2.5 transition-all ${
+                  className={`rounded-xl border border-l-4 px-3 py-2.5 transition-all ${storeBorderAccent} ${
                     isError ? 'border-red-300 bg-red-50/60' :
                     isWaiting ? 'border-amber-200 bg-amber-50/50' :
                     isReadyPrint ? 'border-green-200 bg-green-50/50' :
@@ -2448,7 +2463,16 @@ export default function OrderLookup(){
                   {/* Order header */}
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <div className="text-sm font-bold text-gray-900">#{item.order?.number || "—"}</div>
+                      <div className="text-sm font-bold text-gray-900 flex items-center gap-1.5">
+                        #{item.order?.number || "—"}
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wide ${
+                          isIrranova
+                            ? 'bg-purple-100 text-purple-700 border border-purple-200'
+                            : 'bg-blue-100 text-blue-700 border border-blue-200'
+                        }`}>
+                          {isIrranova ? 'Irranova' : 'Irrakids'}
+                        </span>
+                      </div>
                       <div className="text-[11px] text-gray-500 truncate">
                         {item.companyName || item.order?.customer || "Preparing…"}
                       </div>
@@ -2632,7 +2656,7 @@ export default function OrderLookup(){
         <Suspense key={activeLabelQueueItem.queueId} fallback={null}>
           <DeliveryLabelPopup
             order={activeLabelQueueItem.order}
-            store={store}
+            store={activeLabelQueueItem.store || store}
             open={false}
             autoRunWhenHidden={true}
             onClose={() => {}}
