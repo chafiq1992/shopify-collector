@@ -215,7 +215,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
   const [error, setError] = useState(null);
   const [log, setLog] = useState([]);
   const [merchants, setMerchants] = useState([]);
-  const [merchantId, setMerchantId] = useState(savedMerchant);
+  const [merchantId, setMerchantId] = useState(() => savedMerchant(store));
   const [companies, setCompanies] = useState([]);
   const [cities, setCities] = useState([]);
   const [deliveryOrderId, setDeliveryOrderId] = useState(null);
@@ -539,8 +539,10 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     setBusy(true);
     setError(null);
     try {
+      if (autoRunWhenHidden) console.warn(`[DLP-BG] init() start — store=${store}, orderNum=${orderNum}`);
       addLog("Loading delivery settings...");
       const bootstrap = await loadDeliveryBootstrap();
+      if (autoRunWhenHidden) console.warn(`[DLP-BG] bootstrap loaded — configured=${bootstrap.configured}, merchants=${(bootstrap.merchants||[]).length}`);
       if (!bootstrap.configured) { setNotConfigured(true); setBusy(false); return; }
 
       const list = bootstrap.merchants || [];
@@ -555,6 +557,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         mid = list.length ? Number(list[0].id) : null;
       }
       if (mid) { setMerchantId(mid); saveMerchant(mid, store); }
+      if (autoRunWhenHidden) console.warn(`[DLP-BG] resolved merchant=${mid} for store=${store}`);
 
       addLog("Loading companies & cities...");
       setCompanies(bootstrap.companies || []);
@@ -588,6 +591,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
 
       await searchQueue(mid, { warmOnly });
     } catch (e) {
+      if (autoRunWhenHidden) console.warn(`[DLP-BG] init() FAILED:`, e?.message || e);
       if (e?.status === 503) { setNotConfigured(true); setBusy(false); return; }
       setError(e?.message || "Init failed");
       setPhase("error");
@@ -601,11 +605,14 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     setPhase("searching");
     addLog(`Searching queue for ${orderName}...`);
     try {
+      if (autoRunWhenHidden) console.warn(`[DLP-BG] searchQueue() merchant=${mid}, orderNum=${orderNum}`);
       const q = await dlvApi(`ext/admin/merchant-queue/${mid}`, { query: { limit: 500 } });
       const items = (q?.items) || [];
+      if (autoRunWhenHidden) console.warn(`[DLP-BG] queue returned ${items.length} items, looking for orderNum="${orderNum}"`);
       const row = items.find(r => String(r.orderName || "").replace(/^#/, "").trim() === orderNum);
 
       if (row) {
+        if (autoRunWhenHidden) console.warn(`[DLP-BG] FOUND in queue! row.id=${row.id}, hasError=${row.hasError}`);
         addLog(`Found in queue (row #${row.id})${row.hasError ? ` — HAS ERROR: ${row.errorType || "unknown"}` : ""}`);
         setQueueRow(row);
         populateEditFromRow(row);
@@ -624,6 +631,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         }
       } else {
         addLog("Not found in queue.");
+        if (autoRunWhenHidden) console.warn(`[DLP-BG] NOT FOUND in queue for merchant=${mid}. Setting phase=manual`);
         populateEditFromOrder();
         if (!isWarmOnly) {
           const cached = getCachedOrderId(orderNum);
@@ -1042,6 +1050,8 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     ].join("|");
     if (fingerprint === lastEmitRef.current) return;
     lastEmitRef.current = fingerprint;
+
+    if (autoRunWhenHidden) console.warn(`[DLP-BG] onStateChange emit — phase=${phase}, statusKey=${queueState.statusKey}, merchant=${merchantId}, store=${store}, orderNum=${orderNum}, error=${error || 'none'}`);
 
     onStateChange({
       orderId: String(order?.id || ""),
