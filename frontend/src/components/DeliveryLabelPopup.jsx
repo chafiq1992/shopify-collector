@@ -602,10 +602,14 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
 
   async function searchQueue(mid, options = {}) {
     const isWarmOnly = options?.warmOnly === true;
-    setPhase("searching");
-    addLog(`Searching queue for ${orderName}...`);
+    const retryAttempt = options?._retryAttempt || 0;
+    const MAX_BG_RETRIES = 5;
+    const RETRY_DELAYS = [3000, 6000, 10000, 15000, 20000];
+
+    if (retryAttempt === 0) setPhase("searching");
+    addLog(retryAttempt > 0 ? `Retry #${retryAttempt}: searching queue for ${orderName}...` : `Searching queue for ${orderName}...`);
     try {
-      if (autoRunWhenHidden) console.warn(`[DLP-BG] searchQueue() merchant=${mid}, orderNum=${orderNum}`);
+      if (autoRunWhenHidden) console.warn(`[DLP-BG] searchQueue() merchant=${mid}, orderNum=${orderNum}, attempt=${retryAttempt}`);
       const q = await dlvApi(`ext/admin/merchant-queue/${mid}`, { query: { limit: 500 } });
       const items = (q?.items) || [];
       if (autoRunWhenHidden) console.warn(`[DLP-BG] queue returned ${items.length} items, looking for orderNum="${orderNum}"`);
@@ -630,8 +634,18 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
           }
         }
       } else {
+        // --- Auto-retry logic for sidebar background processing ---
+        if (autoRunWhenHidden && retryAttempt < MAX_BG_RETRIES) {
+          const delay = RETRY_DELAYS[retryAttempt] || 20000;
+          if (autoRunWhenHidden) console.warn(`[DLP-BG] NOT FOUND in queue for merchant=${mid}. Will retry in ${delay/1000}s (attempt ${retryAttempt + 1}/${MAX_BG_RETRIES})`);
+          addLog(`Order not in queue yet. Retrying in ${delay/1000}s... (${retryAttempt + 1}/${MAX_BG_RETRIES})`);
+          setPhase("searching"); // keep showing "Preparing" during retries
+          await sleep(delay);
+          return searchQueue(mid, { ...options, _retryAttempt: retryAttempt + 1 });
+        }
+
         addLog("Not found in queue.");
-        if (autoRunWhenHidden) console.warn(`[DLP-BG] NOT FOUND in queue for merchant=${mid}. Setting phase=manual`);
+        if (autoRunWhenHidden) console.warn(`[DLP-BG] NOT FOUND after ${retryAttempt} retries for merchant=${mid}. Setting phase=manual`);
         populateEditFromOrder();
         if (!isWarmOnly) {
           const cached = getCachedOrderId(orderNum);
