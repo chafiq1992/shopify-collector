@@ -25,11 +25,12 @@ from sqlalchemy.exc import IntegrityError
 HAVE_AUTH_DB = True
 try:
     from .db import get_session, init_db, SessionLocal
-    from .models import User, OrderEvent, DailyUserStats, AppSetting, PrintJob
+    from .models import User, OrderEvent, DailyUserStats, AppSetting, PrintJob, ReturnScan
     from .auth_routes import router as auth_router, get_current_user, require_admin, hash_password
     from .admin_bootstrap_routes import router as admin_bootstrap_router
     from .shopify_oauth_routes import router as shopify_oauth_router
     from .settings_store import get_shopify_oauth_record
+    from .return_scan_routes import router as return_scan_router
 except Exception:
     HAVE_AUTH_DB = False
     get_session = None  # type: ignore
@@ -150,6 +151,8 @@ if HAVE_AUTH_DB and admin_bootstrap_router is not None:
     app.include_router(admin_bootstrap_router)
 if HAVE_AUTH_DB and "shopify_oauth_router" in globals() and shopify_oauth_router is not None:  # type: ignore[name-defined]
     app.include_router(shopify_oauth_router)  # type: ignore[arg-type]
+if HAVE_AUTH_DB and "return_scan_router" in globals() and return_scan_router is not None:  # type: ignore[name-defined]
+    app.include_router(return_scan_router)  # type: ignore[arg-type]
 
 # CORS (relaxed for simplicity; tighten in prod)
 app.add_middleware(
@@ -2894,6 +2897,105 @@ else:
 
     @app.get("/api/admin/order-events", response_model=Dict[str, Any])
     async def admin_order_events_unavailable():
+        raise HTTPException(status_code=503, detail="auth/db not configured")
+
+
+# ---------- Admin: Return Scan Analytics ----------
+if HAVE_AUTH_DB:
+    @app.get("/api/admin/return-scan-stats")
+    async def admin_return_scan_stats(
+        from_date: Optional[str] = Query(None, description="Inclusive start date (YYYY-MM-DD)"),
+        to_date: Optional[str] = Query(None, description="Inclusive end date (YYYY-MM-DD)"),
+        admin: User = Depends(require_admin),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        """Aggregated return scan counts per user."""
+        start_dt = _parse_date(from_date) or (datetime.now(timezone.utc) - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_dt = _parse_date(to_date) or datetime.now(timezone.utc)
+        end_dt_inclusive = end_dt + timedelta(days=1)
+
+        from sqlalchemy.orm import selectinload  # local import to avoid top-level issues
+
+        stmt = (
+            select(
+                User.id,
+                User.email,
+                User.name,
+                func.date(ReturnScan.ts).label("day"),
+                func.count(ReturnScan.id).label("scan_count"),
+            )
+            .join(ReturnScan, User.id == ReturnScan.user_id)
+            .where(ReturnScan.ts >= start_dt, ReturnScan.ts < end_dt_inclusive)
+            .group_by(User.id, User.email, User.name, func.date(ReturnScan.ts))
+            .order_by(func.date(ReturnScan.ts).desc())
+        )
+        result = await session.execute(stmt)
+        rows = []
+        summary: Dict[str, Any] = {}
+        for uid, email, name, day_val, scan_count in result.fetchall():
+            day_str = day_val.isoformat() if hasattr(day_val, "isoformat") else str(day_val)
+            count_int = int(scan_count or 0)
+            rows.append({
+                "user_id": uid,
+                "email": email,
+                "name": name,
+                "day": day_str,
+                "return_scans": count_int,
+            })
+            if uid not in summary:
+                summary[uid] = {"email": email, "name": name, "return_scans": 0}
+            summary[uid]["return_scans"] += count_int
+
+        return {"ok": True, "rows": rows, "summary": summary}
+
+    @app.get("/api/admin/return-scan-events")
+    async def admin_return_scan_events(
+        from_date: Optional[str] = Query(None, description="Inclusive start date (YYYY-MM-DD)"),
+        to_date: Optional[str] = Query(None, description="Inclusive end date (YYYY-MM-DD)"),
+        admin: User = Depends(require_admin),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        """Detailed return scan event list with user info."""
+        start_dt = _parse_date(from_date) or (datetime.now(timezone.utc) - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_dt = _parse_date(to_date) or datetime.now(timezone.utc)
+        end_dt_inclusive = end_dt + timedelta(days=1)
+
+        from sqlalchemy.orm import selectinload
+
+        stmt = (
+            select(ReturnScan)
+            .options(selectinload(ReturnScan.user))
+            .where(ReturnScan.ts >= start_dt, ReturnScan.ts < end_dt_inclusive)
+            .order_by(ReturnScan.ts.desc())
+            .limit(500)
+        )
+        result = await session.execute(stmt)
+        scans = result.scalars().all()
+        rows = []
+        for s in scans:
+            rows.append({
+                "id": s.id,
+                "ts": s.ts.isoformat() if s.ts else "",
+                "order_name": s.order_name or "",
+                "store": s.store or "",
+                "fulfillment": s.fulfillment or "",
+                "financial": s.financial or "",
+                "status": s.status or "",
+                "result": s.result or "",
+                "user": {
+                    "id": s.user.id if s.user else "",
+                    "email": s.user.email if s.user else "",
+                    "name": s.user.name if s.user else "",
+                },
+            })
+        return {"ok": True, "rows": rows}
+else:
+    @app.get("/api/admin/return-scan-stats")
+    async def admin_return_scan_stats_unavailable():
+        raise HTTPException(status_code=503, detail="auth/db not configured")
+
+    @app.get("/api/admin/return-scan-events")
+    async def admin_return_scan_events_unavailable():
         raise HTTPException(status_code=503, detail="auth/db not configured")
 
 

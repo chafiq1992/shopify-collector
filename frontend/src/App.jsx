@@ -813,6 +813,14 @@ export default function App(){
                 Products
               </button>
             )}
+            {auth?.user && (
+              <button
+                onClick={()=>navigate('/return-scanner')}
+                className="text-xs px-3 py-1 rounded-full border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
+              >
+                ↩️ Returns
+              </button>
+            )}
             <button aria-label="Choose profile" onClick={()=>{ vibrate(10); setShowProfilePicker(true); }} className="p-1.5 rounded-full hover:bg-gray-100">
               <Boxes className={`w-4 h-4 ${profile?.id === 'stock' ? 'text-blue-600' : 'text-gray-700'}`} />
             </button>

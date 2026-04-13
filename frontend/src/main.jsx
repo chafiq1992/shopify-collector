@@ -13,6 +13,7 @@ const OrderLookupPage = lazy(() => import('./pages/OrderLookup'))
 const OrderTaggerPage = lazy(() => import('./pages/OrderTagger'))
 const ShopifyConnectPage = lazy(() => import('./pages/ShopifyConnect'))
 const VariantOrdersPage = lazy(() => import('./pages/VariantOrders'))
+const ReturnScannerPage = lazy(() => import('./pages/ReturnScanner'))
 
 function readCurrentStore() {
   try {
@@ -104,6 +105,9 @@ function RouteShell() {
         break
       case '/variant-orders':
         Page = VariantOrdersPage
+        break
+      case '/return-scanner':
+        Page = ReturnScannerPage
         break
       case '/':
       default:

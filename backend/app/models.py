@@ -105,3 +105,29 @@ class PrintJob(Base):
     attempts = Column(Integer, nullable=False, default=0)
     dedup_key = Column(String(512), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+
+
+class ReturnScan(Base):
+    """Tracks return-order scans performed by individual users.
+
+    Each row represents a single barcode scan (or manual entry) on the
+    Return Scanner page.  The ``user_id`` foreign key links back to the
+    collector who performed the scan so the admin analytics page can
+    report per-user return volumes.
+    """
+
+    __tablename__ = "return_scans"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+    order_name = Column(String(64), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    tags = Column(String, default="")
+    store = Column(String(32), default="")
+    fulfillment = Column(String(32), default="")
+    status = Column(String(32), default="")
+    financial = Column(String(32), default="")
+    result = Column(String(64), default="")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+
+    user = relationship("User")

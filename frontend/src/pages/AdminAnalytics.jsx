@@ -36,6 +36,14 @@ export default function AdminAnalytics(){
   const outRequestIdRef = useRef(0);
   const usersRequestIdRef = useRef(0);
   const orderSearchRequestIdRef = useRef(0);
+  const returnStatsRequestIdRef = useRef(0);
+  const returnEventsRequestIdRef = useRef(0);
+
+  const [returnStatsSummary, setReturnStatsSummary] = useState({});
+  const [returnStatsRows, setReturnStatsRows] = useState([]);
+  const [returnStatsLoading, setReturnStatsLoading] = useState(false);
+  const [returnEventRows, setReturnEventRows] = useState([]);
+  const [returnEventsLoading, setReturnEventsLoading] = useState(false);
 
   async function searchOrderEvents(){
     const requestId = ++orderSearchRequestIdRef.current;
@@ -144,6 +152,53 @@ export default function AdminAnalytics(){
     }
   }
 
+  async function loadReturnStats(){
+    const requestId = ++returnStatsRequestIdRef.current;
+    setReturnStatsLoading(true);
+    try {
+      const params = new URLSearchParams({ from_date: fromDate, to_date: toDate });
+      const res = await authFetch(`/api/admin/return-scan-stats?${params.toString()}`, {
+        headers: authHeaders({"Accept":"application/json"})
+      });
+      if (!res.ok) {
+        const js = await res.json().catch(()=>({detail:"Failed to load return stats"}));
+        throw new Error(js.detail || "Failed to load return stats");
+      }
+      const js = await res.json();
+      if (requestId !== returnStatsRequestIdRef.current) return;
+      setReturnStatsSummary(js.summary || {});
+      setReturnStatsRows(js.rows || []);
+    } catch (e){
+      if (requestId !== returnStatsRequestIdRef.current) return;
+      setAdminMsg(e?.message || "Failed to load return stats");
+    } finally {
+      if (requestId === returnStatsRequestIdRef.current) setReturnStatsLoading(false);
+    }
+  }
+
+  async function loadReturnEvents(){
+    const requestId = ++returnEventsRequestIdRef.current;
+    setReturnEventsLoading(true);
+    try {
+      const params = new URLSearchParams({ from_date: fromDate, to_date: toDate });
+      const res = await authFetch(`/api/admin/return-scan-events?${params.toString()}`, {
+        headers: authHeaders({"Accept":"application/json"})
+      });
+      if (!res.ok) {
+        const js = await res.json().catch(()=>({detail:"Failed to load return events"}));
+        throw new Error(js.detail || "Failed to load return events");
+      }
+      const js = await res.json();
+      if (requestId !== returnEventsRequestIdRef.current) return;
+      setReturnEventRows(js.rows || []);
+    } catch (e){
+      if (requestId !== returnEventsRequestIdRef.current) return;
+      setAdminMsg(e?.message || "Failed to load return events");
+    } finally {
+      if (requestId === returnEventsRequestIdRef.current) setReturnEventsLoading(false);
+    }
+  }
+
   function genPassword(){
     // Simple, readable random password (no ambiguous chars)
     const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
@@ -226,6 +281,7 @@ export default function AdminAnalytics(){
             <button onClick={()=>goto("/order-tagger")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Order Tagger</button>
             <button onClick={()=>goto("/order-lookup")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Order Lookup</button>
             <button onClick={()=>goto("/variant-orders")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Product Orders</button>
+            <button onClick={()=>goto("/return-scanner")} className="text-xs px-3 py-1 rounded-full border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100">Return Scanner</button>
             <button onClick={()=>goto("/shopify-connect")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Shopify Connect</button>
           </div>
           <div className="ml-auto flex items-center gap-2">
@@ -239,6 +295,7 @@ export default function AdminAnalytics(){
             <button onClick={()=>goto("/order-tagger")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Tagger</button>
             <button onClick={()=>goto("/order-lookup")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Lookup</button>
             <button onClick={()=>goto("/variant-orders")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Products</button>
+            <button onClick={()=>goto("/return-scanner")} className="text-xs px-3 py-1 rounded-full border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100">Returns</button>
             <button onClick={()=>goto("/shopify-connect")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Connect</button>
           </div>
         </div>
@@ -517,6 +574,109 @@ export default function AdminAnalytics(){
               <div className="mt-2 text-[11px] text-gray-500">
                 Tip: this list comes from collector actions (not Shopify tag history). If your database is not persistent, you may see missing rows.
               </div>
+            </section>
+            {/* Return Scan Analytics */}
+            <section className="mt-6">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-gray-700">↩️ Return Scan Analytics</h3>
+                <div className="flex gap-2">
+                  <button
+                    onClick={loadReturnStats}
+                    className="text-xs px-3 py-1.5 rounded-lg border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                    disabled={returnStatsLoading}
+                  >
+                    {returnStatsLoading ? "Loading…" : "Load Return Stats"}
+                  </button>
+                  <button
+                    onClick={loadReturnEvents}
+                    className="text-xs px-3 py-1.5 rounded-lg border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                    disabled={returnEventsLoading}
+                  >
+                    {returnEventsLoading ? "Loading…" : "Load Return Events"}
+                  </button>
+                </div>
+              </div>
+              {/* Per-user return scan totals */}
+              {Object.keys(returnStatsSummary || {}).length > 0 && (
+                <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+                  {Object.entries(returnStatsSummary).map(([uid, row]) => (
+                    <div key={uid} className="border border-amber-200 rounded-xl bg-white p-3">
+                      <div className="text-sm font-semibold truncate">{row.name || row.email || uid}</div>
+                      <div className="text-xs text-gray-500 truncate">{row.email}</div>
+                      <div className="mt-2 flex items-center gap-3 text-sm">
+                        <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200">Return Scans: {row.return_scans || 0}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* Daily breakdown */}
+              {(returnStatsRows || []).length > 0 && (
+                <div className="overflow-x-auto mb-4">
+                  <table className="min-w-full text-sm bg-white border border-gray-200 rounded-xl overflow-hidden">
+                    <thead className="bg-gray-100 text-left">
+                      <tr>
+                        <th className="px-3 py-2 border-b border-gray-200">Day</th>
+                        <th className="px-3 py-2 border-b border-gray-200">User</th>
+                        <th className="px-3 py-2 border-b border-gray-200">Return Scans</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {returnStatsRows.map((r, idx) => (
+                        <tr key={idx} className="border-b last:border-b-0">
+                          <td className="px-3 py-2">{r.day}</td>
+                          <td className="px-3 py-2">
+                            <div className="font-medium">{r.name || r.email || r.user_id}</div>
+                            <div className="text-xs text-gray-500">{r.email}</div>
+                          </td>
+                          <td className="px-3 py-2 text-amber-700 font-semibold">{r.return_scans || 0}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {/* Detailed return events */}
+              {(returnEventRows || []).length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm bg-white border border-gray-200 rounded-xl overflow-hidden">
+                    <thead className="bg-gray-100 text-left">
+                      <tr>
+                        <th className="px-3 py-2 border-b border-gray-200">Time</th>
+                        <th className="px-3 py-2 border-b border-gray-200">Order</th>
+                        <th className="px-3 py-2 border-b border-gray-200">Scanner</th>
+                        <th className="px-3 py-2 border-b border-gray-200">Store</th>
+                        <th className="px-3 py-2 border-b border-gray-200">Result</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {returnEventRows.map((r, idx) => (
+                        <tr key={idx} className="border-b last:border-b-0">
+                          <td className="px-3 py-2 text-gray-600">{(r.ts || "").replace("T"," ").slice(0,19)}</td>
+                          <td className="px-3 py-2 font-semibold">{r.order_name}</td>
+                          <td className="px-3 py-2">
+                            <div className="font-medium">{r?.user?.name || r?.user?.email || "—"}</div>
+                            <div className="text-xs text-gray-500">{r?.user?.email || ""}</div>
+                          </td>
+                          <td className="px-3 py-2">{(r.store || "").toUpperCase()}</td>
+                          <td className="px-3 py-2">
+                            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                              (r.result || "").includes("✅") ? "bg-green-100 text-green-800 border border-green-200" :
+                              (r.result || "").includes("❌") ? "bg-red-100 text-red-800 border border-red-200" :
+                              "bg-amber-100 text-amber-800 border border-amber-200"
+                            }`}>
+                              {r.result}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {Object.keys(returnStatsSummary || {}).length === 0 && (returnEventRows || []).length === 0 && (
+                <div className="text-sm text-gray-500">Click "Load Return Stats" or "Load Return Events" to see return scan analytics for the selected date range.</div>
+              )}
             </section>
           </>
         )}

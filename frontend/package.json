@@ -9,6 +9,7 @@
     "preview": "vite preview --port 5173"
   },
   "dependencies": {
+    "html5-qrcode": "^2.3.8",
     "lucide-react": "^0.471.0",
     "pdfjs-dist": "^4.10.38",
     "react": "^18.3.1",
@@ -22,4 +23,3 @@
     "vite": "^5.4.2"
   }
 }
-
