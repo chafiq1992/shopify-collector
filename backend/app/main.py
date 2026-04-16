@@ -1350,7 +1350,7 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             product_title=((var or {}).get("product") or {}).get("title"),
             image=img,
             barcode=(var or {}).get("barcode"),
-            sku=li.get("sku"),
+            sku=li.get("sku") or (var or {}).get("sku"),
             title=(var or {}).get("title"),
             available_quantity=available_qty,
             on_hand_quantity=None,
@@ -1891,6 +1891,7 @@ async def list_orders(
                   variant {
                     id
                     title
+                    sku
                     barcode
                     selectedOptions { name value }
                     inventoryQuantity
