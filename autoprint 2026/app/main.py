@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 from datetime import datetime as _dt
 
 import requests
+from requests.adapters import HTTPAdapter
 import yaml
 from fastapi import FastAPI, UploadFile, File, Form, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -230,7 +231,22 @@ def _collector_base_url(cfg: Dict[str, Any]) -> str:
     # Reuse relay_url as the collector base; both run on the same service
     return (cfg.get("relay_url") or "").strip().rstrip("/")
 
-def fetch_overrides_from_collector(cfg: Dict[str, Any], order_numbers: list[str], store: Optional[str]) -> dict[str, dict]:
+def _build_http_session(pool_size: int = 8) -> requests.Session:
+    sess = requests.Session()
+    try:
+        adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size, max_retries=0)
+        sess.mount("http://", adapter)
+        sess.mount("https://", adapter)
+    except Exception:
+        pass
+    return sess
+
+def fetch_overrides_from_collector(
+    cfg: Dict[str, Any],
+    order_numbers: list[str],
+    store: Optional[str],
+    session: Optional[requests.Session] = None,
+) -> dict[str, dict]:
     base = _collector_base_url(cfg)
     if not base or not order_numbers:
         return {}
@@ -239,7 +255,8 @@ def fetch_overrides_from_collector(cfg: Dict[str, Any], order_numbers: list[str]
         params = {"orders": joined}
         if store:
             params["store"] = store
-        r = requests.get(f"{base}/api/overrides", params=params, timeout=20)
+        client = session or requests
+        r = client.get(f"{base}/api/overrides", params=params, timeout=20)
         r.raise_for_status()
         js = r.json() or {}
         return js.get("overrides") or {}
@@ -598,7 +615,8 @@ def print_orders(
         order_groups = list(_chunked(b.orders or [], max_per_batch)) if (b.orders and max_per_batch and max_per_batch > 1) else [b.orders or []]
         fetch_workers = int(cfg.get("fetch_order_workers", 4))
         results = []
-        overrides_map = fetch_overrides_from_collector(cfg, b.orders or [], b.store)
+        collector_session = _build_http_session(max(fetch_workers, 4))
+        overrides_map = fetch_overrides_from_collector(cfg, b.orders or [], b.store, session=collector_session)
         chosen_printer = _normalize_printer_name(b.printer)
 
         for group in order_groups:
@@ -761,7 +779,7 @@ def _print_status_banner():
     _plog("\n".join(lines))
 
 # ----------------- delivery label printing (from delivery print-agent) -----------------
-def _print_delivery_label(job: dict, cfg: dict):
+def _print_delivery_label(job: dict, cfg: dict, session: Optional[requests.Session] = None):
     """Download and print a delivery label. Mirrors print-agent/poller.py logic."""
     relay = (cfg.get("relay_url") or "").strip().rstrip("/")
     if not relay:
@@ -775,15 +793,16 @@ def _print_delivery_label(job: dict, cfg: dict):
     if envoy_code:
         params["envoy_code"] = envoy_code
 
+    client = session or requests
     r = None
     try:
         req_params = {**params}
         if not envoy_code:
             req_params["format"] = "pdf"
-        r = requests.get(url, params=req_params, timeout=30)
+        r = client.get(url, params=req_params, timeout=30)
         r.raise_for_status()
     except Exception:
-        r = requests.get(url, params=params, timeout=30)
+        r = client.get(url, params=params, timeout=30)
         r.raise_for_status()
 
     content_type = (r.headers.get("content-type") or "").lower()
@@ -808,17 +827,18 @@ def _print_delivery_label(job: dict, cfg: dict):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 # ----------------- optional: cloud relay poller -----------------
-def _print_job(job: dict, cfg: dict):
+def _print_job(job: dict, cfg: dict, session: Optional[requests.Session] = None):
     # Delivery label jobs (from the delivery app)
     if job.get("type") == "label":
         dlv_id = job.get("delivery_order_id", "")
         print(f"[poller] LABEL {dlv_id}")
-        _print_delivery_label(job, cfg)
+        _print_delivery_label(job, cfg, session=session)
         return
 
     # If pdf_url present, print PDF directly
     if job.get("pdf_url"):
-        r = requests.get(job["pdf_url"], timeout=60)
+        client = session or requests
+        r = client.get(job["pdf_url"], timeout=60)
         r.raise_for_status()
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(r.content); tmp.flush(); path = tmp.name
@@ -838,7 +858,7 @@ def _print_job(job: dict, cfg: dict):
     copies = int(job.get("copies", 1))
     if orders:
         chosen_printer = ""
-        overrides_map = fetch_overrides_from_collector(cfg, [str(n) for n in orders], job.get("store"))
+        overrides_map = fetch_overrides_from_collector(cfg, [str(n) for n in orders], job.get("store"), session=session)
         max_per_batch = int(cfg.get("max_orders_per_batch", 0) or 0)
         order_groups = list(_chunked(orders, max_per_batch)) if (orders and max_per_batch and max_per_batch > 1) else [orders]
         fetch_workers = int(cfg.get("fetch_order_workers", 4))
@@ -892,7 +912,7 @@ def start_poller():
     max_workers   = int(cfg.get("max_workers", 4))
     status_sec    = int(cfg.get("status_interval_seconds", 30))
 
-    sess = requests.Session()
+    sess = _build_http_session(max(4, max_workers * 2))
 
     # ── relay helpers (connection-pooled) ──
     def _pull() -> list:
@@ -933,7 +953,7 @@ def start_poller():
                 cfg_now = load_config()
             except Exception:
                 cfg_now = cfg
-            _print_job(job, cfg_now)
+            _print_job(job, cfg_now, session=sess)
             _ack(jid)
             _pq.done(jid)
             _plog(f"  [OK] {kind:6s} {desc}")

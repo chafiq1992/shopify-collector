@@ -242,7 +242,13 @@ export default function App(){
       return raw ? JSON.parse(raw) : { collectPrefix: "cod", collectExcludeTag: "pc", verificationIncludeTag: "pc" };
     } catch { return { collectPrefix: "cod", collectExcludeTag: "pc", verificationIncludeTag: "pc" }; }
   });
-  const [selectedOrderNumbers, setSelectedOrderNumbers] = useState(() => new Set());
+  const [selectedOrderNumbers, setSelectedOrderNumbers] = useState(() => {
+    try {
+      const raw = localStorage.getItem(`orderCollectorSelected_${store}`);
+      if (raw) { const arr = JSON.parse(raw); if (Array.isArray(arr)) return new Set(arr); }
+    } catch {}
+    return new Set();
+  });
   const [printBusy, setPrintBusy] = useState(false);
   const [printMsg, setPrintMsg] = useState(null);
   const [reloadCounter, setReloadCounter] = useState(0);
@@ -272,6 +278,17 @@ export default function App(){
   useEffect(()=>{
     try { localStorage.setItem("orderCollectorProductSortOldToNew", productSortOldToNew ? '1' : '0'); } catch {}
   }, [productSortOldToNew]);
+  // Persist selected order numbers to survive page changes / app close
+  useEffect(()=>{
+    try {
+      const arr = Array.from(selectedOrderNumbers);
+      if (arr.length > 0) {
+        localStorage.setItem(`orderCollectorSelected_${store}`, JSON.stringify(arr));
+      } else {
+        localStorage.removeItem(`orderCollectorSelected_${store}`);
+      }
+    } catch {}
+  }, [selectedOrderNumbers, store]);
 
   const wsRef = useRef(null);
   const requestIdRef = useRef(0);
@@ -775,52 +792,7 @@ export default function App(){
                 </button>
               </div>
             )}
-            {auth?.user?.role === 'admin' && (
-              <>
-                <button
-                  onClick={()=>navigate('/admin')}
-                  className="text-xs px-3 py-1 rounded-full border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
-                >
-                  Admin
-                </button>
-                <button
-                  onClick={()=>navigate('/invoices-verifier')}
-                  className="text-xs px-3 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                >
-                  Invoices
-                </button>
-                <button
-                  onClick={()=>navigate('/shopify-connect')}
-                  className="text-xs px-3 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                >
-                  Shopify Connect
-                </button>
-              </>
-            )}
-            {auth?.user && (
-              <button
-                onClick={()=>navigate('/my-analytics')}
-                className="text-xs px-3 py-1 rounded-full border border-teal-200 bg-teal-50 text-teal-700 hover:bg-teal-100"
-              >
-                My Analytics
-              </button>
-            )}
-            {auth?.user && (
-              <button
-                onClick={()=>navigate('/variant-orders')}
-                className="text-xs px-3 py-1 rounded-full border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
-              >
-                Products
-              </button>
-            )}
-            {auth?.user && (
-              <button
-                onClick={()=>navigate('/return-scanner')}
-                className="text-xs px-3 py-1 rounded-full border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
-              >
-                ↩️ Returns
-              </button>
-            )}
+
             <button aria-label="Choose profile" onClick={()=>{ vibrate(10); setShowProfilePicker(true); }} className="p-1.5 rounded-full hover:bg-gray-100">
               <Boxes className={`w-4 h-4 ${profile?.id === 'stock' ? 'text-blue-600' : 'text-gray-700'}`} />
             </button>

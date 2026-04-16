@@ -107,12 +107,23 @@ function OrderCard({ order, selectedOut, onToggleVariant, onMarkCollected, onMar
                     )}
                   </div>
                 )}
-                <div className="p-1.5 flex items-center gap-2">
-                  <span className="text-[10px] uppercase tracking-wide text-gray-500">SKU</span>
-                  <span className="font-mono text-[11px] bg-gray-50 px-2 py-0.5 rounded border border-gray-200">{v.sku}</span>
-                  {v.title && <span className="text-[11px] text-gray-700 flex-1 whitespace-normal break-words">· {v.title}</span>}
-                  <span className="ml-auto text-[10px] uppercase tracking-wide text-gray-500">Qty</span>
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-red-600 text-white text-xs font-semibold">{v.qty}</span>
+                <div className="p-2 flex flex-col gap-1.5">
+                  {v.sku ? (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] uppercase tracking-wide font-bold text-amber-700">SKU</span>
+                      <span className="font-mono text-xs font-bold bg-amber-100 text-amber-900 px-2.5 py-1 rounded-lg border-2 border-amber-400 shadow-sm">{v.sku}</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] uppercase tracking-wide text-gray-400">SKU</span>
+                      <span className="text-[11px] text-gray-400 italic">No SKU</span>
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2">
+                    {v.title && <span className="text-[11px] text-gray-700 flex-1 whitespace-normal break-words">{v.title}</span>}
+                    <span className="ml-auto text-[10px] uppercase tracking-wide text-gray-500">Qty</span>
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-red-600 text-white text-xs font-semibold">{v.qty}</span>
+                  </div>
                 </div>
                 <button
                   onClick={()=>onToggleVariant(v.id)}

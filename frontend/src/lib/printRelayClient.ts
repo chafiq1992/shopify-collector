@@ -1,4 +1,6 @@
 // Prefer explicit env; else use current origin so production Cloud Run works without extra config
+import { authHeaders } from './auth';
+
 const RELAY_BASE = (import.meta.env.VITE_PRINT_RELAY_URL as string) || (typeof window !== 'undefined' ? window.location.origin : "");
 
 function getRelayApiKey(): string {
@@ -66,18 +68,34 @@ export async function enqueueOrdersToRelay(orders: string[], copies = 1, pcId?: 
   if (!pc_id) return { ok: false, error: "pc_id not configured" };
 
   try {
-    const r = await fetch(`${cfg.base}/enqueue`, {
+    const body = JSON.stringify({ pc_id, orders, copies, ...(store ? { store } : {}) });
+
+    // Prefer the authenticated app route so logged-in users do not depend on a browser-saved relay API key.
+    const r = await fetch(`${cfg.base}/api/enqueue-orders`, {
+      method: "POST",
+      headers: {
+        ...authHeaders({ "Content-Type": "application/json" }),
+        ...(cfg.apiKey ? { "x-api-key": cfg.apiKey } : {}),
+      },
+      body,
+      mode: "cors",
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) return { ok: true, job_id: data.job_id, queued: data.queued };
+
+    // Back-compat fallback for older backends that do not expose /api/enqueue-orders yet.
+    const legacy = await fetch(`${cfg.base}/enqueue`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         ...(cfg.apiKey ? { "x-api-key": cfg.apiKey } : {}),
       },
-      body: JSON.stringify({ pc_id, orders, copies, ...(store ? { store } : {}) }),
+      body,
       mode: "cors",
     });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) return { ok: false, error: data?.detail || r.statusText };
-    return { ok: true, job_id: data.job_id, queued: data.queued };
+    const legacyData = await legacy.json().catch(() => ({}));
+    if (!legacy.ok) return { ok: false, error: legacyData?.detail || data?.detail || legacy.statusText || r.statusText };
+    return { ok: true, job_id: legacyData.job_id, queued: legacyData.queued };
   } catch (err: any) {
     return { ok: false, error: String(err) };
   }
