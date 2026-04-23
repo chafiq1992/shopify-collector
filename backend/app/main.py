@@ -1105,6 +1105,7 @@ class OrderVariant(BaseModel):
     on_hand_quantity: Optional[int] = None  # Sum of inventory levels quantities(name="on_hand") across locations
     inventory_item_id: Optional[str] = None  # Shopify InventoryItem GID (used to fetch on_hand in batch)
     qty: int
+    original_qty: Optional[int] = None
     status: Optional[str] = None  # fulfilled | unfulfilled | removed | unknown
     unfulfilled_qty: Optional[int] = None
     unit_price: Optional[float] = None
@@ -1304,11 +1305,26 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
                 img = (var.get("product") or {}).get("featuredImage", {}).get("url")
             except Exception:
                 img = img
-        qty = li.get("quantity", 0) or 0
-        unfulfilled_qty = li.get("unfulfilledQuantity")
+        qty_raw = li.get("quantity", 0)
+        current_qty_raw = li.get("currentQuantity")
+        unfulfilled_qty_raw = li.get("unfulfilledQuantity")
+        try:
+            qty = int(qty_raw or 0)
+        except Exception:
+            qty = 0
+        try:
+            current_qty = None if current_qty_raw is None else int(current_qty_raw)
+        except Exception:
+            current_qty = None
+        try:
+            unfulfilled_qty = None if unfulfilled_qty_raw is None else int(unfulfilled_qty_raw)
+        except Exception:
+            unfulfilled_qty = None
+        # Shopify `quantity` includes removed units; `currentQuantity` reflects the live post-edit quantity.
+        effective_qty = current_qty if current_qty is not None else qty
         status_val = "unknown"
         try:
-            if int(qty) <= 0:
+            if int(effective_qty) <= 0:
                 status_val = "removed"
             else:
                 if unfulfilled_qty is None:
@@ -1355,9 +1371,10 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
             available_quantity=available_qty,
             on_hand_quantity=None,
             inventory_item_id=inv_item_id,
-            qty=qty,
+            qty=effective_qty,
+            original_qty=qty,
             status=status_val,
-            unfulfilled_qty=(None if unfulfilled_qty is None else int(unfulfilled_qty)),
+            unfulfilled_qty=unfulfilled_qty,
             unit_price=unit_price_val,
             currency_code=unit_price_ccy,
             color=color_val,
@@ -1883,12 +1900,13 @@ async def list_orders(
             cancelledAt
             lineItems(first: 50) {
               edges {
-                node {
-                  quantity
-                  unfulfilledQuantity
-                  sku
-                  originalUnitPriceSet { shopMoney { amount currencyCode } }
-                  variant {
+                  node {
+                    quantity
+                    currentQuantity
+                    unfulfilledQuantity
+                    sku
+                    originalUnitPriceSet { shopMoney { amount currencyCode } }
+                    variant {
                     id
                     title
                     sku
@@ -3832,6 +3850,7 @@ async def get_print_data(numbers: str = Query("", description="Comma-separated o
               edges {
                 node {
                   quantity
+                  currentQuantity
                   unfulfilledQuantity
                   sku
                   variant { id title barcode image { url } product { id featuredImage { url } } }
