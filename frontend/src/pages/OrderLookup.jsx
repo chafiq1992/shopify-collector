@@ -308,10 +308,10 @@ export default function OrderLookup(){
       .join("|"),
     [printQueue]
   );
-  const activeLabelQueueItem = useMemo(() => {
+  const activeLabelQueueItems = useMemo(() => {
     return [...labelQueueItems]
       .filter((item) => item && item.statusKey !== "printed")
-      .sort((a, b) => Number(a?.createdAt || 0) - Number(b?.createdAt || 0))[0] || null;
+      .sort((a, b) => Number(a?.createdAt || 0) - Number(b?.createdAt || 0));
   }, [labelQueueItems]);
   const registerSection = useCallback((key) => (el) => {
     if (el) sectionRefs.current[key] = el;
@@ -1058,6 +1058,12 @@ export default function OrderLookup(){
     if (statusKey === "waiting_partner") return "bg-amber-100 text-amber-800 border border-amber-200";
     if (statusKey === "information_error") return "bg-red-100 text-red-800 border border-red-200";
     return "bg-gray-100 text-gray-700 border border-gray-200";
+  };
+  const queueStepIndex = (item) => {
+    if (item?.statusKey === "printed" || item?.phase === "done") return 3;
+    if (item?.statusKey === "ready_to_print" || item?.phase === "ready_print") return 2;
+    if (item?.statusKey === "waiting_partner" || item?.phase === "company_select") return 1;
+    return 0;
   };
 
   function renderGuideFrame({ title, subtitle, children }) {
@@ -2498,8 +2504,7 @@ export default function OrderLookup(){
                   {/* Step Progress Indicator */}
                   <div className="mt-2 flex items-center gap-1">
                     {["creating", "company_select", "ready_print", "done"].map((step, i) => {
-                      const steps = ["creating", "company_select", "ready_print", "done"];
-                      const currentIdx = steps.indexOf(item.phase || "init");
+                      const currentIdx = queueStepIndex(item);
                       const isDone = i < currentIdx || item.phase === "done";
                       const isActive = i === currentIdx;
                       return (
@@ -2652,19 +2657,19 @@ export default function OrderLookup(){
           />
         </Suspense>
       )}
-      {activeLabelQueueItem && !showDeliveryPopup && (
-        <Suspense key={activeLabelQueueItem.queueId} fallback={null}>
+      {activeLabelQueueItems.map((queueItem) => (
+        <Suspense key={queueItem.queueId} fallback={null}>
           <DeliveryLabelPopup
-            order={activeLabelQueueItem.order}
-            store={activeLabelQueueItem.store || store}
+            order={queueItem.order}
+            store={queueItem.store || store}
             open={false}
             autoRunWhenHidden={true}
             onClose={() => {}}
-            onQueued={(payload) => handleQueueItemQueued(activeLabelQueueItem.queueId, payload)}
-            onStateChange={(nextState) => handleQueueItemStateChange(activeLabelQueueItem.queueId, nextState)}
+            onQueued={(payload) => handleQueueItemQueued(queueItem.queueId, payload)}
+            onStateChange={(nextState) => handleQueueItemStateChange(queueItem.queueId, nextState)}
           />
         </Suspense>
-      )}
+      ))}
       {printQueueFlight && (
         <div
           key={printQueueFlight.id}

@@ -414,6 +414,12 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     return () => { cancelled = true; };
   }, [envoyCode, deliveryOrderId, refreshPartnerSendState]);
 
+  useEffect(() => {
+    if (partnerSendState.ok === true && phase === "company_select") {
+      setPhase("ready_print");
+    }
+  }, [partnerSendState.ok, phase]);
+
   function populateEditFromRow(row) {
     setEditFields({
       orderName: row.orderName || orderName,
@@ -582,7 +588,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
             setEnvoyCode(env.code);
             applyResolvedCompany(env.company);
             addLog(`Envoy: ${env.code} (${env.company || "no company"})`);
-            setPhase(env.company ? "ready_print" : "company_select");
+            setPhase("company_select");
             setBusy(false);
             return;
           }
@@ -843,9 +849,21 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         openpackage: item?.openpackage != null ? Number(item.openpackage) : 1,
       };
 
-      await dlvApi(`admin/envoy-notes/items/${deliveryOrderId}/send`, { method: "POST", body: payload });
+      const sendResult = await dlvApi(`admin/envoy-notes/items/${deliveryOrderId}/send`, { method: "POST", body: payload });
+      const partnerResponse = sendResult?.response;
+      if (partnerResponse && partnerResponse.ok === false) {
+        throw new Error(partnerResponse.message || partnerResponse.detail || "Partner rejected the order.");
+      }
       addLog("Sent! Ready to print.");
-      await refreshPartnerSendState(envoyCode, deliveryOrderId);
+      const optimisticSentState = { ok: true, message: partnerResponse?.message || "Sent successfully", sentAt: new Date().toISOString() };
+      setPartnerSendState(optimisticSentState);
+      const refreshed = await refreshPartnerSendState(envoyCode, deliveryOrderId);
+      if (refreshed?.ok === false) {
+        throw new Error(refreshed.message || "Partner send was not confirmed.");
+      }
+      if (!refreshed) {
+        setPartnerSendState(optimisticSentState);
+      }
       setPhase("ready_print");
     } catch (e) {
       setPartnerSendState({ ok: false, message: e?.message || "Send failed", sentAt: null });
@@ -881,6 +899,11 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
   async function handlePrint(oid) {
     const id = oid || deliveryOrderId;
     if (!id) return;
+    if (envoyCode && partnerSendState.ok !== true) {
+      setError("Send to partner must succeed before printing.");
+      setPhase("company_select");
+      return;
+    }
     const labelUrl = `/api/delivery-label/${encodeURIComponent(id)}${envoyCode ? `?envoy_code=${encodeURIComponent(envoyCode)}` : ""}`;
     const sourceRect = printButtonRef.current?.getBoundingClientRect
       ? (() => {
@@ -959,13 +982,13 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         setEnvoyCode(resolved.envoyCode);
         applyResolvedCompany(resolved.companyName);
         addLog(`Envoy: ${resolved.envoyCode}${resolved.companyName ? ` (${resolved.companyName})` : ""}`);
-        setPhase(resolved.companyAssigned ? "ready_print" : "company_select");
+        setPhase("company_select");
         return;
       }
 
       try {
         const env = await dlvApi(`ext/admin/envoy-notes/for-order/${id}`);
-        if (env?.code) { setEnvoyCode(env.code); applyResolvedCompany(env.company); addLog(`Envoy: ${env.code}`); setPhase(env.company ? "ready_print" : "company_select"); return; }
+        if (env?.code) { setEnvoyCode(env.code); applyResolvedCompany(env.company); addLog(`Envoy: ${env.code}`); setPhase("company_select"); return; }
       } catch {}
       try {
         const env = await dlvApi(`ext/admin/envoy-notes/assign-order/${id}`, { method: "POST" });
@@ -1042,14 +1065,14 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     if (phase === "fix_errors" || phase === "manual" || phase === "error") {
       return { statusKey: "information_error", statusLabel: "Information error" };
     }
-    if (phase === "company_select") {
+    if (phase === "company_select" || ((phase === "ready_print" || phase === "done") && envoyCode && partnerSendState.ok !== true)) {
       return { statusKey: "waiting_partner", statusLabel: "Waiting to send to partner" };
     }
-    if (phase === "ready_print" || (phase === "done" && printStatus !== "fallback")) {
+    if ((phase === "ready_print" || (phase === "done" && printStatus !== "fallback")) && (!envoyCode || partnerSendState.ok === true)) {
       return { statusKey: "ready_to_print", statusLabel: "Ready to print" };
     }
     return { statusKey: "preparing", statusLabel: "Preparing" };
-  }, [phase, printStatus]);
+  }, [phase, printStatus, envoyCode, partnerSendState.ok]);
   const needsControlPayload = queueState.statusKey === "waiting_partner" || queueState.statusKey === "information_error";
 
   // Use a ref to track the last emitted key values and avoid infinite loops
@@ -1113,6 +1136,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     : partnerSendState.ok === false
       ? (partnerSendState.message || "Last send failed")
       : (envoyCode ? "Not sent to partner yet" : "Create or assign an envoy note first");
+  const canPrintLabel = Boolean(deliveryOrderId) && (phase === "ready_print" || phase === "done") && (!envoyCode || partnerSendState.ok === true);
 
   if (!open) return null;
 
@@ -1344,7 +1368,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
               </span>
               <span className="text-sm font-semibold text-gray-800">Print Label</span>
             </div>
-            {(phase === "ready_print" || phase === "done") && (
+            {canPrintLabel && (
               <div className="ml-8 mt-2 space-y-2">
                 <button
                   ref={printButtonRef}
