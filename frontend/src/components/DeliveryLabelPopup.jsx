@@ -74,8 +74,23 @@ function merchantForStore(store) {
   return STORE_MERCHANT_MAP[key] || null;
 }
 function getOrderMap() { try { return JSON.parse(localStorage.getItem(LS_ORDER_MAP) || "{}"); } catch { return {}; } }
-function setOrderMap(num, id) { try { const m = getOrderMap(); m[String(num)] = id; localStorage.setItem(LS_ORDER_MAP, JSON.stringify(m)); } catch {} }
-function getCachedOrderId(num) { return getOrderMap()[String(num)] || null; }
+function orderMapKey(num, store, merchant) {
+  const storeKey = String(store || "").trim().toLowerCase() || "store";
+  const merchantKey = String(merchant || "").trim() || "merchant";
+  const orderKey = normalizeLookupValue(num);
+  return `${storeKey}:${merchantKey}:${orderKey}`;
+}
+function setOrderMap(num, id, store, merchant) {
+  try {
+    const key = orderMapKey(num, store, merchant);
+    const m = getOrderMap();
+    m[key] = id;
+    localStorage.setItem(LS_ORDER_MAP, JSON.stringify(m));
+  } catch {}
+}
+function getCachedOrderId(num, store, merchant) {
+  try { return getOrderMap()[orderMapKey(num, store, merchant)] || null; } catch { return null; }
+}
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function isDigitsOnly(value) { return /^\d+$/.test(String(value || "").trim()); }
@@ -463,7 +478,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     });
     const rows = Array.isArray(res?.rows) ? res.rows : [];
     const wantedOrder = normalizeLookupValue(query);
-    const matched = rows.find(row => normalizeLookupValue(row?.orderName) === wantedOrder) || rows[0] || null;
+    const matched = rows.find(row => normalizeLookupValue(row?.orderName) === wantedOrder) || null;
     if (!matched?.id) return null;
     return {
       deliveryOrderId: Number(matched.id),
@@ -520,11 +535,11 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         const itemCode = normalizeLookupValue(item?.code);
         const itemOrderName = normalizeLookupValue(item?.order_name || item?.orderName);
         return itemCode === wantedCode || itemOrderName === wantedOrder;
-      }) || items[0] || null;
+      }) || null;
 
       const deliveryOrderId = Number(matchedItem?.orderId || matchedItem?.order_id || 0);
       if (!deliveryOrderId) {
-        throw new Error("Envoy note found, but no delivery order is attached to it.");
+        throw new Error("Envoy note found, but it does not contain this order.");
       }
 
       return {
@@ -577,8 +592,16 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         return;
       }
 
-      const cached = getCachedOrderId(orderNum);
+      const cached = getCachedOrderId(orderNum, store, mid);
+      let cachedExact = null;
       if (cached) {
+        try {
+          cachedExact = await lookupExistingDeliveryOrder({ merchant: mid, query: orderNum });
+        } catch {
+          cachedExact = null;
+        }
+      }
+      if (cached && cachedExact && Number(cachedExact.deliveryOrderId) === Number(cached)) {
         addLog(`Cached delivery ID: ${cached}`);
         setDeliveryOrderId(cached);
         populateEditFromOrder();
@@ -654,8 +677,16 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         if (autoRunWhenHidden) console.warn(`[DLP-BG] NOT FOUND after ${retryAttempt} retries for merchant=${mid}. Setting phase=manual`);
         populateEditFromOrder();
         if (!isWarmOnly) {
-          const cached = getCachedOrderId(orderNum);
+          const cached = getCachedOrderId(orderNum, store, mid);
+          let cachedExact = null;
           if (cached) {
+            try {
+              cachedExact = await lookupExistingDeliveryOrder({ merchant: mid, query: orderNum });
+            } catch {
+              cachedExact = null;
+            }
+          }
+          if (cached && cachedExact && Number(cachedExact.deliveryOrderId) === Number(cached)) {
             setDeliveryOrderId(cached);
             try {
               const env = await dlvApi(`ext/admin/envoy-notes/assign-order/${cached}`, { method: "POST" });
@@ -729,7 +760,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
 
       const oid = r0.orderId;
       setDeliveryOrderId(oid);
-      setOrderMap(orderNum, oid);
+      setOrderMap(orderNum, oid, store, mid);
       addLog(`Order ID: ${oid}`);
 
       addLog("Assigning envoy note...");
@@ -948,7 +979,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     try {
       const resolved = await resolveManualReference(raw);
       setDeliveryOrderId(resolved.deliveryOrderId);
-      setOrderMap(orderNum, resolved.deliveryOrderId);
+      setOrderMap(orderNum, resolved.deliveryOrderId, store, merchantId);
       if (resolved.envoyCode) {
         setEnvoyCode(resolved.envoyCode);
         applyResolvedCompany(resolved.companyName);
@@ -975,7 +1006,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       const resolved = await resolveManualReference(raw);
       const id = String(resolved.deliveryOrderId);
       setDeliveryOrderId(resolved.deliveryOrderId);
-      setOrderMap(orderNum, resolved.deliveryOrderId);
+      setOrderMap(orderNum, resolved.deliveryOrderId, store, merchantId);
       addLog(`Using order ID: ${id}`);
 
       if (resolved.envoyCode) {
