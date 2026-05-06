@@ -18,7 +18,7 @@ from io import BytesIO
 import qrcode
 from qrcode.constants import ERROR_CORRECT_M
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, case
+from sqlalchemy import select, func, case, or_
 from sqlalchemy.exc import IntegrityError
 
 # Local auth/db modules (optional)
@@ -2877,6 +2877,20 @@ if HAVE_AUTH_DB:
         if not norm:
             return {"ok": True, "order_number": order_number, "rows": [], "message": "Enter an order number"}
 
+        matching_order_gids = set()
+        for store_key in ("irrakids", "irranova"):
+            gid = await _find_order_gid_by_number(norm, store_key)
+            if gid:
+                matching_order_gids.add(gid)
+
+        match_clause = OrderEvent.order_number == norm
+        if matching_order_gids:
+            match_clause = or_(
+                OrderEvent.order_number == norm,
+                OrderEvent.order_gid.in_(matching_order_gids),
+                OrderEvent.event_metadata["order_gid"].as_string().in_(matching_order_gids),
+            )
+
         stmt = (
             select(
                 OrderEvent.order_number,
@@ -2890,7 +2904,7 @@ if HAVE_AUTH_DB:
             )
             .join(User, User.id == OrderEvent.user_id)
             .where(
-                OrderEvent.order_number == norm,
+                match_clause,
                 OrderEvent.action.in_(["collected", "fulfilled", "out"]),
             )
             .order_by(OrderEvent.created_at.desc())
@@ -3030,6 +3044,7 @@ class FulfillSelectionGroup(BaseModel):
 class FulfillRequest(BaseModel):
     lineItemsByFulfillmentOrder: Optional[List[FulfillSelectionGroup]] = None
     notifyCustomer: Optional[bool] = False
+    order_number: Optional[str] = None
 
 @app.post("/api/orders/{order_gid:path}/fulfill")
 async def fulfill_order(order_gid: str, body: FulfillRequest, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
@@ -3164,7 +3179,7 @@ if HAVE_AUTH_DB:
         await _record_user_action(
             session,
             user_id=user.id,
-            order_number=None,
+            order_number=(getattr(body, "order_number", None) or "").lstrip("#") or None,
             order_gid=None,
             store_key=store_key,
             action="fulfilled",

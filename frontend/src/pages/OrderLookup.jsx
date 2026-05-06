@@ -45,22 +45,22 @@ const API = {
     });
     if (!res.ok) throw new Error("Failed to update note");
   },
-  async fulfill(orderId, store){
+  async fulfill(orderId, store, orderNumber){
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/fulfill-tracked${qs}`, {
       method: "POST",
       headers: authHeaders({"Content-Type":"application/json"}),
-      body: JSON.stringify({}),
+      body: JSON.stringify({ order_number: String(orderNumber || "").replace(/^#/, "") || null }),
     });
     if (!res.ok) throw new Error("Failed to fulfill order");
     return res.json();
   },
-  async fulfillWithSelection(orderId, store, lineItemsByFulfillmentOrder){
+  async fulfillWithSelection(orderId, store, lineItemsByFulfillmentOrder, orderNumber){
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/fulfill-tracked${qs}`, {
       method: "POST",
       headers: authHeaders({"Content-Type":"application/json"}),
-      body: JSON.stringify({ lineItemsByFulfillmentOrder }),
+      body: JSON.stringify({ lineItemsByFulfillmentOrder, order_number: String(orderNumber || "").replace(/^#/, "") || null }),
     });
     if (!res.ok) throw new Error("Failed to fulfill order");
     return res.json();
@@ -2308,9 +2308,9 @@ export default function OrderLookup(){
                         setFulfillBusy(false);
                         return;
                       }
-                      res = await API.fulfillWithSelection(order.id, store, groups);
+                      res = await API.fulfillWithSelection(order.id, store, groups, order.number);
                     } else {
-                      res = await API.fulfill(order.id, store);
+                      res = await API.fulfill(order.id, store, order.number);
                     }
                     if (res && res.fulfilled === false) {
                       const reason = res.reason === "no_remaining"
