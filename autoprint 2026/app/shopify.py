@@ -56,9 +56,11 @@ def hydrate_order_for_template(order: dict, currency_suffix: str = "") -> dict:
         li["_final_line_price"] = f"{final_unfulfilled:.2f}"
         li["final_line_price"] = f"{final_unfulfilled:.2f}"
 
-        # Hydrate a minimal variant object expected by the template
+        # Hydrate a minimal variant object expected by the template. Keep any
+        # featured image populated earlier by ensure_variant_images().
         variant_title = li.get("variant_title") or li.get("title") or ""
-        # Prefer the image attached to the line item payload if present
+        existing_variant = li.get("variant") or {}
+        # Prefer the image attached to the line item payload if present.
         img = None
         try:
             img = (li.get("image") or {}).get("src")
@@ -66,7 +68,7 @@ def hydrate_order_for_template(order: dict, currency_suffix: str = "") -> dict:
             img = None
         li["variant"] = {
             "title": variant_title,
-            "featured_image": img or "",
+            "featured_image": img or existing_variant.get("featured_image") or "",
         }
     return order
 

@@ -3902,6 +3902,7 @@ async def get_print_data(numbers: str = Query("", description="Comma-separated o
                     "sku": getattr(v, "sku", None),
                     "title": getattr(v, "title", None),
                     "qty": qv,
+                    "image": getattr(v, "image", None),
                 })
             out.append({
                 "number": dto.number,
@@ -4063,7 +4064,9 @@ async def delivery_label_proxy(
                         target = item
                         break
                 order_name = str((target or {}).get("orderName") or "").strip()
-                if order_name:
+                target_code = str((target or {}).get("code") or "").strip()
+                target_tokens = [t for t in (order_name, target_code, str(order_id).strip()) if t]
+                if target_tokens:
                     note_params: Dict[str, Any] = {"renderer": "html", "viewer": "false"}
                     if autoprint:
                         note_params["autoprint"] = "true"
@@ -4091,12 +4094,17 @@ async def delivery_label_proxy(
                         selected = None
                         for start, end in page_blocks:
                             block = html[start:end]
-                            if order_name in block:
+                            if any(token in block for token in target_tokens):
                                 selected = (start, end, block)
                                 break
                         if selected:
                             start, end, block = selected
                             html = html[:first_idx] + block + html[page_blocks[-1][1]:]
+                        else:
+                            # Do not return a whole multi-order envoy note when the
+                            # selected order cannot be identified; the direct single
+                            # order label is safer than printing the wrong pages.
+                            return Response(content=resp.content, status_code=resp.status_code, media_type=media_type)
                     return Response(content=html.encode("utf-8"), status_code=200, media_type=media_type)
         except Exception:
             pass

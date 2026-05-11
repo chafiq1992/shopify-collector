@@ -37,20 +37,17 @@ def ack_job(job_id: str):
     r.raise_for_status()
 
 
-def requeue_job(orders, copies, store: str | None = None):
+def nack_job(job_id: str) -> bool:
     try:
-        headers = {"x-api-key": API_KEY} if API_KEY else {}
-        payload = {
-            "pc_id": PC_ID,
-            "orders": [str(o).lstrip("#") for o in (orders or [])],
-            "copies": int(copies) if copies else 1,
-            **({"store": store} if store else {}),
-        }
-        r = requests.post(f"{RELAY_URL}/enqueue", json=payload, headers=headers, timeout=10)
+        r = requests.post(
+            f"{RELAY_URL}/nack",
+            json={"pc_id": PC_ID, "secret": PC_SECRET, "job_id": job_id},
+            timeout=10,
+        )
         r.raise_for_status()
         return True
     except Exception as e:
-        print("Failed to re-enqueue job:", e)
+        print("Failed to nack job:", e)
         return False
 
 def print_locally(orders, copies, store: str | None = None) -> bool:
@@ -300,9 +297,9 @@ def main():
                     if printed:
                         ack_job(job.get("job_id"))
                     else:
-                        requeued = requeue_job(orders, copies, store)
+                        requeued = nack_job(job.get("job_id"))
                         if not requeued:
-                            print("Re-enqueue failed; will retry on next poll")
+                            print("Nack failed; job will retry after its lease expires")
             time.sleep(PULL_INTERVAL_SEC)
         except Exception as e:
             print("Error:", e)
@@ -311,5 +308,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
