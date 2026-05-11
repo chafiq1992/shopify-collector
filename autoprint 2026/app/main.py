@@ -250,43 +250,18 @@ def fetch_overrides_from_collector(
     base = _collector_base_url(cfg)
     if not base or not order_numbers:
         return {}
-    joined = ",".join(str(n).lstrip("#") for n in order_numbers)
-    needed = [str(n).lstrip("#") for n in order_numbers if str(n).strip()]
-
-    def _is_complete(ov: dict | None) -> bool:
-        if not isinstance(ov, dict):
-            return False
-        try:
-            cust = ov.get("customer") or {}
-            shp = ov.get("shippingAddress") or {}
-            has_name = bool(str(cust.get("displayName") or shp.get("name") or "").strip())
-            has_contact = bool(str(cust.get("phone") or ov.get("phone") or shp.get("phone") or cust.get("email") or ov.get("email") or "").strip())
-            has_address = bool(str(shp.get("address1") or "").strip()) and bool(str(shp.get("city") or "").strip())
-            return has_name and has_contact and has_address
-        except Exception:
-            return False
-
-    merged: dict[str, dict] = {}
-    attempts = [(False, 0.0), (True, 0.8), (True, 1.6)]
-    client = session or requests
-    for force_live, delay in attempts:
-        try:
-            if delay > 0:
-                time.sleep(delay)
-            params = {"orders": joined}
-            if force_live:
-                params["force_live"] = "1"
-            if store:
-                params["store"] = store
-            r = client.get(f"{base}/api/overrides", params=params, timeout=20)
-            r.raise_for_status()
-            js = r.json() or {}
-            merged.update(js.get("overrides") or {})
-            if needed and all(_is_complete(merged.get(k)) for k in needed):
-                break
-        except Exception:
-            continue
-    return merged
+    try:
+        joined = ",".join(str(n).lstrip("#") for n in order_numbers)
+        params = {"orders": joined}
+        if store:
+            params["store"] = store
+        client = session or requests
+        r = client.get(f"{base}/api/overrides", params=params, timeout=8)
+        r.raise_for_status()
+        js = r.json() or {}
+        return js.get("overrides") or {}
+    except Exception:
+        return {}
 
 def _merge_shipping_address(order: dict, override_addr: dict) -> dict:
     if not override_addr:
