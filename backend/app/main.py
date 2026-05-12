@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, FileResponse
 import httpx
 import hmac, hashlib, base64
 from datetime import datetime, timezone, timedelta
-import requests as _requests
+from urllib.parse import quote
 from pydantic import BaseModel
 import random
 from functools import lru_cache
@@ -59,6 +59,10 @@ from .geo_zones import load_zones, find_zone_match
 
 # ---------- Settings (multi-store) ----------
 SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2025-01").strip()
+try:
+    SHOPIFY_OVERRIDES_TIMEOUT_SECONDS = float(os.environ.get("SHOPIFY_OVERRIDES_TIMEOUT_SECONDS", "6").strip() or 6)
+except Exception:
+    SHOPIFY_OVERRIDES_TIMEOUT_SECONDS = 6.0
 
 # Back-compat defaults (irrakids-only) while supporting per-store overrides
 DEFAULT_DOMAIN = os.environ.get("IRRAKIDS_STORE_DOMAIN", "").strip()
@@ -3048,37 +3052,10 @@ class FulfillRequest(BaseModel):
 
 @app.post("/api/orders/{order_gid:path}/fulfill")
 async def fulfill_order(order_gid: str, body: FulfillRequest, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
-    # 1) Fetch fulfillment orders for the order and gather remaining quantities
-    q = """
-    query GetFO($id: ID!) {
-      order(id: $id) {
-        id
-        fulfillmentOrders(first: 50) {
-          nodes {
-            id
-            status
-            lineItems(first: 100) {
-              nodes {
-                id
-                remainingQuantity
-                lineItem {
-                  id
-                  sku
-                  variant { id title }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    data = await shopify_graphql(q, {"id": order_gid}, store=store)
-    order_node = data.get("order") or {}
-    fo_nodes = ((order_node.get("fulfillmentOrders") or {}).get("nodes")) or []
+    # 1) Build the fulfillment groups. If the client already sent exact
+    # fulfillment-order line item selections, avoid a duplicate Shopify read.
     groups_payload: List[Dict[str, Any]] = []
     if body and body.lineItemsByFulfillmentOrder:
-        # Use explicit selections from the client
         for g in (body.lineItemsByFulfillmentOrder or []):
             try:
                 groups_payload.append({
@@ -3087,12 +3064,38 @@ async def fulfill_order(order_gid: str, body: FulfillRequest, store: Optional[st
                 })
             except Exception:
                 continue
-        # Drop empty groups
         groups_payload = [g for g in groups_payload if g.get("fulfillmentOrderLineItems")]
         if not groups_payload:
             return {"ok": False, "errors": [{"message": "No valid selections provided"}]}
     else:
-        # Default: fulfill all remaining
+        # No explicit selections: fetch fulfillment orders for the order and gather remaining quantities.
+        q = """
+        query GetFO($id: ID!) {
+          order(id: $id) {
+            id
+            fulfillmentOrders(first: 50) {
+              nodes {
+                id
+                status
+                lineItems(first: 100) {
+                  nodes {
+                    id
+                    remainingQuantity
+                    lineItem {
+                      id
+                      sku
+                      variant { id title }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        data = await shopify_graphql(q, {"id": order_gid}, store=store)
+        order_node = data.get("order") or {}
+        fo_nodes = ((order_node.get("fulfillmentOrders") or {}).get("nodes")) or []
         if not fo_nodes:
             try:
                 sk = _normalize_store(store)
@@ -3779,54 +3782,67 @@ async def get_overrides(
             domain, access_token, api_key = await resolve_store_settings_effective(store_key)
             if not domain or not access_token:
                 return
-            for k in keys:
-                # Skip if we already have complete data and not forcing live
-                if (k in out) and _override_is_complete(out[k]) and not force_live:
-                    continue
-                try:
-                    name = _requests.utils.quote(f"#{k}")
-                    url = f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/orders.json?name={name}&status=any"
-                    headers = {"X-Shopify-Access-Token": access_token, "Accept": "application/json"}
-                    r = _requests.get(url, headers=headers, timeout=30)
-                    r.raise_for_status()
-                    js = r.json().get("orders", [])
-                    if not js:
+            timeout = httpx.Timeout(
+                SHOPIFY_OVERRIDES_TIMEOUT_SECONDS,
+                connect=min(3.0, SHOPIFY_OVERRIDES_TIMEOUT_SECONDS),
+                read=SHOPIFY_OVERRIDES_TIMEOUT_SECONDS,
+                write=min(3.0, SHOPIFY_OVERRIDES_TIMEOUT_SECONDS),
+                pool=min(3.0, SHOPIFY_OVERRIDES_TIMEOUT_SECONDS),
+            )
+            headers = {"X-Shopify-Access-Token": access_token, "Accept": "application/json"}
+
+            def _build_override(ord_full: Dict[str, Any]) -> Dict[str, Any]:
+                cust = (ord_full.get("customer") or {})
+                shp = (ord_full.get("shipping_address") or {})
+                root_email = (ord_full.get("email") or "").strip()
+                root_phone = (ord_full.get("phone") or "").strip()
+                return {
+                    "store": store_key,
+                    "customer": {
+                        "displayName": ((cust.get("first_name") or "").strip() + (" " + (cust.get("last_name") or "").strip() if cust.get("last_name") else "")).strip(),
+                        "email": (cust.get("email") or root_email or None),
+                        "phone": (cust.get("phone") or root_phone or None),
+                    },
+                    "shippingAddress": {
+                        "name": (shp.get("name") or (str(shp.get("first_name") or "").strip() + " " + str(shp.get("last_name") or "").strip()).strip()),
+                        "address1": shp.get("address1"),
+                        "address2": shp.get("address2"),
+                        "city": shp.get("city"),
+                        "zip": shp.get("zip") or shp.get("postal_code"),
+                        "province": shp.get("province"),
+                        "country": shp.get("country"),
+                        "phone": shp.get("phone") or cust.get("phone") or root_phone or None,
+                    },
+                    "email": (root_email or cust.get("email")),
+                    "phone": (root_phone or cust.get("phone")),
+                }
+
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                for k in keys:
+                    # Skip if we already have complete data and not forcing live.
+                    if (k in out) and _override_is_complete(out[k]) and not force_live:
                         continue
-                    oid = js[0]["id"]
-                    r2 = _requests.get(f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/orders/{oid}.json", headers=headers, timeout=30)
-                    r2.raise_for_status()
-                    ord_full = (r2.json() or {}).get("order") or {}
-                    cust = (ord_full.get("customer") or {})
-                    shp = (ord_full.get("shipping_address") or {})
-                    # Root-level contact fallbacks
-                    root_email = (ord_full.get("email") or "").strip()
-                    root_phone = (ord_full.get("phone") or "").strip()
-                    ov = {
-                        "store": store_key,
-                        "customer": {
-                            "displayName": ((cust.get("first_name") or "").strip() + (" " + (cust.get("last_name") or "").strip() if cust.get("last_name") else "")).strip(),
-                            "email": (cust.get("email") or root_email or None),
-                            "phone": (cust.get("phone") or root_phone or None),
-                        },
-                        "shippingAddress": {
-                            "name": (shp.get("name") or (str(shp.get("first_name") or "").strip() + " " + str(shp.get("last_name") or "").strip()).strip()),
-                            "address1": shp.get("address1"),
-                            "address2": shp.get("address2"),
-                            "city": shp.get("city"),
-                            "zip": shp.get("zip") or shp.get("postal_code"),
-                            "province": shp.get("province"),
-                            "country": shp.get("country"),
-                            "phone": shp.get("phone") or cust.get("phone") or root_phone or None,
-                        },
-                        # Keep convenience root-level contact copies too
-                        "email": (root_email or cust.get("email")),
-                        "phone": (root_phone or cust.get("phone")),
-                    }
-                    # Save result
-                    out[k] = ov
-                    ORDER_OVERRIDES[k] = ov
-                except Exception:
-                    continue
+                    try:
+                        name = quote(f"#{k}")
+                        fields = quote("id,email,phone,customer,shipping_address", safe=",")
+                        url = f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/orders.json?name={name}&status=any&fields={fields}"
+                        r = await client.get(url, headers=headers)
+                        r.raise_for_status()
+                        js = (r.json() or {}).get("orders", [])
+                        if not js:
+                            continue
+                        ord_full = js[0] or {}
+                        ov = _build_override(ord_full)
+                        if not _override_is_complete(ov) and ord_full.get("id"):
+                            full_url = f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/orders/{ord_full['id']}.json?fields={fields}"
+                            r2 = await client.get(full_url, headers=headers)
+                            r2.raise_for_status()
+                            ord_full = (r2.json() or {}).get("order") or ord_full
+                            ov = _build_override(ord_full)
+                        out[k] = ov
+                        ORDER_OVERRIDES[k] = ov
+                    except Exception:
+                        continue
         except Exception:
             return
 
