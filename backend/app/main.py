@@ -1561,7 +1561,37 @@ def _order_summary_payload(order: "OrderDTO") -> Dict[str, Any]:
         "variants": variants,
     }
 
-def _aggregate_orders_by_product(orders: List["OrderDTO"]) -> List[Dict[str, Any]]:
+def _cod_tag_sort_key(order: Any, collect_prefix: Optional[str]) -> str:
+    import re
+
+    prefix = str((collect_prefix or "cod")).strip().lower() or "cod"
+    cod_regex = re.compile(rf"^{re.escape(prefix)}\s+(\d{{2}})/(\d{{2}})/(\d{{2}})$", re.IGNORECASE)
+    best = ""
+    tags = (order.get("tags") if isinstance(order, dict) else getattr(order, "tags", None)) or []
+    for tag in tags:
+        try:
+            match = cod_regex.match(str(tag or "").strip())
+            if not match:
+                continue
+            dd, mm, yy = match.groups()
+            sortable = f"20{yy}-{mm}-{dd}"
+            if not best or sortable < best:
+                best = sortable
+        except Exception:
+            continue
+    return best
+
+def _sort_orders_by_cod_tag_then_created(items: List["OrderDTO"], collect_prefix: Optional[str]) -> None:
+    try:
+        items.sort(key=lambda o: (
+            _cod_tag_sort_key(o, collect_prefix) or "9999-12-31",
+            getattr(o, "created_at", None) or "",
+            getattr(o, "number", None) or "",
+        ))
+    except Exception:
+        pass
+
+def _aggregate_orders_by_product(orders: List["OrderDTO"], collect_prefix: Optional[str] = None) -> List[Dict[str, Any]]:
     product_map: Dict[str, Dict[str, Any]] = {}
     order_summary_by_id: Dict[str, Dict[str, Any]] = {}
     for order in orders:
@@ -1624,7 +1654,11 @@ def _aggregate_orders_by_product(orders: List["OrderDTO"]) -> List[Dict[str, Any
                 for order_id in variant_group["order_ids"]
                 if order_id in order_summary_by_id
             ]
-            variant_orders.sort(key=lambda order: str(order.get("created_at") or ""))
+            variant_orders.sort(key=lambda order: (
+                _cod_tag_sort_key(order, collect_prefix) or "9999-12-31",
+                str(order.get("created_at") or ""),
+                str(order.get("number") or ""),
+            ))
             variants_out.append({
                 "key": variant_group["key"],
                 "variantId": variant_group["variantId"],
@@ -2200,7 +2234,7 @@ async def list_orders(
                 if any((variant.sku or "").lower().find(search_lower) >= 0 for variant in order.variants) or search_lower in order.number.lower()
             ]
 
-        groups = _aggregate_orders_by_product(all_items) if aggregate_by == "products" else _aggregate_orders_by_cod_date(all_items, collect_prefix)
+        groups = _aggregate_orders_by_product(all_items, collect_prefix) if aggregate_by == "products" else _aggregate_orders_by_cod_date(all_items, collect_prefix)
         unique_tags = sorted({tag for order in all_items for tag in (order.tags or [])})
         resp = {
             "groups": groups,
@@ -2218,12 +2252,9 @@ async def list_orders(
         ss = search.lower().strip()
         items = [o for o in items if any((v.sku or "").lower().find(ss) >= 0 for v in o.variants) or ss in o.number.lower()]
 
-    # Product mode: present oldest first within current page window
+    # Product mode: present oldest COD tag first within current page window.
     if (product_id or "").strip():
-        try:
-            items.sort(key=lambda o: (getattr(o, "created_at", None) or ""))
-        except Exception:
-            pass
+        _sort_orders_by_cod_tag_then_created(items, collect_prefix)
 
     # Collect: compute ranking globally across a larger window of orders
     if status_filter == "collect" and not disable_collect_ranking:

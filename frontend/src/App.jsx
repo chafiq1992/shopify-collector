@@ -123,6 +123,38 @@ function savePendingActions(arr){
   try { localStorage.setItem(PENDING_ACTIONS_KEY, JSON.stringify(Array.isArray(arr) ? arr : [])); } catch {}
 }
 
+function codTagSortValue(order, collectPrefix = "cod"){
+  try {
+    const prefix = String(collectPrefix || "cod").trim().toLowerCase() || "cod";
+    const tags = Array.isArray(order?.tags) ? order.tags : [];
+    let best = "";
+    for (const rawTag of tags){
+      const tag = String(rawTag || "").trim();
+      const lower = tag.toLowerCase();
+      if (!lower.startsWith(`${prefix} `)) continue;
+      const datePart = tag.slice(prefix.length).trim();
+      const match = /^(\d{2})\/(\d{2})\/(\d{2})$/.exec(datePart);
+      if (!match) continue;
+      const [, dd, mm, yy] = match;
+      const sortable = `20${yy}-${mm}-${dd}`;
+      if (!best || sortable < best) best = sortable;
+    }
+    return best;
+  } catch {
+    return "";
+  }
+}
+
+function sortOrdersByCodTagThenCreated(a, b, collectPrefix = "cod"){
+  const aCod = codTagSortValue(a, collectPrefix);
+  const bCod = codTagSortValue(b, collectPrefix);
+  return (
+    String(aCod || "9999-12-31").localeCompare(String(bCod || "9999-12-31")) ||
+    String(a?.created_at || "").localeCompare(String(b?.created_at || "")) ||
+    String(a?.number || "").localeCompare(String(b?.number || ""))
+  );
+}
+
 function sleep(ms){
   return new Promise(r => setTimeout(r, ms));
 }
@@ -489,7 +521,7 @@ export default function App(){
     }
     // Optional product sort override: old -> new
     if (productSortOldToNew && isProductMode){
-      try { ords.sort((a,b) => String(a.created_at||"").localeCompare(String(b.created_at||""))); } catch {}
+      try { ords.sort((a,b) => sortOrdersByCodTagThenCreated(a, b, preset.collectPrefix)); } catch {}
     }
     setOrders(ords);
     setTags(data.tags || []);
@@ -550,7 +582,7 @@ export default function App(){
       setOrders(prev => {
         const merged = prev.concat(more);
         if (productSortOldToNew && isProductMode){
-          try { merged.sort((a,b) => String(a.created_at||"").localeCompare(String(b.created_at||""))); } catch {}
+          try { merged.sort((a,b) => sortOrdersByCodTagThenCreated(a, b, preset.collectPrefix)); } catch {}
         }
         return merged;
       });
