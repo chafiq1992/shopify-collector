@@ -191,21 +191,29 @@ def _store_env_names(base: str, store_key: str) -> List[str]:
     return out
 
 
-def _store_env_value(base: str, store_key: str) -> str:
+def _store_env_value(base: str, store_key: str) -> Tuple[str, str]:
     for name in _store_env_names(base, store_key):
         value = (os.environ.get(name) or "").strip()
         if value:
-            return value
-    return ""
+            return value, name
+    return "", ""
 
 
-def _client_creds(store_key: str = "") -> Tuple[str, str]:
-    cid = _store_env_value("SHOPIFY_CLIENT_ID", store_key) or (os.environ.get("SHOPIFY_CLIENT_ID") or "").strip()
-    sec = _store_env_value("SHOPIFY_CLIENT_SECRET", store_key) or (os.environ.get("SHOPIFY_CLIENT_SECRET") or "").strip()
+def _client_creds(store_key: str = "") -> Tuple[str, str, str]:
+    store_cid, store_cid_name = _store_env_value("SHOPIFY_CLIENT_ID", store_key)
+    store_sec, store_sec_name = _store_env_value("SHOPIFY_CLIENT_SECRET", store_key)
+    if store_cid or store_sec:
+        if not store_cid or not store_sec:
+            suffix_hint = f"SHOPIFY_CLIENT_ID_{store_key}/SHOPIFY_CLIENT_SECRET_{store_key}"
+            raise HTTPException(status_code=500, detail=f"Incomplete per-store Shopify OAuth credentials for {store_key}; set both {suffix_hint}")
+        return store_cid, store_sec, f"per_store:{store_cid_name}/{store_sec_name}"
+
+    cid = (os.environ.get("SHOPIFY_CLIENT_ID") or "").strip()
+    sec = (os.environ.get("SHOPIFY_CLIENT_SECRET") or "").strip()
     if not cid or not sec:
         suffix_hint = f" or SHOPIFY_CLIENT_ID_{store_key}/SHOPIFY_CLIENT_SECRET_{store_key}" if store_key else ""
         raise HTTPException(status_code=500, detail=f"SHOPIFY_CLIENT_ID/SHOPIFY_CLIENT_SECRET{suffix_hint} not configured")
-    return cid, sec
+    return cid, sec, "global"
 
 
 def _canonical_hmac_msg(qp: List[Tuple[str, str]]) -> str:
@@ -295,7 +303,7 @@ async def oauth_start(
     store_key = _require_oauth_enabled_store(store)
     shop_norm = normalize_shop_domain(shop)
 
-    cid, _ = _client_creds(store_key)
+    cid, _, cred_source = _client_creds(store_key)
     redirect_uri = f"{_base_url()}/api/shopify/oauth/callback"
     now = _now_ts()
     state = sign_state(
@@ -303,6 +311,7 @@ async def oauth_start(
             "store": store_key,
             "shop": shop_norm,
             "nonce": os.urandom(16).hex(),
+            "cred_source": cred_source,
             "iat": now,
             "exp": now + 10 * 60,
         }
@@ -337,12 +346,12 @@ async def oauth_callback(
     if not hmac.compare_digest(shop_in_state, shop_norm):
         raise HTTPException(status_code=400, detail="state/shop mismatch")
 
-    cid, client_secret = _client_creds(store_key)
+    cid, client_secret, cred_source = _client_creds(store_key)
     skip_hmac = _bool_env("SHOPIFY_OAUTH_SKIP_HMAC", default=False)
     ok_hmac, debug = _verify_shopify_hmac(request=request, client_secret=client_secret)
     if (not ok_hmac) and (not skip_hmac):
         # Return debug JSON to help troubleshoot production mismatches
-        out = {"error": "invalid_hmac", "shop": shop_norm}
+        out = {"error": "invalid_hmac", "shop": shop_norm, "store": store_key, "credential_source": cred_source}
         if isinstance(debug, dict):
             out.update(debug)
         return JSONResponse(out, status_code=400)
