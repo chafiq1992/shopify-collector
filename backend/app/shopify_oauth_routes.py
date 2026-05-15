@@ -171,11 +171,36 @@ def verify_state(token: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="invalid state")
 
 
-def _client_creds() -> Tuple[str, str]:
-    cid = (os.environ.get("SHOPIFY_CLIENT_ID") or "").strip()
-    sec = (os.environ.get("SHOPIFY_CLIENT_SECRET") or "").strip()
+def _store_env_names(base: str, store_key: str) -> List[str]:
+    raw = (store_key or "").strip()
+    suffix = _store_env_suffix(raw)
+    names: List[str] = []
+    for part in (raw, raw.lower(), raw.upper(), suffix):
+        if part:
+            names.append(f"{base}_{part}")
+    out: List[str] = []
+    seen = set()
+    for name in names:
+        if name not in seen:
+            out.append(name)
+            seen.add(name)
+    return out
+
+
+def _store_env_value(base: str, store_key: str) -> str:
+    for name in _store_env_names(base, store_key):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _client_creds(store_key: str = "") -> Tuple[str, str]:
+    cid = _store_env_value("SHOPIFY_CLIENT_ID", store_key) or (os.environ.get("SHOPIFY_CLIENT_ID") or "").strip()
+    sec = _store_env_value("SHOPIFY_CLIENT_SECRET", store_key) or (os.environ.get("SHOPIFY_CLIENT_SECRET") or "").strip()
     if not cid or not sec:
-        raise HTTPException(status_code=500, detail="SHOPIFY_CLIENT_ID/SHOPIFY_CLIENT_SECRET not configured")
+        suffix_hint = f" or SHOPIFY_CLIENT_ID_{store_key}/SHOPIFY_CLIENT_SECRET_{store_key}" if store_key else ""
+        raise HTTPException(status_code=500, detail=f"SHOPIFY_CLIENT_ID/SHOPIFY_CLIENT_SECRET{suffix_hint} not configured")
     return cid, sec
 
 
@@ -266,7 +291,7 @@ async def oauth_start(
     store_key = _require_oauth_enabled_store(store)
     shop_norm = normalize_shop_domain(shop)
 
-    cid, _ = _client_creds()
+    cid, _ = _client_creds(store_key)
     redirect_uri = f"{_base_url()}/api/shopify/oauth/callback"
     now = _now_ts()
     state = sign_state(
@@ -308,7 +333,7 @@ async def oauth_callback(
     if not hmac.compare_digest(shop_in_state, shop_norm):
         raise HTTPException(status_code=400, detail="state/shop mismatch")
 
-    cid, client_secret = _client_creds()
+    cid, client_secret = _client_creds(store_key)
     skip_hmac = _bool_env("SHOPIFY_OAUTH_SKIP_HMAC", default=False)
     ok_hmac, debug = _verify_shopify_hmac(request=request, client_secret=client_secret)
     if (not ok_hmac) and (not skip_hmac):

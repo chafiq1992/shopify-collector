@@ -13,6 +13,7 @@ A clean, swipe-first app for warehouse/employee order collection:
 This repo supports Shopify public-app OAuth for adding stores:
 
 - `SHOPIFY_CLIENT_ID` and `SHOPIFY_CLIENT_SECRET` come from the Shopify Dev Dashboard.
+- If a store has its own Shopify app, set `SHOPIFY_CLIENT_ID_storekey` and `SHOPIFY_CLIENT_SECRET_storekey`; otherwise it uses the global pair.
 - `SHOPIFY_STORE_KEYS` is the store-key list allowed to connect, for example `irrakids,irranova,newstore` or `*`.
 - New stores connect through `/shopify-connect`; Shopify mints the Admin API token during OAuth and the app stores it in the DB.
 - No manually pasted `SHOPIFY_ACCESS_TOKEN_*` or `SHOPIFY_PASSWORD` is needed for new stores.
@@ -66,6 +67,7 @@ Leave these unset for OAuth-only stores. If per-store passwords are not set, the
 - `BASE_URL` — public Cloud Run URL used to build redirect URI exactly: `{BASE_URL}/api/shopify/oauth/callback`
 - `SHOPIFY_CLIENT_ID`
 - `SHOPIFY_CLIENT_SECRET` (starts with `shpss_...`)
+- Optional per-store overrides: `SHOPIFY_CLIENT_ID_newstore`, `SHOPIFY_CLIENT_SECRET_newstore`
 - `SHOPIFY_STORE_KEYS` — comma-separated store keys allowed to use OAuth, or `*` to allow adding new store keys from `/shopify-connect`
 - `SHOPIFY_OAUTH_SCOPES` — comma-separated
 - `SHOPIFY_OAUTH_STORES` — optional backward-compatible alias for `SHOPIFY_STORE_KEYS`
@@ -76,6 +78,7 @@ Leave these unset for OAuth-only stores. If per-store passwords are not set, the
 When resolving Shopify credentials for a store:
 
 - Use the DB record stored by the OAuth install for OAuth stores.
+- OAuth app credentials resolve in this order: per-store `SHOPIFY_CLIENT_ID_<store key>` / `SHOPIFY_CLIENT_SECRET_<store key>`, then global `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET`.
 - Legacy static-token env vars are still supported only as a fallback for older stores.
 - Store keys are lowercase slugs such as `irrakids`, `irranova`, or `newstore`. The same key is passed through order lookup, order browser, product orders, printing, fulfillment, and analytics.
 
@@ -96,6 +99,9 @@ pip install -r requirements.txt
 # setx BASE_URL "http://localhost:8000"
 # setx SHOPIFY_CLIENT_ID "your_public_app_client_id"
 # setx SHOPIFY_CLIENT_SECRET "shpss_..."
+# Optional, only when a store uses a different Shopify app:
+# setx SHOPIFY_CLIENT_ID_newstorename "that_store_public_app_client_id"
+# setx SHOPIFY_CLIENT_SECRET_newstorename "shpss_..."
 # setx SHOPIFY_STORE_KEYS "*"
 # setx SHOPIFY_OAUTH_SCOPES "read_orders,write_orders,read_products,write_products,read_content,write_content,read_inventory,write_inventory"
 # setx SHOPIFY_API_VERSION "2025-01"
