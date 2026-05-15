@@ -153,6 +153,10 @@ def _store_labels_from_env() -> set[str]:
             labels.add(env_key.removeprefix("SHOPIFY_SHOP_DOMAIN_").lower())
         elif env_key.startswith("SHOPIFY_ACCESS_TOKEN_"):
             labels.add(env_key.removeprefix("SHOPIFY_ACCESS_TOKEN_").lower())
+        elif env_key.startswith("SHOPIFY_CLIENT_ID_"):
+            labels.add(env_key.removeprefix("SHOPIFY_CLIENT_ID_").lower())
+        elif env_key.startswith("SHOPIFY_CLIENT_SECRET_"):
+            labels.add(env_key.removeprefix("SHOPIFY_CLIENT_SECRET_").lower())
     if not _oauth_all_stores_enabled():
         labels.update(_oauth_enabled_stores())
     return {label for label in labels if _STORE_LABEL_RE.match(label)}

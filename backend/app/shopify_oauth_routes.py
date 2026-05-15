@@ -88,6 +88,10 @@ def _env_store_labels() -> set[str]:
             labels.add(key.removeprefix("SHOPIFY_SHOP_DOMAIN_").lower())
         elif key.startswith("SHOPIFY_ACCESS_TOKEN_"):
             labels.add(key.removeprefix("SHOPIFY_ACCESS_TOKEN_").lower())
+        elif key.startswith("SHOPIFY_CLIENT_ID_"):
+            labels.add(key.removeprefix("SHOPIFY_CLIENT_ID_").lower())
+        elif key.startswith("SHOPIFY_CLIENT_SECRET_"):
+            labels.add(key.removeprefix("SHOPIFY_CLIENT_SECRET_").lower())
     if os.environ.get("IRRAKIDS_STORE_DOMAIN") or os.environ.get("SHOPIFY_PASSWORD") or os.environ.get("IRRAKIDS_SHOPIFY_PASSWORD"):
         labels.add("irrakids")
     if os.environ.get("IRRANOVA_STORE_DOMAIN") or os.environ.get("IRRANOVA_SHOPIFY_PASSWORD"):
