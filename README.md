@@ -10,27 +10,28 @@ A clean, swipe-first app for warehouse/employee order collection:
 
 ## 1) Shopify prerequisites
 
-This repo supports **mixed-mode Shopify auth** for multiple stores:
+This repo supports Shopify public-app OAuth for adding stores:
 
-- **irrakids**: keeps the “old method” — static Admin API token from env (sent as `X-Shopify-Access-Token`).
-- **irranova**: uses **public app OAuth** (Shopify Dev Dashboard Client ID + Secret) to mint and persist a per-store Admin API token in the DB.
-- New stores can use the same OAuth flow by choosing a store key in `/shopify-connect`.
+- `SHOPIFY_CLIENT_ID` and `SHOPIFY_CLIENT_SECRET` come from the Shopify Dev Dashboard.
+- `SHOPIFY_STORE_KEYS` is the store-key list allowed to connect, for example `irrakids,irranova,newstore` or `*`.
+- New stores connect through `/shopify-connect`; Shopify mints the Admin API token during OAuth and the app stores it in the DB.
+- No manually pasted `SHOPIFY_ACCESS_TOKEN_*` or `SHOPIFY_PASSWORD` is needed for new stores.
 
-### Old method (env token)
+### Legacy method (static token fallback)
 
 Create a **custom app** in Shopify admin (or use your existing token) with Admin API scopes like:
 - `read_orders`, `write_orders` (plus any other features you use)
 
-Copy the **Admin API access token** and set env vars below.
+This fallback is still supported for older stores, but new stores should use OAuth with `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, and a store key.
 
-### New method (public app OAuth)
+### Public app OAuth
 
 In the Shopify Dev Dashboard:
 
 - Create a **public app**
 - Add the exact redirect URL to the allowlist:
   - `{BASE_URL}/api/shopify/oauth/callback` (must match exactly, not just the domain)
-- Set env vars below (`SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_OAUTH_SCOPES`, `BASE_URL`)
+- Set env vars below (`SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_STORE_KEYS`, `SHOPIFY_OAUTH_SCOPES`, `BASE_URL`)
 
 Then in the app UI, open `/shopify-connect`, enter a store key such as `newstore`, enter `newstore.myshopify.com`, and run the install flow.
 
@@ -41,9 +42,6 @@ Important lessons:
 
 ## 2) Environment variables
 
-- `IRRAKIDS_STORE_DOMAIN` — e.g., `yourstore.myshopify.com`
-- `SHOPIFY_PASSWORD` — Admin API access token or Private App password
-- `SHOPIFY_API_KEY` — optional; if set with `SHOPIFY_PASSWORD`, basic auth is used
 - `SHOPIFY_API_VERSION` — default `2025-01`
 
 Auth + collector analytics (recommended for production):
@@ -55,29 +53,30 @@ Important:
 
 - Cloud Run containers can restart and scale to multiple instances. If you keep `DATABASE_URL` as SQLite (`sqlite+aiosqlite:///./local.db`), collector analytics can be **missing/incomplete** because data is not durable and can differ per instance.
 
-Multi-store (optional):
+Legacy static-token fallback (optional):
 
 - `IRRAKIDS_SHOPIFY_PASSWORD`, `IRRAKIDS_SHOPIFY_API_KEY` — overrides for Irrakids, if different
 - `IRRANOVA_STORE_DOMAIN` — e.g., `your-second-store.myshopify.com`
 - `IRRANOVA_SHOPIFY_PASSWORD`, `IRRANOVA_SHOPIFY_API_KEY` — credentials for Irranova
 
-If per-store passwords are not set, the app will fall back to `SHOPIFY_PASSWORD`/`SHOPIFY_API_KEY`.
+Leave these unset for OAuth-only stores. If per-store passwords are not set, the app will use the OAuth token saved in the DB.
 
 ### Shopify OAuth (public app) env vars
 
 - `BASE_URL` — public Cloud Run URL used to build redirect URI exactly: `{BASE_URL}/api/shopify/oauth/callback`
 - `SHOPIFY_CLIENT_ID`
 - `SHOPIFY_CLIENT_SECRET` (starts with `shpss_...`)
+- `SHOPIFY_STORE_KEYS` — comma-separated store keys allowed to use OAuth, or `*` to allow adding new store keys from `/shopify-connect`
 - `SHOPIFY_OAUTH_SCOPES` — comma-separated
-- `SHOPIFY_OAUTH_STORES` — comma-separated store labels allowed to use OAuth, or `*` to allow adding new store keys from `/shopify-connect` (default behavior enables **only** `irranova`)
+- `SHOPIFY_OAUTH_STORES` — optional backward-compatible alias for `SHOPIFY_STORE_KEYS`
 - Optional: `SHOPIFY_OAUTH_SKIP_HMAC=1` (emergency unblock only)
 
-### Mixed-mode resolver behavior
+### Credential resolver behavior
 
 When resolving Shopify credentials for a store:
 
-- Prefer env `SHOPIFY_SHOP_DOMAIN_<STORE>` + `SHOPIFY_ACCESS_TOKEN_<STORE>` (for all stores).
-- If the store is OAuth-enabled (default `irranova`) **and** env credentials are missing, fall back to the DB record stored by the OAuth install.
+- Use the DB record stored by the OAuth install for OAuth stores.
+- Legacy static-token env vars are still supported only as a fallback for older stores.
 - Store keys are lowercase slugs such as `irrakids`, `irranova`, or `newstore`. The same key is passed through order lookup, order browser, product orders, printing, fulfillment, and analytics.
 
 Reference: [Shopify OAuth getting started](https://shopify.dev/apps/auth/oauth/getting-started) and [Shopify API authentication (HMAC verification)](https://shopify.dev/docs/api/usage/authentication).
@@ -94,14 +93,12 @@ npm run dev
 cd ..
 pip install -r requirements.txt
 # On Windows PowerShell:
-# setx IRRAKIDS_STORE_DOMAIN "yourstore.myshopify.com"
-# setx SHOPIFY_PASSWORD "shpat_or_private_app_password"
-# setx SHOPIFY_API_KEY ""
+# setx BASE_URL "http://localhost:8000"
+# setx SHOPIFY_CLIENT_ID "your_public_app_client_id"
+# setx SHOPIFY_CLIENT_SECRET "shpss_..."
+# setx SHOPIFY_STORE_KEYS "*"
+# setx SHOPIFY_OAUTH_SCOPES "read_orders,write_orders,read_products,write_products,read_content,write_content,read_inventory,write_inventory"
 # setx SHOPIFY_API_VERSION "2025-01"
-# Optionally set Irranova envs as well:
-# setx IRRANOVA_STORE_DOMAIN "your-second-store.myshopify.com"
-# setx IRRANOVA_SHOPIFY_PASSWORD "shpat_or_private_app_password_for_irranova"
-# setx IRRANOVA_SHOPIFY_API_KEY ""
 # Then restart terminal to load env vars
 uvicorn backend.app.main:app --reload
 # Open http://localhost:8000 once you build production bundle below
@@ -163,13 +160,12 @@ Or **double-click**:
 ```bash
 docker build -t order-collector:local .
 docker run -p 8080:8080 \
-  -e IRRAKIDS_STORE_DOMAIN=yourstore.myshopify.com \
-  -e SHOPIFY_PASSWORD=shpat_or_private_app_password \
-  -e SHOPIFY_API_KEY= \
+  -e BASE_URL=http://localhost:8080 \
+  -e SHOPIFY_CLIENT_ID=your_public_app_client_id \
+  -e SHOPIFY_CLIENT_SECRET=shpss_... \
+  -e SHOPIFY_STORE_KEYS=* \
+  -e SHOPIFY_OAUTH_SCOPES=read_orders,write_orders,read_products,write_products,read_content,write_content,read_inventory,write_inventory \
   -e SHOPIFY_API_VERSION=2025-01 \
-  -e IRRANOVA_STORE_DOMAIN=your-second-store.myshopify.com \
-  -e IRRANOVA_SHOPIFY_PASSWORD= \
-  -e IRRANOVA_SHOPIFY_API_KEY= \
   order-collector:local
 # Open http://localhost:8080
 ```
@@ -185,7 +181,7 @@ gcloud run deploy order-collector \
   --region europe-west1 \
   --port 8080 \
   --allow-unauthenticated \
-  --set-env-vars IRRAKIDS_STORE_DOMAIN=yourstore.myshopify.com,SHOPIFY_PASSWORD=shpat_or_private_app_password,SHOPIFY_API_KEY=,SHOPIFY_API_VERSION=2025-01
+  --set-env-vars BASE_URL=https://your-cloud-run-url.a.run.app,SHOPIFY_CLIENT_ID=your_public_app_client_id,SHOPIFY_CLIENT_SECRET=shpss_...,SHOPIFY_STORE_KEYS=*,SHOPIFY_OAUTH_SCOPES=read_orders,write_orders,read_products,write_products,read_content,write_content,read_inventory,write_inventory,SHOPIFY_API_VERSION=2025-01
 ```
 
 > Cloud Run supports **WebSockets** out of the box. For multi-instance fan-out, back WebSocket events with Pub/Sub or Redis instead of in-memory list.
@@ -205,7 +201,7 @@ If your environment allows dot-directories, place this file at `.github/workflow
 - `GCP_WORKLOAD_ID_PROVIDER` — resource name of your provider
 - `GCP_RUN_SA_EMAIL` — deploy service account email
 - `GCP_ARTIFACT_REPO` — Artifact Registry repo, like `europe-west1-docker.pkg.dev/<project>/<repo>`
-- `IRRAKIDS_STORE_DOMAIN`, `SHOPIFY_PASSWORD`, `SHOPIFY_API_KEY` — your secrets
+- `BASE_URL`, `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_STORE_KEYS`, `SHOPIFY_OAUTH_SCOPES` — your Shopify OAuth config
 
 ```yaml
 name: Deploy to Cloud Run
@@ -239,7 +235,7 @@ jobs:
             --platform managed \
             --port 8080 \
             --allow-unauthenticated \
-            --set-env-vars IRRAKIDS_STORE_DOMAIN=${{ secrets.IRRAKIDS_STORE_DOMAIN }},SHOPIFY_PASSWORD=${{ secrets.SHOPIFY_PASSWORD }},SHOPIFY_API_KEY=${{ secrets.SHOPIFY_API_KEY }},SHOPIFY_API_VERSION=2025-01
+            --set-env-vars BASE_URL=${{ secrets.BASE_URL }},SHOPIFY_CLIENT_ID=${{ secrets.SHOPIFY_CLIENT_ID }},SHOPIFY_CLIENT_SECRET=${{ secrets.SHOPIFY_CLIENT_SECRET }},SHOPIFY_STORE_KEYS=${{ secrets.SHOPIFY_STORE_KEYS }},SHOPIFY_OAUTH_SCOPES=${{ secrets.SHOPIFY_OAUTH_SCOPES }},SHOPIFY_API_VERSION=2025-01
 ```
 
 ## 7) Notes on scaling & speed

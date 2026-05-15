@@ -42,8 +42,16 @@ def _oauth_scopes() -> str:
     return ",".join([s.strip() for s in scopes.split(",") if s.strip()])
 
 
+def _oauth_store_keys_raw() -> str:
+    return (
+        (os.environ.get("SHOPIFY_STORE_KEYS") or "").strip()
+        or (os.environ.get("SHOPIFY_STORE_KEY") or "").strip()
+        or (os.environ.get("SHOPIFY_OAUTH_STORES") or "").strip()
+    )
+
+
 def _oauth_enabled_stores() -> set[str]:
-    raw = (os.environ.get("SHOPIFY_OAUTH_STORES") or "").strip()
+    raw = _oauth_store_keys_raw()
     if not raw:
         return {"irranova"}  # safe default
     out: set[str] = set()
@@ -55,7 +63,7 @@ def _oauth_enabled_stores() -> set[str]:
 
 
 def _oauth_all_stores_enabled() -> bool:
-    raw = (os.environ.get("SHOPIFY_OAUTH_STORES") or "").strip()
+    raw = _oauth_store_keys_raw()
     return raw in ("*", "all", "ALL")
 
 

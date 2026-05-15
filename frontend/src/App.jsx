@@ -811,7 +811,7 @@ export default function App(){
               <div className="font-semibold">Backend error</div>
               <div className="mt-0.5">{apiError}</div>
               <div className="mt-1 text-[11px] text-amber-800/80">
-                Usually this means Shopify credentials are missing in Cloud Run (set <span className="font-mono">SHOPIFY_PASSWORD</span> or <span className="font-mono">IRRAKIDS_SHOPIFY_PASSWORD</span>).
+                Usually this means the store has not been connected yet. Set <span className="font-mono">SHOPIFY_CLIENT_ID</span>, <span className="font-mono">SHOPIFY_CLIENT_SECRET</span>, and <span className="font-mono">SHOPIFY_STORE_KEYS</span>, then connect it in Shopify Connect.
               </div>
             </div>
           )}

@@ -29,5 +29,5 @@ jobs:
             --platform managed \
             --port 8080 \
             --allow-unauthenticated \
-            --set-env-vars IRRAKIDS_STORE_DOMAIN=${{ secrets.IRRAKIDS_STORE_DOMAIN }},SHOPIFY_PASSWORD=${{ secrets.SHOPIFY_PASSWORD }},SHOPIFY_API_KEY=${{ secrets.SHOPIFY_API_KEY }},SHOPIFY_API_VERSION=2025-01
+            --set-env-vars BASE_URL=${{ secrets.BASE_URL }},SHOPIFY_CLIENT_ID=${{ secrets.SHOPIFY_CLIENT_ID }},SHOPIFY_CLIENT_SECRET=${{ secrets.SHOPIFY_CLIENT_SECRET }},SHOPIFY_STORE_KEYS=${{ secrets.SHOPIFY_STORE_KEYS }},SHOPIFY_OAUTH_SCOPES=${{ secrets.SHOPIFY_OAUTH_SCOPES }},SHOPIFY_API_VERSION=2025-01
 

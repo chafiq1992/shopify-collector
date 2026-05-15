@@ -24,16 +24,18 @@ steps:
         '--port','8080',
         '--allow-unauthenticated',
         '--timeout','300',
-        '--set-env-vars','IRRAKIDS_STORE_DOMAIN=${_IRRAKIDS_STORE_DOMAIN},SHOPIFY_PASSWORD=${_SHOPIFY_PASSWORD},SHOPIFY_API_KEY=${_SHOPIFY_API_KEY},SHOPIFY_API_VERSION=2025-01,API_KEY=${_API_KEY},PC_ID_1=${_PC_ID_1},PC_SECRET_1=${_PC_SECRET_1}'
+        '--set-env-vars','BASE_URL=${_BASE_URL},SHOPIFY_CLIENT_ID=${_SHOPIFY_CLIENT_ID},SHOPIFY_CLIENT_SECRET=${_SHOPIFY_CLIENT_SECRET},SHOPIFY_STORE_KEYS=${_SHOPIFY_STORE_KEYS},SHOPIFY_OAUTH_SCOPES=${_SHOPIFY_OAUTH_SCOPES},SHOPIFY_API_VERSION=2025-01,API_KEY=${_API_KEY},PC_ID_1=${_PC_ID_1},PC_SECRET_1=${_PC_SECRET_1}'
       ]
 
 substitutions:
   _AR_REPO: 'europe-west1-docker.pkg.dev/PROJECT/REPO'
   _SERVICE_NAME: 'order-collector'
   _REGION: 'europe-west1'
-  _IRRAKIDS_STORE_DOMAIN: 'yourstore.myshopify.com'
-  _SHOPIFY_PASSWORD: 'shpat_or_private_app_password'
-  _SHOPIFY_API_KEY: ''
+  _BASE_URL: 'https://your-cloud-run-url.a.run.app'
+  _SHOPIFY_CLIENT_ID: ''
+  _SHOPIFY_CLIENT_SECRET: ''
+  _SHOPIFY_STORE_KEYS: '*'
+  _SHOPIFY_OAUTH_SCOPES: 'read_orders,write_orders,read_products,write_products,read_content,write_content,read_inventory,write_inventory'
   _VITE_PRINT_RELAY_URL: ''
   _VITE_PRINT_RELAY_API_KEY: ''
   _VITE_PRINT_RELAY_PC_ID: ''
