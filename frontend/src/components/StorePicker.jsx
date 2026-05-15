@@ -4,7 +4,6 @@ import { normalizeStoreKey, titleStore } from "../lib/stores";
 
 export default function StorePicker({ value, onChange, includeAll = false, allowCustom = true, className = "" }) {
   const [stores, setStores] = useState([]);
-  const [custom, setCustom] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -43,20 +42,18 @@ export default function StorePicker({ value, onChange, includeAll = false, allow
   }, [includeAll, stores, value]);
 
   function choose(next) {
-    if (next === "__custom__") return;
+    if (next === "__custom__") {
+      const entered = window.prompt("Enter store key");
+      const key = normalizeStoreKey(entered, "");
+      if (key) onChange?.(key);
+      return;
+    }
     if (next === "all" && includeAll) {
       onChange?.("all");
       return;
     }
     const key = normalizeStoreKey(next, "");
     if (key) onChange?.(key);
-  }
-
-  function applyCustom() {
-    const key = normalizeStoreKey(custom, "");
-    if (!key) return;
-    onChange?.(key);
-    setCustom("");
   }
 
   return (
@@ -71,25 +68,8 @@ export default function StorePicker({ value, onChange, includeAll = false, allow
             {store.label || titleStore(store.key)}{store.connected === false && store.key !== "all" ? " (not connected)" : ""}
           </option>
         ))}
+        {allowCustom && <option value="__custom__">Enter new store...</option>}
       </select>
-      {allowCustom && (
-        <>
-          <input
-            value={custom}
-            onChange={(e) => setCustom(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") applyCustom(); }}
-            placeholder="new-store"
-            className="w-24 text-xs border-l border-gray-200 px-2 py-1 outline-none"
-          />
-          <button
-            type="button"
-            onClick={applyCustom}
-            className="px-2 py-1 rounded-lg text-xs font-medium text-gray-700 hover:bg-gray-100"
-          >
-            Use
-          </button>
-        </>
-      )}
     </div>
   );
 }
