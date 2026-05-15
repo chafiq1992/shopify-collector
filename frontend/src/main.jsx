@@ -2,6 +2,7 @@ import React, { Suspense, lazy, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import { loadAuth, saveAuth } from './lib/auth'
+import { readCurrentStore } from './lib/stores'
 
 const CollectorPage = lazy(() => import('./App'))
 const LoginPage = lazy(() => import('./pages/Login'))
@@ -14,19 +15,6 @@ const OrderTaggerPage = lazy(() => import('./pages/OrderTagger'))
 const ShopifyConnectPage = lazy(() => import('./pages/ShopifyConnect'))
 const VariantOrdersPage = lazy(() => import('./pages/VariantOrders'))
 const ReturnScannerPage = lazy(() => import('./pages/ReturnScanner'))
-
-function readCurrentStore() {
-  try {
-    const params = new URLSearchParams(location.search)
-    const fromUrl = String(params.get('store') || '').trim().toLowerCase()
-    if (fromUrl === 'irrakids' || fromUrl === 'irranova') return fromUrl
-  } catch {}
-  try {
-    const fromSession = String(sessionStorage.getItem('orderCollectorStore') || '').trim().toLowerCase()
-    if (fromSession === 'irrakids' || fromSession === 'irranova') return fromSession
-  } catch {}
-  return 'irrakids'
-}
 
 function PageFallback() {
   return (

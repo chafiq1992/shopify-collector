@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
+import StorePicker from "../components/StorePicker";
+import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 
 const API = {
   async getOrders(params = {}) {
@@ -73,23 +75,10 @@ function tagClass(tag) {
 
 export default function VariantOrders() {
   const [store, setStore] = useState(() => {
-    try {
-      const params = new URLSearchParams(location.search);
-      const selected = (params.get("store") || sessionStorage.getItem("orderCollectorStore") || "irrakids").trim().toLowerCase();
-      return selected === "irranova" ? "irranova" : "irrakids";
-    } catch {
-      return "irrakids";
-    }
+    return readCurrentStore();
   });
   useEffect(() => {
-    try { sessionStorage.setItem("orderCollectorStore", store); } catch {}
-    try {
-      const params = new URLSearchParams(location.search);
-      if ((params.get("store") || "").trim().toLowerCase() !== store) {
-        params.set("store", store);
-        history.replaceState(null, "", `${location.pathname}?${params.toString()}`);
-      }
-    } catch {}
+    persistStoreSelection(store);
   }, [store]);
 
   const [fromDate, setFromDate] = useState(() => {
@@ -219,10 +208,7 @@ export default function VariantOrders() {
       <header className="sticky top-0 z-40 bg-white/85 backdrop-blur border-b border-gray-200">
         <div className="max-w-7xl mx-auto px-4 py-2 flex items-center gap-2">
           <div className="text-sm font-extrabold tracking-tight">Product Orders</div>
-          <div className="ml-3 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
-            <button onClick={() => setStore("irrakids")} className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === "irrakids" ? "bg-blue-600 text-white" : "text-gray-700 hover:bg-gray-100"}`}>Irrakids</button>
-            <button onClick={() => setStore("irranova")} className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === "irranova" ? "bg-blue-600 text-white" : "text-gray-700 hover:bg-gray-100"}`}>Irranova</button>
-          </div>
+          <StorePicker value={store} onChange={setStore} className="ml-3" />
           <div className="ml-3 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
             <button onClick={() => setViewMode("products")} className={`px-2 py-0.5 rounded-lg text-xs font-medium ${viewMode === "products" ? "bg-indigo-600 text-white" : "text-gray-700 hover:bg-gray-100"}`}>Products</button>
             <button onClick={() => setViewMode("ordersByCod")} className={`px-2 py-0.5 rounded-lg text-xs font-medium ${viewMode === "ordersByCod" ? "bg-indigo-600 text-white" : "text-gray-700 hover:bg-gray-100"}`}>Orders by COD</button>

@@ -3,6 +3,8 @@ import { CheckCircle, PackageSearch, PackageCheck, XCircle, ChevronLeft, Chevron
 import { authFetch, authHeaders, loadAuth, clearAuth } from "./lib/auth";
 import { printOrdersLocally } from "./lib/localPrintClient";
 import { enqueueOrdersToRelay, isRelayConfigured } from "./lib/printRelayClient";
+import StorePicker from "./components/StorePicker.jsx";
+import { persistStoreSelection, readCurrentStore } from "./lib/stores";
 
 const OrderCard = React.lazy(() => import('./components/OrderCard.jsx'));
 const PresetSettingsModal = React.lazy(() => import('./components/PresetSettingsModal.jsx'));
@@ -244,17 +246,7 @@ export default function App(){
   const overlayTimerRef = useRef(null);
   const [pendingCount, setPendingCount] = useState(() => loadPendingActions().length);
   const [store, setStore] = useState(() => {
-    // Prefer URL ?store=..., then sessionStorage; default to irrakids
-    try {
-      const params = new URLSearchParams(location.search);
-      const fromUrl = (params.get('store') || '').trim().toLowerCase();
-      if (fromUrl === 'irrakids' || fromUrl === 'irranova') return fromUrl;
-    } catch {}
-    try {
-      const fromSession = (sessionStorage.getItem('orderCollectorStore') || '').trim().toLowerCase();
-      if (fromSession === 'irrakids' || fromSession === 'irranova') return fromSession;
-    } catch {}
-    return 'irrakids';
+    return readCurrentStore();
   });
   const [profile, setProfile] = useState(() => {
     try {
@@ -294,18 +286,7 @@ export default function App(){
     try { localStorage.setItem("orderCollectorStockFilter", stockFilter); } catch {}
   }, [stockFilter]);
   useEffect(()=>{
-    // Persist store per-tab and reflect in URL to keep it stable across reloads
-    try { sessionStorage.setItem('orderCollectorStore', store); } catch {}
-    try {
-      const params = new URLSearchParams(location.search);
-      const prev = (params.get('store') || '').trim().toLowerCase();
-      if (prev !== store){
-        params.set('store', store);
-        const qs = params.toString();
-        const nextUrl = `${location.pathname}${qs ? `?${qs}` : ''}${location.hash || ''}`;
-        history.replaceState(null, '', nextUrl);
-      }
-    } catch {}
+    persistStoreSelection(store);
   }, [store]);
   useEffect(()=>{
     try { localStorage.setItem("orderCollectorProductSortOldToNew", productSortOldToNew ? '1' : '0'); } catch {}
@@ -794,18 +775,7 @@ export default function App(){
         )}
         <div className="max-w-5xl mx-auto px-4 py-1 flex items-center gap-2">
           <PackageSearch className="w-5 h-5" />
-          <div className="ml-3 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
-            <button
-              onClick={()=>setStore('irrakids')}
-              onMouseDown={()=>vibrate(10)}
-              className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === 'irrakids' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
-            >Irrakids</button>
-            <button
-              onClick={()=>setStore('irranova')}
-              onMouseDown={()=>vibrate(10)}
-              className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === 'irranova' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
-            >Irranova</button>
-          </div>
+          <StorePicker value={store} onChange={(next)=>{ vibrate(10); setStore(next); }} className="ml-3" />
           <div className="ml-auto flex items-center gap-2">
             {auth?.user && (
               <div className="hidden sm:flex items-center gap-2 text-xs text-gray-700 border border-gray-200 rounded-lg px-2 py-1 bg-white">

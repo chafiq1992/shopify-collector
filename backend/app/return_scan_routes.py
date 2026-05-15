@@ -83,7 +83,7 @@ async def _find_order_in_shopify(order_name: str) -> dict:
     (irrakids, irranova) and returns the first match.
     """
     # Import lazily to avoid circular imports
-    from .main import shopify_graphql
+    from .main import known_store_labels, shopify_graphql
 
     query = """
     query FindOrder($first: Int!, $query: String) {
@@ -104,7 +104,7 @@ async def _find_order_in_shopify(order_name: str) -> dict:
     # Strip '#' for the Shopify search query
     name_q = order_name.lstrip("#")
 
-    for store_key in ("irrakids", "irranova"):
+    for store_key in await known_store_labels():
         try:
             data = await shopify_graphql(
                 query, {"first": 1, "query": f"name:{name_q}"}, store=store_key

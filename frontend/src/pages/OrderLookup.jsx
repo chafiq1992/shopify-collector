@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
 import { authFetch, authHeaders, clearAuth } from "../lib/auth";
+import StorePicker from "../components/StorePicker";
+import { persistStoreSelection, readCurrentStore, titleStore } from "../lib/stores";
 
 const DeliveryLabelPopup = lazy(() => import("../components/DeliveryLabelPopup"));
 const RECENT_TAG_CACHE_TTL_MS = 60 * 1000;
@@ -229,21 +231,10 @@ function buildFulfilledQueueOrder(baseOrder, foData) {
 
 export default function OrderLookup(){
   const [store, setStore] = useState(() => {
-    try {
-      const params = new URLSearchParams(location.search);
-      const s = (params.get("store") || sessionStorage.getItem("orderCollectorStore") || "irrakids").trim().toLowerCase();
-      return (s === "irranova" ? "irranova" : "irrakids");
-    } catch { return "irrakids"; }
+    return readCurrentStore();
   });
   useEffect(() => {
-    try { sessionStorage.setItem("orderCollectorStore", store); } catch {}
-    try {
-      const params = new URLSearchParams(location.search);
-      if ((params.get("store") || "").trim().toLowerCase() !== store){
-        params.set("store", store);
-        history.replaceState(null, "", `${location.pathname}?${params.toString()}`);
-      }
-    } catch {}
+    persistStoreSelection(store);
   }, [store]);
 
   const [query, setQuery] = useState(() => {
@@ -1576,16 +1567,7 @@ export default function OrderLookup(){
             onClick={()=>{ try { location.href = `/my-analytics?store=${encodeURIComponent(store)}`; } catch {} }}
             className="px-3 py-1.5 rounded-lg text-sm border border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
           >My Analytics</button>
-          <div className="ml-2 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
-            <button
-              onClick={()=>setStore('irrakids')}
-              className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === 'irrakids' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
-            >Irrakids</button>
-            <button
-              onClick={()=>setStore('irranova')}
-              className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === 'irranova' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
-            >Irranova</button>
-          </div>
+          <StorePicker value={store} onChange={setStore} className="ml-2" />
           <div className="flex-1 flex items-center gap-2 bg-gray-100 rounded-xl px-3 py-1 ml-2">
             <span className="text-gray-500 text-xs">#</span>
             <input
@@ -2426,12 +2408,18 @@ export default function OrderLookup(){
               </div>
               <div className="text-[11px] text-gray-500 flex items-center gap-2 mt-0.5">
                 {(() => {
-                  const kids = labelQueueItems.filter(i => i.store === 'irrakids').length;
-                  const nova = labelQueueItems.filter(i => i.store === 'irranova').length;
+                  const counts = new Map();
+                  for (const item of labelQueueItems) {
+                    const key = String(item.store || store || "").trim().toLowerCase() || "store";
+                    counts.set(key, (counts.get(key) || 0) + 1);
+                  }
                   return (
                     <>
-                      {kids > 0 && <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-semibold border border-blue-200">Irrakids {kids}</span>}
-                      {nova > 0 && <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] font-semibold border border-purple-200">Irranova {nova}</span>}
+                      {Array.from(counts.entries()).map(([key, count]) => (
+                        <span key={key} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-semibold border border-blue-200">
+                          {titleStore(key)} {count}
+                        </span>
+                      ))}
                     </>
                   );
                 })()}
@@ -2452,8 +2440,13 @@ export default function OrderLookup(){
               const showSendBtn = showCompanyControls && item.envoyCode && !partnerOk;
               const showPrintBtn = (isReadyPrint || isPrinted) && item.actions;
 
-              const isIrranova = item.store === 'irranova';
-              const storeBorderAccent = isIrranova ? 'border-l-purple-400' : 'border-l-blue-400';
+              const itemStoreKey = String(item.store || store || "").trim().toLowerCase();
+              const isIrranova = itemStoreKey === 'irranova';
+              const isIrrakids = itemStoreKey === 'irrakids';
+              const storeBorderAccent = isIrranova ? 'border-l-purple-400' : (isIrrakids ? 'border-l-blue-400' : 'border-l-emerald-400');
+              const storeBadgeClass = isIrranova
+                ? 'bg-purple-100 text-purple-700 border border-purple-200'
+                : (isIrrakids ? 'bg-blue-100 text-blue-700 border border-blue-200' : 'bg-emerald-100 text-emerald-700 border border-emerald-200');
 
               return (
                 <div
@@ -2471,12 +2464,8 @@ export default function OrderLookup(){
                     <div className="min-w-0">
                       <div className="text-sm font-bold text-gray-900 flex items-center gap-1.5">
                         #{item.order?.number || "—"}
-                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wide ${
-                          isIrranova
-                            ? 'bg-purple-100 text-purple-700 border border-purple-200'
-                            : 'bg-blue-100 text-blue-700 border border-blue-200'
-                        }`}>
-                          {isIrranova ? 'Irranova' : 'Irrakids'}
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wide ${storeBadgeClass}`}>
+                          {titleStore(itemStoreKey)}
                         </span>
                       </div>
                       <div className="text-[11px] text-gray-500 truncate">

@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from typing import List, Optional, Dict, Any, Tuple
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header, Request, Depends, Response, UploadFile, File
@@ -29,7 +30,7 @@ try:
     from .auth_routes import router as auth_router, get_current_user, require_admin, hash_password
     from .admin_bootstrap_routes import router as admin_bootstrap_router
     from .shopify_oauth_routes import router as shopify_oauth_router
-    from .settings_store import get_shopify_oauth_record
+    from .settings_store import get_shopify_oauth_record, list_shopify_oauth_store_labels
     from .return_scan_routes import router as return_scan_router
 except Exception:
     HAVE_AUTH_DB = False
@@ -68,23 +69,36 @@ except Exception:
 DEFAULT_DOMAIN = os.environ.get("IRRAKIDS_STORE_DOMAIN", "").strip()
 DEFAULT_PASSWORD = os.environ.get("SHOPIFY_PASSWORD", "").strip()
 DEFAULT_API_KEY = os.environ.get("SHOPIFY_API_KEY", "").strip()
+_STORE_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+
+
+def normalize_store_label(store: Optional[str], *, default: str = "irrakids") -> str:
+    raw = (store or default or "irrakids").strip().lower()
+    if not raw:
+        raw = default or "irrakids"
+    if not _STORE_LABEL_RE.match(raw):
+        raise HTTPException(status_code=400, detail="invalid store label")
+    return raw
+
+
+def _store_env_suffix(store_key: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", (store_key or "").upper()).strip("_")
 
 def resolve_store_settings(store: Optional[str]) -> Tuple[str, str, str]:
     """Return (domain, password, api_key) for the requested store.
 
-    - store == 'irranova' → IRRANOVA_* vars
-    - store == 'irrakids' or None → IRRAKIDS_* or global fallbacks
+    Supports any normalized store label through:
+      SHOPIFY_SHOP_DOMAIN_<STORE>, SHOPIFY_ACCESS_TOKEN_<STORE>, SHOPIFY_API_KEY_<STORE>
+
+    Keeps legacy env vars for irrakids and irranova.
     """
-    key = (store or "irrakids").strip().lower()
-    if key not in ("irrakids", "irranova"):
-        # Unknown store → treat as irrakids to keep backward compatibility
-        key = "irrakids"
+    key = normalize_store_label(store)
 
     # New preferred env var convention:
     #   SHOPIFY_SHOP_DOMAIN_<STORE> and SHOPIFY_ACCESS_TOKEN_<STORE>
     # Back-compat:
     #   IRRAKIDS_STORE_DOMAIN / IRRANOVA_STORE_DOMAIN and *_SHOPIFY_PASSWORD / SHOPIFY_PASSWORD
-    upper = key.upper()
+    upper = _store_env_suffix(key)
     domain = os.environ.get(f"SHOPIFY_SHOP_DOMAIN_{upper}", "").strip()
     token = os.environ.get(f"SHOPIFY_ACCESS_TOKEN_{upper}", "").strip()
     api_key = os.environ.get(f"SHOPIFY_API_KEY_{upper}", "").strip()
@@ -98,7 +112,7 @@ def resolve_store_settings(store: Optional[str]) -> Tuple[str, str, str]:
         domain = domain or os.environ.get("IRRANOVA_STORE_DOMAIN", "").strip()
         token = token or os.environ.get("IRRANOVA_SHOPIFY_PASSWORD", "").strip()
         api_key = api_key or os.environ.get("IRRANOVA_SHOPIFY_API_KEY", "").strip()
-    else:
+    elif key == "irrakids":
         # irrakids keeps backward compatibility with global fallbacks
         domain = domain or os.environ.get("IRRAKIDS_STORE_DOMAIN", DEFAULT_DOMAIN).strip()
         token = token or (os.environ.get("IRRAKIDS_SHOPIFY_PASSWORD", "").strip() or DEFAULT_PASSWORD)
@@ -119,6 +133,34 @@ def _oauth_enabled_stores() -> set[str]:
     return out
 
 
+def _oauth_all_stores_enabled() -> bool:
+    raw = (os.environ.get("SHOPIFY_OAUTH_STORES") or "").strip()
+    return raw in ("*", "all", "ALL")
+
+
+def _store_labels_from_env() -> set[str]:
+    labels = {"irrakids", "irranova"}
+    for env_key in os.environ:
+        if env_key.startswith("SHOPIFY_SHOP_DOMAIN_"):
+            labels.add(env_key.removeprefix("SHOPIFY_SHOP_DOMAIN_").lower())
+        elif env_key.startswith("SHOPIFY_ACCESS_TOKEN_"):
+            labels.add(env_key.removeprefix("SHOPIFY_ACCESS_TOKEN_").lower())
+    if not _oauth_all_stores_enabled():
+        labels.update(_oauth_enabled_stores())
+    return {label for label in labels if _STORE_LABEL_RE.match(label)}
+
+
+async def known_store_labels() -> list[str]:
+    labels = set(_store_labels_from_env())
+    if HAVE_AUTH_DB and SessionLocal is not None:
+        try:
+            async with SessionLocal() as db:  # type: ignore[misc]
+                labels.update(await list_shopify_oauth_store_labels(db))  # type: ignore[name-defined]
+        except Exception:
+            pass
+    return sorted(labels)
+
+
 async def resolve_store_settings_effective(store: Optional[str]) -> Tuple[str, str, str]:
     """
     Mixed-mode Shopify credential resolver:
@@ -129,11 +171,9 @@ async def resolve_store_settings_effective(store: Optional[str]) -> Tuple[str, s
     if domain and token:
         return (domain, token, api_key)
 
-    key = (store or "irrakids").strip().lower()
-    if key not in ("irrakids", "irranova"):
-        key = "irrakids"
+    key = normalize_store_label(store)
 
-    if (key in _oauth_enabled_stores()) and HAVE_AUTH_DB and SessionLocal is not None:
+    if (_oauth_all_stores_enabled() or key in _oauth_enabled_stores()) and HAVE_AUTH_DB and SessionLocal is not None:
         try:
             async with SessionLocal() as db:  # type: ignore[misc]
                 rec = await get_shopify_oauth_record(db, key)  # type: ignore[arg-type]
@@ -2913,7 +2953,7 @@ if HAVE_AUTH_DB:
             return {"ok": True, "order_number": order_number, "rows": [], "message": "Enter an order number"}
 
         matching_order_gids = set()
-        for store_key in ("irrakids", "irranova"):
+        for store_key in await known_store_labels():
             gid = await _find_order_gid_by_number(norm, store_key)
             if gid:
                 matching_order_gids.add(gid)
@@ -3130,7 +3170,7 @@ async def fulfill_order(order_gid: str, body: FulfillRequest, store: Optional[st
         if not fo_nodes:
             try:
                 sk = _normalize_store(store)
-                if HAVE_AUTH_DB and SessionLocal is not None and sk in _oauth_enabled_stores():
+                if HAVE_AUTH_DB and SessionLocal is not None and (_oauth_all_stores_enabled() or sk in _oauth_enabled_stores()):
                     async with SessionLocal() as db:  # type: ignore[misc]
                         rec = await get_shopify_oauth_record(db, sk)  # type: ignore[arg-type]
                         scopes_raw = str((rec or {}).get("scopes") or "")
@@ -3357,10 +3397,8 @@ async def invoice_parse_pdf(
                 except Exception:
                     return False
 
-            store_ready = {
-                "irrakids": await _store_ready("irrakids"),
-                "irranova": await _store_ready("irranova"),
-            }
+            all_store_keys = await known_store_labels()
+            store_ready = {store_key: await _store_ready(store_key) for store_key in all_store_keys}
 
             sem = asyncio.Semaphore(8)
 
@@ -3368,10 +3406,10 @@ async def invoice_parse_pdf(
                 async with sem:
                     preferred = (inferred.get(n) or "").strip().lower() or None
                     stores_to_try = []
-                    if preferred in ("irrakids", "irranova"):
-                        stores_to_try = [preferred, ("irranova" if preferred == "irrakids" else "irrakids")]
+                    if preferred in all_store_keys:
+                        stores_to_try = [preferred] + [st for st in all_store_keys if st != preferred]
                     else:
-                        stores_to_try = ["irrakids", "irranova"]
+                        stores_to_try = list(all_store_keys)
                     last_err = None
                     for st in stores_to_try:
                         if not store_ready.get(st):
@@ -3527,10 +3565,8 @@ async def invoice_lookup_orders(body: InvoiceLookupRequest, admin: User = Depend
         except Exception:
             return False
 
-    store_ready = {
-        "irrakids": await _store_ready("irrakids"),
-        "irranova": await _store_ready("irranova"),
-    }
+    all_store_keys = await known_store_labels()
+    store_ready = {store_key: await _store_ready(store_key) for store_key in all_store_keys}
 
     sem = asyncio.Semaphore(8)
 
@@ -3538,10 +3574,10 @@ async def invoice_lookup_orders(body: InvoiceLookupRequest, admin: User = Depend
         async with sem:
             preferred = (inferred.get(n) or "").strip().lower() or None
             stores_to_try = []
-            if preferred in ("irrakids", "irranova"):
-                stores_to_try = [preferred, ("irranova" if preferred == "irrakids" else "irrakids")]
+            if preferred in all_store_keys:
+                stores_to_try = [preferred] + [st for st in all_store_keys if st != preferred]
             else:
-                stores_to_try = ["irrakids", "irranova"]
+                stores_to_try = list(all_store_keys)
 
             last_err = None
             for st in stores_to_try:
@@ -3878,12 +3914,12 @@ async def get_overrides(
             return
 
     store_key = (store or "").strip().lower()
-    # Attempt live enrichment for the requested store; if none provided, try both
+    # Attempt live enrichment for the requested store; if none provided, try all known stores.
     if store_key:
         await _fetch_live_for_store(store_key)
     else:
-        await _fetch_live_for_store("irrakids")
-        await _fetch_live_for_store("irranova")
+        for known_store in await known_store_labels():
+            await _fetch_live_for_store(known_store)
 
     return {"ok": True, "overrides": out}
 

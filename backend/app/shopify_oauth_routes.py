@@ -15,7 +15,7 @@ from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_session
-from .settings_store import get_shopify_oauth_record, set_shopify_oauth_record
+from .settings_store import get_shopify_oauth_record, list_shopify_oauth_store_labels, set_shopify_oauth_record
 
 router = APIRouter()
 
@@ -54,11 +54,55 @@ def _oauth_enabled_stores() -> set[str]:
     return out
 
 
-def _require_oauth_enabled_store(store_label: str) -> str:
+def _oauth_all_stores_enabled() -> bool:
+    raw = (os.environ.get("SHOPIFY_OAUTH_STORES") or "").strip()
+    return raw in ("*", "all", "ALL")
+
+
+_STORE_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+
+
+def normalize_store_label(store_label: str) -> str:
     s = (store_label or "").strip().lower()
-    if s not in ("irrakids", "irranova"):
-        raise HTTPException(status_code=400, detail="invalid store")
-    if s not in _oauth_enabled_stores():
+    if not _STORE_LABEL_RE.match(s):
+        raise HTTPException(status_code=400, detail="invalid store label")
+    return s
+
+
+def _store_env_suffix(store_key: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", (store_key or "").upper()).strip("_")
+
+
+def _env_store_labels() -> set[str]:
+    labels: set[str] = set()
+    for key in os.environ:
+        if key.startswith("SHOPIFY_SHOP_DOMAIN_"):
+            labels.add(key.removeprefix("SHOPIFY_SHOP_DOMAIN_").lower())
+        elif key.startswith("SHOPIFY_ACCESS_TOKEN_"):
+            labels.add(key.removeprefix("SHOPIFY_ACCESS_TOKEN_").lower())
+    if os.environ.get("IRRAKIDS_STORE_DOMAIN") or os.environ.get("SHOPIFY_PASSWORD") or os.environ.get("IRRAKIDS_SHOPIFY_PASSWORD"):
+        labels.add("irrakids")
+    if os.environ.get("IRRANOVA_STORE_DOMAIN") or os.environ.get("IRRANOVA_SHOPIFY_PASSWORD"):
+        labels.add("irranova")
+    return {label for label in labels if _STORE_LABEL_RE.match(label)}
+
+
+def _env_store_configured(store_key: str) -> bool:
+    suffix = _store_env_suffix(store_key)
+    domain = (os.environ.get(f"SHOPIFY_SHOP_DOMAIN_{suffix}") or "").strip()
+    token = (os.environ.get(f"SHOPIFY_ACCESS_TOKEN_{suffix}") or "").strip()
+    if store_key == "irrakids":
+        domain = domain or (os.environ.get("IRRAKIDS_STORE_DOMAIN") or "").strip()
+        token = token or (os.environ.get("IRRAKIDS_SHOPIFY_PASSWORD") or os.environ.get("SHOPIFY_PASSWORD") or "").strip()
+    elif store_key == "irranova":
+        domain = domain or (os.environ.get("IRRANOVA_STORE_DOMAIN") or "").strip()
+        token = token or (os.environ.get("IRRANOVA_SHOPIFY_PASSWORD") or "").strip()
+    return bool(domain and token)
+
+
+def _require_oauth_enabled_store(store_label: str) -> str:
+    s = normalize_store_label(store_label)
+    if (not _oauth_all_stores_enabled()) and s not in _oauth_enabled_stores():
         raise HTTPException(status_code=400, detail="oauth not enabled for this store")
     return s
 
@@ -166,17 +210,44 @@ async def oauth_status(
     store: str = Query(...),
     db: AsyncSession = Depends(get_session),
 ):
-    s = (store or "").strip().lower()
-    if s not in ("irrakids", "irranova"):
-        raise HTTPException(status_code=400, detail="invalid store")
+    s = normalize_store_label(store)
     rec = await get_shopify_oauth_record(db, s)
     if not rec:
-        return {"connected": False, "shop": None, "scopes": None}
+        return {"connected": _env_store_configured(s), "shop": None, "scopes": None, "source": "env" if _env_store_configured(s) else None}
     return {
-        "connected": bool((rec.get("access_token") or "").strip()) and bool((rec.get("shop") or "").strip()),
+        "connected": _env_store_configured(s) or (bool((rec.get("access_token") or "").strip()) and bool((rec.get("shop") or "").strip())),
         "shop": rec.get("shop"),
         "scopes": rec.get("scopes"),
+        "source": "env" if _env_store_configured(s) else "oauth",
     }
+
+
+@router.get("/api/shopify/stores")
+async def shopify_stores(db: AsyncSession = Depends(get_session)):
+    labels = {"irrakids", "irranova"}
+    labels.update(await list_shopify_oauth_store_labels(db))
+    labels.update(_env_store_labels())
+    enabled = _oauth_enabled_stores()
+    if not _oauth_all_stores_enabled():
+        labels.update(enabled)
+
+    stores = []
+    for label in sorted(labels):
+        try:
+            rec = await get_shopify_oauth_record(db, label)
+        except Exception:
+            rec = None
+        stores.append(
+            {
+                "key": label,
+                "label": label,
+                "oauth_enabled": _oauth_all_stores_enabled() or label in enabled,
+                "connected": _env_store_configured(label) or bool(isinstance(rec, dict) and (rec.get("shop") or "").strip() and (rec.get("access_token") or "").strip()),
+                "shop": (rec or {}).get("shop") if isinstance(rec, dict) else None,
+                "scopes": (rec or {}).get("scopes") if isinstance(rec, dict) else None,
+            }
+        )
+    return {"stores": stores, "oauth_all_stores_enabled": _oauth_all_stores_enabled()}
 
 
 @router.get("/api/shopify/oauth/start")

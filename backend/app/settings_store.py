@@ -28,6 +28,17 @@ def shopify_oauth_key(store_label: str) -> str:
     return f"shopify_oauth:{(store_label or '').strip().lower()}"
 
 
+async def list_shopify_oauth_store_labels(db: AsyncSession) -> list[str]:
+    prefix = "shopify_oauth:"
+    rows = await db.execute(select(AppSetting.key).where(AppSetting.key.like(f"{prefix}%")))
+    labels: list[str] = []
+    for key in rows.scalars().all():
+        label = str(key or "")[len(prefix):].strip().lower()
+        if label:
+            labels.append(label)
+    return sorted(set(labels))
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 

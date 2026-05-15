@@ -1,5 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
+import StorePicker from "../components/StorePicker";
+import { normalizeStoreKey } from "../lib/stores";
 
 function useQueryParam(name) {
   try {
@@ -16,8 +18,6 @@ export default function ShopifyConnect({ store, setStore }) {
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
-
-  const canOAuth = useMemo(() => (store === "irranova"), [store]);
 
   useEffect(() => {
     // per-store remembered shop input
@@ -54,15 +54,16 @@ export default function ShopifyConnect({ store, setStore }) {
 
   function startOAuth() {
     setErr(null);
-    if (!canOAuth) {
-      setErr("OAuth install is disabled for this store (irrakids stays on the old env token method).");
+    const storeKey = normalizeStoreKey(store, "");
+    if (!storeKey) {
+      setErr("Enter a store key like irranova or my-new-store.");
       return;
     }
     if (!String(shop || "").trim()) {
-      setErr("Enter a shop domain like irranova.myshopify.com");
+      setErr("Enter a shop domain like your-store.myshopify.com");
       return;
     }
-    const url = `/api/shopify/oauth/start?store=${encodeURIComponent(store)}&shop=${encodeURIComponent(shop)}`;
+    const url = `/api/shopify/oauth/start?store=${encodeURIComponent(storeKey)}&shop=${encodeURIComponent(shop)}`;
     // Full page navigation (Shopify install requires redirects)
     window.location.href = url;
   }
@@ -74,7 +75,7 @@ export default function ShopifyConnect({ store, setStore }) {
           <div>
             <h1 className="text-xl font-extrabold tracking-tight">Shopify Connect</h1>
             <p className="text-sm text-gray-600 mt-1">
-              Connect the public app (OAuth) for <span className="font-semibold">irranova</span>. Irrakids stays on the old env token method.
+              Connect a Shopify store with OAuth, then use the same store key across order lookup, browser, printing, and analytics.
             </p>
           </div>
           <button
@@ -100,35 +101,25 @@ export default function ShopifyConnect({ store, setStore }) {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label className="block">
               <div className="text-xs font-semibold text-gray-600">Store</div>
-              <select
-                value={store}
-                onChange={(e) => setStore(e.target.value)}
-                className="mt-1 w-full text-sm border border-gray-300 rounded-xl px-3 py-2 bg-white"
-              >
-                <option value="irrakids">irrakids</option>
-                <option value="irranova">irranova</option>
-              </select>
+              <div className="mt-1">
+                <StorePicker value={store} onChange={setStore} />
+              </div>
             </label>
             <label className="block">
               <div className="text-xs font-semibold text-gray-600">Shop domain</div>
               <input
                 value={shop}
                 onChange={(e) => setShop(e.target.value)}
-                placeholder="irranova.myshopify.com"
+                placeholder="your-store.myshopify.com"
                 className="mt-1 w-full text-sm border border-gray-300 rounded-xl px-3 py-2"
               />
-              {!canOAuth && (
-                <div className="mt-1 text-[11px] text-gray-500">
-                  OAuth is disabled for this store. Use env token config for irrakids.
-                </div>
-              )}
             </label>
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2">
             <button
               onClick={startOAuth}
-              className={`px-4 py-2 rounded-xl text-sm font-semibold text-white ${canOAuth ? "bg-blue-600 hover:bg-blue-700" : "bg-gray-400"}`}
+              className="px-4 py-2 rounded-xl text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700"
             >
               Connect (OAuth install)
             </button>

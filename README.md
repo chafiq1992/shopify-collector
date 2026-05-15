@@ -10,10 +10,11 @@ A clean, swipe-first app for warehouse/employee order collection:
 
 ## 1) Shopify prerequisites
 
-This repo supports **mixed-mode Shopify auth** for two stores:
+This repo supports **mixed-mode Shopify auth** for multiple stores:
 
 - **irrakids**: keeps the “old method” — static Admin API token from env (sent as `X-Shopify-Access-Token`).
 - **irranova**: uses **public app OAuth** (Shopify Dev Dashboard Client ID + Secret) to mint and persist a per-store Admin API token in the DB.
+- New stores can use the same OAuth flow by choosing a store key in `/shopify-connect`.
 
 ### Old method (env token)
 
@@ -22,7 +23,7 @@ Create a **custom app** in Shopify admin (or use your existing token) with Admin
 
 Copy the **Admin API access token** and set env vars below.
 
-### New method (public app OAuth) — Irranova only
+### New method (public app OAuth)
 
 In the Shopify Dev Dashboard:
 
@@ -31,7 +32,7 @@ In the Shopify Dev Dashboard:
   - `{BASE_URL}/api/shopify/oauth/callback` (must match exactly, not just the domain)
 - Set env vars below (`SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_OAUTH_SCOPES`, `BASE_URL`)
 
-Then in the app UI, open `/shopify-connect` and run the install flow for `irranova`.
+Then in the app UI, open `/shopify-connect`, enter a store key such as `newstore`, enter `newstore.myshopify.com`, and run the install flow.
 
 Important lessons:
 
@@ -62,13 +63,13 @@ Multi-store (optional):
 
 If per-store passwords are not set, the app will fall back to `SHOPIFY_PASSWORD`/`SHOPIFY_API_KEY`.
 
-### Shopify OAuth (public app) env vars (Irranova)
+### Shopify OAuth (public app) env vars
 
 - `BASE_URL` — public Cloud Run URL used to build redirect URI exactly: `{BASE_URL}/api/shopify/oauth/callback`
 - `SHOPIFY_CLIENT_ID`
 - `SHOPIFY_CLIENT_SECRET` (starts with `shpss_...`)
 - `SHOPIFY_OAUTH_SCOPES` — comma-separated
-- `SHOPIFY_OAUTH_STORES` — comma-separated store labels allowed to use OAuth (default behavior enables **only** `irranova`)
+- `SHOPIFY_OAUTH_STORES` — comma-separated store labels allowed to use OAuth, or `*` to allow adding new store keys from `/shopify-connect` (default behavior enables **only** `irranova`)
 - Optional: `SHOPIFY_OAUTH_SKIP_HMAC=1` (emergency unblock only)
 
 ### Mixed-mode resolver behavior
@@ -77,6 +78,7 @@ When resolving Shopify credentials for a store:
 
 - Prefer env `SHOPIFY_SHOP_DOMAIN_<STORE>` + `SHOPIFY_ACCESS_TOKEN_<STORE>` (for all stores).
 - If the store is OAuth-enabled (default `irranova`) **and** env credentials are missing, fall back to the DB record stored by the OAuth install.
+- Store keys are lowercase slugs such as `irrakids`, `irranova`, or `newstore`. The same key is passed through order lookup, order browser, product orders, printing, fulfillment, and analytics.
 
 Reference: [Shopify OAuth getting started](https://shopify.dev/apps/auth/oauth/getting-started) and [Shopify API authentication (HMAC verification)](https://shopify.dev/docs/api/usage/authentication).
 
@@ -293,4 +295,3 @@ Acceptance checks:
 - Arabic-only or partial addresses should still geocode when within the polygon.
 - Invalid HMAC → HTTP 401; no processing is performed.
 - Replaying the same webhook does not duplicate tags.
-

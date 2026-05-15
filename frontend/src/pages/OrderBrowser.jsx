@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
+import StorePicker from "../components/StorePicker";
+import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 
 // Minimal API client reused across pages
 const API = {
@@ -42,21 +44,10 @@ const API = {
 export default function OrderBrowser(){
   // Persist store choice in session and URL param like other pages
   const [store, setStore] = useState(() => {
-    try {
-      const params = new URLSearchParams(location.search);
-      const s = (params.get("store") || sessionStorage.getItem("orderCollectorStore") || "irrakids").trim().toLowerCase();
-      return (s === "irranova" ? "irranova" : "irrakids");
-    } catch { return "irrakids"; }
+    return readCurrentStore();
   });
   useEffect(() => {
-    try { sessionStorage.setItem("orderCollectorStore", store); } catch {}
-    try {
-      const params = new URLSearchParams(location.search);
-      if ((params.get("store") || "").trim().toLowerCase() !== store){
-        params.set("store", store);
-        history.replaceState(null, "", `${location.pathname}?${params.toString()}`);
-      }
-    } catch {}
+    persistStoreSelection(store);
   }, [store]);
 
   // Filters
@@ -548,16 +539,7 @@ export default function OrderBrowser(){
         )}
         <div className="max-w-5xl mx-auto px-4 py-2 flex items-center gap-2">
           <div className="font-semibold">Order Browser</div>
-          <div className="ml-3 inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
-            <button
-              onClick={()=>setStore('irrakids')}
-              className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === 'irrakids' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
-            >Irrakids</button>
-            <button
-              onClick={()=>setStore('irranova')}
-              className={`px-2 py-0.5 rounded-lg text-xs font-medium ${store === 'irranova' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}
-            >Irranova</button>
-          </div>
+          <StorePicker value={store} onChange={setStore} className="ml-3" />
           <div className="ml-auto flex items-center gap-2">
             <button onClick={()=>setShowFilters(v=>!v)} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">
               {showFilters ? "Hide filters" : "Show filters"}
@@ -719,4 +701,3 @@ function renderShipping(ov){
     </div>
   );
 }
-

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
+import StorePicker from "../components/StorePicker";
 
 function todayISO(offsetDays = 0) {
   const d = new Date();
@@ -325,11 +326,7 @@ export default function AdminAnalytics(){
         <div className="max-w-6xl mx-auto px-4 pb-3 grid sm:grid-cols-4 gap-3">
           <div className="bg-gray-100 rounded-xl px-3 py-2">
             <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Store</div>
-            <div className="inline-flex items-center gap-1 rounded-xl border border-gray-300 p-1 bg-white">
-              <button onClick={()=>setStore("all")} className={`px-3 py-1 rounded-lg text-xs font-medium ${store === 'all' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}>All</button>
-              <button onClick={()=>setStore("irrakids")} className={`px-3 py-1 rounded-lg text-xs font-medium ${store === 'irrakids' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}>Irrakids</button>
-              <button onClick={()=>setStore("irranova")} className={`px-3 py-1 rounded-lg text-xs font-medium ${store === 'irranova' ? 'bg-blue-600 text-white' : 'text-gray-700 hover:bg-gray-100'}`}>Irranova</button>
-            </div>
+            <StorePicker value={store} onChange={setStore} includeAll allowCustom={false} />
           </div>
           <div className="bg-gray-100 rounded-xl px-3 py-2">
             <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">From</div>
