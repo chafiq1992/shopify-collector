@@ -157,8 +157,15 @@ function AgentView({ me }) {
   useEffect(() => { persistStoreSelection(store); }, [store]);
 
   const [agentInfo, setAgentInfo] = useState(null);
-  const [data, setData] = useState({ orders: [], assigned_total: 0, today_label: "", nextCursor: null, shop_domain: "" });
+  // Page cache, mirroring OrderBrowser. Each entry: { orders, nextCursor, startCursor }.
+  // startCursor is the cursor used to fetch THIS page (null for page 0); nextCursor is the
+  // cursor for the page that comes after.
+  const [pages, setPages] = useState([]);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [meta, setMeta] = useState({ assigned_total: 0, today_label: "", shop_domain: "" });
+  const PER_PAGE = 41;
   const [loading, setLoading] = useState(false);
+  const [pageBusy, setPageBusy] = useState(false);
   const [error, setError] = useState(null);
   const [lastLoadedAt, setLastLoadedAt] = useState(null);
   const [nowTick, setNowTick] = useState(0);
@@ -183,21 +190,27 @@ function AgentView({ me }) {
   }, []);
   useEffect(() => { loadAgentMe(); }, [loadAgentMe]);
 
-  const load = useCallback(async () => {
+  function dedupeAndFilter(raw) {
+    // Strip cod-tagged stragglers and cap to one page worth.
+    return (raw || [])
+      .filter((o) => !(o.tags || []).some(isCodTag))
+      .slice(0, PER_PAGE);
+  }
+
+  // Fetch the first page and reset the cache. Used by both the manual Refresh button and
+  // the 15-second polling tick.
+  const loadFirst = useCallback(async () => {
     const reqId = ++requestIdRef.current;
     setLoading(true); setError(null);
     try {
-      const js = await API.getQueue(store, { limit: 41 });
+      const js = await API.getQueue(store, { limit: PER_PAGE });
       if (reqId !== requestIdRef.current) return;
-      // Belt-and-suspenders: hide any order that still carries a cod-prefix tag.
-      const orders = (js.orders || [])
-        .filter((o) => !(o.tags || []).some(isCodTag))
-        .slice(0, 41);
-      setData({
-        orders,
+      const orders = dedupeAndFilter(js.orders);
+      setPages([{ orders, nextCursor: js.nextCursor || null, startCursor: null }]);
+      setPageIndex(0);
+      setMeta({
         assigned_total: js.assigned_total || 0,
         today_label: js.today_label || "",
-        nextCursor: js.nextCursor || null,
         shop_domain: js.shop_domain || "",
       });
       setLastLoadedAt(Date.now());
@@ -209,6 +222,39 @@ function AgentView({ me }) {
     }
   }, [store]);
 
+  // Move to a specific page. If not yet cached, fetch using the previous page's nextCursor.
+  const goToPage = useCallback(async (targetIdx) => {
+    if (targetIdx < 0) return;
+    if (targetIdx < pages.length) {
+      setPageIndex(targetIdx);
+      return;
+    }
+    // Only support stepping forward by 1 (Next button).
+    if (targetIdx !== pages.length) return;
+    const prev = pages[pages.length - 1];
+    const cursor = prev?.nextCursor;
+    if (!cursor) return; // no further pages
+    setPageBusy(true); setError(null);
+    try {
+      const js = await API.getQueue(store, { limit: PER_PAGE, cursor });
+      const orders = dedupeAndFilter(js.orders);
+      setPages((p) => [...p, { orders, nextCursor: js.nextCursor || null, startCursor: cursor }]);
+      setPageIndex(targetIdx);
+      // Keep meta in sync with whichever page was just fetched (today_label / shop_domain
+      // don't change, but assigned_total is the same global count).
+      setMeta((m) => ({
+        ...m,
+        assigned_total: js.assigned_total ?? m.assigned_total,
+        today_label: js.today_label || m.today_label,
+        shop_domain: js.shop_domain || m.shop_domain,
+      }));
+    } catch (e) {
+      setError(e?.message || "Failed to load page");
+    } finally {
+      setPageBusy(false);
+    }
+  }, [pages, store]);
+
   const loadTeam = useCallback(async () => {
     const reqId = ++teamRequestIdRef.current;
     try {
@@ -218,13 +264,17 @@ function AgentView({ me }) {
     } catch {}
   }, [store]);
 
-  useEffect(() => { load(); loadTeam(); }, [load, loadTeam]);
+  useEffect(() => { loadFirst(); loadTeam(); }, [loadFirst, loadTeam]);
 
-  // 15-second polling
+  // 15-second polling: refresh the first page only when the user is sitting on it. If they
+  // navigated to a later cached page, don't yank them back.
   useEffect(() => {
-    const t = setInterval(() => { load(); loadTeam(); }, 15_000);
+    const t = setInterval(() => {
+      if (pageIndex === 0) loadFirst();
+      loadTeam();
+    }, 15_000);
     return () => clearInterval(t);
-  }, [load, loadTeam]);
+  }, [loadFirst, loadTeam, pageIndex]);
 
   // 1s freshness ticker + re-apply pending writes (so stats reflect just-clicked actions
   // even when Shopify hasn't fully propagated the tag yet).
@@ -233,30 +283,37 @@ function AgentView({ me }) {
     return () => clearInterval(t);
   }, []);
 
-  // Orders, with pending sync-queue writes layered on top.
+  const currentOrders = pages[pageIndex]?.orders || [];
+  const hasNextPage = !!(pages[pageIndex]?.nextCursor) || pageIndex + 1 < pages.length;
+  const hasPrevPage = pageIndex > 0;
+
+  // Orders for the current page, with pending sync-queue writes layered on top.
   const ordersForView = useMemo(
-    () => applyPendingQueueWrites(data.orders || []),
+    () => applyPendingQueueWrites(currentOrders),
     // recomputes on each `nowTick` so newly enqueued writes are picked up promptly
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data.orders, syncCount, nowTick]
+    [currentOrders, syncCount, nowTick]
   );
 
   // ---------- Optimistic local mutations ----------
   function updateLocalOrderTags(orderId, mutate) {
-    setData((prev) => ({
-      ...prev,
-      orders: prev.orders.map((o) =>
-        o.id === orderId ? { ...o, tags: mutate([...(o.tags || [])]) } : o
-      ),
+    setPages((prev) => prev.map((p, idx) => {
+      if (idx !== pageIndex) return p;
+      return {
+        ...p,
+        orders: p.orders.map((o) =>
+          o.id === orderId ? { ...o, tags: mutate([...(o.tags || [])]) } : o
+        ),
+      };
     }));
   }
 
   function removeLocalOrder(orderId) {
-    setData((prev) => ({
-      ...prev,
-      orders: prev.orders.filter((o) => o.id !== orderId),
-      assigned_total: Math.max(0, (prev.assigned_total || 0) - 1),
+    setPages((prev) => prev.map((p, idx) => {
+      if (idx !== pageIndex) return p;
+      return { ...p, orders: p.orders.filter((o) => o.id !== orderId) };
     }));
+    setMeta((prev) => ({ ...prev, assigned_total: Math.max(0, (prev.assigned_total || 0) - 1) }));
   }
 
   function dedupTags(tags) {
@@ -430,7 +487,7 @@ function AgentView({ me }) {
             <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700 border border-gray-200">
               {updatedAgoSec == null ? "Updating…" : `Updated ${updatedAgoSec}s ago`}
             </span>
-            <button onClick={() => { load(); loadTeam(); }} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">
+            <button onClick={() => { loadFirst(); loadTeam(); }} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">
               Refresh
             </button>
           </div>
@@ -439,7 +496,7 @@ function AgentView({ me }) {
       <main className="max-w-7xl mx-auto px-4 py-4 space-y-4">
         {/* Stats pills */}
         <div className="flex flex-wrap gap-2">
-          <StatPill label="Assigned" value={data.assigned_total} />
+          <StatPill label="Assigned" value={meta.assigned_total} />
           <StatPill label="In view" value={ordersForView.length} />
           <StatPill label="Not called" value={stats.notCalled} accent="indigo" />
           <StatPill label="N1" value={stats.n1} />
@@ -448,9 +505,9 @@ function AgentView({ me }) {
           <StatPill label="Total contacted" value={stats.contacted} />
           <StatPill label="Confirmed today" value={confirmedToday} accent="emerald" />
         </div>
-        {data.assigned_total > ordersForView.length && (
+        {meta.assigned_total > ordersForView.length && (
           <div className="text-xs text-gray-500">
-            Showing {ordersForView.length} of {data.assigned_total} — paginate to see the rest.
+            Showing {ordersForView.length} of {meta.assigned_total} on page {pageIndex + 1} — use the pager below to see the rest.
           </div>
         )}
         {tagsAssigned.length === 0 && (
@@ -576,7 +633,7 @@ function AgentView({ me }) {
                         </td>
                         <td className="px-3 py-2 font-medium">
                           {(() => {
-                            const url = shopifyOrderUrl(o, data.shop_domain);
+                            const url = shopifyOrderUrl(o, meta.shop_domain);
                             const label = o.name || `#${o.number}`;
                             return url ? (
                               <a
@@ -675,6 +732,25 @@ function AgentView({ me }) {
               </tbody>
             </table>
           </div>
+          {/* Pagination */}
+          <div className="flex items-center gap-2 px-3 py-2 border-t border-gray-100 bg-gray-50">
+            <button
+              onClick={() => goToPage(pageIndex - 1)}
+              disabled={!hasPrevPage || pageBusy}
+              className="text-xs px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >← Prev</button>
+            <span className="text-xs text-gray-700">
+              Page {pageIndex + 1}{pages.length > 1 ? ` of ${pages.length}${hasNextPage && pages[pageIndex]?.nextCursor && pageIndex + 1 === pages.length ? "+" : ""}` : ""}
+            </span>
+            <button
+              onClick={() => goToPage(pageIndex + 1)}
+              disabled={!hasNextPage || pageBusy}
+              className="text-xs px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >{pageBusy ? "Loading…" : "Next →"}</button>
+            <span className="ml-auto text-[11px] text-gray-500">
+              {ordersForView.length} visible · {meta.assigned_total} total
+            </span>
+          </div>
         </section>
 
         {/* Team panels: assigned + confirmed today */}
@@ -701,7 +777,7 @@ function AgentView({ me }) {
             )}
           </div>
           <div>
-            <div className="text-sm font-semibold mb-2">Team — confirmed today {data.today_label && <span className="text-xs text-gray-500 font-normal">(any cod date, clicks counted today)</span>}</div>
+            <div className="text-sm font-semibold mb-2">Team — confirmed today {meta.today_label && <span className="text-xs text-gray-500 font-normal">(any cod date, clicks counted today)</span>}</div>
             {teamStats.length === 0 ? (
               <div className="text-xs text-gray-500">No team data yet.</div>
             ) : (
