@@ -215,45 +215,26 @@ def build_queue_query(tags: List[str]) -> Optional[str]:
     return " ".join(parts)
 
 
-def build_catchall_query(exclude_tags: List[str]) -> str:
-    """Build a Shopify search query for an "untagged" agent: open, unshipped orders that
-    carry NONE of the other agents' tags. COD-dated orders are still removed via Python
-    post-filter."""
-    parts = ["status:open", "fulfillment_status:unshipped"]
-    for t in (exclude_tags or []):
-        if t:
-            parts.append(f"-tag:{_escape_tag(t)}")
-    return " ".join(parts)
-
-
-async def _other_agents_active_tags(db: AsyncSession, exclude_user_id: Optional[str] = None) -> List[str]:
-    """All tags carried by active confirmation users other than the given one."""
-    res = await db.execute(
-        select(User).where(User.is_active == True)  # noqa: E712
-    )
-    out: set = set()
-    for u in res.scalars().all():
-        if exclude_user_id and u.id == exclude_user_id:
-            continue
-        for t in (u.agent_tags or []):
-            if t:
-                out.add(t)
-    return sorted(out)
+def build_catchall_query() -> str:
+    """Build a Shopify search query for an "untagged" agent: every open, unshipped order.
+    Cancelled orders are already excluded by `status:open`. COD-dated orders are stripped
+    by the Python post-filter (Shopify search has no reliable multi-word wildcard
+    exclusion for tags like "cod 18/05/26")."""
+    return "status:open fulfillment_status:unshipped"
 
 
 async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
     """Return the Shopify search query an agent's queue should use.
 
-    - Tags assigned     → positive OR-of-tags query
-    - No tags but role=="agent" → catch-all query that excludes every other agent's tags
-    - Otherwise         → None (their queue is intentionally empty)
+    - Tags assigned             → positive OR-of-tags query
+    - No tags but role=="agent" → catch-all: every open, unshipped, not-yet-confirmed order
+    - Otherwise                 → None (their queue is intentionally empty)
     """
     tags = list(user.agent_tags or [])
     if tags:
         return build_queue_query(tags)
     if user.role == "agent":
-        other = await _other_agents_active_tags(db, exclude_user_id=user.id)
-        return build_catchall_query(other)
+        return build_catchall_query()
     return None
 
 

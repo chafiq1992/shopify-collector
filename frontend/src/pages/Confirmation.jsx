@@ -187,10 +187,12 @@ function AgentView({ me }) {
     const reqId = ++requestIdRef.current;
     setLoading(true); setError(null);
     try {
-      const js = await API.getQueue(store, { limit: 50 });
+      const js = await API.getQueue(store, { limit: 41 });
       if (reqId !== requestIdRef.current) return;
       // Belt-and-suspenders: hide any order that still carries a cod-prefix tag.
-      const orders = (js.orders || []).filter((o) => !(o.tags || []).some(isCodTag));
+      const orders = (js.orders || [])
+        .filter((o) => !(o.tags || []).some(isCodTag))
+        .slice(0, 41);
       setData({
         orders,
         assigned_total: js.assigned_total || 0,
@@ -691,7 +693,7 @@ function AgentView({ me }) {
                     </div>
                     <div className="text-gray-700">{a.assigned} assigned</div>
                     <div className="text-[10px] text-gray-500 truncate max-w-[180px]" title={(a.tags || []).join(", ")}>
-                      {(a.tags || []).length === 0 ? (a.is_catchall ? "no tag · sees untagged orders" : "no tag") : (a.tags || []).join(", ")}
+                      {(a.tags || []).length === 0 ? (a.is_catchall ? "no tag · sees all open unshipped" : "no tag") : (a.tags || []).join(", ")}
                     </div>
                   </div>
                 ))}
