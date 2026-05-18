@@ -15,8 +15,9 @@ Provides:
 import asyncio
 import os
 import re
+import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -274,6 +275,72 @@ def has_cod_tag(tags: List[str]) -> bool:
     return False
 
 
+# (key=(user_id, store, query)) → (timestamp_seconds, accurate_count). Used so the queue
+# endpoint can report the post-filtered count of orders an agent can actually act on
+# without re-scanning Shopify on every 15-second poll.
+_ACCURATE_COUNT_CACHE: Dict[Tuple[str, str, str], Tuple[float, int]] = {}
+_ACCURATE_COUNT_TTL_SECONDS = 60
+_ACCURATE_COUNT_SCAN_PAGE = 250  # Shopify's max page size
+_ACCURATE_COUNT_HARD_CAP = 10_000  # safety net
+
+
+async def accurate_assigned_count(store: str, user_id: str, base_q: str) -> int:
+    """Walk every Shopify page for `base_q`, drop cod-tagged orders, return the total.
+
+    Result is cached in-memory per (user, store, query) for 60 seconds so the 15-second
+    polling refresh and the manual Refresh button only pay the scan cost once a minute.
+    """
+    key = (user_id, store, base_q)
+    now = time.time()
+    cached = _ACCURATE_COUNT_CACHE.get(key)
+    if cached and (now - cached[0]) < _ACCURATE_COUNT_TTL_SECONDS:
+        return cached[1]
+
+    from .main import shopify_graphql  # type: ignore
+
+    gql = """
+    query Q($first: Int!, $after: String, $q: String) {
+      orders(first: $first, after: $after, query: $q, sortKey: CREATED_AT, reverse: true) {
+        edges { cursor node { tags } }
+        pageInfo { hasNextPage }
+      }
+    }
+    """
+    count = 0
+    scanned = 0
+    cursor: Optional[str] = None
+    while scanned < _ACCURATE_COUNT_HARD_CAP:
+        try:
+            data = await shopify_graphql(gql, {"first": _ACCURATE_COUNT_SCAN_PAGE, "after": cursor, "q": base_q}, store=store)
+        except Exception:
+            # On error, fall back to whatever we've counted so far.
+            break
+        edges = ((data or {}).get("orders") or {}).get("edges") or []
+        if not edges:
+            break
+        for e in edges:
+            scanned += 1
+            tags_list = list((e.get("node") or {}).get("tags") or [])
+            if not has_cod_tag(tags_list):
+                count += 1
+        page_info = ((data or {}).get("orders") or {}).get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = edges[-1].get("cursor")
+
+    _ACCURATE_COUNT_CACHE[key] = (now, count)
+    return count
+
+
+def _cached_accurate_count(store: str, user_id: str, base_q: str) -> Optional[int]:
+    """Return the cached count if fresh, else None — used for cheap follow-up calls
+    (e.g. fetching page 2) without re-scanning."""
+    cached = _ACCURATE_COUNT_CACHE.get((user_id, store, base_q))
+    if cached and (time.time() - cached[0]) < _ACCURATE_COUNT_TTL_SECONDS:
+        return cached[1]
+    return None
+
+
 QUEUE_QUERY_GQL = """
 query AgentQueue($first: Int!, $after: String, $query: String) {
   orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {
@@ -421,25 +488,28 @@ async def agent_queue(
     has_next = bool(page_info.get("hasNextPage"))
     next_cursor = edges[-1].get("cursor") if (has_next and edges) else None
 
-    # Shopify's tag search has no reliable wildcard exclusion for multi-word tags
-    # ("cod 15/05/26"), so we drop any order carrying a cod-prefixed tag here.
-    # The raw `ordersCount` includes those orders; subtract them so "assigned" reflects
-    # actually-actionable orders.
-    assigned_total_raw = int(((data or {}).get("ordersCount") or {}).get("count") or 0)
-    excluded_in_page = 0
+    # Build the current page's orders (dropping cod-tagged stragglers).
     orders: List[Dict[str, Any]] = []
     for e in edges:
         node = e.get("node") or {}
         tags_list = list(node.get("tags") or [])
         if has_cod_tag(tags_list):
-            excluded_in_page += 1
             continue
         orders.append(_flatten_order(node))
-    # Conservative estimate: assume excluded ratio holds across the full result set.
-    if edges:
-        assigned_total = max(0, assigned_total_raw - excluded_in_page)
+
+    # `assigned_total` should be the count of orders the agent could actually act on, NOT
+    # the raw `ordersCount` (which includes already-confirmed `cod *` orders that Shopify's
+    # tag-wildcard exclusion doesn't reliably match for multi-word tag values).
+    if cursor is None:
+        # Page 1: pay for an accurate scan (cached 60s). This is the only place we kick off
+        # the scan; subsequent pages just read the cached value.
+        try:
+            assigned_total = await accurate_assigned_count(store, user.id, q)
+        except Exception:
+            assigned_total = int(((data or {}).get("ordersCount") or {}).get("count") or 0)
     else:
-        assigned_total = assigned_total_raw
+        cached_count = _cached_accurate_count(store, user.id, q)
+        assigned_total = cached_count if cached_count is not None else int(((data or {}).get("ordersCount") or {}).get("count") or 0)
 
     return {
         "ok": True,
@@ -614,17 +684,16 @@ async def team_stats(
     for a in agents:
         queries.append(await query_for_user(db, a))
 
-    async def _count(q: Optional[str]) -> int:
+    async def _accurate_count_for(idx: int) -> int:
+        q = queries[idx]
         if not q:
             return 0
-        gql = "query Q($q: String) { ordersCount(query: $q) { count } }"
         try:
-            data = await shopify_graphql(gql, {"q": q}, store=store)
-            return int(((data or {}).get("ordersCount") or {}).get("count") or 0)
+            return await accurate_assigned_count(store, agents[idx].id, q)
         except Exception:
             return 0
 
-    counts = await asyncio.gather(*[_count(q) for q in queries])
+    counts = await asyncio.gather(*[_accurate_count_for(i) for i in range(len(agents))])
     assigned_map = {a.id: counts[i] for i, a in enumerate(agents)}
 
     return {

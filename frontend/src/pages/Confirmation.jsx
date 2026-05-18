@@ -191,7 +191,6 @@ function AgentView({ me }) {
   const [bulkTag, setBulkTag] = useState("");
   const [showBulkSuggestions, setShowBulkSuggestions] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
-  const [selectAllAcrossPages, setSelectAllAcrossPages] = useState(false);
   // Filter for the top stat pills: "" | "n1" | "n2" | "n3" | "new"
   const [filterLevel, setFilterLevel] = useState("");
   const requestIdRef = useRef(0);
@@ -230,8 +229,6 @@ function AgentView({ me }) {
         shop_domain: js.shop_domain || "",
       });
       setLastLoadedAt(Date.now());
-      // A fresh queue invalidates any cross-page select-all.
-      setSelectAllAcrossPages(false);
     } catch (e) {
       if (reqId !== requestIdRef.current) return;
       setError(e?.message || "Failed to load queue");
@@ -415,18 +412,11 @@ function AgentView({ me }) {
       }
       return next;
     });
-    // Toggling the row selection alone never implies "select across all pages".
-    setSelectAllAcrossPages(false);
   }
 
   function clearSelection() {
     setSelected(new Set());
-    setSelectAllAcrossPages(false);
   }
-
-  // The effective "selected count" the user sees on the Apply button.
-  const effectiveSelectedCount = selectAllAcrossPages ? meta.assigned_total : selected.size;
-  const canSelectAcrossPages = meta.assigned_total > ordersForView.length;
 
   // Suggestion pool = current orders' tags ∪ agent's own assigned tags. Filtered by input.
   const tagSuggestions = useMemo(() => {
@@ -442,42 +432,22 @@ function AgentView({ me }) {
 
   async function applyBulkTag() {
     const tag = String(bulkTag || "").trim();
-    if (!tag) return;
-    if (!selectAllAcrossPages && selected.size === 0) return;
+    if (!tag || selected.size === 0) return;
     setBulkBusy(true); setError(null);
     try {
-      if (selectAllAcrossPages) {
-        // Server-side: tag every order in the agent's queue (respecting the active level
-        // filter). This may take a few seconds for large queues.
-        try {
-          const js = await API.bulkTag({ tag, store, scope: "all", level: filterLevel || null });
-          // Confirmation cod-tag → orders disappear; refresh page 1 either way.
-          setError(`Bulk applied "${tag}" to ${js.tagged}/${js.total} orders.`);
-        } catch (e) {
-          setError(e?.message || "Bulk tag failed");
-        } finally {
-          setBulkTag("");
-          setShowBulkSuggestions(false);
-          clearSelection();
-          await loadFirst();
-          loadTeam();
+      const ids = [...selected];
+      const isCod = isCodTag(tag);
+      for (const id of ids) {
+        if (isCod) {
+          removeLocalOrder(id);
+        } else {
+          updateLocalOrderTags(id, (tags) => dedupTags([...tags, tag]));
         }
-      } else {
-        // Per-id flow via the durable sync queue (same as the single-order action buttons).
-        const ids = [...selected];
-        const isCod = isCodTag(tag);
-        for (const id of ids) {
-          if (isCod) {
-            removeLocalOrder(id);
-          } else {
-            updateLocalOrderTags(id, (tags) => dedupTags([...tags, tag]));
-          }
-          enqueueTagWrite({ orderId: id, action: "add", tag, store });
-        }
-        setBulkTag("");
-        setShowBulkSuggestions(false);
-        clearSelection();
+        enqueueTagWrite({ orderId: id, action: "add", tag, store });
       }
+      setBulkTag("");
+      setShowBulkSuggestions(false);
+      clearSelection();
     } finally {
       setBulkBusy(false);
     }
@@ -586,33 +556,15 @@ function AgentView({ me }) {
             <label className="text-xs text-gray-600 inline-flex items-center gap-2 select-none">
               <input
                 type="checkbox"
-                checked={selectAllAcrossPages || allSelected}
+                checked={allSelected}
                 onChange={toggleSelectAll}
                 ref={(el) => {
                   if (!el) return;
-                  const partial = selected.size > 0 && !allSelected && !selectAllAcrossPages;
-                  el.indeterminate = partial;
+                  el.indeterminate = selected.size > 0 && !allSelected;
                 }}
               />
-              {selectAllAcrossPages
-                ? `All ${meta.assigned_total} in queue selected`
-                : (selected.size > 0 ? `${selected.size} selected` : "Select all visible")}
+              {selected.size > 0 ? `${selected.size} selected` : "Select all visible"}
             </label>
-            {!selectAllAcrossPages && allSelected && canSelectAcrossPages && (
-              <button
-                type="button"
-                onClick={() => setSelectAllAcrossPages(true)}
-                className="text-xs px-2 py-1 rounded border border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
-                title="Apply the tag to every matching order, not just this page"
-              >Select all {meta.assigned_total} in queue →</button>
-            )}
-            {selectAllAcrossPages && (
-              <button
-                type="button"
-                onClick={() => setSelectAllAcrossPages(false)}
-                className="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50"
-              >Limit to this page</button>
-            )}
             <div className="relative flex-1 min-w-[220px] max-w-md">
               <input
                 type="text"
@@ -639,13 +591,13 @@ function AgentView({ me }) {
             </div>
             <button
               onClick={applyBulkTag}
-              disabled={bulkBusy || effectiveSelectedCount === 0 || !bulkTag.trim()}
+              disabled={bulkBusy || selected.size === 0 || !bulkTag.trim()}
               className="text-xs px-4 py-1.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-50"
               title="Add the chosen tag to every selected order"
             >
-              {bulkBusy ? "Applying…" : `Apply to ${effectiveSelectedCount || "…"}`}
+              {bulkBusy ? "Applying…" : `Apply to ${selected.size || "…"}`}
             </button>
-            {(selected.size > 0 || selectAllAcrossPages) && (
+            {selected.size > 0 && (
               <button
                 onClick={clearSelection}
                 className="text-xs px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50"
@@ -666,9 +618,9 @@ function AgentView({ me }) {
                   <th className="px-3 py-2 w-8">
                     <input
                       type="checkbox"
-                      checked={selectAllAcrossPages || allSelected}
+                      checked={allSelected}
                       onChange={toggleSelectAll}
-                      ref={(el) => { if (el) el.indeterminate = !selectAllAcrossPages && selected.size > 0 && !allSelected; }}
+                      ref={(el) => { if (el) el.indeterminate = selected.size > 0 && !allSelected; }}
                       aria-label="Select all visible orders"
                     />
                   </th>
