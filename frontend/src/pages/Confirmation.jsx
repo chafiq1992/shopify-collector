@@ -39,6 +39,21 @@ const API = {
   },
 };
 
+function shopifyOrderUrl(order, shopDomain) {
+  const domain = String(shopDomain || "").trim();
+  if (!domain) return null;
+  // Prefer the numeric legacy ID; fall back to extracting it from the GID string.
+  let numeric = String(order?.legacy_id || "").trim();
+  if (!numeric) {
+    const gid = String(order?.id || "");
+    const m = gid.match(/(\d+)\s*$/);
+    if (m) numeric = m[1];
+  }
+  if (!numeric) return null;
+  // Shop domain is typically "*.myshopify.com" — the admin UI lives at /admin/orders/{id}.
+  return `https://${domain.replace(/^https?:\/\//, "")}/admin/orders/${numeric}`;
+}
+
 function goto(path, store) {
   try {
     const s = (store && store !== "all") ? String(store) : "";
@@ -112,25 +127,9 @@ export default function Confirmation() {
     return <div className="min-h-screen w-full flex items-center justify-center text-gray-500">Loading…</div>;
   }
 
-  if (me.role === "agent") return <AgentView me={me} />;
-  // Admins and collectors: this page is for agents only. Send admins to the management UI.
-  return (
-    <div className="min-h-screen w-full bg-gray-50 flex items-center justify-center px-4">
-      <div className="max-w-sm bg-white border border-gray-200 rounded-2xl p-6 text-center shadow-sm">
-        <div className="text-base font-semibold mb-2">Confirmation is for agents</div>
-        <div className="text-sm text-gray-600 mb-4">
-          This dashboard is reserved for confirmation agents. {me.role === "admin"
-            ? "Manage agents and their tags from the Admin page."
-            : "Ask an admin to grant you an agent account."}
-        </div>
-        {me.role === "admin" && (
-          <button onClick={() => goto("/admin")} className="text-sm px-4 py-2 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700">
-            Go to Admin
-          </button>
-        )}
-      </div>
-    </div>
-  );
+  // Any logged-in user can use the confirmation page; whether their queue is non-empty
+  // depends purely on the Shopify tags assigned to them in /admin.
+  return <AgentView me={me} />;
 }
 
 // ---------- Header ----------
@@ -158,7 +157,7 @@ function AgentView({ me }) {
   useEffect(() => { persistStoreSelection(store); }, [store]);
 
   const [agentInfo, setAgentInfo] = useState(null);
-  const [data, setData] = useState({ orders: [], assigned_total: 0, today_label: "", nextCursor: null });
+  const [data, setData] = useState({ orders: [], assigned_total: 0, today_label: "", nextCursor: null, shop_domain: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [lastLoadedAt, setLastLoadedAt] = useState(null);
@@ -192,6 +191,7 @@ function AgentView({ me }) {
         assigned_total: js.assigned_total || 0,
         today_label: js.today_label || "",
         nextCursor: js.nextCursor || null,
+        shop_domain: js.shop_domain || "",
       });
       setLastLoadedAt(Date.now());
     } catch (e) {
@@ -423,7 +423,24 @@ function AgentView({ me }) {
                           });
                         }}
                       >
-                        <td className="px-3 py-2 font-medium">{o.name || `#${o.number}`}</td>
+                        <td className="px-3 py-2 font-medium">
+                          {(() => {
+                            const url = shopifyOrderUrl(o, data.shop_domain);
+                            const label = o.name || `#${o.number}`;
+                            return url ? (
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(ev) => ev.stopPropagation()}
+                                className="text-indigo-700 hover:text-indigo-900 hover:underline"
+                                title="Open in Shopify admin"
+                              >{label}</a>
+                            ) : (
+                              <span>{label}</span>
+                            );
+                          })()}
+                        </td>
                         <td className="px-3 py-2">{o.customer_name || <span className="text-gray-400">—</span>}</td>
                         <td className="px-3 py-2 font-mono text-xs">{o.phone || <span className="text-gray-400">—</span>}</td>
                         <td className="px-3 py-2 text-xs text-gray-700">

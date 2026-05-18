@@ -153,11 +153,91 @@ async def admin_list_users(
                 "name": u.name,
                 "role": u.role,
                 "is_active": bool(u.is_active),
+                "tags": list(u.agent_tags or []),
                 "created_at": _dt_to_iso(u.created_at),
                 "last_login_at": _dt_to_iso(u.last_login_at),
             }
             for u in users
         ],
     }
+
+
+class AdminUpdateUserBody(BaseModel):
+    name: Optional[str] = None
+    password: Optional[str] = None
+    tags: Optional[list[str]] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+def _normalize_tag_list(raw) -> list[str]:
+    out: list[str] = []
+    seen = set()
+    for p in raw or []:
+        v = str(p or "").strip()
+        if not v:
+            continue
+        k = v.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(v)
+    return out
+
+
+@router.patch("/api/admin/users/{user_id}")
+async def admin_update_user(
+    user_id: str,
+    body: AdminUpdateUserBody,
+    db: AsyncSession = Depends(get_session),
+    _: User = Depends(require_admin),
+):
+    from sqlalchemy import select  # local import keeps top of file uncluttered
+    user = await db.scalar(select(User).where(User.id == user_id))
+    if not user:
+        raise HTTPException(status_code=404, detail="user not found")
+    if body.name is not None:
+        user.name = (body.name or "").strip() or None
+    if body.password is not None and (body.password or "").strip():
+        user.password_hash = hash_password(body.password)
+    if body.tags is not None:
+        user.agent_tags = _normalize_tag_list(body.tags)
+    if body.role is not None and body.role in ("admin", "collector", "agent"):
+        user.role = body.role
+    if body.is_active is not None:
+        user.is_active = bool(body.is_active)
+    await db.commit()
+    await db.refresh(user)
+    return {
+        "ok": True,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+            "is_active": bool(user.is_active),
+            "tags": list(user.agent_tags or []),
+            "last_login_at": _dt_to_iso(user.last_login_at),
+        },
+    }
+
+
+@router.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: str,
+    db: AsyncSession = Depends(get_session),
+    me: User = Depends(require_admin),
+):
+    from sqlalchemy import select
+    user = await db.scalar(select(User).where(User.id == user_id))
+    if not user:
+        raise HTTPException(status_code=404, detail="user not found")
+    if user.id == me.id:
+        raise HTTPException(status_code=400, detail="cannot delete yourself")
+    # Soft delete: preserve audit history via order_events FK.
+    user.is_active = False
+    user.agent_tags = []
+    await db.commit()
+    return {"ok": True}
 
 

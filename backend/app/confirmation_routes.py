@@ -231,6 +231,7 @@ query AgentQueue($first: Int!, $after: String, $query: String) {
       cursor
       node {
         id
+        legacyResourceId
         name
         createdAt
         tags
@@ -306,6 +307,7 @@ def _flatten_order(node: Dict[str, Any]) -> Dict[str, Any]:
     total = _money(node.get("currentTotalPriceSet"))
     return {
         "id": node.get("id"),
+        "legacy_id": str(node.get("legacyResourceId") or "").strip(),
         "number": (node.get("name") or "").lstrip("#"),
         "name": node.get("name") or "",
         "created_at": node.get("createdAt"),
@@ -333,15 +335,27 @@ async def agent_queue(
     cursor: Optional[str] = None,
     user: User = Depends(get_current_user),
 ):
-    if user.role not in ("agent", "admin"):
-        raise HTTPException(status_code=403, detail="agent role required")
     tags = list(user.agent_tags or [])
     today_label = today_cod_label()
-    if not tags and user.role == "agent":
-        return {"ok": True, "orders": [], "assigned_total": 0, "nextCursor": None, "today_label": today_label}
+    # Resolve the shop domain so the agent UI can link to the Shopify admin order page.
+    shop_domain = ""
+    try:
+        from .main import resolve_store_settings_effective  # type: ignore
+        domain, _token, _api = await resolve_store_settings_effective(store)
+        shop_domain = (domain or "").strip()
+    except Exception:
+        shop_domain = ""
+    if not tags:
+        return {
+            "ok": True, "orders": [], "assigned_total": 0, "nextCursor": None,
+            "today_label": today_label, "shop_domain": shop_domain,
+        }
     q = build_queue_query(tags)
     if not q:
-        return {"ok": True, "orders": [], "assigned_total": 0, "nextCursor": None, "today_label": today_label}
+        return {
+            "ok": True, "orders": [], "assigned_total": 0, "nextCursor": None,
+            "today_label": today_label, "shop_domain": shop_domain,
+        }
 
     # Import lazily to avoid a circular import with main.py at module load time.
     from .main import shopify_graphql  # type: ignore
@@ -386,6 +400,7 @@ async def agent_queue(
         "assigned_total": assigned_total,
         "nextCursor": next_cursor,
         "today_label": today_label,
+        "shop_domain": shop_domain,
     }
 
 
@@ -398,11 +413,11 @@ async def team_stats(
     db: AsyncSession = Depends(get_session),
 ):
     today_label = today_cod_label()
-    # Fetch the active agents and their tags.
+    # Any active user with assigned tags is treated as a confirmation agent for stats.
     res = await db.execute(
-        select(User).where(User.role == "agent", User.is_active == True)  # noqa: E712
+        select(User).where(User.is_active == True)  # noqa: E712
     )
-    agents = res.scalars().all()
+    agents = [u for u in res.scalars().all() if (u.agent_tags or [])]
 
     if not agents:
         return {"ok": True, "agents": [], "today_label": today_label}
