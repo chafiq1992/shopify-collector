@@ -187,7 +187,7 @@ function AgentView({ me }) {
   // cursor for the page that comes after.
   const [pages, setPages] = useState([]);
   const [pageIndex, setPageIndex] = useState(0);
-  const [meta, setMeta] = useState({ assigned_total: 0, today_label: "", shop_domain: "" });
+  const [meta, setMeta] = useState({ assigned_total: 0, today_label: "", shop_domain: "", level_counts: null });
   const PER_PAGE = 50;
   const [loading, setLoading] = useState(false);
   const [pageBusy, setPageBusy] = useState(false);
@@ -242,6 +242,7 @@ function AgentView({ me }) {
         assigned_total: js.assigned_total || 0,
         today_label: js.today_label || "",
         shop_domain: js.shop_domain || "",
+        level_counts: js.level_counts || null,
       });
       setLastLoadedAt(Date.now());
     } catch (e) {
@@ -275,6 +276,7 @@ function AgentView({ me }) {
         assigned_total: js.assigned_total ?? m.assigned_total,
         today_label: js.today_label || m.today_label,
         shop_domain: js.shop_domain || m.shop_domain,
+        level_counts: js.level_counts || m.level_counts,
       }));
     } catch (e) {
       setError(e?.message || "Failed to load page");
@@ -477,24 +479,23 @@ function AgentView({ me }) {
   }
 
   // ---------- Stats ----------
+  // Pulled from the server-computed per-level breakdown so the pills show the TRUE
+  // total assigned to the agent for each level. They stay stable regardless of which
+  // filter pill is currently active (each pill reflects its own slice of the same
+  // unfiltered query).
   const stats = useMemo(() => {
-    let n1 = 0, n2 = 0, n3 = 0, n4 = 0, notCalled = 0, contacted = 0;
-    for (const o of ordersForView) {
-      const tags = (o.tags || []).map((t) => String(t || "").trim().toLowerCase());
-      const has1 = tags.includes("n1");
-      const has2 = tags.includes("n2");
-      const has3 = tags.includes("n3");
-      const has4 = tags.includes("n4");
-      // Classify by highest attempt level present.
-      if (has4) n4++;
-      else if (has3) n3++;
-      else if (has2) n2++;
-      else if (has1) n1++;
-      else notCalled++;
-      if (has1 || has2 || has3 || has4) contacted++;
-    }
-    return { n1, n2, n3, n4, notCalled, contacted };
-  }, [ordersForView]);
+    const c = meta.level_counts || {};
+    const total = Number(c.total || 0);
+    const notCalled = Number(c.new || 0);
+    return {
+      n1: Number(c.n1 || 0),
+      n2: Number(c.n2 || 0),
+      n3: Number(c.n3 || 0),
+      n4: Number(c.n4 || 0),
+      notCalled,
+      contacted: Math.max(0, total - notCalled),
+    };
+  }, [meta.level_counts]);
 
   const confirmedToday = useMemo(() => {
     const mine = teamStats.find((a) => a.id === me.id);

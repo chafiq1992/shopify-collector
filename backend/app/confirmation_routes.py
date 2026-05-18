@@ -275,25 +275,30 @@ def has_cod_tag(tags: List[str]) -> bool:
     return False
 
 
-# (key=(user_id, store, query)) → (timestamp_seconds, accurate_count). Used so the queue
-# endpoint can report the post-filtered count of orders an agent can actually act on
-# without re-scanning Shopify on every 15-second poll.
-_ACCURATE_COUNT_CACHE: Dict[Tuple[str, str, str], Tuple[float, int]] = {}
-_ACCURATE_COUNT_TTL_SECONDS = 60
-_ACCURATE_COUNT_SCAN_PAGE = 250  # Shopify's max page size
-_ACCURATE_COUNT_HARD_CAP = 10_000  # safety net
+# (key=(user_id, store, base_query)) → (timestamp_seconds, breakdown_dict). One full
+# pagination scan produces the total count AND the per-level (n1/n2/n3/n4/new) counts;
+# the queue endpoint and team-stats both read from this cache so the 15-second polling
+# and the per-level filter pills don't trigger fresh scans.
+_BREAKDOWN_CACHE: Dict[Tuple[str, str, str], Tuple[float, Dict[str, int]]] = {}
+_BREAKDOWN_TTL_SECONDS = 60
+_BREAKDOWN_SCAN_PAGE = 250  # Shopify's max page size
+_BREAKDOWN_HARD_CAP = 10_000  # safety net
 
 
-async def accurate_assigned_count(store: str, user_id: str, base_q: str) -> int:
-    """Walk every Shopify page for `base_q`, drop cod-tagged orders, return the total.
+def _empty_breakdown() -> Dict[str, int]:
+    return {"total": 0, "n1": 0, "n2": 0, "n3": 0, "n4": 0, "new": 0}
 
-    Result is cached in-memory per (user, store, query) for 60 seconds so the 15-second
-    polling refresh and the manual Refresh button only pay the scan cost once a minute.
+
+async def accurate_assigned_breakdown(store: str, user_id: str, base_q: str) -> Dict[str, int]:
+    """Walk every Shopify page for `base_q`, drop cod-tagged orders, and return the total
+    plus counts for each call-attempt level (n1/n2/n3/n4/new).
+
+    Cached per (user, store, base_query) for 60 seconds.
     """
     key = (user_id, store, base_q)
     now = time.time()
-    cached = _ACCURATE_COUNT_CACHE.get(key)
-    if cached and (now - cached[0]) < _ACCURATE_COUNT_TTL_SECONDS:
+    cached = _BREAKDOWN_CACHE.get(key)
+    if cached and (now - cached[0]) < _BREAKDOWN_TTL_SECONDS:
         return cached[1]
 
     from .main import shopify_graphql  # type: ignore
@@ -306,39 +311,50 @@ async def accurate_assigned_count(store: str, user_id: str, base_q: str) -> int:
       }
     }
     """
-    count = 0
-    scanned = 0
+    counts = _empty_breakdown()
     cursor: Optional[str] = None
-    while scanned < _ACCURATE_COUNT_HARD_CAP:
+    while counts["total"] < _BREAKDOWN_HARD_CAP:
         try:
-            data = await shopify_graphql(gql, {"first": _ACCURATE_COUNT_SCAN_PAGE, "after": cursor, "q": base_q}, store=store)
+            data = await shopify_graphql(gql, {"first": _BREAKDOWN_SCAN_PAGE, "after": cursor, "q": base_q}, store=store)
         except Exception:
-            # On error, fall back to whatever we've counted so far.
             break
         edges = ((data or {}).get("orders") or {}).get("edges") or []
         if not edges:
             break
         for e in edges:
-            scanned += 1
             tags_list = list((e.get("node") or {}).get("tags") or [])
-            if not has_cod_tag(tags_list):
-                count += 1
+            if has_cod_tag(tags_list):
+                continue
+            counts["total"] += 1
+            tlower = {str(t or "").strip().lower() for t in tags_list}
+            has_any = False
+            for lv in ("n1", "n2", "n3", "n4"):
+                if lv in tlower:
+                    counts[lv] += 1
+                    has_any = True
+            if not has_any:
+                counts["new"] += 1
         page_info = ((data or {}).get("orders") or {}).get("pageInfo") or {}
         if not page_info.get("hasNextPage"):
             break
         cursor = edges[-1].get("cursor")
 
-    _ACCURATE_COUNT_CACHE[key] = (now, count)
-    return count
+    _BREAKDOWN_CACHE[key] = (now, counts)
+    return counts
 
 
-def _cached_accurate_count(store: str, user_id: str, base_q: str) -> Optional[int]:
-    """Return the cached count if fresh, else None — used for cheap follow-up calls
-    (e.g. fetching page 2) without re-scanning."""
-    cached = _ACCURATE_COUNT_CACHE.get((user_id, store, base_q))
-    if cached and (time.time() - cached[0]) < _ACCURATE_COUNT_TTL_SECONDS:
+def _cached_breakdown(store: str, user_id: str, base_q: str) -> Optional[Dict[str, int]]:
+    """Return the cached breakdown if fresh, else None."""
+    cached = _BREAKDOWN_CACHE.get((user_id, store, base_q))
+    if cached and (time.time() - cached[0]) < _BREAKDOWN_TTL_SECONDS:
         return cached[1]
     return None
+
+
+async def accurate_assigned_count(store: str, user_id: str, base_q: str) -> int:
+    """Thin wrapper for callers that only need the total. Shares the breakdown cache."""
+    bd = await accurate_assigned_breakdown(store, user_id, base_q)
+    return int(bd.get("total") or 0)
 
 
 QUEUE_QUERY_GQL = """
@@ -497,24 +513,43 @@ async def agent_queue(
             continue
         orders.append(_flatten_order(node))
 
-    # `assigned_total` should be the count of orders the agent could actually act on, NOT
-    # the raw `ordersCount` (which includes already-confirmed `cod *` orders that Shopify's
-    # tag-wildcard exclusion doesn't reliably match for multi-word tag values).
+    # Compute the per-level breakdown ONCE on page 1 (or use a fresh cache hit on follow-up
+    # pages). The breakdown is derived from `base_q` — i.e. the agent's full tag-criteria
+    # query WITHOUT any active level filter — so the N1/N2/N3/N4/New pills always show
+    # the same totals regardless of which pill is currently selected.
     if cursor is None:
-        # Page 1: pay for an accurate scan (cached 60s). This is the only place we kick off
-        # the scan; subsequent pages just read the cached value.
         try:
-            assigned_total = await accurate_assigned_count(store, user.id, q)
+            breakdown = await accurate_assigned_breakdown(store, user.id, base_q)
         except Exception:
-            assigned_total = int(((data or {}).get("ordersCount") or {}).get("count") or 0)
+            breakdown = _empty_breakdown()
+            breakdown["total"] = int(((data or {}).get("ordersCount") or {}).get("count") or 0)
     else:
-        cached_count = _cached_accurate_count(store, user.id, q)
-        assigned_total = cached_count if cached_count is not None else int(((data or {}).get("ordersCount") or {}).get("count") or 0)
+        bd_cached = _cached_breakdown(store, user.id, base_q)
+        if bd_cached is not None:
+            breakdown = bd_cached
+        else:
+            breakdown = _empty_breakdown()
+            breakdown["total"] = int(((data or {}).get("ordersCount") or {}).get("count") or 0)
+
+    # `Assigned` reflects the active filter so it agrees with what's visible in the table.
+    lv = (level or "").lower().strip()
+    if lv in ("n1", "n2", "n3", "n4", "new"):
+        assigned_total = int(breakdown.get(lv, 0))
+    else:
+        assigned_total = int(breakdown.get("total", 0))
 
     return {
         "ok": True,
         "orders": orders,
         "assigned_total": assigned_total,
+        "level_counts": {
+            "total": int(breakdown.get("total", 0)),
+            "n1": int(breakdown.get("n1", 0)),
+            "n2": int(breakdown.get("n2", 0)),
+            "n3": int(breakdown.get("n3", 0)),
+            "n4": int(breakdown.get("n4", 0)),
+            "new": int(breakdown.get("new", 0)),
+        },
         "nextCursor": next_cursor,
         "today_label": today_label,
         "shop_domain": shop_domain,
