@@ -238,6 +238,27 @@ async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
     return None
 
 
+_VALID_LEVELS = {"n1", "n2", "n3", "new"}
+
+
+def apply_level_filter(q: str, level: Optional[str]) -> str:
+    """Narrow an agent's queue query by call-attempt level.
+
+    n1/n2/n3 → only orders carrying that exact attempt tag.
+    new      → orders with none of n1/n2/n3 (i.e. not yet called).
+    """
+    if not q or not level:
+        return q
+    lv = level.lower().strip()
+    if lv not in _VALID_LEVELS:
+        return q
+    if lv in ("n1", "n2", "n3"):
+        return f"{q} tag:{_escape_tag(lv)}"
+    if lv == "new":
+        return f"{q} -tag:n1 -tag:n2 -tag:n3"
+    return q
+
+
 _COD_TAG_RE = re.compile(r"^\s*cod(\s|$)", re.IGNORECASE)
 
 
@@ -357,6 +378,7 @@ async def agent_queue(
     store: str,
     limit: int = 50,
     cursor: Optional[str] = None,
+    level: Optional[str] = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
@@ -369,12 +391,13 @@ async def agent_queue(
         shop_domain = (domain or "").strip()
     except Exception:
         shop_domain = ""
-    q = await query_for_user(db, user)
-    if not q:
+    base_q = await query_for_user(db, user)
+    if not base_q:
         return {
             "ok": True, "orders": [], "assigned_total": 0, "nextCursor": None,
             "today_label": today_label, "shop_domain": shop_domain,
         }
+    q = apply_level_filter(base_q, level)
 
     # Import lazily to avoid a circular import with main.py at module load time.
     from .main import shopify_graphql  # type: ignore
@@ -421,6 +444,117 @@ async def agent_queue(
         "today_label": today_label,
         "shop_domain": shop_domain,
     }
+
+
+# ---------- Bulk tag apply (entire queue or specific IDs) ----------
+
+class BulkTagBody(BaseModel):
+    tag: str
+    store: str
+    scope: Optional[str] = None     # "all" → apply to every order in the agent's queue
+    level: Optional[str] = None     # narrows scope=="all" by n1/n2/n3/new
+    order_ids: Optional[List[str]] = None  # used when scope != "all"
+
+
+_BULK_CONCURRENCY = 10
+
+
+@router.post("/api/agent/bulk-tag")
+async def bulk_tag(
+    body: BulkTagBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    tag = (body.tag or "").strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="tag is required")
+    store = (body.store or "").strip()
+    if not store:
+        raise HTTPException(status_code=400, detail="store is required")
+
+    # Resolve which order IDs to tag.
+    order_ids: List[str] = []
+    if (body.scope or "").lower() == "all":
+        base_q = await query_for_user(db, user)
+        if not base_q:
+            raise HTTPException(status_code=400, detail="no queue access for this user")
+        q = apply_level_filter(base_q, body.level)
+        # Paginate through Shopify, collecting non-cod order IDs.
+        from .main import shopify_graphql  # type: ignore
+        gql = """
+        query Q($first: Int!, $after: String, $q: String) {
+          orders(first: $first, after: $after, query: $q, sortKey: CREATED_AT, reverse: true) {
+            edges { cursor node { id tags } }
+            pageInfo { hasNextPage }
+          }
+        }
+        """
+        cursor: Optional[str] = None
+        # Safety cap so a runaway query doesn't tag thousands of orders.
+        MAX_BULK = 2000
+        while True:
+            data = await shopify_graphql(gql, {"first": 100, "after": cursor, "q": q}, store=store)
+            edges = ((data or {}).get("orders") or {}).get("edges") or []
+            for e in edges:
+                node = e.get("node") or {}
+                if has_cod_tag(node.get("tags") or []):
+                    continue
+                gid = node.get("id")
+                if gid:
+                    order_ids.append(gid)
+                    if len(order_ids) >= MAX_BULK:
+                        break
+            page_info = ((data or {}).get("orders") or {}).get("pageInfo") or {}
+            if (not page_info.get("hasNextPage")) or (not edges) or len(order_ids) >= MAX_BULK:
+                break
+            cursor = edges[-1].get("cursor")
+    else:
+        order_ids = [str(x or "").strip() for x in (body.order_ids or []) if str(x or "").strip()]
+        if not order_ids:
+            raise HTTPException(status_code=400, detail="order_ids is required when scope != 'all'")
+
+    if not order_ids:
+        return {"ok": True, "tagged": 0, "total": 0, "tag": tag}
+
+    # Tag each order with bounded concurrency.
+    from .main import _shopify_add_tag, _record_user_action, _normalize_store, _classify_agent_tag_action  # type: ignore
+
+    sem = asyncio.Semaphore(_BULK_CONCURRENCY)
+    audit_records: List[Dict[str, Any]] = []
+
+    async def _tag_one(oid: str) -> bool:
+        async with sem:
+            try:
+                await _shopify_add_tag(oid, tag, store)
+                audit_records.append({"order_gid": oid})
+                return True
+            except Exception:
+                return False
+
+    results = await asyncio.gather(*[_tag_one(o) for o in order_ids])
+    tagged = sum(1 for r in results if r)
+
+    # Best-effort audit log. We commit per record so a single unique-constraint clash
+    # (e.g. the user already confirmed an order earlier) doesn't roll back the others.
+    action_name = _classify_agent_tag_action(tag) or "confirmation_tag_add"
+    store_key_norm = _normalize_store(store)
+    for rec in audit_records:
+        try:
+            await _record_user_action(
+                db,
+                user_id=user.id,
+                order_number=None,
+                order_gid=rec["order_gid"],
+                store_key=store_key_norm,
+                action=action_name,
+                metadata={"tag": tag, "op": "add", "bulk": True},
+            )
+            await db.commit()
+        except Exception:
+            try: await db.rollback()
+            except Exception: pass
+
+    return {"ok": True, "tagged": tagged, "total": len(order_ids), "tag": tag}
 
 
 # ---------- Agent team stats (confirmed today across team) ----------

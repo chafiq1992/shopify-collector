@@ -21,13 +21,26 @@ const API = {
     if (!res.ok) throw new Error("agent/me failed");
     return res.json();
   },
-  async getQueue(store, { limit = 50, cursor = null } = {}) {
+  async getQueue(store, { limit = 50, cursor = null, level = null } = {}) {
     const qs = new URLSearchParams({ store, limit: String(limit) });
     if (cursor) qs.set("cursor", cursor);
+    if (level) qs.set("level", level);
     const res = await authFetch(`/api/agent/queue?${qs}`, { headers: authHeaders() });
     if (!res.ok) {
       const js = await res.json().catch(() => ({ detail: "Failed to load queue" }));
       throw new Error(js.detail || `Failed to load queue (${res.status})`);
+    }
+    return res.json();
+  },
+  async bulkTag({ tag, store, scope = null, level = null, order_ids = null }) {
+    const res = await authFetch(`/api/agent/bulk-tag`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ tag, store, scope, level, order_ids }),
+    });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Bulk tag failed" }));
+      throw new Error(js.detail || `Bulk tag failed (${res.status})`);
     }
     return res.json();
   },
@@ -178,6 +191,9 @@ function AgentView({ me }) {
   const [bulkTag, setBulkTag] = useState("");
   const [showBulkSuggestions, setShowBulkSuggestions] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [selectAllAcrossPages, setSelectAllAcrossPages] = useState(false);
+  // Filter for the top stat pills: "" | "n1" | "n2" | "n3" | "new"
+  const [filterLevel, setFilterLevel] = useState("");
   const requestIdRef = useRef(0);
   const teamRequestIdRef = useRef(0);
   const syncCount = useSyncQueueLength();
@@ -197,13 +213,13 @@ function AgentView({ me }) {
       .slice(0, PER_PAGE);
   }
 
-  // Fetch the first page and reset the cache. Used by both the manual Refresh button and
-  // the 15-second polling tick.
+  // Fetch the first page and reset the cache. Used by the manual Refresh button, the
+  // 15-second polling tick, and whenever the filter or store changes.
   const loadFirst = useCallback(async () => {
     const reqId = ++requestIdRef.current;
     setLoading(true); setError(null);
     try {
-      const js = await API.getQueue(store, { limit: PER_PAGE });
+      const js = await API.getQueue(store, { limit: PER_PAGE, level: filterLevel || null });
       if (reqId !== requestIdRef.current) return;
       const orders = dedupeAndFilter(js.orders);
       setPages([{ orders, nextCursor: js.nextCursor || null, startCursor: null }]);
@@ -214,13 +230,15 @@ function AgentView({ me }) {
         shop_domain: js.shop_domain || "",
       });
       setLastLoadedAt(Date.now());
+      // A fresh queue invalidates any cross-page select-all.
+      setSelectAllAcrossPages(false);
     } catch (e) {
       if (reqId !== requestIdRef.current) return;
       setError(e?.message || "Failed to load queue");
     } finally {
       if (reqId === requestIdRef.current) setLoading(false);
     }
-  }, [store]);
+  }, [store, filterLevel]);
 
   // Move to a specific page. If not yet cached, fetch using the previous page's nextCursor.
   const goToPage = useCallback(async (targetIdx) => {
@@ -236,12 +254,10 @@ function AgentView({ me }) {
     if (!cursor) return; // no further pages
     setPageBusy(true); setError(null);
     try {
-      const js = await API.getQueue(store, { limit: PER_PAGE, cursor });
+      const js = await API.getQueue(store, { limit: PER_PAGE, cursor, level: filterLevel || null });
       const orders = dedupeAndFilter(js.orders);
       setPages((p) => [...p, { orders, nextCursor: js.nextCursor || null, startCursor: cursor }]);
       setPageIndex(targetIdx);
-      // Keep meta in sync with whichever page was just fetched (today_label / shop_domain
-      // don't change, but assigned_total is the same global count).
       setMeta((m) => ({
         ...m,
         assigned_total: js.assigned_total ?? m.assigned_total,
@@ -253,7 +269,7 @@ function AgentView({ me }) {
     } finally {
       setPageBusy(false);
     }
-  }, [pages, store]);
+  }, [pages, store, filterLevel]);
 
   const loadTeam = useCallback(async () => {
     const reqId = ++teamRequestIdRef.current;
@@ -399,11 +415,18 @@ function AgentView({ me }) {
       }
       return next;
     });
+    // Toggling the row selection alone never implies "select across all pages".
+    setSelectAllAcrossPages(false);
   }
 
   function clearSelection() {
     setSelected(new Set());
+    setSelectAllAcrossPages(false);
   }
+
+  // The effective "selected count" the user sees on the Apply button.
+  const effectiveSelectedCount = selectAllAcrossPages ? meta.assigned_total : selected.size;
+  const canSelectAcrossPages = meta.assigned_total > ordersForView.length;
 
   // Suggestion pool = current orders' tags ∪ agent's own assigned tags. Filtered by input.
   const tagSuggestions = useMemo(() => {
@@ -419,23 +442,42 @@ function AgentView({ me }) {
 
   async function applyBulkTag() {
     const tag = String(bulkTag || "").trim();
-    if (!tag || selected.size === 0) return;
-    setBulkBusy(true);
+    if (!tag) return;
+    if (!selectAllAcrossPages && selected.size === 0) return;
+    setBulkBusy(true); setError(null);
     try {
-      const ids = [...selected];
-      const isCod = isCodTag(tag);
-      for (const id of ids) {
-        // Optimistic UI update
-        if (isCod) {
-          removeLocalOrder(id);
-        } else {
-          updateLocalOrderTags(id, (tags) => dedupTags([...tags, tag]));
+      if (selectAllAcrossPages) {
+        // Server-side: tag every order in the agent's queue (respecting the active level
+        // filter). This may take a few seconds for large queues.
+        try {
+          const js = await API.bulkTag({ tag, store, scope: "all", level: filterLevel || null });
+          // Confirmation cod-tag → orders disappear; refresh page 1 either way.
+          setError(`Bulk applied "${tag}" to ${js.tagged}/${js.total} orders.`);
+        } catch (e) {
+          setError(e?.message || "Bulk tag failed");
+        } finally {
+          setBulkTag("");
+          setShowBulkSuggestions(false);
+          clearSelection();
+          await loadFirst();
+          loadTeam();
         }
-        enqueueTagWrite({ orderId: id, action: "add", tag, store });
+      } else {
+        // Per-id flow via the durable sync queue (same as the single-order action buttons).
+        const ids = [...selected];
+        const isCod = isCodTag(tag);
+        for (const id of ids) {
+          if (isCod) {
+            removeLocalOrder(id);
+          } else {
+            updateLocalOrderTags(id, (tags) => dedupTags([...tags, tag]));
+          }
+          enqueueTagWrite({ orderId: id, action: "add", tag, store });
+        }
+        setBulkTag("");
+        setShowBulkSuggestions(false);
+        clearSelection();
       }
-      setBulkTag("");
-      setShowBulkSuggestions(false);
-      clearSelection();
     } finally {
       setBulkBusy(false);
     }
@@ -498,10 +540,31 @@ function AgentView({ me }) {
         <div className="flex flex-wrap gap-2">
           <StatPill label="Assigned" value={meta.assigned_total} />
           <StatPill label="In view" value={ordersForView.length} />
-          <StatPill label="Not called" value={stats.notCalled} accent="indigo" />
-          <StatPill label="N1" value={stats.n1} />
-          <StatPill label="N2" value={stats.n2} />
-          <StatPill label="N3" value={stats.n3} />
+          <StatPill
+            label="Not called"
+            value={stats.notCalled}
+            accent="indigo"
+            active={filterLevel === "new"}
+            onClick={() => setFilterLevel((p) => (p === "new" ? "" : "new"))}
+          />
+          <StatPill
+            label="N1"
+            value={stats.n1}
+            active={filterLevel === "n1"}
+            onClick={() => setFilterLevel((p) => (p === "n1" ? "" : "n1"))}
+          />
+          <StatPill
+            label="N2"
+            value={stats.n2}
+            active={filterLevel === "n2"}
+            onClick={() => setFilterLevel((p) => (p === "n2" ? "" : "n2"))}
+          />
+          <StatPill
+            label="N3"
+            value={stats.n3}
+            active={filterLevel === "n3"}
+            onClick={() => setFilterLevel((p) => (p === "n3" ? "" : "n3"))}
+          />
           <StatPill label="Total contacted" value={stats.contacted} />
           <StatPill label="Confirmed today" value={confirmedToday} accent="emerald" />
         </div>
@@ -523,16 +586,33 @@ function AgentView({ me }) {
             <label className="text-xs text-gray-600 inline-flex items-center gap-2 select-none">
               <input
                 type="checkbox"
-                checked={allSelected}
+                checked={selectAllAcrossPages || allSelected}
                 onChange={toggleSelectAll}
                 ref={(el) => {
                   if (!el) return;
-                  const partial = selected.size > 0 && !allSelected;
+                  const partial = selected.size > 0 && !allSelected && !selectAllAcrossPages;
                   el.indeterminate = partial;
                 }}
               />
-              {selected.size > 0 ? `${selected.size} selected` : "Select all visible"}
+              {selectAllAcrossPages
+                ? `All ${meta.assigned_total} in queue selected`
+                : (selected.size > 0 ? `${selected.size} selected` : "Select all visible")}
             </label>
+            {!selectAllAcrossPages && allSelected && canSelectAcrossPages && (
+              <button
+                type="button"
+                onClick={() => setSelectAllAcrossPages(true)}
+                className="text-xs px-2 py-1 rounded border border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+                title="Apply the tag to every matching order, not just this page"
+              >Select all {meta.assigned_total} in queue →</button>
+            )}
+            {selectAllAcrossPages && (
+              <button
+                type="button"
+                onClick={() => setSelectAllAcrossPages(false)}
+                className="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50"
+              >Limit to this page</button>
+            )}
             <div className="relative flex-1 min-w-[220px] max-w-md">
               <input
                 type="text"
@@ -559,13 +639,13 @@ function AgentView({ me }) {
             </div>
             <button
               onClick={applyBulkTag}
-              disabled={bulkBusy || selected.size === 0 || !bulkTag.trim()}
+              disabled={bulkBusy || effectiveSelectedCount === 0 || !bulkTag.trim()}
               className="text-xs px-4 py-1.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-50"
               title="Add the chosen tag to every selected order"
             >
-              {bulkBusy ? "Applying…" : `Apply to ${selected.size || "…"}`}
+              {bulkBusy ? "Applying…" : `Apply to ${effectiveSelectedCount || "…"}`}
             </button>
-            {selected.size > 0 && (
+            {(selected.size > 0 || selectAllAcrossPages) && (
               <button
                 onClick={clearSelection}
                 className="text-xs px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50"
@@ -586,9 +666,9 @@ function AgentView({ me }) {
                   <th className="px-3 py-2 w-8">
                     <input
                       type="checkbox"
-                      checked={allSelected}
+                      checked={selectAllAcrossPages || allSelected}
                       onChange={toggleSelectAll}
-                      ref={(el) => { if (el) el.indeterminate = selected.size > 0 && !allSelected; }}
+                      ref={(el) => { if (el) el.indeterminate = !selectAllAcrossPages && selected.size > 0 && !allSelected; }}
                       aria-label="Select all visible orders"
                     />
                   </th>
@@ -797,15 +877,30 @@ function AgentView({ me }) {
   );
 }
 
-function StatPill({ label, value, accent }) {
-  const palette = accent === "indigo"
-    ? "bg-indigo-50 text-indigo-700 border-indigo-200"
-    : accent === "emerald"
-    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-    : "bg-white text-gray-700 border-gray-200";
+function StatPill({ label, value, accent, onClick, active = false }) {
+  const palette = active
+    ? "bg-indigo-600 text-white border-indigo-700"
+    : accent === "indigo"
+      ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+      : accent === "emerald"
+        ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+        : "bg-white text-gray-700 border-gray-200";
+  const interactive = typeof onClick === "function";
+  const clickable = interactive
+    ? "cursor-pointer hover:shadow-sm hover:border-indigo-400 transition"
+    : "";
   return (
-    <div className={`rounded-xl border px-3 py-2 min-w-[88px] ${palette}`}>
-      <div className="text-[10px] uppercase tracking-wide opacity-70">{label}</div>
+    <div
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={interactive ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(e); } } : undefined}
+      className={`rounded-xl border px-3 py-2 min-w-[88px] ${palette} ${clickable}`}
+    >
+      <div className="text-[10px] uppercase tracking-wide opacity-70 flex items-center gap-1">
+        {label}
+        {active && <span aria-hidden>✕</span>}
+      </div>
       <div className="text-lg font-semibold leading-tight">{value}</div>
     </div>
   );
