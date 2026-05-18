@@ -27,11 +27,12 @@ HAVE_AUTH_DB = True
 try:
     from .db import get_session, init_db, SessionLocal
     from .models import User, OrderEvent, DailyUserStats, AppSetting, PrintJob, ReturnScan
-    from .auth_routes import router as auth_router, get_current_user, require_admin, hash_password
+    from .auth_routes import router as auth_router, get_current_user, get_current_user_optional, require_admin, hash_password
     from .admin_bootstrap_routes import router as admin_bootstrap_router
     from .shopify_oauth_routes import router as shopify_oauth_router
     from .settings_store import get_shopify_oauth_record, list_shopify_oauth_store_labels
     from .return_scan_routes import router as return_scan_router
+    from .confirmation_routes import router as confirmation_router
 except Exception:
     HAVE_AUTH_DB = False
     get_session = None  # type: ignore
@@ -209,6 +210,8 @@ if HAVE_AUTH_DB and "shopify_oauth_router" in globals() and shopify_oauth_router
     app.include_router(shopify_oauth_router)  # type: ignore[arg-type]
 if HAVE_AUTH_DB and "return_scan_router" in globals() and return_scan_router is not None:  # type: ignore[name-defined]
     app.include_router(return_scan_router)  # type: ignore[arg-type]
+if HAVE_AUTH_DB and "confirmation_router" in globals() and confirmation_router is not None:  # type: ignore[name-defined]
+    app.include_router(confirmation_router)  # type: ignore[arg-type]
 
 # CORS (relaxed for simplicity; tighten in prod)
 app.add_middleware(
@@ -2564,17 +2567,89 @@ def _parse_date(date_str: Optional[str]) -> Optional[datetime]:
     except Exception:
         return None
 
-@app.post("/api/orders/{order_gid:path}/add-tag")
-async def add_tag(order_gid: str, payload: TagPayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
-    data = await _shopify_add_tag(order_gid, payload.tag, store)
-    await manager.broadcast({"type": "order.tag_added", "id": order_gid, "tag": payload.tag})
-    return {"ok": True, "result": data}
+def _classify_agent_tag_action(tag: str) -> Optional[str]:
+    """Map a tag write to a richer audit-log action name for agent users."""
+    t = (tag or "").strip().lower()
+    if t in ("n1", "n2", "n3"):
+        return f"confirmation_phone_{t}"
+    if t in ("wtp1", "wtp2", "wtp3"):
+        return f"confirmation_whatsapp_{t}"
+    if t.startswith("cod "):
+        return "confirmation_confirmed"
+    return None
 
-@app.post("/api/orders/{order_gid:path}/remove-tag")
-async def remove_tag(order_gid: str, payload: TagPayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
-    data = await _shopify_remove_tag(order_gid, payload.tag, store)
-    await manager.broadcast({"type": "order.tag_removed", "id": order_gid, "tag": payload.tag})
-    return {"ok": True, "result": data}
+
+async def _maybe_log_agent_tag_action(
+    user: Optional["User"],
+    session: Optional[AsyncSession],
+    *,
+    order_gid: str,
+    tag: str,
+    op: str,
+    store: Optional[str],
+):
+    if user is None or session is None:
+        return
+    if getattr(user, "role", None) != "agent":
+        return
+    try:
+        action_name = _classify_agent_tag_action(tag) or f"confirmation_tag_{op}"
+        await _record_user_action(
+            session,
+            user_id=user.id,
+            order_number=None,
+            order_gid=order_gid,
+            store_key=_normalize_store(store),
+            action=action_name,
+            metadata={"tag": tag, "op": op},
+        )
+        await session.commit()
+    except Exception:
+        # Audit failure must never block a tag write
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+
+
+if HAVE_AUTH_DB:
+    @app.post("/api/orders/{order_gid:path}/add-tag")
+    async def add_tag(
+        order_gid: str,
+        payload: TagPayload,
+        store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
+        user: Optional[User] = Depends(get_current_user_optional),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        data = await _shopify_add_tag(order_gid, payload.tag, store)
+        await manager.broadcast({"type": "order.tag_added", "id": order_gid, "tag": payload.tag})
+        await _maybe_log_agent_tag_action(user, session, order_gid=order_gid, tag=payload.tag, op="add", store=store)
+        return {"ok": True, "result": data}
+
+    @app.post("/api/orders/{order_gid:path}/remove-tag")
+    async def remove_tag(
+        order_gid: str,
+        payload: TagPayload,
+        store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
+        user: Optional[User] = Depends(get_current_user_optional),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        data = await _shopify_remove_tag(order_gid, payload.tag, store)
+        await manager.broadcast({"type": "order.tag_removed", "id": order_gid, "tag": payload.tag})
+        await _maybe_log_agent_tag_action(user, session, order_gid=order_gid, tag=payload.tag, op="remove", store=store)
+        return {"ok": True, "result": data}
+else:
+    @app.post("/api/orders/{order_gid:path}/add-tag")
+    async def add_tag(order_gid: str, payload: TagPayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+        data = await _shopify_add_tag(order_gid, payload.tag, store)
+        await manager.broadcast({"type": "order.tag_added", "id": order_gid, "tag": payload.tag})
+        return {"ok": True, "result": data}
+
+    @app.post("/api/orders/{order_gid:path}/remove-tag")
+    async def remove_tag(order_gid: str, payload: TagPayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+        data = await _shopify_remove_tag(order_gid, payload.tag, store)
+        await manager.broadcast({"type": "order.tag_removed", "id": order_gid, "tag": payload.tag})
+        return {"ok": True, "result": data}
 
 class AppendNotePayload(BaseModel):
     append: str
@@ -4247,6 +4322,10 @@ async def _spa_order_browser():
 
 @app.get("/admin")
 async def _spa_admin():
+    return await _serve_frontend_index_or_404()
+
+@app.get("/confirmation")
+async def _spa_confirmation():
     return await _serve_frontend_index_or_404()
 
 

@@ -33,6 +33,8 @@ class User(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     last_login_at = Column(DateTime(timezone=True), nullable=True)
+    # Shopify order tag pool used to route confirmation orders to this user when role=="agent".
+    agent_tags = Column(_json_type(), nullable=False, default=list)
 
     events = relationship("OrderEvent", back_populates="user", cascade="all,delete")
 

@@ -133,7 +133,7 @@ async def register(body: RegisterBody, db: AsyncSession = Depends(get_session), 
     if exists:
         raise HTTPException(status_code=400, detail="email already exists")
 
-    role = body.role if body.role in ("admin", "collector") else "collector"
+    role = body.role if body.role in ("admin", "collector", "agent") else "collector"
     if is_first_user:
         role = "admin"
 

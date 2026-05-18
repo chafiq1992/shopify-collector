@@ -15,6 +15,7 @@ const OrderTaggerPage = lazy(() => import('./pages/OrderTagger'))
 const ShopifyConnectPage = lazy(() => import('./pages/ShopifyConnect'))
 const VariantOrdersPage = lazy(() => import('./pages/VariantOrders'))
 const ReturnScannerPage = lazy(() => import('./pages/ReturnScanner'))
+const ConfirmationPage = lazy(() => import('./pages/Confirmation'))
 
 function PageFallback() {
   return (
@@ -47,8 +48,12 @@ function RouteShell() {
     saveAuth(data)
     setAuth(data)
     try {
+      const role = data?.user?.role
+      const isAgent = role === 'agent'
       if (String(location.pathname || '') === '/login') {
-        history.replaceState(null, '', '/')
+        history.replaceState(null, '', isAgent ? '/confirmation' : '/')
+      } else if (isAgent && String(location.pathname || '') === '/') {
+        history.replaceState(null, '', '/confirmation')
       }
     } catch {}
     setRouteTick((tick) => tick + 1)
@@ -56,6 +61,17 @@ function RouteShell() {
 
   const currentPath = (typeof location !== 'undefined' ? String(location.pathname || '').trim() : '/') || '/'
   const isAuthed = !!auth?.access_token
+  const userRole = auth?.user?.role
+
+  // Agents are scoped to the confirmation page; redirect away from anything else (except /login).
+  useEffect(() => {
+    if (isAuthed && userRole === 'agent' && currentPath !== '/confirmation' && currentPath !== '/login') {
+      try {
+        history.replaceState(null, '', '/confirmation')
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      } catch {}
+    }
+  }, [isAuthed, userRole, currentPath])
 
   let Page = CollectorPage
   let pageProps = {}
@@ -63,6 +79,8 @@ function RouteShell() {
   if (!isAuthed && currentPath !== '/login') {
     Page = LoginPage
     pageProps = { onSuccess: handleLoginSuccess }
+  } else if (isAuthed && userRole === 'agent' && currentPath !== '/confirmation') {
+    Page = ConfirmationPage
   } else {
     switch (currentPath) {
       case '/login':
@@ -96,6 +114,9 @@ function RouteShell() {
         break
       case '/return-scanner':
         Page = ReturnScannerPage
+        break
+      case '/confirmation':
+        Page = ConfirmationPage
         break
       case '/':
       default:

@@ -93,7 +93,7 @@ async def admin_create_user(
     exists = await db.scalar(select(User).where(User.email == email_norm))
     if exists:
         raise HTTPException(status_code=400, detail="email already exists")
-    role = body.role if body.role in ("admin", "collector") else "collector"
+    role = body.role if body.role in ("admin", "collector", "agent") else "collector"
     user = User(
         email=email_norm,
         name=(body.name or "").strip() or None,

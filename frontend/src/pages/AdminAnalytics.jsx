@@ -283,6 +283,7 @@ export default function AdminAnalytics(){
             <button onClick={()=>goto("/order-lookup")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Order Lookup</button>
             <button onClick={()=>goto("/variant-orders")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Product Orders</button>
             <button onClick={()=>goto("/return-scanner")} className="text-xs px-3 py-1 rounded-full border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100">Return Scanner</button>
+            <button onClick={()=>goto("/confirmation")} className="text-xs px-3 py-1 rounded-full border border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100">Confirmation</button>
             <button onClick={()=>goto("/shopify-connect")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Shopify Connect</button>
           </div>
           <div className="ml-auto flex items-center gap-2">
@@ -297,6 +298,7 @@ export default function AdminAnalytics(){
             <button onClick={()=>goto("/order-lookup")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Lookup</button>
             <button onClick={()=>goto("/variant-orders")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Products</button>
             <button onClick={()=>goto("/return-scanner")} className="text-xs px-3 py-1 rounded-full border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100">Returns</button>
+            <button onClick={()=>goto("/confirmation")} className="text-xs px-3 py-1 rounded-full border border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100">Confirm</button>
             <button onClick={()=>goto("/shopify-connect")} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Connect</button>
           </div>
         </div>

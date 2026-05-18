@@ -41,7 +41,24 @@ async def get_session() -> AsyncSession:
 async def init_db():
     """Create tables at startup (lightweight, safe to run repeatedly)."""
     from . import models  # ensure models are imported
+    from sqlalchemy import text
 
     async with engine.begin() as conn:
         await conn.run_sync(models.Base.metadata.create_all)
+        # Additive migrations for columns added to existing tables.
+        # SQLite "ADD COLUMN" doesn't accept JSON default values in all versions, so we add a TEXT-typed column
+        # with default '[]' (compatible across SQLite/Postgres since the type emitted by JSON() is TEXT/JSON).
+        is_sqlite_engine = (DATABASE_URL or "").lower().startswith("sqlite")
+        try:
+            if is_sqlite_engine:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE users ADD COLUMN agent_tags TEXT NOT NULL DEFAULT '[]'"
+                )
+            else:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS agent_tags JSONB NOT NULL DEFAULT '[]'::jsonb"
+                )
+        except Exception:
+            # Column already exists or DB rejected addition (safe to ignore on repeat starts).
+            pass
 
