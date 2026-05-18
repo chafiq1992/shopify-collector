@@ -12,20 +12,21 @@ Provides:
   - GET    /api/agent/team-stats              -> per-agent confirmed-today counts
 """
 
+import asyncio
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth_routes import get_current_user, hash_password, require_admin
 from .db import get_session
-from .models import User
+from .models import OrderEvent, User
 
 router = APIRouter()
 
@@ -214,6 +215,48 @@ def build_queue_query(tags: List[str]) -> Optional[str]:
     return " ".join(parts)
 
 
+def build_catchall_query(exclude_tags: List[str]) -> str:
+    """Build a Shopify search query for an "untagged" agent: open, unshipped orders that
+    carry NONE of the other agents' tags. COD-dated orders are still removed via Python
+    post-filter."""
+    parts = ["status:open", "fulfillment_status:unshipped"]
+    for t in (exclude_tags or []):
+        if t:
+            parts.append(f"-tag:{_escape_tag(t)}")
+    return " ".join(parts)
+
+
+async def _other_agents_active_tags(db: AsyncSession, exclude_user_id: Optional[str] = None) -> List[str]:
+    """All tags carried by active confirmation users other than the given one."""
+    res = await db.execute(
+        select(User).where(User.is_active == True)  # noqa: E712
+    )
+    out: set = set()
+    for u in res.scalars().all():
+        if exclude_user_id and u.id == exclude_user_id:
+            continue
+        for t in (u.agent_tags or []):
+            if t:
+                out.add(t)
+    return sorted(out)
+
+
+async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
+    """Return the Shopify search query an agent's queue should use.
+
+    - Tags assigned     → positive OR-of-tags query
+    - No tags but role=="agent" → catch-all query that excludes every other agent's tags
+    - Otherwise         → None (their queue is intentionally empty)
+    """
+    tags = list(user.agent_tags or [])
+    if tags:
+        return build_queue_query(tags)
+    if user.role == "agent":
+        other = await _other_agents_active_tags(db, exclude_user_id=user.id)
+        return build_catchall_query(other)
+    return None
+
+
 _COD_TAG_RE = re.compile(r"^\s*cod(\s|$)", re.IGNORECASE)
 
 
@@ -334,8 +377,8 @@ async def agent_queue(
     limit: int = 50,
     cursor: Optional[str] = None,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
 ):
-    tags = list(user.agent_tags or [])
     today_label = today_cod_label()
     # Resolve the shop domain so the agent UI can link to the Shopify admin order page.
     shop_domain = ""
@@ -345,12 +388,7 @@ async def agent_queue(
         shop_domain = (domain or "").strip()
     except Exception:
         shop_domain = ""
-    if not tags:
-        return {
-            "ok": True, "orders": [], "assigned_total": 0, "nextCursor": None,
-            "today_label": today_label, "shop_domain": shop_domain,
-        }
-    q = build_queue_query(tags)
+    q = await query_for_user(db, user)
     if not q:
         return {
             "ok": True, "orders": [], "assigned_total": 0, "nextCursor": None,
@@ -413,45 +451,61 @@ async def team_stats(
     db: AsyncSession = Depends(get_session),
 ):
     today_label = today_cod_label()
-    # Any active user with assigned tags is treated as a confirmation agent for stats.
-    res = await db.execute(
-        select(User).where(User.is_active == True)  # noqa: E712
-    )
-    agents = [u for u in res.scalars().all() if (u.agent_tags or [])]
 
+    # Roster: any active user who is either intentionally an "agent" or has tags assigned.
+    res = await db.execute(select(User).where(User.is_active == True))  # noqa: E712
+    all_active = res.scalars().all()
+    agents = [u for u in all_active if u.role == "agent" or (u.agent_tags or [])]
     if not agents:
         return {"ok": True, "agents": [], "today_label": today_label}
 
+    # ----- Confirmed today (audit log) -----
+    # An agent's confirmed_today is the number of distinct orders they marked Confirmed today
+    # in the app timezone, regardless of which delivery date they chose. This comes from the
+    # OrderEvent rows written when a `cod ...` tag is added by a user.
+    tz = _tz()
+    today_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_local = today_local + timedelta(days=1)
+    today_utc = today_local.astimezone(timezone.utc)
+    tomorrow_utc = tomorrow_local.astimezone(timezone.utc)
+    agent_ids = [a.id for a in agents]
+    confirmed_map: Dict[str, int] = {a.id: 0 for a in agents}
+    if agent_ids:
+        rows = await db.execute(
+            select(OrderEvent.user_id, func.count(OrderEvent.id))
+            .where(
+                OrderEvent.action == "confirmation_confirmed",
+                OrderEvent.user_id.in_(agent_ids),
+                OrderEvent.created_at >= today_utc,
+                OrderEvent.created_at < tomorrow_utc,
+            )
+            .group_by(OrderEvent.user_id)
+        )
+        for uid, count in rows.all():
+            confirmed_map[uid] = int(count or 0)
+
+    # ----- Assigned per agent (Shopify ordersCount) -----
+    # Run all per-agent counts in parallel. Inflates counts slightly because Shopify search
+    # has no reliable wildcard exclusion for multi-word tags like "cod 18/05/26"; the agent's
+    # own /confirmation queue post-filters them away.
     from .main import shopify_graphql  # type: ignore
 
-    q = f"status:any tag:{_escape_tag(today_label)}"
-    gql = """
-    query ConfirmedToday($first: Int!, $after: String, $query: String) {
-      orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: true) {
-        edges {
-          cursor
-          node { tags }
-        }
-        pageInfo { hasNextPage }
-      }
-    }
-    """
-    counts: Dict[str, int] = {a.id: 0 for a in agents}
-    after: Optional[str] = None
-    # Cap the number of pages we scan for safety.
-    for _page in range(20):
-        data = await shopify_graphql(gql, {"first": 100, "after": after, "query": q}, store=store)
-        edges = ((data or {}).get("orders") or {}).get("edges") or []
-        page_info = ((data or {}).get("orders") or {}).get("pageInfo") or {}
-        for e in edges:
-            tags_l = {str(t or "").lower() for t in ((e.get("node") or {}).get("tags") or [])}
-            for a in agents:
-                a_tags = {str(t or "").lower() for t in (a.agent_tags or [])}
-                if a_tags & tags_l:
-                    counts[a.id] += 1
-        if not page_info.get("hasNextPage") or not edges:
-            break
-        after = edges[-1].get("cursor")
+    queries: List[Optional[str]] = []
+    for a in agents:
+        queries.append(await query_for_user(db, a))
+
+    async def _count(q: Optional[str]) -> int:
+        if not q:
+            return 0
+        gql = "query Q($q: String) { ordersCount(query: $q) { count } }"
+        try:
+            data = await shopify_graphql(gql, {"q": q}, store=store)
+            return int(((data or {}).get("ordersCount") or {}).get("count") or 0)
+        except Exception:
+            return 0
+
+    counts = await asyncio.gather(*[_count(q) for q in queries])
+    assigned_map = {a.id: counts[i] for i, a in enumerate(agents)}
 
     return {
         "ok": True,
@@ -461,8 +515,11 @@ async def team_stats(
                 "id": a.id,
                 "email": a.email,
                 "name": a.name,
+                "role": a.role,
                 "tags": list(a.agent_tags or []),
-                "confirmed_today": counts.get(a.id, 0),
+                "is_catchall": (a.role == "agent" and not (a.agent_tags or [])),
+                "assigned": assigned_map.get(a.id, 0),
+                "confirmed_today": confirmed_map.get(a.id, 0),
             }
             for a in agents
         ],

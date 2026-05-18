@@ -166,6 +166,11 @@ function AgentView({ me }) {
   const [datePickerFor, setDatePickerFor] = useState(null);
   const [chosenDate, setChosenDate] = useState(() => todayISO());
   const [teamStats, setTeamStats] = useState([]);
+  // Bulk selection + bulk-tag UI
+  const [selected, setSelected] = useState(() => new Set());
+  const [bulkTag, setBulkTag] = useState("");
+  const [showBulkSuggestions, setShowBulkSuggestions] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const requestIdRef = useRef(0);
   const teamRequestIdRef = useRef(0);
   const syncCount = useSyncQueueLength();
@@ -310,6 +315,73 @@ function AgentView({ me }) {
     enqueueTagWrite({ orderId: order.id, action: "remove", tag, store });
   }
 
+  // ---------- Bulk selection / bulk tagging ----------
+  function toggleRowSelected(orderId) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(orderId)) next.delete(orderId); else next.add(orderId);
+      return next;
+    });
+  }
+
+  const allSelected = useMemo(
+    () => ordersForView.length > 0 && ordersForView.every((o) => selected.has(o.id)),
+    [ordersForView, selected]
+  );
+
+  function toggleSelectAll() {
+    setSelected((prev) => {
+      if (ordersForView.length === 0) return prev;
+      const next = new Set(prev);
+      if (allSelected) {
+        for (const o of ordersForView) next.delete(o.id);
+      } else {
+        for (const o of ordersForView) next.add(o.id);
+      }
+      return next;
+    });
+  }
+
+  function clearSelection() {
+    setSelected(new Set());
+  }
+
+  // Suggestion pool = current orders' tags ∪ agent's own assigned tags. Filtered by input.
+  const tagSuggestions = useMemo(() => {
+    const pool = new Set();
+    for (const o of ordersForView) for (const t of (o.tags || [])) if (t) pool.add(t);
+    const ownTags = (agentInfo?.tags || me?.tags || []);
+    for (const t of ownTags) if (t) pool.add(t);
+    const q = String(bulkTag || "").trim().toLowerCase();
+    const list = [...pool].filter((t) => String(t || "").toLowerCase() !== q);
+    if (!q) return list.slice(0, 10);
+    return list.filter((t) => String(t || "").toLowerCase().includes(q)).slice(0, 10);
+  }, [ordersForView, agentInfo, me, bulkTag]);
+
+  async function applyBulkTag() {
+    const tag = String(bulkTag || "").trim();
+    if (!tag || selected.size === 0) return;
+    setBulkBusy(true);
+    try {
+      const ids = [...selected];
+      const isCod = isCodTag(tag);
+      for (const id of ids) {
+        // Optimistic UI update
+        if (isCod) {
+          removeLocalOrder(id);
+        } else {
+          updateLocalOrderTags(id, (tags) => dedupTags([...tags, tag]));
+        }
+        enqueueTagWrite({ orderId: id, action: "add", tag, store });
+      }
+      setBulkTag("");
+      setShowBulkSuggestions(false);
+      clearSelection();
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   // ---------- Stats ----------
   const stats = useMemo(() => {
     let n1 = 0, n2 = 0, n3 = 0, notCalled = 0, contacted = 0;
@@ -386,12 +458,81 @@ function AgentView({ me }) {
         )}
         {error && <div className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</div>}
 
+        {/* Bulk-action bar */}
+        <section className="bg-white border border-gray-200 rounded-2xl p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-xs text-gray-600 inline-flex items-center gap-2 select-none">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={toggleSelectAll}
+                ref={(el) => {
+                  if (!el) return;
+                  const partial = selected.size > 0 && !allSelected;
+                  el.indeterminate = partial;
+                }}
+              />
+              {selected.size > 0 ? `${selected.size} selected` : "Select all visible"}
+            </label>
+            <div className="relative flex-1 min-w-[220px] max-w-md">
+              <input
+                type="text"
+                value={bulkTag}
+                onChange={(e) => { setBulkTag(e.target.value); setShowBulkSuggestions(true); }}
+                onFocus={() => setShowBulkSuggestions(true)}
+                onBlur={() => setTimeout(() => setShowBulkSuggestions(false), 120)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); applyBulkTag(); } }}
+                placeholder="Tag to add (e.g. agent_yasmine, cod 18/05/26)"
+                className="w-full text-sm border border-gray-300 rounded-lg px-3 py-1.5"
+              />
+              {showBulkSuggestions && tagSuggestions.length > 0 && (
+                <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-56 overflow-auto">
+                  {tagSuggestions.map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onMouseDown={(ev) => { ev.preventDefault(); setBulkTag(t); setShowBulkSuggestions(false); }}
+                      className="block w-full text-left text-xs px-3 py-1.5 hover:bg-indigo-50"
+                    >{t}</button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button
+              onClick={applyBulkTag}
+              disabled={bulkBusy || selected.size === 0 || !bulkTag.trim()}
+              className="text-xs px-4 py-1.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-50"
+              title="Add the chosen tag to every selected order"
+            >
+              {bulkBusy ? "Applying…" : `Apply to ${selected.size || "…"}`}
+            </button>
+            {selected.size > 0 && (
+              <button
+                onClick={clearSelection}
+                className="text-xs px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50"
+              >Clear</button>
+            )}
+            <div className="text-[11px] text-gray-500 ml-auto">
+              Tip: a <code className="bg-gray-100 px-1 rounded">cod dd/mm/yy</code> tag removes the order from your queue.
+            </div>
+          </div>
+        </section>
+
         {/* Order table */}
         <section className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
           <div className="overflow-auto">
             <table className="min-w-full text-sm">
               <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
                 <tr>
+                  <th className="px-3 py-2 w-8">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={toggleSelectAll}
+                      ref={(el) => { if (el) el.indeterminate = selected.size > 0 && !allSelected; }}
+                      aria-label="Select all visible orders"
+                    />
+                  </th>
                   <th className="px-3 py-2">Order</th>
                   <th className="px-3 py-2">Customer</th>
                   <th className="px-3 py-2">Phone</th>
@@ -404,7 +545,7 @@ function AgentView({ me }) {
               </thead>
               <tbody>
                 {ordersForView.length === 0 && !loading && (
-                  <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-500">No orders in your queue.</td></tr>
+                  <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-500">No orders in your queue.</td></tr>
                 )}
                 {ordersForView.map((o) => {
                   const isOpen = expanded.has(o.id);
@@ -412,10 +553,10 @@ function AgentView({ me }) {
                   return (
                     <React.Fragment key={o.id}>
                       <tr
-                        className="border-t border-gray-100 hover:bg-gray-50 cursor-pointer"
+                        className={`border-t border-gray-100 hover:bg-gray-50 cursor-pointer ${selected.has(o.id) ? "bg-indigo-50/40" : ""}`}
                         onClick={(e) => {
                           const tag = (e.target?.tagName || "").toLowerCase();
-                          if (["button", "input", "select", "a", "svg", "path"].includes(tag)) return;
+                          if (["button", "input", "select", "a", "svg", "path", "label"].includes(tag)) return;
                           setExpanded((prev) => {
                             const next = new Set(prev);
                             if (next.has(o.id)) next.delete(o.id); else next.add(o.id);
@@ -423,6 +564,14 @@ function AgentView({ me }) {
                           });
                         }}
                       >
+                        <td className="px-3 py-2 w-8" onClick={(ev) => ev.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={selected.has(o.id)}
+                            onChange={() => toggleRowSelected(o.id)}
+                            aria-label={`Select order ${o.name || o.number}`}
+                          />
+                        </td>
                         <td className="px-3 py-2 font-medium">
                           {(() => {
                             const url = shopifyOrderUrl(o, data.shop_domain);
@@ -490,7 +639,7 @@ function AgentView({ me }) {
                       </tr>
                       {pickerOpen && (
                         <tr className="bg-indigo-50/40">
-                          <td colSpan={8} className="px-3 py-2">
+                          <td colSpan={9} className="px-3 py-2">
                             <div className="flex items-center gap-2">
                               <span className="text-xs text-gray-700">Confirm delivery for:</span>
                               <input
@@ -513,7 +662,7 @@ function AgentView({ me }) {
                       )}
                       {isOpen && (
                         <tr className="bg-gray-50/60">
-                          <td colSpan={8} className="px-3 py-3">
+                          <td colSpan={9} className="px-3 py-3">
                             <LineItemsGrid order={o} />
                           </td>
                         </tr>
@@ -526,21 +675,44 @@ function AgentView({ me }) {
           </div>
         </section>
 
-        {/* Team panel */}
-        <section className="bg-white border border-gray-200 rounded-2xl p-4">
-          <div className="text-sm font-semibold mb-2">Team confirmations today {data.today_label && <span className="text-xs text-gray-500 font-normal">({data.today_label})</span>}</div>
-          {teamStats.length === 0 ? (
-            <div className="text-xs text-gray-500">No team data yet.</div>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {teamStats.map((a) => (
-                <div key={a.id} className={`text-xs rounded-lg border px-3 py-2 ${a.id === me.id ? "border-indigo-300 bg-indigo-50" : "border-gray-200 bg-gray-50"}`}>
-                  <div className="font-medium">{a.name || a.email}</div>
-                  <div className="text-gray-600">{a.confirmed_today} confirmed</div>
-                </div>
-              ))}
-            </div>
-          )}
+        {/* Team panels: assigned + confirmed today */}
+        <section className="bg-white border border-gray-200 rounded-2xl p-4 space-y-4">
+          <div>
+            <div className="text-sm font-semibold mb-2">Team — assigned now</div>
+            {teamStats.length === 0 ? (
+              <div className="text-xs text-gray-500">No team data yet.</div>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {teamStats.map((a) => (
+                  <div key={`a-${a.id}`} className={`text-xs rounded-lg border px-3 py-2 ${a.id === me.id ? "border-indigo-300 bg-indigo-50" : "border-gray-200 bg-gray-50"}`}>
+                    <div className="font-medium flex items-center gap-1">
+                      {a.name || a.email}
+                      {a.is_catchall && <span className="text-[10px] uppercase tracking-wide bg-amber-100 text-amber-700 border border-amber-200 rounded px-1">catch-all</span>}
+                    </div>
+                    <div className="text-gray-700">{a.assigned} assigned</div>
+                    <div className="text-[10px] text-gray-500 truncate max-w-[180px]" title={(a.tags || []).join(", ")}>
+                      {(a.tags || []).length === 0 ? (a.is_catchall ? "no tag · sees untagged orders" : "no tag") : (a.tags || []).join(", ")}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div>
+            <div className="text-sm font-semibold mb-2">Team — confirmed today {data.today_label && <span className="text-xs text-gray-500 font-normal">(any cod date, clicks counted today)</span>}</div>
+            {teamStats.length === 0 ? (
+              <div className="text-xs text-gray-500">No team data yet.</div>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {teamStats.map((a) => (
+                  <div key={`c-${a.id}`} className={`text-xs rounded-lg border px-3 py-2 ${a.id === me.id ? "border-emerald-300 bg-emerald-50" : "border-gray-200 bg-gray-50"}`}>
+                    <div className="font-medium">{a.name || a.email}</div>
+                    <div className="text-gray-700">{a.confirmed_today} confirmed</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </section>
       </main>
     </div>
