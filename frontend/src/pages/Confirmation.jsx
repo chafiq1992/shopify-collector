@@ -176,7 +176,7 @@ function AgentView({ me }) {
   const [pages, setPages] = useState([]);
   const [pageIndex, setPageIndex] = useState(0);
   const [meta, setMeta] = useState({ assigned_total: 0, today_label: "", shop_domain: "" });
-  const PER_PAGE = 41;
+  const PER_PAGE = 50;
   const [loading, setLoading] = useState(false);
   const [pageBusy, setPageBusy] = useState(false);
   const [error, setError] = useState(null);

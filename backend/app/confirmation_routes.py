@@ -199,10 +199,16 @@ def _escape_tag(t: str) -> str:
     return '"' + str(t or "").replace('"', '\\"') + '"'
 
 
+# Tag prefix wildcard that excludes every tag beginning with "cod" (e.g. "cod 18/05/26",
+# "cod_done", "cod-pending"). Shopify search supports `tag:<prefix>*` and its negation
+# `-tag:<prefix>*` on tag values. This lets the Shopify ordersCount and pagination match
+# the Python post-filter, so "Assigned" agrees with what the agent can actually select.
+_COD_EXCLUSION = "-tag:cod*"
+
+
 def build_queue_query(tags: List[str]) -> Optional[str]:
-    """Build a Shopify search query that returns open, unshipped orders carrying any of the
-    agent's tags. COD-dated orders are excluded in Python post-filtering (Shopify search does
-    not support reliable wildcard exclusions for multi-word tags like "cod 15/05/26")."""
+    """Build a Shopify search query that returns open, unshipped, not-yet-confirmed orders
+    carrying any of the agent's tags."""
     tags = [t for t in (tags or []) if t]
     if not tags:
         return None
@@ -210,17 +216,16 @@ def build_queue_query(tags: List[str]) -> Optional[str]:
     parts = [
         "status:open",
         "fulfillment_status:unshipped",
+        _COD_EXCLUSION,
         f"({tag_or})",
     ]
     return " ".join(parts)
 
 
 def build_catchall_query() -> str:
-    """Build a Shopify search query for an "untagged" agent: every open, unshipped order.
-    Cancelled orders are already excluded by `status:open`. COD-dated orders are stripped
-    by the Python post-filter (Shopify search has no reliable multi-word wildcard
-    exclusion for tags like "cod 18/05/26")."""
-    return "status:open fulfillment_status:unshipped"
+    """Build a Shopify search query for an "untagged" agent: every open, unshipped order
+    that isn't already confirmed. Cancelled orders are excluded by `status:open`."""
+    return f"status:open fulfillment_status:unshipped {_COD_EXCLUSION}"
 
 
 async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
