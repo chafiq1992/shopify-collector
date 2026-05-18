@@ -44,6 +44,18 @@ const API = {
     }
     return res.json();
   },
+  async cancelOrder(orderId, { store, reason, staff_note, restock, refund }) {
+    const res = await authFetch(`/api/agent/orders/${encodeURIComponent(orderId)}/cancel`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ store, reason, staff_note, restock, refund }),
+    });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Cancel failed" }));
+      throw new Error(js.detail || `Cancel failed (${res.status})`);
+    }
+    return res.json();
+  },
   async teamStats(store) {
     const qs = new URLSearchParams({ store });
     const res = await authFetch(`/api/agent/team-stats?${qs}`, { headers: authHeaders() });
@@ -191,8 +203,11 @@ function AgentView({ me }) {
   const [bulkTag, setBulkTag] = useState("");
   const [showBulkSuggestions, setShowBulkSuggestions] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
-  // Filter for the top stat pills: "" | "n1" | "n2" | "n3" | "new"
+  // Filter for the top stat pills: "" | "n1" | "n2" | "n3" | "n4" | "new"
   const [filterLevel, setFilterLevel] = useState("");
+  // Per-row "..." dropdown + cancel-order modal
+  const [actionsDropdownFor, setActionsDropdownFor] = useState(null);
+  const [cancelModalFor, setCancelModalFor] = useState(null);
   const requestIdRef = useRef(0);
   const teamRequestIdRef = useRef(0);
   const syncCount = useSyncQueueLength();
@@ -295,6 +310,14 @@ function AgentView({ me }) {
     const t = setInterval(() => setNowTick((n) => n + 1), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // Close the per-row "..." dropdown whenever the user clicks anywhere else.
+  useEffect(() => {
+    if (!actionsDropdownFor) return;
+    function onDocClick() { setActionsDropdownFor(null); }
+    window.addEventListener("click", onDocClick);
+    return () => window.removeEventListener("click", onDocClick);
+  }, [actionsDropdownFor]);
 
   const currentOrders = pages[pageIndex]?.orders || [];
   const hasNextPage = !!(pages[pageIndex]?.nextCursor) || pageIndex + 1 < pages.length;
@@ -455,19 +478,22 @@ function AgentView({ me }) {
 
   // ---------- Stats ----------
   const stats = useMemo(() => {
-    let n1 = 0, n2 = 0, n3 = 0, notCalled = 0, contacted = 0;
+    let n1 = 0, n2 = 0, n3 = 0, n4 = 0, notCalled = 0, contacted = 0;
     for (const o of ordersForView) {
       const tags = (o.tags || []).map((t) => String(t || "").trim().toLowerCase());
       const has1 = tags.includes("n1");
       const has2 = tags.includes("n2");
       const has3 = tags.includes("n3");
-      if (has3) n3++;
+      const has4 = tags.includes("n4");
+      // Classify by highest attempt level present.
+      if (has4) n4++;
+      else if (has3) n3++;
       else if (has2) n2++;
       else if (has1) n1++;
       else notCalled++;
-      if (has1 || has2 || has3) contacted++;
+      if (has1 || has2 || has3 || has4) contacted++;
     }
-    return { n1, n2, n3, notCalled, contacted };
+    return { n1, n2, n3, n4, notCalled, contacted };
   }, [ordersForView]);
 
   const confirmedToday = useMemo(() => {
@@ -534,6 +560,12 @@ function AgentView({ me }) {
             value={stats.n3}
             active={filterLevel === "n3"}
             onClick={() => setFilterLevel((p) => (p === "n3" ? "" : "n3"))}
+          />
+          <StatPill
+            label="N4"
+            value={stats.n4}
+            active={filterLevel === "n4"}
+            onClick={() => setFilterLevel((p) => (p === "n4" ? "" : "n4"))}
           />
           <StatPill label="Total contacted" value={stats.contacted} />
           <StatPill label="Confirmed today" value={confirmedToday} accent="emerald" />
@@ -705,11 +737,11 @@ function AgentView({ me }) {
                           </div>
                         </td>
                         <td className="px-3 py-2 text-right whitespace-nowrap">
-                          <div className="inline-flex gap-1">
+                          <div className="inline-flex items-center gap-1">
                             <button
                               onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
                               className="text-xs px-3 py-1 rounded-lg bg-sky-600 text-white hover:bg-sky-700"
-                              title="Copy phone + advance n1/n2/n3"
+                              title="Copy phone + advance n1/n2/n3/n4"
                             >
                               📞 {tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || ""}
                             </button>
@@ -725,6 +757,31 @@ function AgentView({ me }) {
                               className="text-xs px-3 py-1 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
                               title="Confirm for a delivery date"
                             >✅</button>
+                            <div className="relative">
+                              <button
+                                onClick={(ev) => {
+                                  ev.stopPropagation();
+                                  setActionsDropdownFor((prev) => (prev === o.id ? null : o.id));
+                                }}
+                                className="text-xs px-2 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 text-gray-700"
+                                title="More actions"
+                                aria-haspopup="menu"
+                                aria-expanded={actionsDropdownFor === o.id}
+                              >⋯</button>
+                              {actionsDropdownFor === o.id && (
+                                <div
+                                  role="menu"
+                                  onClick={(ev) => ev.stopPropagation()}
+                                  className="absolute right-0 mt-1 w-44 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden"
+                                >
+                                  <button
+                                    role="menuitem"
+                                    onClick={() => { setCancelModalFor(o); setActionsDropdownFor(null); }}
+                                    className="block w-full text-left text-xs px-3 py-2 hover:bg-rose-50 text-rose-700"
+                                  >Cancel order…</button>
+                                </div>
+                              )}
+                            </div>
                           </div>
                         </td>
                       </tr>
@@ -825,6 +882,123 @@ function AgentView({ me }) {
           </div>
         </section>
       </main>
+      {cancelModalFor && (
+        <CancelOrderModal
+          order={cancelModalFor}
+          store={store}
+          onClose={() => setCancelModalFor(null)}
+          onSuccess={() => {
+            // Cancelled orders should disappear from the queue (status:open filter excludes them).
+            removeLocalOrder(cancelModalFor.id);
+            setCancelModalFor(null);
+            // Refresh team-stats so any "confirmed today" / "assigned now" rollups update.
+            loadTeam();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function CancelOrderModal({ order, store, onClose, onSuccess }) {
+  const [reason, setReason] = useState("CUSTOMER");
+  const [staffNote, setStaffNote] = useState("");
+  const [restock, setRestock] = useState(true);
+  const [refund, setRefund] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const orderLabel = order?.name || `#${order?.number || ""}`;
+  const amount = `${order?.total_price || ""} ${order?.currency || ""}`.trim();
+
+  async function submit() {
+    setBusy(true); setErr(null);
+    try {
+      await API.cancelOrder(order.id, {
+        store,
+        reason,
+        staff_note: staffNote.trim() || null,
+        restock,
+        refund,
+      });
+      onSuccess?.();
+    } catch (e) {
+      setErr(e?.message || "Failed to cancel order");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Esc to close
+  useEffect(() => {
+    function onKey(e) { if (e.key === "Escape" && !busy) onClose?.(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 px-4" onClick={() => { if (!busy) onClose?.(); }}>
+      <div
+        className="bg-white border border-gray-200 rounded-2xl p-5 w-full max-w-md shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-base font-semibold mb-4">Cancel order {orderLabel}?</div>
+
+        <div className="mb-3">
+          <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">Cancel transactions</div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={refund} onChange={(e) => setRefund(e.target.checked)} />
+            Cancel {amount} pending
+          </label>
+        </div>
+
+        <div className="mb-3">
+          <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">Reason for cancellation</label>
+          <select
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm bg-white"
+          >
+            <option value="CUSTOMER">Customer changed or canceled order</option>
+            <option value="INVENTORY">Items unavailable</option>
+            <option value="FRAUD">Fraudulent order</option>
+            <option value="DECLINED">Payment declined</option>
+            <option value="STAFF">Staff error</option>
+            <option value="OTHER">Other</option>
+          </select>
+        </div>
+
+        <div className="mb-3">
+          <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">Staff note</label>
+          <div className="text-[11px] text-gray-500 mb-1">Only you and other staff can see this note.</div>
+          <textarea
+            value={staffNote}
+            onChange={(e) => setStaffNote(e.target.value)}
+            rows={2}
+            className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+            placeholder="Optional"
+          />
+        </div>
+
+        <label className="flex items-center gap-2 text-sm mb-4">
+          <input type="checkbox" checked={restock} onChange={(e) => setRestock(e.target.checked)} />
+          Restock inventory
+        </label>
+
+        {err && <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 mb-3">{err}</div>}
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="text-sm px-4 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50"
+          >Cancel</button>
+          <button
+            onClick={submit}
+            disabled={busy}
+            className="text-sm px-4 py-1.5 rounded-lg bg-rose-600 text-white font-medium hover:bg-rose-700 disabled:opacity-50"
+          >{busy ? "Cancelling…" : "Cancel order"}</button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -2570,7 +2570,7 @@ def _parse_date(date_str: Optional[str]) -> Optional[datetime]:
 def _classify_agent_tag_action(tag: str) -> Optional[str]:
     """Map a tag write to a richer audit-log action name for agent users."""
     t = (tag or "").strip().lower()
-    if t in ("n1", "n2", "n3"):
+    if t in ("n1", "n2", "n3", "n4"):
         return f"confirmation_phone_{t}"
     if t in ("wtp1", "wtp2", "wtp3"):
         return f"confirmation_whatsapp_{t}"

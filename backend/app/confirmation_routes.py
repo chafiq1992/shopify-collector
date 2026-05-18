@@ -244,24 +244,24 @@ async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
     return None
 
 
-_VALID_LEVELS = {"n1", "n2", "n3", "new"}
+_VALID_LEVELS = {"n1", "n2", "n3", "n4", "new"}
 
 
 def apply_level_filter(q: str, level: Optional[str]) -> str:
     """Narrow an agent's queue query by call-attempt level.
 
-    n1/n2/n3 → only orders carrying that exact attempt tag.
-    new      → orders with none of n1/n2/n3 (i.e. not yet called).
+    n1/n2/n3/n4 → only orders carrying that exact attempt tag.
+    new         → orders with none of n1/n2/n3/n4 (i.e. not yet called).
     """
     if not q or not level:
         return q
     lv = level.lower().strip()
     if lv not in _VALID_LEVELS:
         return q
-    if lv in ("n1", "n2", "n3"):
+    if lv in ("n1", "n2", "n3", "n4"):
         return f"{q} tag:{_escape_tag(lv)}"
     if lv == "new":
-        return f"{q} -tag:n1 -tag:n2 -tag:n3"
+        return f"{q} -tag:n1 -tag:n2 -tag:n3 -tag:n4"
     return q
 
 
@@ -519,6 +519,100 @@ async def agent_queue(
         "today_label": today_label,
         "shop_domain": shop_domain,
     }
+
+
+# ---------- Cancel a Shopify order ----------
+
+_VALID_CANCEL_REASONS = {"CUSTOMER", "DECLINED", "FRAUD", "INVENTORY", "OTHER", "STAFF"}
+
+
+class CancelOrderBody(BaseModel):
+    store: str
+    reason: str = "CUSTOMER"
+    staff_note: Optional[str] = None
+    restock: bool = True
+    refund: bool = True
+    notify_customer: bool = False
+
+
+@router.post("/api/agent/orders/{order_gid:path}/cancel")
+async def cancel_order(
+    order_gid: str,
+    body: CancelOrderBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    reason = (body.reason or "CUSTOMER").upper().strip()
+    if reason not in _VALID_CANCEL_REASONS:
+        raise HTTPException(status_code=400, detail=f"invalid reason; one of {sorted(_VALID_CANCEL_REASONS)}")
+    store = (body.store or "").strip()
+    if not store:
+        raise HTTPException(status_code=400, detail="store is required")
+
+    from .main import shopify_graphql, _record_user_action, _normalize_store  # type: ignore
+
+    mutation = """
+    mutation CancelOrder(
+      $orderId: ID!,
+      $reason: OrderCancelReason!,
+      $refund: Boolean!,
+      $restock: Boolean!,
+      $staffNote: String,
+      $notifyCustomer: Boolean
+    ) {
+      orderCancel(
+        orderId: $orderId,
+        reason: $reason,
+        refund: $refund,
+        restock: $restock,
+        staffNote: $staffNote,
+        notifyCustomer: $notifyCustomer
+      ) {
+        orderCancelUserErrors { code field message }
+        userErrors { field message }
+      }
+    }
+    """
+    variables = {
+        "orderId": order_gid,
+        "reason": reason,
+        "refund": bool(body.refund),
+        "restock": bool(body.restock),
+        "staffNote": (body.staff_note or "").strip() or None,
+        "notifyCustomer": bool(body.notify_customer),
+    }
+    try:
+        data = await shopify_graphql(mutation, variables, store=store)
+    except HTTPException as he:
+        raise he
+    result = (data or {}).get("orderCancel") or {}
+    errs = (result.get("orderCancelUserErrors") or []) + (result.get("userErrors") or [])
+    if errs:
+        msg = "; ".join(f"{e.get('field') or '?'}: {e.get('message') or ''}" for e in errs)
+        raise HTTPException(status_code=400, detail=f"Shopify cancel failed: {msg}")
+
+    # Best-effort audit log (independent of any tag mutations).
+    try:
+        await _record_user_action(
+            db,
+            user_id=user.id,
+            order_number=None,
+            order_gid=order_gid,
+            store_key=_normalize_store(store),
+            action="confirmation_cancelled",
+            metadata={
+                "reason": reason,
+                "restock": bool(body.restock),
+                "refund": bool(body.refund),
+                "staff_note": (body.staff_note or "").strip() or None,
+            },
+        )
+        await db.commit()
+    except Exception:
+        try: await db.rollback()
+        except Exception: pass
+
+    return {"ok": True}
 
 
 # ---------- Bulk tag apply (entire queue or specific IDs) ----------

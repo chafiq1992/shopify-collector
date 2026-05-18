@@ -1,7 +1,7 @@
 // Helpers for the call-center confirmation page: phone formatting, tag cycling,
 // and clipboard copy.
 
-export const PHONE_TAGS = ["n1", "n2", "n3"];
+export const PHONE_TAGS = ["n1", "n2", "n3", "n4"];
 export const WHATSAPP_TAGS = ["wtp1", "wtp2", "wtp3"];
 
 const PHONE_SET = new Set(PHONE_TAGS);
