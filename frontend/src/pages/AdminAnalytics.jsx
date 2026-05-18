@@ -29,6 +29,20 @@ export default function AdminAnalytics(){
   const [resetEmail, setResetEmail] = useState("");
   const [resetPassword, setResetPassword] = useState("");
 
+  // Confirmation agents management
+  const [agents, setAgents] = useState([]);
+  const [agentEmail, setAgentEmail] = useState("");
+  const [agentName, setAgentName] = useState("");
+  const [agentPassword, setAgentPassword] = useState("");
+  const [agentTagsInput, setAgentTagsInput] = useState("");
+  const [agentsBusy, setAgentsBusy] = useState(false);
+  const [agentMsg, setAgentMsg] = useState(null);
+  const [editingAgentId, setEditingAgentId] = useState(null);
+  const [editAgentName, setEditAgentName] = useState("");
+  const [editAgentTags, setEditAgentTags] = useState("");
+  const [editAgentPassword, setEditAgentPassword] = useState("");
+  const agentsRequestIdRef = useRef(0);
+
   const [orderSearch, setOrderSearch] = useState("");
   const [orderSearchResults, setOrderSearchResults] = useState([]);
   const [orderSearchLoading, setOrderSearchLoading] = useState(false);
@@ -234,6 +248,135 @@ export default function AdminAnalytics(){
     }
   }
 
+  async function loadAgents(){
+    const reqId = ++agentsRequestIdRef.current;
+    try {
+      const res = await authFetch(`/api/admin/agents`, { headers: authHeaders({"Accept":"application/json"}) });
+      if (!res.ok){
+        const js = await res.json().catch(()=>({detail:"Failed to load agents"}));
+        throw new Error(js.detail || "Failed to load agents");
+      }
+      const js = await res.json();
+      if (reqId !== agentsRequestIdRef.current) return;
+      setAgents(js.agents || []);
+    } catch (e){
+      if (reqId !== agentsRequestIdRef.current) return;
+      setAgentMsg(e?.message || "Failed to load agents");
+    }
+  }
+
+  function parseTagsInput(raw){
+    return String(raw || "").split(",").map(t => t.trim()).filter(Boolean);
+  }
+
+  async function handleCreateAgent(e){
+    e?.preventDefault?.();
+    setAgentMsg(null);
+    if (!agentEmail || !agentPassword){
+      setAgentMsg("Email and password are required");
+      return;
+    }
+    setAgentsBusy(true);
+    try {
+      const res = await authFetch(`/api/admin/agents`, {
+        method: "POST",
+        headers: authHeaders({"Content-Type":"application/json"}),
+        body: JSON.stringify({
+          email: agentEmail,
+          password: agentPassword,
+          name: agentName || null,
+          tags: parseTagsInput(agentTagsInput),
+        })
+      });
+      const js = await res.json().catch(()=>({detail:"Failed to create agent"}));
+      if (!res.ok) throw new Error(js.detail || "Failed to create agent");
+      setAgentMsg(`Agent created: ${js?.agent?.email || agentEmail}`);
+      setAgentEmail(""); setAgentName(""); setAgentPassword(""); setAgentTagsInput("");
+      await loadAgents();
+    } catch (e2){
+      setAgentMsg(e2?.message || "Failed to create agent");
+    } finally {
+      setAgentsBusy(false);
+    }
+  }
+
+  function startEditAgent(a){
+    setEditingAgentId(a.id);
+    setEditAgentName(a.name || "");
+    setEditAgentTags((a.tags || []).join(", "));
+    setEditAgentPassword("");
+    setAgentMsg(null);
+  }
+
+  function cancelEditAgent(){
+    setEditingAgentId(null);
+    setEditAgentName(""); setEditAgentTags(""); setEditAgentPassword("");
+  }
+
+  async function saveEditAgent(a){
+    setAgentsBusy(true); setAgentMsg(null);
+    try {
+      const body = {
+        name: editAgentName || null,
+        tags: parseTagsInput(editAgentTags),
+      };
+      if ((editAgentPassword || "").trim()) body.password = editAgentPassword.trim();
+      const res = await authFetch(`/api/admin/agents/${encodeURIComponent(a.id)}`, {
+        method: "PATCH",
+        headers: authHeaders({"Content-Type":"application/json"}),
+        body: JSON.stringify(body),
+      });
+      const js = await res.json().catch(()=>({detail:"Failed to save agent"}));
+      if (!res.ok) throw new Error(js.detail || "Failed to save agent");
+      cancelEditAgent();
+      setAgentMsg(`Agent updated: ${a.email}`);
+      await loadAgents();
+    } catch (e){
+      setAgentMsg(e?.message || "Failed to save agent");
+    } finally {
+      setAgentsBusy(false);
+    }
+  }
+
+  async function removeAgentTag(a, tag){
+    setAgentsBusy(true); setAgentMsg(null);
+    try {
+      const nextTags = (a.tags || []).filter(t => String(t).toLowerCase() !== String(tag).toLowerCase());
+      const res = await authFetch(`/api/admin/agents/${encodeURIComponent(a.id)}`, {
+        method: "PATCH",
+        headers: authHeaders({"Content-Type":"application/json"}),
+        body: JSON.stringify({ tags: nextTags }),
+      });
+      if (!res.ok){
+        const js = await res.json().catch(()=>({detail:"Failed to remove tag"}));
+        throw new Error(js.detail || "Failed to remove tag");
+      }
+      await loadAgents();
+    } catch (e){
+      setAgentMsg(e?.message || "Failed to remove tag");
+    } finally {
+      setAgentsBusy(false);
+    }
+  }
+
+  async function deleteAgent(a){
+    if (!confirm(`Delete agent ${a.email}? They will no longer be able to log in.`)) return;
+    setAgentsBusy(true); setAgentMsg(null);
+    try {
+      const res = await authFetch(`/api/admin/agents/${encodeURIComponent(a.id)}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error(`Failed to delete (${res.status})`);
+      setAgentMsg(`Deleted agent ${a.email}`);
+      await loadAgents();
+    } catch (e){
+      setAgentMsg(e?.message || "Failed to delete agent");
+    } finally {
+      setAgentsBusy(false);
+    }
+  }
+
   async function handleResetPassword(e){
     e?.preventDefault?.();
     setAdminMsg(null);
@@ -258,6 +401,7 @@ export default function AdminAnalytics(){
 
   useEffect(() => { load(); }, []); // initial
   useEffect(() => { loadUsers(); }, []); // initial
+  useEffect(() => { loadAgents(); }, []); // initial
 
   function goto(path){
     try {
@@ -415,6 +559,7 @@ export default function AdminAnalytics(){
                       <select value={newUserRole} onChange={(e)=>setNewUserRole(e.target.value)} className="w-full border border-gray-300 rounded-lg px-2 py-1 text-sm bg-white">
                         <option value="collector">collector</option>
                         <option value="admin">admin</option>
+                        <option value="agent">agent (confirmation)</option>
                       </select>
                     </div>
                     <button type="submit" className="w-full text-sm px-3 py-2 rounded-lg bg-gray-900 text-white font-semibold active:scale-[.98]">Create user</button>
@@ -469,6 +614,107 @@ export default function AdminAnalytics(){
                     </table>
                   </div>
                   <button onClick={loadUsers} className="mt-2 w-full text-sm px-3 py-2 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Refresh</button>
+                </div>
+              </div>
+            </section>
+            <section className="mb-6">
+              <div className="flex items-center mb-2">
+                <h3 className="text-sm font-semibold text-gray-700">Confirmation agents</h3>
+                <span className="ml-2 text-xs text-gray-500">Agents assigned Shopify tags route COD orders to their <a className="underline" href="/confirmation">/confirmation</a> queue.</span>
+                <button onClick={loadAgents} className="ml-auto text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Refresh</button>
+              </div>
+              {agentMsg && (
+                <div className="mb-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">{agentMsg}</div>
+              )}
+              <div className="grid lg:grid-cols-3 gap-3">
+                <div className="border border-gray-200 rounded-xl bg-white p-3">
+                  <div className="text-sm font-semibold mb-2">Create agent</div>
+                  <form onSubmit={handleCreateAgent} className="space-y-2">
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">Email</label>
+                      <input value={agentEmail} onChange={(e)=>setAgentEmail(e.target.value)} type="email" className="w-full border border-gray-300 rounded-lg px-2 py-1 text-sm" placeholder="agent@example.com" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">Name (optional)</label>
+                      <input value={agentName} onChange={(e)=>setAgentName(e.target.value)} type="text" className="w-full border border-gray-300 rounded-lg px-2 py-1 text-sm" placeholder="Display name" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">Password</label>
+                      <div className="flex gap-2">
+                        <input value={agentPassword} onChange={(e)=>setAgentPassword(e.target.value)} type="text" className="w-full border border-gray-300 rounded-lg px-2 py-1 text-sm" placeholder="Temporary password" />
+                        <button type="button" onClick={()=>setAgentPassword(genPassword())} className="shrink-0 text-xs px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Generate</button>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">Shopify tags (comma-separated)</label>
+                      <input value={agentTagsInput} onChange={(e)=>setAgentTagsInput(e.target.value)} type="text" className="w-full border border-gray-300 rounded-lg px-2 py-1 text-sm" placeholder="agent_yasmine, vip" />
+                    </div>
+                    <button type="submit" disabled={agentsBusy} className="w-full text-sm px-3 py-2 rounded-lg bg-indigo-600 text-white font-semibold active:scale-[.98] disabled:opacity-60">{agentsBusy ? "Working…" : "Create agent"}</button>
+                  </form>
+                </div>
+                <div className="border border-gray-200 rounded-xl bg-white p-3 lg:col-span-2">
+                  <div className="text-sm font-semibold mb-2">Agents ({agents.length})</div>
+                  <div className="max-h-[420px] overflow-auto border border-gray-200 rounded-lg">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-gray-100 sticky top-0">
+                        <tr>
+                          <th className="text-left px-2 py-2 border-b border-gray-200">Agent</th>
+                          <th className="text-left px-2 py-2 border-b border-gray-200">Tags</th>
+                          <th className="text-left px-2 py-2 border-b border-gray-200">Last login</th>
+                          <th className="text-right px-2 py-2 border-b border-gray-200">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {agents.length === 0 && (
+                          <tr><td colSpan={4} className="px-2 py-3 text-center text-gray-500">No agents yet</td></tr>
+                        )}
+                        {agents.map(a => editingAgentId === a.id ? (
+                          <tr key={a.id} className="bg-indigo-50/40 border-b last:border-b-0 align-top">
+                            <td className="px-2 py-2">
+                              <input value={editAgentName} onChange={e=>setEditAgentName(e.target.value)} placeholder="Name" className="w-full text-sm border border-gray-300 rounded px-2 py-1" />
+                              <div className="text-xs text-gray-500 mt-1">{a.email}</div>
+                              <input value={editAgentPassword} onChange={e=>setEditAgentPassword(e.target.value)} placeholder="(optional) new password" className="mt-1 w-full text-sm border border-gray-300 rounded px-2 py-1" />
+                            </td>
+                            <td className="px-2 py-2">
+                              <input value={editAgentTags} onChange={e=>setEditAgentTags(e.target.value)} placeholder="tag1, tag2" className="w-full text-sm border border-gray-300 rounded px-2 py-1" />
+                              <div className="text-[11px] text-gray-500 mt-1">Comma-separated. e.g. agent_yasmine, vip</div>
+                            </td>
+                            <td className="px-2 py-2 text-xs text-gray-500">{a.last_login_at ? new Date(a.last_login_at).toLocaleString() : "never"}</td>
+                            <td className="px-2 py-2 text-right whitespace-nowrap">
+                              <button onClick={()=>saveEditAgent(a)} disabled={agentsBusy} className="text-xs px-2 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 mr-1 disabled:opacity-50">Save</button>
+                              <button onClick={cancelEditAgent} className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50">Cancel</button>
+                            </td>
+                          </tr>
+                        ) : (
+                          <tr key={a.id} className="border-b last:border-b-0">
+                            <td className="px-2 py-2">
+                              <div className="font-medium">{a.email}</div>
+                              <div className="text-xs text-gray-500">{a.name || ""} {a.is_active ? "" : "· inactive"}</div>
+                            </td>
+                            <td className="px-2 py-2">
+                              {(a.tags || []).length === 0 ? (
+                                <span className="text-xs text-gray-400">no tags</span>
+                              ) : (
+                                <div className="flex flex-wrap gap-1">
+                                  {(a.tags || []).map(t => (
+                                    <span key={t} className="inline-flex items-center text-[11px] bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-full">
+                                      {t}
+                                      <button title="Remove tag" onClick={()=>removeAgentTag(a, t)} className="ml-1 text-indigo-400 hover:text-rose-600">×</button>
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-2 py-2 text-xs text-gray-500">{a.last_login_at ? new Date(a.last_login_at).toLocaleString() : "never"}</td>
+                            <td className="px-2 py-2 text-right whitespace-nowrap">
+                              <button onClick={()=>startEditAgent(a)} className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 mr-1">Edit</button>
+                              <button onClick={()=>deleteAgent(a)} disabled={agentsBusy} className="text-xs px-2 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50 disabled:opacity-50">Delete</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             </section>

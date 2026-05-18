@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
-import { enqueueTagWrite, useSyncQueueLength } from "../lib/syncQueue";
+import { enqueueTagWrite, useSyncQueueLength, readQueue } from "../lib/syncQueue";
 import {
   PHONE_TAGS, WHATSAPP_TAGS, nextInCycle, tagsInCycle,
   moroccoInternational, copyToClipboard,
@@ -31,39 +31,6 @@ const API = {
     }
     return res.json();
   },
-  async listAgents() {
-    const res = await authFetch("/api/admin/agents", { headers: authHeaders() });
-    if (!res.ok) throw new Error("Failed to load agents");
-    return res.json();
-  },
-  async createAgent(body) {
-    const res = await authFetch("/api/admin/agents", {
-      method: "POST",
-      headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify(body),
-    });
-    const js = await res.json().catch(() => ({ detail: "Failed to create agent" }));
-    if (!res.ok) throw new Error(js.detail || "Failed to create agent");
-    return js;
-  },
-  async updateAgent(id, body) {
-    const res = await authFetch(`/api/admin/agents/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify(body),
-    });
-    const js = await res.json().catch(() => ({ detail: "Failed to update agent" }));
-    if (!res.ok) throw new Error(js.detail || "Failed to update agent");
-    return js;
-  },
-  async deleteAgent(id) {
-    const res = await authFetch(`/api/admin/agents/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-      headers: authHeaders(),
-    });
-    if (!res.ok) throw new Error("Failed to delete agent");
-    return res.json();
-  },
   async teamStats(store) {
     const qs = new URLSearchParams({ store });
     const res = await authFetch(`/api/agent/team-stats?${qs}`, { headers: authHeaders() });
@@ -72,13 +39,6 @@ const API = {
   },
 };
 
-function genPassword() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-  let out = "";
-  for (let i = 0; i < 12; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  return out;
-}
-
 function goto(path, store) {
   try {
     const s = (store && store !== "all") ? String(store) : "";
@@ -86,6 +46,40 @@ function goto(path, store) {
     history.pushState(null, "", url);
     try { window.dispatchEvent(new PopStateEvent("popstate")); } catch {}
   } catch { try { location.href = path; } catch {} }
+}
+
+// Apply pending sync-queue tag writes to a list of orders so the UI keeps showing
+// recent agent clicks until Shopify has propagated the tag change.
+function applyPendingQueueWrites(orders) {
+  let pending;
+  try { pending = readQueue(); } catch { pending = []; }
+  if (!pending || pending.length === 0) return orders;
+  const byOrder = new Map();
+  for (const it of pending) {
+    if (!it?.orderId) continue;
+    const arr = byOrder.get(it.orderId) || [];
+    arr.push(it);
+    byOrder.set(it.orderId, arr);
+  }
+  return orders.map((o) => {
+    const items = byOrder.get(o.id);
+    if (!items || items.length === 0) return o;
+    const lower = new Set((o.tags || []).map((t) => String(t || "").toLowerCase()));
+    const order = [...(o.tags || [])];
+    for (const it of items) {
+      const k = String(it.tag || "").toLowerCase();
+      if (!k) continue;
+      if (it.action === "add" && !lower.has(k)) {
+        lower.add(k);
+        order.push(it.tag);
+      } else if (it.action === "remove" && lower.has(k)) {
+        lower.delete(k);
+        const idx = order.findIndex((t) => String(t || "").toLowerCase() === k);
+        if (idx >= 0) order.splice(idx, 1);
+      }
+    }
+    return { ...o, tags: order };
+  });
 }
 
 // ---------- Top-level page ----------
@@ -118,30 +112,33 @@ export default function Confirmation() {
     return <div className="min-h-screen w-full flex items-center justify-center text-gray-500">Loading…</div>;
   }
 
-  if (me.role === "admin") return <AdminView me={me} />;
   if (me.role === "agent") return <AgentView me={me} />;
+  // Admins and collectors: this page is for agents only. Send admins to the management UI.
   return (
-    <div className="min-h-screen w-full flex items-center justify-center text-gray-700">
-      Your account does not have access to the Confirmation page.
+    <div className="min-h-screen w-full bg-gray-50 flex items-center justify-center px-4">
+      <div className="max-w-sm bg-white border border-gray-200 rounded-2xl p-6 text-center shadow-sm">
+        <div className="text-base font-semibold mb-2">Confirmation is for agents</div>
+        <div className="text-sm text-gray-600 mb-4">
+          This dashboard is reserved for confirmation agents. {me.role === "admin"
+            ? "Manage agents and their tags from the Admin page."
+            : "Ask an admin to grant you an agent account."}
+        </div>
+        {me.role === "admin" && (
+          <button onClick={() => goto("/admin")} className="text-sm px-4 py-2 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700">
+            Go to Admin
+          </button>
+        )}
+      </div>
     </div>
   );
 }
 
 // ---------- Header ----------
-function Header({ title, store, setStore, rightSlot, me }) {
+function Header({ title, store, setStore, rightSlot }) {
   return (
     <header className="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-gray-200">
       <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3 flex-wrap">
         <div className="text-lg font-semibold">{title}</div>
-        <div className="hidden md:flex items-center gap-2">
-          {me?.role === "admin" && (
-            <>
-              <button onClick={() => goto("/", store)} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Collector</button>
-              <button onClick={() => goto("/order-browser", store)} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Order Browser</button>
-              <button onClick={() => goto("/admin", store)} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">Admin</button>
-            </>
-          )}
-        </div>
         <div className="ml-auto flex items-center gap-2">
           {rightSlot}
           <StorePicker value={store} onChange={(v) => setStore(v)} />
@@ -155,231 +152,12 @@ function Header({ title, store, setStore, rightSlot, me }) {
   );
 }
 
-// ---------- Admin view ----------
-function AdminView({ me }) {
-  const [store, setStore] = useState(() => readCurrentStore());
-  useEffect(() => { persistStoreSelection(store); }, [store]);
-
-  const [agents, setAgents] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [statusMsg, setStatusMsg] = useState(null);
-
-  // Create form
-  const [email, setEmail] = useState("");
-  const [name, setName] = useState("");
-  const [password, setPassword] = useState("");
-  const [tagsInput, setTagsInput] = useState("");
-
-  const loadAgents = useCallback(async () => {
-    setLoading(true); setError(null);
-    try {
-      const js = await API.listAgents();
-      setAgents(js.agents || []);
-    } catch (e) {
-      setError(e?.message || "Failed to load agents");
-    } finally { setLoading(false); }
-  }, []);
-
-  useEffect(() => { loadAgents(); }, [loadAgents]);
-
-  async function handleCreate(e) {
-    e?.preventDefault?.();
-    setStatusMsg(null);
-    try {
-      const tags = tagsInput.split(",").map((t) => t.trim()).filter(Boolean);
-      await API.createAgent({ email, password, name: name || null, tags });
-      setStatusMsg(`Created agent ${email}`);
-      setEmail(""); setName(""); setPassword(""); setTagsInput("");
-      await loadAgents();
-    } catch (e2) {
-      setStatusMsg(e2?.message || "Failed to create agent");
-    }
-  }
-
-  return (
-    <div className="min-h-screen w-full bg-gray-50 text-gray-900">
-      <Header title="Confirmation · Admin" store={store} setStore={setStore} me={me} />
-      <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
-        {statusMsg && <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">{statusMsg}</div>}
-        {error && <div className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</div>}
-
-        <section className="bg-white border border-gray-200 rounded-2xl p-5">
-          <div className="text-sm font-semibold mb-3">Create agent</div>
-          <form onSubmit={handleCreate} className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
-            <input
-              required
-              type="email"
-              placeholder="email@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white"
-            />
-            <input
-              type="text"
-              placeholder="Display name (optional)"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white"
-            />
-            <div className="flex gap-2">
-              <input
-                required
-                type="text"
-                placeholder="Temporary password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white"
-              />
-              <button
-                type="button"
-                onClick={() => setPassword(genPassword())}
-                className="text-xs px-3 py-2 rounded-lg border border-gray-300 bg-white hover:bg-gray-50"
-              >Generate</button>
-            </div>
-            <input
-              type="text"
-              placeholder="Shopify tags (comma-separated) e.g. agent_yasmine, vip"
-              value={tagsInput}
-              onChange={(e) => setTagsInput(e.target.value)}
-              className="text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white"
-            />
-            <div className="md:col-span-2">
-              <button type="submit" className="text-sm px-4 py-2 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700">
-                Create agent
-              </button>
-            </div>
-          </form>
-        </section>
-
-        <section className="bg-white border border-gray-200 rounded-2xl p-5">
-          <div className="flex items-center mb-3">
-            <div className="text-sm font-semibold">Agents</div>
-            <button onClick={loadAgents} className="ml-auto text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">
-              {loading ? "Loading…" : "Refresh"}
-            </button>
-          </div>
-          {agents.length === 0 ? (
-            <div className="text-sm text-gray-500">No agents yet.</div>
-          ) : (
-            <div className="overflow-auto">
-              <table className="min-w-full text-sm">
-                <thead className="text-left text-xs uppercase tracking-wide text-gray-500">
-                  <tr>
-                    <th className="px-2 py-2">Name</th>
-                    <th className="px-2 py-2">Email</th>
-                    <th className="px-2 py-2">Tags</th>
-                    <th className="px-2 py-2">Active</th>
-                    <th className="px-2 py-2">Last login</th>
-                    <th className="px-2 py-2 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {agents.map((a) => (
-                    <AgentRow key={a.id} agent={a} onChanged={loadAgents} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      </main>
-    </div>
-  );
-}
-
-function AgentRow({ agent, onChanged }) {
-  const [editing, setEditing] = useState(false);
-  const [name, setName] = useState(agent.name || "");
-  const [tagsInput, setTagsInput] = useState((agent.tags || []).join(", "));
-  const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState(null);
-
-  async function save() {
-    setBusy(true); setMsg(null);
-    try {
-      const body = {
-        name: name || null,
-        tags: tagsInput.split(",").map((t) => t.trim()).filter(Boolean),
-      };
-      if (password.trim()) body.password = password.trim();
-      await API.updateAgent(agent.id, body);
-      setEditing(false);
-      setPassword("");
-      onChanged?.();
-    } catch (e) {
-      setMsg(e?.message || "Failed to save");
-    } finally { setBusy(false); }
-  }
-
-  async function deactivate() {
-    if (!confirm(`Delete agent ${agent.email}? They will no longer be able to log in.`)) return;
-    setBusy(true);
-    try {
-      await API.deleteAgent(agent.id);
-      onChanged?.();
-    } catch (e) {
-      setMsg(e?.message || "Failed to delete");
-    } finally { setBusy(false); }
-  }
-
-  if (!editing) {
-    return (
-      <tr className="border-t border-gray-100">
-        <td className="px-2 py-2">{agent.name || <span className="text-gray-400">—</span>}</td>
-        <td className="px-2 py-2">{agent.email}</td>
-        <td className="px-2 py-2">
-          {(agent.tags || []).length === 0 ? (
-            <span className="text-gray-400 text-xs">no tags</span>
-          ) : (
-            <div className="flex flex-wrap gap-1">
-              {(agent.tags || []).map((t) => (
-                <span key={t} className="text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-full">{t}</span>
-              ))}
-            </div>
-          )}
-        </td>
-        <td className="px-2 py-2">{agent.is_active ? "✓" : "—"}</td>
-        <td className="px-2 py-2 text-xs text-gray-500">
-          {agent.last_login_at ? new Date(agent.last_login_at).toLocaleString() : "never"}
-        </td>
-        <td className="px-2 py-2 text-right">
-          <button onClick={() => setEditing(true)} className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50 mr-1">Edit</button>
-          <button onClick={deactivate} disabled={busy} className="text-xs px-2 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50 disabled:opacity-50">Delete</button>
-        </td>
-      </tr>
-    );
-  }
-  return (
-    <tr className="border-t border-gray-100 bg-gray-50">
-      <td className="px-2 py-2">
-        <input value={name} onChange={(e) => setName(e.target.value)} className="w-full text-sm border border-gray-300 rounded px-2 py-1" />
-      </td>
-      <td className="px-2 py-2 text-xs text-gray-500">{agent.email}</td>
-      <td className="px-2 py-2">
-        <input value={tagsInput} onChange={(e) => setTagsInput(e.target.value)} placeholder="tag1, tag2" className="w-full text-sm border border-gray-300 rounded px-2 py-1" />
-      </td>
-      <td className="px-2 py-2 text-xs">
-        <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="New password" className="w-full text-sm border border-gray-300 rounded px-2 py-1" />
-      </td>
-      <td className="px-2 py-2 text-xs text-gray-500" colSpan={1}>
-        {msg && <div className="text-rose-700">{msg}</div>}
-      </td>
-      <td className="px-2 py-2 text-right">
-        <button onClick={save} disabled={busy} className="text-xs px-2 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 mr-1 disabled:opacity-50">Save</button>
-        <button onClick={() => { setEditing(false); setName(agent.name || ""); setTagsInput((agent.tags || []).join(", ")); setPassword(""); }} className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50">Cancel</button>
-      </td>
-    </tr>
-  );
-}
-
 // ---------- Agent view ----------
 function AgentView({ me }) {
   const [store, setStore] = useState(() => readCurrentStore());
   useEffect(() => { persistStoreSelection(store); }, [store]);
 
-  const [agentInfo, setAgentInfo] = useState(null); // /api/agent/me (includes tags)
+  const [agentInfo, setAgentInfo] = useState(null);
   const [data, setData] = useState({ orders: [], assigned_total: 0, today_label: "", nextCursor: null });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -407,8 +185,10 @@ function AgentView({ me }) {
     try {
       const js = await API.getQueue(store, { limit: 50 });
       if (reqId !== requestIdRef.current) return;
+      // Belt-and-suspenders: hide any order that still carries a cod-prefix tag.
+      const orders = (js.orders || []).filter((o) => !(o.tags || []).some(isCodTag));
       setData({
-        orders: js.orders || [],
+        orders,
         assigned_total: js.assigned_total || 0,
         today_label: js.today_label || "",
         nextCursor: js.nextCursor || null,
@@ -439,11 +219,20 @@ function AgentView({ me }) {
     return () => clearInterval(t);
   }, [load, loadTeam]);
 
-  // 1s freshness ticker
+  // 1s freshness ticker + re-apply pending writes (so stats reflect just-clicked actions
+  // even when Shopify hasn't fully propagated the tag yet).
   useEffect(() => {
     const t = setInterval(() => setNowTick((n) => n + 1), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // Orders, with pending sync-queue writes layered on top.
+  const ordersForView = useMemo(
+    () => applyPendingQueueWrites(data.orders || []),
+    // recomputes on each `nowTick` so newly enqueued writes are picked up promptly
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data.orders, syncCount, nowTick]
+  );
 
   // ---------- Optimistic local mutations ----------
   function updateLocalOrderTags(orderId, mutate) {
@@ -474,16 +263,14 @@ function AgentView({ me }) {
     return out;
   }
 
-  function cyclePhone(order, cycle, kind /* "phone" | "wtp" */) {
+  function cyclePhone(order, cycle) {
     const next = nextInCycle(order.tags || [], cycle);
     const cycleSet = new Set(cycle.map((t) => t.toLowerCase()));
-    // Optimistically remove any existing in-cycle tag and add the next one.
     const present = (order.tags || []).filter((t) => cycleSet.has(String(t || "").toLowerCase()));
     updateLocalOrderTags(order.id, (tags) => {
       const filtered = tags.filter((t) => !cycleSet.has(String(t || "").toLowerCase()));
       return dedupTags([...filtered, next]);
     });
-    // Enqueue: remove existing cycle tags first, then add the next one.
     for (const old of present) {
       if (String(old).toLowerCase() === next.toLowerCase()) continue;
       enqueueTagWrite({ orderId: order.id, action: "remove", tag: old, store });
@@ -494,13 +281,13 @@ function AgentView({ me }) {
 
   async function handlePhone(order) {
     await copyToClipboard(order.phone || "");
-    cyclePhone(order, PHONE_TAGS, "phone");
+    cyclePhone(order, PHONE_TAGS);
   }
 
   async function handleWhatsApp(order) {
     const intl = moroccoInternational(order.phone || "");
     await copyToClipboard(intl);
-    cyclePhone(order, WHATSAPP_TAGS, "wtp");
+    cyclePhone(order, WHATSAPP_TAGS);
   }
 
   function openDatePicker(order) {
@@ -512,12 +299,8 @@ function AgentView({ me }) {
     const dd = isoToDDMMYY(chosenDate);
     if (!dd) return;
     const tag = `cod ${dd}`;
-    // If choosing today, remove from queue immediately (matches server filter).
-    if (dd === todayDDMMYY()) {
-      removeLocalOrder(order.id);
-    } else {
-      updateLocalOrderTags(order.id, (tags) => dedupTags([...tags, tag]));
-    }
+    // Any cod-dated order disappears from the queue immediately — see backend filter.
+    removeLocalOrder(order.id);
     enqueueTagWrite({ orderId: order.id, action: "add", tag, store });
     setDatePickerFor(null);
   }
@@ -529,10 +312,9 @@ function AgentView({ me }) {
 
   // ---------- Stats ----------
   const stats = useMemo(() => {
-    const orders = data.orders || [];
     let n1 = 0, n2 = 0, n3 = 0, notCalled = 0, contacted = 0;
-    for (const o of orders) {
-      const tags = (o.tags || []).map((t) => String(t || "").toLowerCase());
+    for (const o of ordersForView) {
+      const tags = (o.tags || []).map((t) => String(t || "").trim().toLowerCase());
       const has1 = tags.includes("n1");
       const has2 = tags.includes("n2");
       const has3 = tags.includes("n3");
@@ -543,7 +325,7 @@ function AgentView({ me }) {
       if (has1 || has2 || has3) contacted++;
     }
     return { n1, n2, n3, notCalled, contacted };
-  }, [data.orders]);
+  }, [ordersForView]);
 
   const confirmedToday = useMemo(() => {
     const mine = teamStats.find((a) => a.id === me.id);
@@ -558,14 +340,12 @@ function AgentView({ me }) {
 
   const tagsAssigned = agentInfo?.tags || me?.tags || [];
 
-  // Hide the order completely while a "cod today" write is pending if the row was removed locally.
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900">
       <Header
         title="Confirmation"
         store={store}
         setStore={setStore}
-        me={me}
         rightSlot={
           <div className="flex items-center gap-2">
             {syncCount > 0 && (
@@ -586,7 +366,7 @@ function AgentView({ me }) {
         {/* Stats pills */}
         <div className="flex flex-wrap gap-2">
           <StatPill label="Assigned" value={data.assigned_total} />
-          <StatPill label="In view" value={(data.orders || []).length} />
+          <StatPill label="In view" value={ordersForView.length} />
           <StatPill label="Not called" value={stats.notCalled} accent="indigo" />
           <StatPill label="N1" value={stats.n1} />
           <StatPill label="N2" value={stats.n2} />
@@ -594,9 +374,9 @@ function AgentView({ me }) {
           <StatPill label="Total contacted" value={stats.contacted} />
           <StatPill label="Confirmed today" value={confirmedToday} accent="emerald" />
         </div>
-        {data.assigned_total > (data.orders || []).length && (
+        {data.assigned_total > ordersForView.length && (
           <div className="text-xs text-gray-500">
-            Showing {(data.orders || []).length} of {data.assigned_total} — paginate to see the rest.
+            Showing {ordersForView.length} of {data.assigned_total} — paginate to see the rest.
           </div>
         )}
         {tagsAssigned.length === 0 && (
@@ -623,10 +403,10 @@ function AgentView({ me }) {
                 </tr>
               </thead>
               <tbody>
-                {(data.orders || []).length === 0 && !loading && (
+                {ordersForView.length === 0 && !loading && (
                   <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-500">No orders in your queue.</td></tr>
                 )}
-                {(data.orders || []).map((o) => {
+                {ordersForView.map((o) => {
                   const isOpen = expanded.has(o.id);
                   const pickerOpen = datePickerFor === o.id;
                   return (
@@ -634,7 +414,6 @@ function AgentView({ me }) {
                       <tr
                         className="border-t border-gray-100 hover:bg-gray-50 cursor-pointer"
                         onClick={(e) => {
-                          // Don't toggle when clicking on inputs/buttons inside the row.
                           const tag = (e.target?.tagName || "").toLowerCase();
                           if (["button", "input", "select", "a", "svg", "path"].includes(tag)) return;
                           setExpanded((prev) => {

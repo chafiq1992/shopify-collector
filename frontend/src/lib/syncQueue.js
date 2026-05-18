@@ -65,6 +65,10 @@ export function getQueueLength() {
   return read().length;
 }
 
+export function readQueue() {
+  return read();
+}
+
 export function subscribeToQueue(cb) {
   listeners.add(cb);
   try { cb(read().length); } catch {}

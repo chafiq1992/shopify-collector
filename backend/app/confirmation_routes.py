@@ -13,6 +13,7 @@ Provides:
 """
 
 import os
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -197,7 +198,10 @@ def _escape_tag(t: str) -> str:
     return '"' + str(t or "").replace('"', '\\"') + '"'
 
 
-def build_queue_query(tags: List[str], today_label: str) -> Optional[str]:
+def build_queue_query(tags: List[str]) -> Optional[str]:
+    """Build a Shopify search query that returns open, unshipped orders carrying any of the
+    agent's tags. COD-dated orders are excluded in Python post-filtering (Shopify search does
+    not support reliable wildcard exclusions for multi-word tags like "cod 15/05/26")."""
     tags = [t for t in (tags or []) if t]
     if not tags:
         return None
@@ -206,9 +210,18 @@ def build_queue_query(tags: List[str], today_label: str) -> Optional[str]:
         "status:open",
         "fulfillment_status:unshipped",
         f"({tag_or})",
-        f"-tag:{_escape_tag(today_label)}",
     ]
     return " ".join(parts)
+
+
+_COD_TAG_RE = re.compile(r"^\s*cod(\s|$)", re.IGNORECASE)
+
+
+def has_cod_tag(tags: List[str]) -> bool:
+    for t in tags or []:
+        if _COD_TAG_RE.match(str(t or "")):
+            return True
+    return False
 
 
 QUEUE_QUERY_GQL = """
@@ -323,30 +336,50 @@ async def agent_queue(
     if user.role not in ("agent", "admin"):
         raise HTTPException(status_code=403, detail="agent role required")
     tags = list(user.agent_tags or [])
-    if not tags and user.role == "agent":
-        return {"ok": True, "orders": [], "assigned_total": 0, "nextCursor": None, "today_label": today_cod_label()}
     today_label = today_cod_label()
-    q = build_queue_query(tags, today_label)
+    if not tags and user.role == "agent":
+        return {"ok": True, "orders": [], "assigned_total": 0, "nextCursor": None, "today_label": today_label}
+    q = build_queue_query(tags)
     if not q:
         return {"ok": True, "orders": [], "assigned_total": 0, "nextCursor": None, "today_label": today_label}
 
     # Import lazily to avoid a circular import with main.py at module load time.
     from .main import shopify_graphql  # type: ignore
 
+    page_size = max(1, min(100, int(limit or 50)))
     try:
         data = await shopify_graphql(
             QUEUE_QUERY_GQL,
-            {"first": max(1, min(100, int(limit or 50))), "after": cursor, "query": q},
+            {"first": page_size, "after": cursor, "query": q},
             store=store,
         )
     except HTTPException as he:
         raise he
     edges = ((data or {}).get("orders") or {}).get("edges") or []
-    orders = [_flatten_order(e.get("node") or {}) for e in edges]
     page_info = ((data or {}).get("orders") or {}).get("pageInfo") or {}
     has_next = bool(page_info.get("hasNextPage"))
     next_cursor = edges[-1].get("cursor") if (has_next and edges) else None
-    assigned_total = int(((data or {}).get("ordersCount") or {}).get("count") or 0)
+
+    # Shopify's tag search has no reliable wildcard exclusion for multi-word tags
+    # ("cod 15/05/26"), so we drop any order carrying a cod-prefixed tag here.
+    # The raw `ordersCount` includes those orders; subtract them so "assigned" reflects
+    # actually-actionable orders.
+    assigned_total_raw = int(((data or {}).get("ordersCount") or {}).get("count") or 0)
+    excluded_in_page = 0
+    orders: List[Dict[str, Any]] = []
+    for e in edges:
+        node = e.get("node") or {}
+        tags_list = list(node.get("tags") or [])
+        if has_cod_tag(tags_list):
+            excluded_in_page += 1
+            continue
+        orders.append(_flatten_order(node))
+    # Conservative estimate: assume excluded ratio holds across the full result set.
+    if edges:
+        assigned_total = max(0, assigned_total_raw - excluded_in_page)
+    else:
+        assigned_total = assigned_total_raw
+
     return {
         "ok": True,
         "orders": orders,
