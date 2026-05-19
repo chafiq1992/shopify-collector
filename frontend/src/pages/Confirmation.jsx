@@ -6,8 +6,8 @@ import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 import { enqueueTagWrite, useSyncQueueLength, readQueue } from "../lib/syncQueue";
 import { copyNodeAsPng, triggerDownload } from "../lib/labelClipboard";
 import {
-  PHONE_TAGS, WHATSAPP_TAGS, nextInCycle, tagsInCycle,
-  moroccoInternational, copyToClipboard,
+  PHONE_TAGS, NOWTP_TAG, nextInCycle, tagsInCycle, hasNowtpTag,
+  copyToClipboard,
   todayDDMMYY, todayISO, isoToDDMMYY, isCodTag,
 } from "../lib/confirmationActions";
 
@@ -410,10 +410,11 @@ function AgentView({ me }) {
     cyclePhone(order, PHONE_TAGS);
   }
 
-  async function handleWhatsApp(order) {
-    const intl = moroccoInternational(order.phone || "");
-    await copyToClipboard(intl);
-    cyclePhone(order, WHATSAPP_TAGS);
+  function handleNowtp(order) {
+    // Idempotent: add the `nowtp` tag once. If it's already on the order, do nothing.
+    if (hasNowtpTag(order.tags || [])) return;
+    updateLocalOrderTags(order.id, (tags) => dedupTags([...tags, NOWTP_TAG]));
+    enqueueTagWrite({ orderId: order.id, action: "add", tag: NOWTP_TAG, store });
   }
 
   function openDatePicker(order) {
@@ -510,14 +511,15 @@ function AgentView({ me }) {
   const stats = useMemo(() => {
     const c = meta.level_counts || {};
     const total = Number(c.total || 0);
-    const notCalled = Number(c.new || 0);
+    const fresh = Number(c.new || 0);
     return {
       n1: Number(c.n1 || 0),
       n2: Number(c.n2 || 0),
       n3: Number(c.n3 || 0),
       n4: Number(c.n4 || 0),
-      notCalled,
-      contacted: Math.max(0, total - notCalled),
+      nowtp: Number(c.nowtp || 0),
+      fresh,
+      contacted: Math.max(0, total - fresh),
     };
   }, [meta.level_counts]);
 
@@ -562,8 +564,8 @@ function AgentView({ me }) {
           <StatPill label="Assigned" value={meta.assigned_total} />
           <StatPill label="In view" value={ordersForView.length} />
           <StatPill
-            label="Not called"
-            value={stats.notCalled}
+            label="New"
+            value={stats.fresh}
             accent="indigo"
             active={filterLevel === "new"}
             onClick={() => setFilterLevel((p) => (p === "new" ? "" : "new"))}
@@ -591,6 +593,12 @@ function AgentView({ me }) {
             value={stats.n4}
             active={filterLevel === "n4"}
             onClick={() => setFilterLevel((p) => (p === "n4" ? "" : "n4"))}
+          />
+          <StatPill
+            label="Nowtp"
+            value={stats.nowtp}
+            active={filterLevel === "nowtp"}
+            onClick={() => setFilterLevel((p) => (p === "nowtp" ? "" : "nowtp"))}
           />
           <StatPill label="Total contacted" value={stats.contacted} />
           <StatPill label="Confirmed today" value={confirmedToday} accent="emerald" />
@@ -770,13 +778,19 @@ function AgentView({ me }) {
                             >
                               📞 {tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || ""}
                             </button>
-                            <button
-                              onClick={(ev) => { ev.stopPropagation(); handleWhatsApp(o); }}
-                              className="text-xs px-3 py-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700"
-                              title="Copy international phone + advance wtp1/wtp2/wtp3"
-                            >
-                              💬 {tagsInCycle(o.tags || [], WHATSAPP_TAGS).slice(-1)[0] || ""}
-                            </button>
+                            {(() => {
+                              const tagged = hasNowtpTag(o.tags || []);
+                              return (
+                                <button
+                                  onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
+                                  disabled={tagged}
+                                  className={`text-xs px-3 py-1 rounded-lg text-white ${tagged ? "bg-slate-400 cursor-default" : "bg-slate-700 hover:bg-slate-800"}`}
+                                  title={tagged ? "Already flagged as no-WhatsApp" : "Mark as no WhatsApp (adds the 'nowtp' tag)"}
+                                >
+                                  {tagged ? "🚫 nowtp ✓" : "🚫 Nowtp"}
+                                </button>
+                              );
+                            })()}
                             <button
                               onClick={(ev) => { ev.stopPropagation(); openDatePicker(o); }}
                               className="text-xs px-3 py-1 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"

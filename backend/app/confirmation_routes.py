@@ -244,24 +244,25 @@ async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
     return None
 
 
-_VALID_LEVELS = {"n1", "n2", "n3", "n4", "new"}
+_VALID_LEVELS = {"n1", "n2", "n3", "n4", "nowtp", "new"}
 
 
 def apply_level_filter(q: str, level: Optional[str]) -> str:
     """Narrow an agent's queue query by call-attempt level.
 
     n1/n2/n3/n4 → only orders carrying that exact attempt tag.
-    new         → orders with none of n1/n2/n3/n4 (i.e. not yet called).
+    nowtp       → only orders flagged "no WhatsApp" by the agent.
+    new         → orders with none of n1/n2/n3/n4/nowtp (i.e. not yet handled).
     """
     if not q or not level:
         return q
     lv = level.lower().strip()
     if lv not in _VALID_LEVELS:
         return q
-    if lv in ("n1", "n2", "n3", "n4"):
+    if lv in ("n1", "n2", "n3", "n4", "nowtp"):
         return f"{q} tag:{_escape_tag(lv)}"
     if lv == "new":
-        return f"{q} -tag:n1 -tag:n2 -tag:n3 -tag:n4"
+        return f"{q} -tag:n1 -tag:n2 -tag:n3 -tag:n4 -tag:nowtp"
     return q
 
 
@@ -286,7 +287,7 @@ _BREAKDOWN_HARD_CAP = 10_000  # safety net
 
 
 def _empty_breakdown() -> Dict[str, int]:
-    return {"total": 0, "n1": 0, "n2": 0, "n3": 0, "n4": 0, "new": 0}
+    return {"total": 0, "n1": 0, "n2": 0, "n3": 0, "n4": 0, "nowtp": 0, "new": 0}
 
 
 async def accurate_assigned_breakdown(store: str, user_id: str, base_q: str) -> Dict[str, int]:
@@ -328,7 +329,7 @@ async def accurate_assigned_breakdown(store: str, user_id: str, base_q: str) -> 
             counts["total"] += 1
             tlower = {str(t or "").strip().lower() for t in tags_list}
             has_any = False
-            for lv in ("n1", "n2", "n3", "n4"):
+            for lv in ("n1", "n2", "n3", "n4", "nowtp"):
                 if lv in tlower:
                     counts[lv] += 1
                     has_any = True
@@ -535,7 +536,7 @@ async def agent_queue(
 
     # `Assigned` reflects the active filter so it agrees with what's visible in the table.
     lv = (level or "").lower().strip()
-    if lv in ("n1", "n2", "n3", "n4", "new"):
+    if lv in ("n1", "n2", "n3", "n4", "nowtp", "new"):
         assigned_total = int(breakdown.get(lv, 0))
     else:
         assigned_total = int(breakdown.get("total", 0))
@@ -550,6 +551,7 @@ async def agent_queue(
             "n2": int(breakdown.get("n2", 0)),
             "n3": int(breakdown.get("n3", 0)),
             "n4": int(breakdown.get("n4", 0)),
+            "nowtp": int(breakdown.get("nowtp", 0)),
             "new": int(breakdown.get("new", 0)),
         },
         "nextCursor": next_cursor,

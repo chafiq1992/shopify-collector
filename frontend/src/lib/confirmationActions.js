@@ -2,10 +2,9 @@
 // and clipboard copy.
 
 export const PHONE_TAGS = ["n1", "n2", "n3", "n4"];
-export const WHATSAPP_TAGS = ["wtp1", "wtp2", "wtp3"];
+export const NOWTP_TAG = "nowtp";
 
 const PHONE_SET = new Set(PHONE_TAGS);
-const WHATSAPP_SET = new Set(WHATSAPP_TAGS);
 
 export function nextInCycle(currentTags, cycle) {
   // Find the highest tag in `cycle` already on the order; return the next one.
@@ -26,8 +25,11 @@ export function tagsInCycle(currentTags, cycle) {
 export function isPhoneTag(tag) {
   return PHONE_SET.has(String(tag || "").toLowerCase());
 }
-export function isWhatsAppTag(tag) {
-  return WHATSAPP_SET.has(String(tag || "").toLowerCase());
+export function isNowtpTag(tag) {
+  return String(tag || "").trim().toLowerCase() === NOWTP_TAG;
+}
+export function hasNowtpTag(tags) {
+  return (tags || []).some(isNowtpTag);
 }
 
 export function moroccoInternational(phone) {

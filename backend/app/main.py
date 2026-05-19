@@ -2572,8 +2572,8 @@ def _classify_agent_tag_action(tag: str) -> Optional[str]:
     t = (tag or "").strip().lower()
     if t in ("n1", "n2", "n3", "n4"):
         return f"confirmation_phone_{t}"
-    if t in ("wtp1", "wtp2", "wtp3"):
-        return f"confirmation_whatsapp_{t}"
+    if t == "nowtp":
+        return "confirmation_nowtp"
     if t.startswith("cod "):
         return "confirmation_confirmed"
     return None
