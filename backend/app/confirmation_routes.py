@@ -542,27 +542,57 @@ async def agent_queue(
     from .main import shopify_graphql  # type: ignore
 
     page_size = max(1, min(100, int(limit or 50)))
-    try:
-        data = await shopify_graphql(
-            QUEUE_QUERY_GQL,
-            {"first": page_size, "after": cursor, "query": q},
-            store=store,
-        )
-    except HTTPException as he:
-        raise he
-    edges = ((data or {}).get("orders") or {}).get("edges") or []
-    page_info = ((data or {}).get("orders") or {}).get("pageInfo") or {}
-    has_next = bool(page_info.get("hasNextPage"))
-    next_cursor = edges[-1].get("cursor") if (has_next and edges) else None
 
-    # Build the current page's orders (dropping cod-tagged stragglers).
+    # Iteratively pull Shopify pages, dropping cod-tagged orders, until we have a full
+    # page_size of actionable orders to return. This keeps every page the agent sees at
+    # the requested size — Shopify's tag-wildcard exclusion is unreliable for multi-word
+    # tags like "cod 18/05/26", so we filter in Python here and just keep pulling.
     orders: List[Dict[str, Any]] = []
-    for e in edges:
-        node = e.get("node") or {}
-        tags_list = list(node.get("tags") or [])
-        if has_cod_tag(tags_list):
-            continue
-        orders.append(_flatten_order(node))
+    next_cursor: Optional[str] = None
+    inner_cursor: Optional[str] = cursor
+    BATCH = 100
+    MAX_BATCHES = 12
+    last_data: Optional[Dict[str, Any]] = None
+    for _ in range(MAX_BATCHES):
+        try:
+            data = await shopify_graphql(
+                QUEUE_QUERY_GQL,
+                {"first": BATCH, "after": inner_cursor, "query": q},
+                store=store,
+            )
+        except HTTPException as he:
+            if not orders:
+                raise he
+            break
+        last_data = data
+        edges = ((data or {}).get("orders") or {}).get("edges") or []
+        page_info = ((data or {}).get("orders") or {}).get("pageInfo") or {}
+        if not edges:
+            next_cursor = None
+            break
+
+        filled = False
+        for idx, e in enumerate(edges):
+            node = e.get("node") or {}
+            tags_list = list(node.get("tags") or [])
+            if has_cod_tag(tags_list):
+                continue
+            orders.append(_flatten_order(node))
+            if len(orders) >= page_size:
+                # Did we exhaust this batch + the next page is empty? If so we're done.
+                more_remaining = (idx < len(edges) - 1) or bool(page_info.get("hasNextPage"))
+                next_cursor = e.get("cursor") if more_remaining else None
+                filled = True
+                break
+        if filled:
+            break
+
+        # Burned through this batch without filling — continue from the last edge.
+        if not page_info.get("hasNextPage"):
+            next_cursor = None
+            break
+        inner_cursor = edges[-1].get("cursor")
+    data = last_data or {}
 
     # Compute the per-level breakdown ONCE on page 1 (or use a fresh cache hit on follow-up
     # pages). The breakdown is derived from `base_q` — i.e. the agent's full tag-criteria

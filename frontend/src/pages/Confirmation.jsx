@@ -246,10 +246,10 @@ function AgentView({ me }) {
   useEffect(() => { loadAgentMe(); }, [loadAgentMe]);
 
   function dedupeAndFilter(raw) {
-    // Strip cod-tagged stragglers and cap to one page worth.
-    return (raw || [])
-      .filter((o) => !(o.tags || []).some(isCodTag))
-      .slice(0, PER_PAGE);
+    // Safety net: drop any cod-tagged stragglers the server somehow returned. The
+    // server already paginates iteratively to deliver a full PER_PAGE of non-cod orders,
+    // so no client-side slicing is needed here.
+    return (raw || []).filter((o) => !(o.tags || []).some(isCodTag));
   }
 
   // Fetch the first page and reset the cache. Used by the manual Refresh button, the
