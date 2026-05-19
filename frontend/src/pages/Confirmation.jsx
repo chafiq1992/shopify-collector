@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
+import OrderLabel from "../components/OrderLabel";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 import { enqueueTagWrite, useSyncQueueLength, readQueue } from "../lib/syncQueue";
+import { copyNodeAsPng, triggerDownload } from "../lib/labelClipboard";
 import {
   PHONE_TAGS, WHATSAPP_TAGS, nextInCycle, tagsInCycle,
   moroccoInternational, copyToClipboard,
@@ -1091,6 +1093,31 @@ function OrderExpanded({ order, store, shopDomain }) {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null);
 
+  const labelRef = useRef(null);
+  const [labelBusy, setLabelBusy] = useState(false);
+  const [labelMsg, setLabelMsg] = useState(null);
+
+  async function handleCopyLabel() {
+    if (!labelRef.current) return;
+    setLabelBusy(true); setLabelMsg(null);
+    try {
+      const { url, clipboardOk, filename } = await copyNodeAsPng(labelRef.current, {
+        filenameHint: `label-${(order.name || order.number || "order").toString().replace(/[^a-z0-9_-]+/gi, "_")}`,
+      });
+      if (clipboardOk) {
+        setLabelMsg("Copied label image to clipboard.");
+      } else {
+        // Clipboard write blocked or unsupported — fall back to download.
+        triggerDownload(url, filename);
+        setLabelMsg("Clipboard blocked — downloaded the PNG instead.");
+      }
+    } catch (e) {
+      setLabelMsg(e?.message || "Failed to generate label");
+    } finally {
+      setLabelBusy(false);
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
     const cid = order?.customer_id;
@@ -1235,8 +1262,28 @@ function OrderExpanded({ order, store, shopDomain }) {
 
       {/* Line items */}
       <div>
-        <div className="text-xs uppercase tracking-wide text-gray-500 mb-2">Line items</div>
+        <div className="flex items-center mb-2">
+          <div className="text-xs uppercase tracking-wide text-gray-500">Line items</div>
+          <div className="ml-auto flex items-center gap-2">
+            {labelMsg && <span className="text-[11px] text-gray-600">{labelMsg}</span>}
+            <button
+              type="button"
+              onClick={handleCopyLabel}
+              disabled={labelBusy}
+              className="text-xs px-3 py-1.5 rounded-lg border border-indigo-300 bg-indigo-50 text-indigo-700 font-medium hover:bg-indigo-100 disabled:opacity-50"
+              title="Generate a PNG label and copy it to your clipboard"
+            >{labelBusy ? "Generating…" : "📋 Copy label"}</button>
+          </div>
+        </div>
         <LineItemsGrid order={order} />
+      </div>
+
+      {/* Off-screen label used for the PNG capture. Positioned far off-screen so it
+          stays out of the visible layout while still being rendered for html-to-image. */}
+      <div style={{ position: "fixed", left: -10000, top: 0, pointerEvents: "none", zIndex: -1 }} aria-hidden>
+        <div ref={labelRef}>
+          <OrderLabel order={order} store={store} />
+        </div>
       </div>
     </div>
   );
