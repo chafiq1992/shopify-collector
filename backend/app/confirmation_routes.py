@@ -373,7 +373,7 @@ query AgentQueue($first: Int!, $after: String, $query: String) {
         displayFulfillmentStatus
         currentTotalPriceSet { shopMoney { amount currencyCode } }
         shippingAddress { name city phone address1 address2 zip province country }
-        customer { displayName phone }
+        customer { id displayName phone }
         lineItems(first: 50) {
           edges {
             node {
@@ -443,6 +443,8 @@ def _flatten_order(node: Dict[str, Any]) -> Dict[str, Any]:
         "legacy_id": str(node.get("legacyResourceId") or "").strip(),
         "number": (node.get("name") or "").lstrip("#"),
         "name": node.get("name") or "",
+        "customer_id": (cust.get("id") or ""),
+        "customer_phone": (cust.get("phone") or ""),
         "created_at": node.get("createdAt"),
         "tags": list(node.get("tags") or []),
         "note": node.get("note") or "",
@@ -552,6 +554,89 @@ async def agent_queue(
         },
         "nextCursor": next_cursor,
         "today_label": today_label,
+        "shop_domain": shop_domain,
+    }
+
+
+# ---------- Customer order history (for the row-expand panel) ----------
+
+CUSTOMER_ORDERS_GQL = """
+query CustomerOrders($id: ID!, $first: Int!) {
+  customer(id: $id) {
+    id
+    displayName
+    numberOfOrders
+    orders(first: $first, sortKey: CREATED_AT, reverse: true) {
+      edges {
+        node {
+          id
+          legacyResourceId
+          name
+          createdAt
+          cancelledAt
+          displayFulfillmentStatus
+          displayFinancialStatus
+          currentTotalPriceSet { shopMoney { amount currencyCode } }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+@router.get("/api/agent/customer-orders")
+async def customer_orders(
+    store: str,
+    customer_id: str,
+    first: int = 20,
+    user: User = Depends(get_current_user),
+):
+    cid = (customer_id or "").strip()
+    if not cid:
+        raise HTTPException(status_code=400, detail="customer_id is required")
+    if not cid.startswith("gid://"):
+        # Accept a numeric id as a convenience.
+        cid = f"gid://shopify/Customer/{cid}"
+    from .main import shopify_graphql, resolve_store_settings_effective  # type: ignore
+    shop_domain = ""
+    try:
+        domain, _t, _a = await resolve_store_settings_effective(store)
+        shop_domain = (domain or "").strip()
+    except Exception:
+        shop_domain = ""
+    try:
+        data = await shopify_graphql(
+            CUSTOMER_ORDERS_GQL,
+            {"id": cid, "first": max(1, min(50, int(first or 20)))},
+            store=store,
+        )
+    except HTTPException as he:
+        raise he
+    customer = (data or {}).get("customer") or {}
+    edges = ((customer.get("orders") or {}).get("edges") or [])
+    orders_out: List[Dict[str, Any]] = []
+    for e in edges:
+        n = e.get("node") or {}
+        money = ((n.get("currentTotalPriceSet") or {}).get("shopMoney") or {})
+        orders_out.append({
+            "id": n.get("id"),
+            "legacy_id": str(n.get("legacyResourceId") or "").strip(),
+            "name": n.get("name") or "",
+            "number": (n.get("name") or "").lstrip("#"),
+            "created_at": n.get("createdAt"),
+            "cancelled_at": n.get("cancelledAt"),
+            "fulfillment_status": n.get("displayFulfillmentStatus") or "",
+            "financial_status": n.get("displayFinancialStatus") or "",
+            "total_price": money.get("amount") or "0",
+            "currency": money.get("currencyCode") or "",
+        })
+    return {
+        "ok": True,
+        "customer_id": customer.get("id") or cid,
+        "display_name": customer.get("displayName") or "",
+        "total_orders": int(customer.get("numberOfOrders") or 0),
+        "orders": orders_out,
         "shop_domain": shop_domain,
     }
 

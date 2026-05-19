@@ -62,6 +62,28 @@ const API = {
     if (!res.ok) throw new Error("Failed to load team stats");
     return res.json();
   },
+  async customerOrders(store, customerId) {
+    const qs = new URLSearchParams({ store, customer_id: customerId });
+    const res = await authFetch(`/api/agent/customer-orders?${qs}`, { headers: authHeaders() });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Failed to load customer history" }));
+      throw new Error(js.detail || `Failed to load customer history (${res.status})`);
+    }
+    return res.json();
+  },
+  async appendNote(orderId, append, store) {
+    const qs = store ? `?store=${encodeURIComponent(store)}` : "";
+    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ append }),
+    });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Failed to add note" }));
+      throw new Error(js.detail || `Failed to add note (${res.status})`);
+    }
+    return res.json();
+  },
 };
 
 function shopifyOrderUrl(order, shopDomain) {
@@ -812,7 +834,7 @@ function AgentView({ me }) {
                       {isOpen && (
                         <tr className="bg-gray-50/60">
                           <td colSpan={9} className="px-3 py-3">
-                            <LineItemsGrid order={o} />
+                            <OrderExpanded order={o} store={store} shopDomain={meta.shop_domain} />
                           </td>
                         </tr>
                       )}
@@ -1029,6 +1051,193 @@ function StatPill({ label, value, accent, onClick, active = false }) {
         {active && <span aria-hidden>✕</span>}
       </div>
       <div className="text-lg font-semibold leading-tight">{value}</div>
+    </div>
+  );
+}
+
+// Colored status badge used in the customer-history list and order details.
+function StatusBadge({ kind, value }) {
+  const v = String(value || "").toLowerCase();
+  // kind: "fulfillment" | "financial" | "lifecycle"
+  let palette = "bg-gray-100 text-gray-700 border-gray-200";
+  if (kind === "lifecycle" && v === "cancelled") palette = "bg-rose-100 text-rose-700 border-rose-200";
+  else if (kind === "fulfillment") {
+    if (v === "fulfilled") palette = "bg-emerald-100 text-emerald-700 border-emerald-200";
+    else if (v === "partially_fulfilled" || v === "partially fulfilled") palette = "bg-sky-100 text-sky-700 border-sky-200";
+    else if (v === "unfulfilled") palette = "bg-amber-100 text-amber-700 border-amber-200";
+    else if (v === "scheduled") palette = "bg-violet-100 text-violet-700 border-violet-200";
+    else if (v === "on_hold" || v === "on hold") palette = "bg-amber-100 text-amber-700 border-amber-200";
+  } else if (kind === "financial") {
+    if (v === "paid") palette = "bg-emerald-100 text-emerald-700 border-emerald-200";
+    else if (v === "pending") palette = "bg-amber-100 text-amber-700 border-amber-200";
+    else if (v === "partially_paid" || v === "partially paid") palette = "bg-sky-100 text-sky-700 border-sky-200";
+    else if (v === "refunded" || v === "partially_refunded" || v === "partially refunded") palette = "bg-gray-100 text-gray-700 border-gray-200";
+    else if (v === "voided" || v === "authorized") palette = "bg-violet-100 text-violet-700 border-violet-200";
+  }
+  const label = String(value || "").replace(/_/g, " ").toLowerCase();
+  return (
+    <span className={`inline-flex items-center text-[10px] uppercase tracking-wide font-medium px-2 py-0.5 rounded-full border ${palette}`}>
+      {label || "—"}
+    </span>
+  );
+}
+
+function OrderExpanded({ order, store, shopDomain }) {
+  const [noteText, setNoteText] = useState("");
+  const [noteBusy, setNoteBusy] = useState(false);
+  const [noteMsg, setNoteMsg] = useState(null);
+
+  const [history, setHistory] = useState(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const cid = order?.customer_id;
+    if (!cid) { setHistory({ orders: [], total_orders: 0 }); return; }
+    setHistoryLoading(true); setHistoryError(null);
+    (async () => {
+      try {
+        const js = await API.customerOrders(store, cid);
+        if (!cancelled) setHistory(js);
+      } catch (e) {
+        if (!cancelled) setHistoryError(e?.message || "Failed to load customer history");
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [order?.customer_id, store]);
+
+  async function handleAddNote() {
+    const text = (noteText || "").trim();
+    if (!text) return;
+    setNoteBusy(true); setNoteMsg(null);
+    try {
+      await API.appendNote(order.id, text, store);
+      setNoteMsg(`Added: "${text}"`);
+      setNoteText("");
+    } catch (e) {
+      setNoteMsg(e?.message || "Failed to add note");
+    } finally {
+      setNoteBusy(false);
+    }
+  }
+
+  const fullAddress = [order.shipping_address1, order.shipping_address2, order.shipping_city, order.shipping_zip, order.shipping_country]
+    .filter(Boolean)
+    .join(", ");
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* Customer / shipping details */}
+        <div className="bg-white border border-gray-200 rounded-xl p-3">
+          <div className="text-xs uppercase tracking-wide text-gray-500 mb-2">Customer & shipping</div>
+          <div className="text-sm font-semibold">{order.customer_name || "—"}</div>
+          <div className="text-xs font-mono text-gray-600 mt-0.5">{order.phone || order.customer_phone || "—"}</div>
+          <div className="text-xs text-gray-700 mt-2">
+            <div>{order.shipping_address1 || ""}{order.shipping_address2 ? `, ${order.shipping_address2}` : ""}</div>
+            <div>
+              <span className="font-medium">City:</span> {order.shipping_city || "—"}
+              {order.shipping_zip ? ` · ${order.shipping_zip}` : ""}
+            </div>
+            {order.shipping_country && <div className="text-gray-500">{order.shipping_country}</div>}
+          </div>
+          {order.note && (
+            <div className="mt-2 text-xs text-gray-700 bg-gray-50 border border-gray-200 rounded p-2 whitespace-pre-wrap">
+              <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">Existing note</div>
+              {order.note}
+            </div>
+          )}
+        </div>
+
+        {/* Add a note to Shopify */}
+        <div className="bg-white border border-gray-200 rounded-xl p-3">
+          <div className="text-xs uppercase tracking-wide text-gray-500 mb-2">Add note to Shopify order</div>
+          <textarea
+            value={noteText}
+            onChange={(e) => setNoteText(e.target.value)}
+            placeholder="e.g. customer asked to call back tomorrow morning"
+            rows={3}
+            className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5 resize-y"
+          />
+          <div className="flex items-center gap-2 mt-2">
+            <button
+              type="button"
+              onClick={handleAddNote}
+              disabled={noteBusy || !noteText.trim()}
+              className="text-xs px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-50"
+            >{noteBusy ? "Adding…" : "Add note"}</button>
+            {noteMsg && <span className="text-[11px] text-gray-600">{noteMsg}</span>}
+          </div>
+          <div className="text-[11px] text-gray-500 mt-1">Appends to the order note in Shopify (existing notes are preserved).</div>
+        </div>
+      </div>
+
+      {/* Customer order history */}
+      <div className="bg-white border border-gray-200 rounded-xl p-3">
+        <div className="flex items-center mb-2">
+          <div className="text-xs uppercase tracking-wide text-gray-500">Customer history</div>
+          {history?.total_orders > 0 && (
+            <span className="ml-2 text-[11px] text-gray-500">{history.total_orders} total order{history.total_orders === 1 ? "" : "s"}</span>
+          )}
+        </div>
+        {historyLoading && <div className="text-xs text-gray-500">Loading customer orders…</div>}
+        {historyError && <div className="text-xs text-rose-700">{historyError}</div>}
+        {!historyLoading && !historyError && history && (
+          (history.orders || []).length === 0 ? (
+            <div className="text-xs text-gray-500">No previous orders.</div>
+          ) : (
+            <div className="overflow-auto">
+              <table className="min-w-full text-xs">
+                <thead className="text-left text-[10px] uppercase tracking-wide text-gray-500">
+                  <tr>
+                    <th className="px-2 py-1">Order</th>
+                    <th className="px-2 py-1">Date</th>
+                    <th className="px-2 py-1">Fulfillment</th>
+                    <th className="px-2 py-1">Payment</th>
+                    <th className="px-2 py-1">Status</th>
+                    <th className="px-2 py-1 text-right">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(history.orders || []).map((h) => {
+                    const url = shopifyOrderUrl({ id: h.id, legacy_id: h.legacy_id }, shopDomain);
+                    const isCancelled = !!h.cancelled_at;
+                    const isCurrent = h.id === order.id;
+                    return (
+                      <tr key={h.id} className={`border-t border-gray-100 ${isCurrent ? "bg-indigo-50/60" : ""}`}>
+                        <td className="px-2 py-1 font-medium whitespace-nowrap">
+                          {url ? (
+                            <a href={url} target="_blank" rel="noopener noreferrer" className="text-indigo-700 hover:underline">{h.name || `#${h.number}`}</a>
+                          ) : (h.name || `#${h.number}`)}
+                          {isCurrent && <span className="ml-1 text-[10px] text-indigo-700">(current)</span>}
+                        </td>
+                        <td className="px-2 py-1 text-gray-600 whitespace-nowrap">{h.created_at ? new Date(h.created_at).toLocaleDateString() : ""}</td>
+                        <td className="px-2 py-1"><StatusBadge kind="fulfillment" value={h.fulfillment_status} /></td>
+                        <td className="px-2 py-1"><StatusBadge kind="financial" value={h.financial_status} /></td>
+                        <td className="px-2 py-1">
+                          {isCancelled
+                            ? <StatusBadge kind="lifecycle" value="cancelled" />
+                            : <span className="text-[10px] text-gray-400">—</span>}
+                        </td>
+                        <td className="px-2 py-1 text-right whitespace-nowrap">{h.total_price} {h.currency}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )
+        )}
+      </div>
+
+      {/* Line items */}
+      <div>
+        <div className="text-xs uppercase tracking-wide text-gray-500 mb-2">Line items</div>
+        <LineItemsGrid order={order} />
+      </div>
     </div>
   );
 }
