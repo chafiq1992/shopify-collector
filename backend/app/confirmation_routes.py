@@ -427,6 +427,8 @@ query AgentQueue($first: Int!, $after: String, $query: String) {
           edges {
             node {
               quantity
+              currentQuantity
+              unfulfilledQuantity
               sku
               title
               originalUnitPriceSet { shopMoney { amount currencyCode } }
@@ -472,6 +474,15 @@ def _flatten_order(node: Dict[str, Any]) -> Dict[str, Any]:
     line_items = []
     for e in line_edges:
         n = e.get("node") or {}
+        # Skip "Removed" line items (edited off the order). Shopify keeps the row in the
+        # lineItems collection but sets currentQuantity to 0. Match the Shopify admin
+        # view that splits Unfulfilled vs. Removed sections.
+        try:
+            current_qty = int(n.get("currentQuantity"))
+        except Exception:
+            current_qty = int(n.get("quantity") or 0)
+        if current_qty <= 0:
+            continue
         variant = n.get("variant") or {}
         product = variant.get("product") or {}
         img = (variant.get("image") or {}).get("url") or ((product.get("featuredImage") or {}).get("url"))
@@ -481,7 +492,7 @@ def _flatten_order(node: Dict[str, Any]) -> Dict[str, Any]:
             "variant_title": variant.get("title") or "",
             "options": variant.get("selectedOptions") or [],
             "sku": n.get("sku") or variant.get("sku") or "",
-            "quantity": int(n.get("quantity") or 0),
+            "quantity": current_qty,
             "unit_price": unit["amount"],
             "currency": unit["currency"],
             "image": img,
