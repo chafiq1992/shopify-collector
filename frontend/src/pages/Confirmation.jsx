@@ -17,6 +17,18 @@ import {
 // the button. Pairs with the existing color/hover styling.
 const BTN_TAP = "active:scale-[0.96] transition-transform duration-75";
 
+// Shared "action chip" styling for the per-order action row. Gradient background +
+// soft shadow + ring on hover + tap press.
+const ACTION_BTN_BASE = "inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold text-white shadow-md hover:shadow-lg hover:-translate-y-px focus:outline-none focus:ring-2 focus:ring-offset-1 active:scale-[0.95] transition-all duration-100 min-w-[60px] justify-center";
+const ACTION_BTN_THEMES = {
+  sky:     "bg-gradient-to-br from-sky-500 to-sky-600 hover:from-sky-600 hover:to-sky-700 focus:ring-sky-400",
+  violet:  "bg-gradient-to-br from-violet-500 to-violet-600 hover:from-violet-600 hover:to-violet-700 focus:ring-violet-400",
+  fuchsia: "bg-gradient-to-br from-fuchsia-500 to-fuchsia-600 hover:from-fuchsia-600 hover:to-fuchsia-700 focus:ring-fuchsia-400",
+  indigo:  "bg-gradient-to-br from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700 focus:ring-indigo-400",
+  rose:    "bg-gradient-to-br from-rose-500 to-rose-600 hover:from-rose-600 hover:to-rose-700 focus:ring-rose-400",
+  emerald: "bg-gradient-to-br from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 focus:ring-emerald-400",
+};
+
 // ---------- API helpers ----------
 const API = {
   async me() {
@@ -188,11 +200,27 @@ export default function Confirmation() {
 }
 
 // ---------- Header ----------
-function Header({ title, store, setStore, rightSlot }) {
+function Header({ title, store, setStore, rightSlot, me }) {
+  const initial = ((me?.name || me?.email || "?").trim().charAt(0) || "?").toUpperCase();
   return (
     <header className="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-gray-200">
       <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3 flex-wrap">
         <div className="text-lg font-semibold">{title}</div>
+        {me && (
+          <div className="inline-flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-full pl-1 pr-3 py-1">
+            <div className="w-6 h-6 rounded-full bg-indigo-600 text-white text-xs font-bold flex items-center justify-center">
+              {initial}
+            </div>
+            <div className="leading-tight">
+              {me.name && (
+                <div className="text-xs font-semibold text-indigo-900 leading-tight">{me.name}</div>
+              )}
+              <div className={`text-[11px] text-indigo-700 leading-tight ${!me.name ? "font-semibold" : ""}`}>
+                {me.email}
+              </div>
+            </div>
+          </div>
+        )}
         <div className="ml-auto flex items-center gap-2">
           {rightSlot}
           <StorePicker value={store} onChange={(v) => setStore(v)} />
@@ -587,6 +615,7 @@ function AgentView({ me }) {
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
       <Header
         title="Confirmation"
+        me={me}
         store={store}
         setStore={setStore}
         rightSlot={
@@ -780,7 +809,13 @@ function AgentView({ me }) {
                   return (
                     <React.Fragment key={o.id}>
                       <tr
-                        className={`border-t border-gray-100 hover:bg-gray-50 cursor-pointer ${selected.has(o.id) ? "bg-indigo-50/40" : ""}`}
+                        className={`border-t border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors ${
+                          isOpen || pickerOpen
+                            ? "bg-indigo-50/80 ring-1 ring-indigo-200 shadow-inner border-l-4 border-l-indigo-500"
+                            : selected.has(o.id)
+                              ? "bg-indigo-50/40"
+                              : ""
+                        }`}
                         onClick={(e) => {
                           const tag = (e.target?.tagName || "").toLowerCase();
                           if (["button", "input", "select", "a", "svg", "path", "label"].includes(tag)) return;
@@ -818,19 +853,19 @@ function AgentView({ me }) {
                           })()}
                         </td>
                         <td className="px-3 py-2">{o.customer_name || <span className="text-gray-400">—</span>}</td>
-                        <td className="px-3 py-2 font-mono text-xs">
+                        <td className="px-3 py-2">
                           {o.phone ? (
-                            <div className="inline-flex items-center gap-1.5">
-                              <span>{o.phone}</span>
+                            <div className="inline-flex items-center gap-1.5 bg-sky-50 border border-sky-200 rounded-lg px-2 py-1">
+                              <span className="font-mono font-bold text-sm text-sky-900 tracking-tight">{o.phone}</span>
                               <button
                                 type="button"
                                 onClick={(ev) => { ev.stopPropagation(); handleCopyPhone(o); }}
                                 title={`Copy ${moroccoInternational(o.phone)} (international, no +)`}
-                                className={`text-gray-400 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
+                                className={`text-sky-500 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
                               >📋</button>
                             </div>
                           ) : (
-                            <span className="text-gray-400">—</span>
+                            <span className="text-gray-400 text-xs">—</span>
                           )}
                         </td>
                         <td className="px-3 py-2 text-xs text-gray-700">
@@ -858,36 +893,41 @@ function AgentView({ me }) {
                           <div className="inline-flex items-center gap-1">
                             <button
                               onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
-                              className={`text-xs px-3 py-1 rounded-lg bg-sky-600 text-white hover:bg-sky-700 shadow-sm ${BTN_TAP}`}
+                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky}`}
                               title="Copy phone + advance n1/n2/n3/n4"
                             >
-                              📞 {tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || ""}
+                              <span aria-hidden className="text-sm">📞</span>
+                              <span>{(tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "").toUpperCase() || "Call"}</span>
                             </button>
                             <button
                               onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
-                              className={`text-xs px-3 py-1 rounded-lg bg-violet-600 text-white hover:bg-violet-700 shadow-sm ${BTN_TAP}`}
+                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.violet}`}
                               title="No-WhatsApp attempt — cycles nowtp1 → nowtp2 → nowtp3 → nowtp4"
                             >
-                              🚫 {(() => {
+                              <span aria-hidden className="text-sm">🚫</span>
+                              <span>{(() => {
                                 const t = tagsInCycle(o.tags || [], NOWTP_TAGS).slice(-1)[0];
-                                return t ? t.replace("nowtp", "nw") : "Nowtp";
-                              })()}
+                                return t ? t.replace("nowtp", "NW").toUpperCase() : "NoWTP";
+                              })()}</span>
                             </button>
                             <button
                               onClick={(ev) => { ev.stopPropagation(); handleEnatt(o); }}
-                              className={`text-xs px-3 py-1 rounded-lg bg-fuchsia-600 text-white hover:bg-fuchsia-700 shadow-sm ${BTN_TAP}`}
+                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.fuchsia}`}
                               title="En attente — cycles enatt1 → enatt2 → enatt3 → enatt4"
                             >
-                              ⏳ {(() => {
+                              <span aria-hidden className="text-sm">⏳</span>
+                              <span>{(() => {
                                 const t = tagsInCycle(o.tags || [], ENATT_TAGS).slice(-1)[0];
-                                return t ? t.replace("enatt", "ea") : "Enatt";
-                              })()}
+                                return t ? t.replace("enatt", "EA").toUpperCase() : "Enatt";
+                              })()}</span>
                             </button>
                             <button
                               onClick={(ev) => { ev.stopPropagation(); openDatePicker(o); }}
-                              className={`text-xs px-3 py-1 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm ${BTN_TAP}`}
+                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.emerald} !min-w-[44px]`}
                               title="Confirm for a delivery date"
-                            >✅</button>
+                            >
+                              <span aria-hidden className="text-base">✅</span>
+                            </button>
                             <div className="relative">
                               <button
                                 onClick={(ev) => {
