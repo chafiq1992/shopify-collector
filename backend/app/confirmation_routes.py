@@ -949,17 +949,17 @@ async def team_stats(
     for a in agents:
         queries.append(await query_for_user(db, a))
 
-    async def _accurate_count_for(idx: int) -> int:
+    async def _breakdown_for(idx: int) -> Dict[str, int]:
         q = queries[idx]
         if not q:
-            return 0
+            return _empty_breakdown()
         try:
-            return await accurate_assigned_count(store, agents[idx].id, q)
+            return await accurate_assigned_breakdown(store, agents[idx].id, q)
         except Exception:
-            return 0
+            return _empty_breakdown()
 
-    counts = await asyncio.gather(*[_accurate_count_for(i) for i in range(len(agents))])
-    assigned_map = {a.id: counts[i] for i, a in enumerate(agents)}
+    breakdowns = await asyncio.gather(*[_breakdown_for(i) for i in range(len(agents))])
+    breakdown_map = {a.id: breakdowns[i] for i, a in enumerate(agents)}
 
     return {
         "ok": True,
@@ -972,7 +972,9 @@ async def team_stats(
                 "role": a.role,
                 "tags": list(a.agent_tags or []),
                 "is_catchall": (a.role == "agent" and not (a.agent_tags or [])),
-                "assigned": assigned_map.get(a.id, 0),
+                # `assigned` kept for backward compat; clients should prefer `breakdown.total`.
+                "assigned": int((breakdown_map.get(a.id) or {}).get("total") or 0),
+                "breakdown": breakdown_map.get(a.id) or _empty_breakdown(),
                 "confirmed_today": confirmed_map.get(a.id, 0),
             }
             for a in agents

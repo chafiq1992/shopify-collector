@@ -947,44 +947,26 @@ function AgentView({ me }) {
           </div>
         </section>
 
-        {/* Team panels: assigned + confirmed today */}
-        <section className="bg-white border border-gray-200 rounded-2xl p-4 space-y-4">
-          <div>
-            <div className="text-sm font-semibold mb-2">Team — assigned now</div>
-            {teamStats.length === 0 ? (
-              <div className="text-xs text-gray-500">No team data yet.</div>
-            ) : (
-              <div className="flex flex-wrap gap-2">
-                {teamStats.map((a) => (
-                  <div key={`a-${a.id}`} className={`text-xs rounded-lg border px-3 py-2 ${a.id === me.id ? "border-indigo-300 bg-indigo-50" : "border-gray-200 bg-gray-50"}`}>
-                    <div className="font-medium flex items-center gap-1">
-                      {a.name || a.email}
-                      {a.is_catchall && <span className="text-[10px] uppercase tracking-wide bg-amber-100 text-amber-700 border border-amber-200 rounded px-1">catch-all</span>}
-                    </div>
-                    <div className="text-gray-700">{a.assigned} assigned</div>
-                    <div className="text-[10px] text-gray-500 truncate max-w-[180px]" title={(a.tags || []).join(", ")}>
-                      {(a.tags || []).length === 0 ? (a.is_catchall ? "no tag · sees all open unshipped" : "no tag") : (a.tags || []).join(", ")}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+        {/* Team performance */}
+        <section className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold flex items-center gap-2">
+              <span>🏆</span>
+              <span>Team performance today</span>
+            </div>
+            <div className="text-[11px] text-gray-500">
+              {meta.today_label && <span>{meta.today_label} · confirmations counted by clicks today</span>}
+            </div>
           </div>
-          <div>
-            <div className="text-sm font-semibold mb-2">Team — confirmed today {meta.today_label && <span className="text-xs text-gray-500 font-normal">(any cod date, clicks counted today)</span>}</div>
-            {teamStats.length === 0 ? (
-              <div className="text-xs text-gray-500">No team data yet.</div>
-            ) : (
-              <div className="flex flex-wrap gap-2">
-                {teamStats.map((a) => (
-                  <div key={`c-${a.id}`} className={`text-xs rounded-lg border px-3 py-2 ${a.id === me.id ? "border-emerald-300 bg-emerald-50" : "border-gray-200 bg-gray-50"}`}>
-                    <div className="font-medium">{a.name || a.email}</div>
-                    <div className="text-gray-700">{a.confirmed_today} confirmed</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          {teamStats.length === 0 ? (
+            <div className="text-xs text-gray-500">No team data yet.</div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              {teamStats.map((a) => (
+                <AgentCard key={a.id} agent={a} isMe={a.id === me.id} />
+              ))}
+            </div>
+          )}
         </section>
       </main>
       {cancelModalFor && (
@@ -1143,6 +1125,92 @@ function StatPill({ label, value, color = "slate", onClick, active = false, icon
         {active && <span aria-hidden className="ml-auto">✕</span>}
       </div>
       <div className="text-xl font-bold leading-tight tabular-nums">{value}</div>
+    </div>
+  );
+}
+
+// Tiny color-coded count chip used inside the team agent cards.
+const MINI_THEMES = {
+  indigo:  { bg: "bg-indigo-50",  text: "text-indigo-700",  border: "border-indigo-200" },
+  amber:   { bg: "bg-amber-50",   text: "text-amber-700",   border: "border-amber-200" },
+  orange:  { bg: "bg-orange-50",  text: "text-orange-700",  border: "border-orange-200" },
+  rose:    { bg: "bg-rose-50",    text: "text-rose-700",    border: "border-rose-200" },
+  red:     { bg: "bg-red-50",     text: "text-red-700",     border: "border-red-200" },
+  violet:  { bg: "bg-violet-50",  text: "text-violet-700",  border: "border-violet-200" },
+  fuchsia: { bg: "bg-fuchsia-50", text: "text-fuchsia-700", border: "border-fuchsia-200" },
+  sky:     { bg: "bg-sky-50",     text: "text-sky-700",     border: "border-sky-200" },
+  emerald: { bg: "bg-emerald-50", text: "text-emerald-700", border: "border-emerald-200" },
+};
+
+function MiniStat({ label, value, color = "indigo", title }) {
+  const theme = MINI_THEMES[color] || MINI_THEMES.indigo;
+  return (
+    <div
+      className={`rounded-lg border ${theme.bg} ${theme.text} ${theme.border} px-1.5 py-1 text-center`}
+      title={title || label}
+    >
+      <div className="text-[9px] uppercase tracking-wide font-semibold opacity-80 leading-tight">{label}</div>
+      <div className="text-sm font-bold tabular-nums leading-tight">{value}</div>
+    </div>
+  );
+}
+
+function AgentCard({ agent, isMe }) {
+  const initial = ((agent.name || agent.email || "?").trim().charAt(0) || "?").toUpperCase();
+  const b = agent.breakdown || {};
+  const confirmed = Number(agent.confirmed_today || 0);
+  return (
+    <div className={`relative bg-white border rounded-2xl p-3 shadow-sm transition hover:shadow-md ${isMe ? "border-indigo-300 ring-1 ring-indigo-200" : "border-gray-200"}`}>
+      {/* Header: avatar + name + chips */}
+      <div className="flex items-center gap-2 mb-2.5">
+        <div className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-sm shrink-0 ${isMe ? "bg-indigo-600 text-white" : "bg-indigo-100 text-indigo-700"}`}>
+          {initial}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-semibold truncate" title={agent.name || agent.email}>
+            {agent.name || agent.email}
+          </div>
+          <div className="text-[10px] text-gray-500 truncate" title={agent.email}>{agent.email}</div>
+        </div>
+        <div className="flex flex-col items-end gap-0.5">
+          {isMe && (
+            <span className="text-[9px] uppercase tracking-wide bg-indigo-100 text-indigo-700 border border-indigo-200 rounded px-1 py-0.5">you</span>
+          )}
+          {agent.is_catchall && (
+            <span className="text-[9px] uppercase tracking-wide bg-amber-100 text-amber-700 border border-amber-200 rounded px-1 py-0.5">catch-all</span>
+          )}
+        </div>
+      </div>
+
+      {/* Tags row */}
+      {(agent.tags || []).length > 0 && (
+        <div className="flex flex-wrap gap-1 mb-2">
+          {(agent.tags || []).map((t) => (
+            <span key={t} className="text-[10px] bg-gray-100 text-gray-700 border border-gray-200 rounded-full px-1.5 py-0.5">{t}</span>
+          ))}
+        </div>
+      )}
+
+      {/* Per-level breakdown */}
+      <div className="grid grid-cols-4 gap-1.5">
+        <MiniStat label="New"   value={Number(b.new   || 0)} color="indigo"  />
+        <MiniStat label="N1"    value={Number(b.n1    || 0)} color="amber"   />
+        <MiniStat label="N2"    value={Number(b.n2    || 0)} color="orange"  />
+        <MiniStat label="N3"    value={Number(b.n3    || 0)} color="rose"    />
+        <MiniStat label="N4"    value={Number(b.n4    || 0)} color="red"     />
+        <MiniStat label="NoWTP" value={Number(b.nowtp || 0)} color="violet"  />
+        <MiniStat label="Enatt" value={Number(b.enatt || 0)} color="fuchsia" />
+        <MiniStat label="Pending" value={Number(b.total || 0)} color="sky" title="Total open + unshipped in this agent's queue" />
+      </div>
+
+      {/* Confirmed today */}
+      <div className="mt-2.5 pt-2.5 border-t border-gray-100 flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wide font-semibold text-emerald-700">
+          <span>✅</span>
+          <span>Confirmed today</span>
+        </div>
+        <div className="text-xl font-bold tabular-nums text-emerald-700">{confirmed}</div>
+      </div>
     </div>
   );
 }
