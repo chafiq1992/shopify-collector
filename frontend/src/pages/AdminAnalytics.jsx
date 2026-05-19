@@ -29,6 +29,12 @@ export default function AdminAnalytics(){
   const [resetEmail, setResetEmail] = useState("");
   const [resetPassword, setResetPassword] = useState("");
 
+  // Confirmation team metrics (n1..n4, nowtp, enatt, confirmed, cancelled per user/day-range)
+  const [confStatsRows, setConfStatsRows] = useState([]);
+  const [confStatsSummary, setConfStatsSummary] = useState({});
+  const [confStatsLoading, setConfStatsLoading] = useState(false);
+  const confStatsRequestIdRef = useRef(0);
+
   // Inline user edit (name, tags, password, role)
   const [editingUserId, setEditingUserId] = useState(null);
   const [editUserName, setEditUserName] = useState("");
@@ -183,6 +189,31 @@ export default function AdminAnalytics(){
       setAdminMsg(e?.message || "Failed to load return stats");
     } finally {
       if (requestId === returnStatsRequestIdRef.current) setReturnStatsLoading(false);
+    }
+  }
+
+  async function loadConfirmationStats(){
+    const requestId = ++confStatsRequestIdRef.current;
+    setConfStatsLoading(true);
+    try {
+      const params = new URLSearchParams({ from_date: fromDate, to_date: toDate });
+      if (store && store !== "all") params.set("store", store);
+      const res = await authFetch(`/api/admin/confirmation-stats?${params.toString()}`, {
+        headers: authHeaders({"Accept":"application/json"})
+      });
+      if (!res.ok) {
+        const js = await res.json().catch(()=>({detail:"Failed to load confirmation stats"}));
+        throw new Error(js.detail || "Failed to load confirmation stats");
+      }
+      const js = await res.json();
+      if (requestId !== confStatsRequestIdRef.current) return;
+      setConfStatsRows(js.rows || []);
+      setConfStatsSummary(js.summary || {});
+    } catch (e){
+      if (requestId !== confStatsRequestIdRef.current) return;
+      setAdminMsg(e?.message || "Failed to load confirmation stats");
+    } finally {
+      if (requestId === confStatsRequestIdRef.current) setConfStatsLoading(false);
     }
   }
 
@@ -353,6 +384,7 @@ export default function AdminAnalytics(){
 
   useEffect(() => { load(); }, []); // initial
   useEffect(() => { loadUsers(); }, []); // initial
+  useEffect(() => { loadConfirmationStats(); }, []); // initial
 
   function goto(path){
     try {
@@ -434,7 +466,7 @@ export default function AdminAnalytics(){
             <input type="date" value={toDate} onChange={(e)=>setToDate(e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1 bg-white" />
           </div>
           <div className="bg-gray-100 rounded-xl px-3 py-2 flex items-end">
-            <button onClick={load} className="w-full text-sm px-3 py-2 rounded-lg bg-gray-900 text-white font-semibold active:scale-[.98]">Apply</button>
+            <button onClick={() => { load(); loadConfirmationStats(); }} className="w-full text-sm px-3 py-2 rounded-lg bg-gray-900 text-white font-semibold active:scale-[.98]">Apply</button>
           </div>
         </div>
       </header>
@@ -620,6 +652,94 @@ export default function AdminAnalytics(){
                 </div>
               </div>
             </section>
+
+            <section className="mb-6">
+              <div className="flex items-center mb-2">
+                <h3 className="text-sm font-semibold text-gray-700">Confirmation team metrics</h3>
+                <span className="ml-2 text-xs text-gray-500">
+                  Counts of each call-center action (N1..N4, NoWTP, Enatt, Confirmed, Cancelled) per agent in the selected date range.
+                </span>
+                <button onClick={loadConfirmationStats} className="ml-auto text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">
+                  {confStatsLoading ? "Loading…" : "Refresh"}
+                </button>
+              </div>
+              <div className="overflow-x-auto bg-white border border-gray-200 rounded-xl">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-gray-50 text-left text-[11px] uppercase tracking-wide text-gray-600">
+                    <tr>
+                      <th className="px-3 py-2">Agent</th>
+                      <th className="px-3 py-2 text-right">N1</th>
+                      <th className="px-3 py-2 text-right">N2</th>
+                      <th className="px-3 py-2 text-right">N3</th>
+                      <th className="px-3 py-2 text-right">N4</th>
+                      <th className="px-3 py-2 text-right">NoWTP</th>
+                      <th className="px-3 py-2 text-right">Enatt</th>
+                      <th className="px-3 py-2 text-right">Confirmed</th>
+                      <th className="px-3 py-2 text-right">Cancelled</th>
+                      <th className="px-3 py-2 text-right">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(confStatsRows || []).length === 0 && !confStatsLoading && (
+                      <tr><td colSpan={10} className="px-3 py-4 text-center text-gray-500">No confirmation activity in this range.</td></tr>
+                    )}
+                    {(confStatsRows || []).map((r) => (
+                      <tr key={r.user_id} className="border-t border-gray-100">
+                        <td className="px-3 py-2">
+                          <div className="font-medium">{r.name || r.email || r.user_id}</div>
+                          <div className="text-[11px] text-gray-500">{r.email}{r.role ? ` · ${r.role}` : ""}</div>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          <span className="inline-block min-w-[28px] px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">{r.n1}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          <span className="inline-block min-w-[28px] px-2 py-0.5 rounded bg-orange-50 text-orange-800 border border-orange-200">{r.n2}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          <span className="inline-block min-w-[28px] px-2 py-0.5 rounded bg-rose-50 text-rose-800 border border-rose-200">{r.n3}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          <span className="inline-block min-w-[28px] px-2 py-0.5 rounded bg-red-50 text-red-800 border border-red-200">{r.n4}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          <span className="inline-block min-w-[28px] px-2 py-0.5 rounded bg-violet-50 text-violet-800 border border-violet-200">{r.nowtp}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          <span className="inline-block min-w-[28px] px-2 py-0.5 rounded bg-fuchsia-50 text-fuchsia-800 border border-fuchsia-200">{r.enatt}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          <span className="inline-block min-w-[28px] px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200 font-semibold">{r.confirmed}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          <span className="inline-block min-w-[28px] px-2 py-0.5 rounded bg-gray-100 text-gray-700 border border-gray-200">{r.cancelled}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums font-semibold">{r.total_attempts}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  {(confStatsRows || []).length > 0 && (
+                    <tfoot className="bg-gray-50">
+                      <tr className="border-t border-gray-200 font-semibold text-gray-800">
+                        <td className="px-3 py-2 text-right">Total</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.n1 || 0}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.n2 || 0}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.n3 || 0}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.n4 || 0}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.nowtp || 0}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.enatt || 0}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-emerald-700">{confStatsSummary?.confirmed || 0}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.cancelled || 0}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.total_attempts || 0}</td>
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              </div>
+              <div className="text-[11px] text-gray-500 mt-1">
+                Computed live from the order audit log (every Phone/Nowtp/Enatt/Confirm/Cancel click).
+              </div>
+            </section>
+
             <section className="mb-4">
               <h3 className="text-sm font-semibold text-gray-700 mb-2">Per-user totals</h3>
               <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">

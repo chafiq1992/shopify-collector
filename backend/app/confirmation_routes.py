@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth_routes import get_current_user, hash_password, require_admin
@@ -1009,4 +1009,126 @@ async def team_stats(
             }
             for a in agents
         ],
+    }
+
+
+# ---------- Admin confirmation analytics ----------
+
+def _parse_date_bound(value: Optional[str], end: bool = False) -> Optional[datetime]:
+    """Parse a YYYY-MM-DD string in the app timezone, returning a UTC datetime. If `end`
+    is True the bound is the start of the FOLLOWING day so the range is half-open."""
+    if not value:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        dt_local = datetime.fromisoformat(s).replace(tzinfo=_tz())
+    except Exception:
+        return None
+    if end:
+        dt_local = dt_local + timedelta(days=1)
+    return dt_local.astimezone(timezone.utc)
+
+
+@router.get("/api/admin/confirmation-stats")
+async def admin_confirmation_stats(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    store: Optional[str] = None,
+    db: AsyncSession = Depends(get_session),
+    _: User = Depends(require_admin),
+):
+    """Per-user counts of confirmation-page actions in a date range.
+
+    Reads the OrderEvent audit table (single source of truth) and buckets the action
+    names into n1..n4 / nowtp / enatt / confirmed / cancelled. Returns one row per
+    active user that took at least one such action, plus a summary across all users.
+    """
+    from_dt = _parse_date_bound(from_date, end=False)
+    to_dt = _parse_date_bound(to_date, end=True)
+    if from_dt is None:
+        # Default: last 7 days inclusive.
+        today_local = datetime.now(_tz()).replace(hour=0, minute=0, second=0, microsecond=0)
+        from_dt = (today_local - timedelta(days=6)).astimezone(timezone.utc)
+    if to_dt is None:
+        today_local = datetime.now(_tz()).replace(hour=0, minute=0, second=0, microsecond=0)
+        to_dt = (today_local + timedelta(days=1)).astimezone(timezone.utc)
+
+    conds = [OrderEvent.created_at >= from_dt, OrderEvent.created_at < to_dt]
+    store_key = (store or "").strip().lower()
+    if store_key and store_key != "all":
+        conds.append(OrderEvent.store_key == store_key)
+
+    def _sum_when(predicate) -> Any:
+        return func.coalesce(func.sum(case((predicate, 1), else_=0)), 0)
+
+    stmt = (
+        select(
+            OrderEvent.user_id.label("user_id"),
+            _sum_when(OrderEvent.action == "confirmation_phone_n1").label("n1"),
+            _sum_when(OrderEvent.action == "confirmation_phone_n2").label("n2"),
+            _sum_when(OrderEvent.action == "confirmation_phone_n3").label("n3"),
+            _sum_when(OrderEvent.action == "confirmation_phone_n4").label("n4"),
+            _sum_when(OrderEvent.action.like("confirmation_nowtp%")).label("nowtp"),
+            _sum_when(OrderEvent.action.like("confirmation_enatt%")).label("enatt"),
+            _sum_when(OrderEvent.action == "confirmation_confirmed").label("confirmed"),
+            _sum_when(OrderEvent.action == "confirmation_cancelled").label("cancelled"),
+        )
+        .where(*conds)
+        .group_by(OrderEvent.user_id)
+    )
+
+    res = await db.execute(stmt)
+    by_user: Dict[str, Dict[str, int]] = {}
+    for row in res.all():
+        m = row._mapping
+        by_user[str(m["user_id"])] = {
+            "n1": int(m["n1"] or 0),
+            "n2": int(m["n2"] or 0),
+            "n3": int(m["n3"] or 0),
+            "n4": int(m["n4"] or 0),
+            "nowtp": int(m["nowtp"] or 0),
+            "enatt": int(m["enatt"] or 0),
+            "confirmed": int(m["confirmed"] or 0),
+            "cancelled": int(m["cancelled"] or 0),
+        }
+
+    # Pull user identity for the rows we found.
+    user_ids = list(by_user.keys())
+    name_by_id: Dict[str, Tuple[str, str, str]] = {}
+    if user_ids:
+        u_res = await db.execute(select(User).where(User.id.in_(user_ids)))
+        for u in u_res.scalars().all():
+            name_by_id[u.id] = (u.email or "", u.name or "", u.role or "")
+
+    rows: List[Dict[str, Any]] = []
+    summary = {"n1": 0, "n2": 0, "n3": 0, "n4": 0, "nowtp": 0, "enatt": 0, "confirmed": 0, "cancelled": 0, "total_attempts": 0}
+    for uid, counts in by_user.items():
+        email, name, role = name_by_id.get(uid, ("", "", ""))
+        total_attempts = sum(counts.values())
+        rows.append({
+            "user_id": uid,
+            "email": email,
+            "name": name,
+            "role": role,
+            **counts,
+            "total_attempts": total_attempts,
+        })
+        for k in summary:
+            if k == "total_attempts":
+                summary[k] += total_attempts
+            else:
+                summary[k] += counts.get(k, 0)
+
+    # Stable order: confirmed-today desc, then cancelled desc, then email.
+    rows.sort(key=lambda r: (-(r.get("confirmed") or 0), -(r.get("cancelled") or 0), r.get("email") or ""))
+
+    return {
+        "ok": True,
+        "from_date": from_date or from_dt.date().isoformat(),
+        "to_date": to_date or (to_dt - timedelta(days=1)).date().isoformat(),
+        "store": store_key or "all",
+        "rows": rows,
+        "summary": summary,
     }
