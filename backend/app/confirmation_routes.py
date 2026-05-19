@@ -245,24 +245,29 @@ async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
 
 
 _VALID_LEVELS = {"n1", "n2", "n3", "n4", "nowtp", "new"}
+_NOWTP_TAGS = ("nowtp1", "nowtp2", "nowtp3", "nowtp4")
 
 
 def apply_level_filter(q: str, level: Optional[str]) -> str:
     """Narrow an agent's queue query by call-attempt level.
 
     n1/n2/n3/n4 → only orders carrying that exact attempt tag.
-    nowtp       → only orders flagged "no WhatsApp" by the agent.
-    new         → orders with none of n1/n2/n3/n4/nowtp (i.e. not yet handled).
+    nowtp       → orders carrying any of nowtp1/nowtp2/nowtp3/nowtp4.
+    new         → orders with none of n1/n2/n3/n4/nowtp* (not yet handled).
     """
     if not q or not level:
         return q
     lv = level.lower().strip()
     if lv not in _VALID_LEVELS:
         return q
-    if lv in ("n1", "n2", "n3", "n4", "nowtp"):
+    if lv in ("n1", "n2", "n3", "n4"):
         return f"{q} tag:{_escape_tag(lv)}"
+    if lv == "nowtp":
+        nowtp_or = " OR ".join(f"tag:{_escape_tag(t)}" for t in _NOWTP_TAGS)
+        return f"{q} ({nowtp_or})"
     if lv == "new":
-        return f"{q} -tag:n1 -tag:n2 -tag:n3 -tag:n4 -tag:nowtp"
+        nowtp_neg = " ".join(f"-tag:{_escape_tag(t)}" for t in _NOWTP_TAGS)
+        return f"{q} -tag:n1 -tag:n2 -tag:n3 -tag:n4 {nowtp_neg}"
     return q
 
 
@@ -329,10 +334,13 @@ async def accurate_assigned_breakdown(store: str, user_id: str, base_q: str) -> 
             counts["total"] += 1
             tlower = {str(t or "").strip().lower() for t in tags_list}
             has_any = False
-            for lv in ("n1", "n2", "n3", "n4", "nowtp"):
+            for lv in ("n1", "n2", "n3", "n4"):
                 if lv in tlower:
                     counts[lv] += 1
                     has_any = True
+            if any(t in tlower for t in _NOWTP_TAGS):
+                counts["nowtp"] += 1
+                has_any = True
             if not has_any:
                 counts["new"] += 1
         page_info = ((data or {}).get("orders") or {}).get("pageInfo") or {}

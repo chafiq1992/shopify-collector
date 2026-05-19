@@ -2,9 +2,10 @@
 // and clipboard copy.
 
 export const PHONE_TAGS = ["n1", "n2", "n3", "n4"];
-export const NOWTP_TAG = "nowtp";
+export const NOWTP_TAGS = ["nowtp1", "nowtp2", "nowtp3", "nowtp4"];
 
 const PHONE_SET = new Set(PHONE_TAGS);
+const NOWTP_SET = new Set(NOWTP_TAGS);
 
 export function nextInCycle(currentTags, cycle) {
   // Find the highest tag in `cycle` already on the order; return the next one.
@@ -26,7 +27,7 @@ export function isPhoneTag(tag) {
   return PHONE_SET.has(String(tag || "").toLowerCase());
 }
 export function isNowtpTag(tag) {
-  return String(tag || "").trim().toLowerCase() === NOWTP_TAG;
+  return NOWTP_SET.has(String(tag || "").trim().toLowerCase());
 }
 export function hasNowtpTag(tags) {
   return (tags || []).some(isNowtpTag);
