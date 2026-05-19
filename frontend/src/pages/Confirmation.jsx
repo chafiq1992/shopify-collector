@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import OrderLabel from "../components/OrderLabel";
+import { useToasts, ToastStack } from "../components/Toast";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 import { enqueueTagWrite, useSyncQueueLength, readQueue } from "../lib/syncQueue";
 import { copyNodeAsPng, triggerDownload } from "../lib/labelClipboard";
@@ -11,6 +12,10 @@ import {
   moroccoInternational, copyToClipboard,
   todayDDMMYY, todayISO, isoToDDMMYY, isCodTag,
 } from "../lib/confirmationActions";
+
+// Tailwind utility chunk applied to interactive buttons so every click visually presses
+// the button. Pairs with the existing color/hover styling.
+const BTN_TAP = "active:scale-[0.96] transition-transform duration-75";
 
 // ---------- API helpers ----------
 const API = {
@@ -193,7 +198,7 @@ function Header({ title, store, setStore, rightSlot }) {
           <StorePicker value={store} onChange={(v) => setStore(v)} />
           <button
             onClick={() => { clearAuth(); try { location.href = "/login"; } catch {} }}
-            className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50"
+            className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50 active:scale-[0.96] transition-transform duration-75"
           >Logout</button>
         </div>
       </div>
@@ -230,6 +235,8 @@ function AgentView({ me }) {
   const [bulkBusy, setBulkBusy] = useState(false);
   // Filter for the top stat pills: "" | "n1" | "n2" | "n3" | "n4" | "new"
   const [filterLevel, setFilterLevel] = useState("");
+  // Toast notifications (button feedback)
+  const [toasts, pushToast, dismissToast] = useToasts();
   // Per-row "..." dropdown + cancel-order modal
   const [actionsDropdownFor, setActionsDropdownFor] = useState(null);
   const [cancelModalFor, setCancelModalFor] = useState(null);
@@ -420,26 +427,36 @@ function AgentView({ me }) {
   }
 
   async function handlePhone(order) {
-    await copyToClipboard(order.phone || "");
-    cyclePhone(order, PHONE_TAGS);
+    const ok = await copyToClipboard(order.phone || "");
+    const next = cyclePhone(order, PHONE_TAGS);
+    pushToast(
+      ok ? `📞 Copied ${order.phone} · ${(next || "").toUpperCase()}` : `📞 ${(next || "").toUpperCase()} — phone copy blocked`,
+      ok ? "success" : "warn",
+    );
   }
 
   function handleNowtp(order) {
     // Cycles nowtp1 → nowtp2 → nowtp3 → nowtp4 (locks at nowtp4).
-    cyclePhone(order, NOWTP_TAGS);
+    const next = cyclePhone(order, NOWTP_TAGS);
+    pushToast(`🚫 No-WhatsApp · ${next}`, "success");
   }
 
   function handleEnatt(order) {
     // Cycles enatt1 → enatt2 → enatt3 → enatt4 (locks at enatt4). Use for "en attente"
     // (order pending follow-up).
-    cyclePhone(order, ENATT_TAGS);
+    const next = cyclePhone(order, ENATT_TAGS);
+    pushToast(`⏳ En attente · ${next}`, "success");
   }
 
   async function handleCopyPhone(order) {
     // Copies the customer's phone in WhatsApp-friendly international format, sans the
     // leading '+'. moroccoInternational already strips the '+'.
     const intl = moroccoInternational(order.phone || "");
-    await copyToClipboard(intl);
+    const ok = await copyToClipboard(intl);
+    pushToast(
+      ok ? `📋 Copied ${intl}` : "📋 Clipboard blocked",
+      ok ? "success" : "warn",
+    );
   }
 
   function openDatePicker(order) {
@@ -455,11 +472,13 @@ function AgentView({ me }) {
     removeLocalOrder(order.id);
     enqueueTagWrite({ orderId: order.id, action: "add", tag, store });
     setDatePickerFor(null);
+    pushToast(`✅ ${order.name || `#${order.number}`} booked for ${dd}`, "success");
   }
 
   function removeTagOptimistic(order, tag) {
     updateLocalOrderTags(order.id, (tags) => tags.filter((t) => String(t || "").toLowerCase() !== String(tag || "").toLowerCase()));
     enqueueTagWrite({ orderId: order.id, action: "remove", tag, store });
+    pushToast(`Tag removed · ${tag}`, "info");
   }
 
   // ---------- Bulk selection / bulk tagging ----------
@@ -520,6 +539,7 @@ function AgentView({ me }) {
         }
         enqueueTagWrite({ orderId: id, action: "add", tag, store });
       }
+      pushToast(`Tag "${tag}" applied to ${ids.length} order${ids.length === 1 ? "" : "s"}`, "success");
       setBulkTag("");
       setShowBulkSuggestions(false);
       clearSelection();
@@ -564,6 +584,7 @@ function AgentView({ me }) {
 
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900">
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
       <Header
         title="Confirmation"
         store={store}
@@ -578,7 +599,7 @@ function AgentView({ me }) {
             <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700 border border-gray-200">
               {updatedAgoSec == null ? "Updating…" : `Updated ${updatedAgoSec}s ago`}
             </span>
-            <button onClick={() => { loadFirst(); loadTeam(); }} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">
+            <button onClick={() => { loadFirst(); loadTeam(); pushToast("Refreshed", "info", 1200); }} className={`text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}>
               Refresh
             </button>
           </div>
@@ -702,15 +723,20 @@ function AgentView({ me }) {
             <button
               onClick={applyBulkTag}
               disabled={bulkBusy || selected.size === 0 || !bulkTag.trim()}
-              className="text-xs px-4 py-1.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-50"
+              className={`text-xs px-4 py-1.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-50 shadow-sm ${BTN_TAP}`}
               title="Add the chosen tag to every selected order"
             >
-              {bulkBusy ? "Applying…" : `Apply to ${selected.size || "…"}`}
+              {bulkBusy ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+                  Applying…
+                </span>
+              ) : `Apply to ${selected.size || "…"}`}
             </button>
             {selected.size > 0 && (
               <button
                 onClick={clearSelection}
-                className="text-xs px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50"
+                className={`text-xs px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
               >Clear</button>
             )}
             <div className="text-[11px] text-gray-500 ml-auto">
@@ -800,7 +826,7 @@ function AgentView({ me }) {
                                 type="button"
                                 onClick={(ev) => { ev.stopPropagation(); handleCopyPhone(o); }}
                                 title={`Copy ${moroccoInternational(o.phone)} (international, no +)`}
-                                className="text-gray-400 hover:text-emerald-600"
+                                className={`text-gray-400 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
                               >📋</button>
                             </div>
                           ) : (
@@ -821,7 +847,7 @@ function AgentView({ me }) {
                                 {t}
                                 <button
                                   onClick={(ev) => { ev.stopPropagation(); removeTagOptimistic(o, t); }}
-                                  className="ml-1 text-gray-400 hover:text-rose-600"
+                                  className={`ml-1 text-gray-400 hover:text-rose-600 hover:scale-110 ${BTN_TAP}`}
                                   title="Remove tag"
                                 >×</button>
                               </span>
@@ -832,14 +858,14 @@ function AgentView({ me }) {
                           <div className="inline-flex items-center gap-1">
                             <button
                               onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
-                              className="text-xs px-3 py-1 rounded-lg bg-sky-600 text-white hover:bg-sky-700"
+                              className={`text-xs px-3 py-1 rounded-lg bg-sky-600 text-white hover:bg-sky-700 shadow-sm ${BTN_TAP}`}
                               title="Copy phone + advance n1/n2/n3/n4"
                             >
                               📞 {tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || ""}
                             </button>
                             <button
                               onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
-                              className="text-xs px-3 py-1 rounded-lg bg-violet-600 text-white hover:bg-violet-700"
+                              className={`text-xs px-3 py-1 rounded-lg bg-violet-600 text-white hover:bg-violet-700 shadow-sm ${BTN_TAP}`}
                               title="No-WhatsApp attempt — cycles nowtp1 → nowtp2 → nowtp3 → nowtp4"
                             >
                               🚫 {(() => {
@@ -849,7 +875,7 @@ function AgentView({ me }) {
                             </button>
                             <button
                               onClick={(ev) => { ev.stopPropagation(); handleEnatt(o); }}
-                              className="text-xs px-3 py-1 rounded-lg bg-fuchsia-600 text-white hover:bg-fuchsia-700"
+                              className={`text-xs px-3 py-1 rounded-lg bg-fuchsia-600 text-white hover:bg-fuchsia-700 shadow-sm ${BTN_TAP}`}
                               title="En attente — cycles enatt1 → enatt2 → enatt3 → enatt4"
                             >
                               ⏳ {(() => {
@@ -859,7 +885,7 @@ function AgentView({ me }) {
                             </button>
                             <button
                               onClick={(ev) => { ev.stopPropagation(); openDatePicker(o); }}
-                              className="text-xs px-3 py-1 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+                              className={`text-xs px-3 py-1 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm ${BTN_TAP}`}
                               title="Confirm for a delivery date"
                             >✅</button>
                             <div className="relative">
@@ -903,11 +929,11 @@ function AgentView({ me }) {
                               />
                               <button
                                 onClick={(ev) => { ev.stopPropagation(); submitConfirm(o); }}
-                                className="text-xs px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700"
+                                className={`text-xs px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm ${BTN_TAP}`}
                               >Confirm</button>
                               <button
                                 onClick={(ev) => { ev.stopPropagation(); setDatePickerFor(null); }}
-                                className="text-xs px-3 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50"
+                                className={`text-xs px-3 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
                               >Cancel</button>
                             </div>
                           </td>
@@ -916,7 +942,7 @@ function AgentView({ me }) {
                       {isOpen && (
                         <tr className="bg-gray-50/60">
                           <td colSpan={9} className="px-3 py-3">
-                            <OrderExpanded order={o} store={store} shopDomain={meta.shop_domain} />
+                            <OrderExpanded order={o} store={store} shopDomain={meta.shop_domain} onToast={pushToast} />
                           </td>
                         </tr>
                       )}
@@ -931,7 +957,7 @@ function AgentView({ me }) {
             <button
               onClick={() => goToPage(pageIndex - 1)}
               disabled={!hasPrevPage || pageBusy}
-              className="text-xs px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              className={`text-xs px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed ${BTN_TAP}`}
             >← Prev</button>
             <span className="text-xs text-gray-700">
               Page {pageIndex + 1}{pages.length > 1 ? ` of ${pages.length}${hasNextPage && pages[pageIndex]?.nextCursor && pageIndex + 1 === pages.length ? "+" : ""}` : ""}
@@ -939,7 +965,7 @@ function AgentView({ me }) {
             <button
               onClick={() => goToPage(pageIndex + 1)}
               disabled={!hasNextPage || pageBusy}
-              className="text-xs px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              className={`text-xs px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed ${BTN_TAP}`}
             >{pageBusy ? "Loading…" : "Next →"}</button>
             <span className="ml-auto text-[11px] text-gray-500">
               {ordersForView.length} visible · {meta.assigned_total} total
@@ -976,10 +1002,12 @@ function AgentView({ me }) {
           onClose={() => setCancelModalFor(null)}
           onSuccess={() => {
             // Cancelled orders should disappear from the queue (status:open filter excludes them).
+            const label = cancelModalFor.name || `#${cancelModalFor.number}`;
             removeLocalOrder(cancelModalFor.id);
             setCancelModalFor(null);
             // Refresh team-stats so any "confirmed today" / "assigned now" rollups update.
             loadTeam();
+            pushToast(`Cancelled ${label}`, "success");
           }}
         />
       )}
@@ -1077,13 +1105,18 @@ function CancelOrderModal({ order, store, onClose, onSuccess }) {
           <button
             onClick={onClose}
             disabled={busy}
-            className="text-sm px-4 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50"
+            className="text-sm px-4 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50 active:scale-[0.96] transition-transform duration-75"
           >Cancel</button>
           <button
             onClick={submit}
             disabled={busy}
-            className="text-sm px-4 py-1.5 rounded-lg bg-rose-600 text-white font-medium hover:bg-rose-700 disabled:opacity-50"
-          >{busy ? "Cancelling…" : "Cancel order"}</button>
+            className="text-sm px-4 py-1.5 rounded-lg bg-rose-600 text-white font-medium hover:bg-rose-700 disabled:opacity-50 active:scale-[0.96] transition-transform duration-75 shadow-sm"
+          >{busy ? (
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-block w-3 h-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+              Cancelling…
+            </span>
+          ) : "Cancel order"}</button>
         </div>
       </div>
     </div>
@@ -1242,7 +1275,8 @@ function StatusBadge({ kind, value }) {
   );
 }
 
-function OrderExpanded({ order, store, shopDomain }) {
+function OrderExpanded({ order, store, shopDomain, onToast }) {
+  const notify = onToast || (() => {});
   const [noteText, setNoteText] = useState("");
   const [noteBusy, setNoteBusy] = useState(false);
   const [noteMsg, setNoteMsg] = useState(null);
@@ -1264,13 +1298,16 @@ function OrderExpanded({ order, store, shopDomain }) {
       });
       if (clipboardOk) {
         setLabelMsg("Copied label image to clipboard.");
+        notify("Label image copied to clipboard", "success");
       } else {
-        // Clipboard write blocked or unsupported — fall back to download.
         triggerDownload(url, filename);
         setLabelMsg("Clipboard blocked — downloaded the PNG instead.");
+        notify("Clipboard blocked — PNG downloaded", "warn");
       }
     } catch (e) {
-      setLabelMsg(e?.message || "Failed to generate label");
+      const msg = e?.message || "Failed to generate label";
+      setLabelMsg(msg);
+      notify(msg, "error");
     } finally {
       setLabelBusy(false);
     }
@@ -1302,8 +1339,11 @@ function OrderExpanded({ order, store, shopDomain }) {
       await API.appendNote(order.id, text, store);
       setNoteMsg(`Added: "${text}"`);
       setNoteText("");
+      notify(`Note added to ${order.name || `#${order.number}`}`, "success");
     } catch (e) {
-      setNoteMsg(e?.message || "Failed to add note");
+      const msg = e?.message || "Failed to add note";
+      setNoteMsg(msg);
+      notify(msg, "error");
     } finally {
       setNoteBusy(false);
     }
@@ -1374,8 +1414,13 @@ function OrderExpanded({ order, store, shopDomain }) {
               type="button"
               onClick={handleAddNote}
               disabled={noteBusy || !noteText.trim()}
-              className="text-xs px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-50"
-            >{noteBusy ? "Adding…" : "Add note"}</button>
+              className={`text-xs px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-50 shadow-sm ${BTN_TAP}`}
+            >{noteBusy ? (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="inline-block w-3 h-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+                Adding…
+              </span>
+            ) : "Add note"}</button>
             {noteMsg && <span className="text-[11px] text-gray-600 truncate" title={noteMsg}>{noteMsg}</span>}
           </div>
           <div className="text-[11px] text-gray-500 mt-1.5">Appends to the order note (existing notes preserved).</div>
@@ -1453,9 +1498,14 @@ function OrderExpanded({ order, store, shopDomain }) {
               type="button"
               onClick={handleCopyLabel}
               disabled={labelBusy}
-              className="text-xs px-3 py-1.5 rounded-lg border border-indigo-300 bg-indigo-50 text-indigo-700 font-semibold hover:bg-indigo-100 disabled:opacity-50"
+              className={`text-xs px-3 py-1.5 rounded-lg border border-indigo-300 bg-indigo-50 text-indigo-700 font-semibold hover:bg-indigo-100 disabled:opacity-50 ${BTN_TAP}`}
               title="Generate a PNG label and copy it to your clipboard"
-            >{labelBusy ? "Generating…" : "📋 Copy label"}</button>
+            >{labelBusy ? (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-300 border-t-indigo-700 animate-spin" />
+                Generating…
+              </span>
+            ) : "📋 Copy label"}</button>
           </div>
         </div>
         <LineItemsGrid order={order} />
