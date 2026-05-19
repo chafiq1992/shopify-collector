@@ -2574,6 +2574,8 @@ def _classify_agent_tag_action(tag: str) -> Optional[str]:
         return f"confirmation_phone_{t}"
     if t in ("nowtp1", "nowtp2", "nowtp3", "nowtp4"):
         return f"confirmation_{t}"
+    if t in ("enatt1", "enatt2", "enatt3", "enatt4"):
+        return f"confirmation_{t}"
     if t.startswith("cod "):
         return "confirmation_confirmed"
     return None
@@ -2613,6 +2615,16 @@ async def _maybe_log_agent_tag_action(
 
 
 if HAVE_AUTH_DB:
+    def _bust_confirmation_caches():
+        """After any tag mutation we clear the confirmation breakdown cache so the
+        N1/N2/N3/N4/Nowtp/Enatt/New pills can't drift out of sync with what the
+        filtered queue actually returns."""
+        try:
+            from .confirmation_routes import invalidate_all_breakdown_caches  # type: ignore
+            invalidate_all_breakdown_caches()
+        except Exception:
+            pass
+
     @app.post("/api/orders/{order_gid:path}/add-tag")
     async def add_tag(
         order_gid: str,
@@ -2622,6 +2634,7 @@ if HAVE_AUTH_DB:
         session: AsyncSession = Depends(get_session),  # type: ignore
     ):
         data = await _shopify_add_tag(order_gid, payload.tag, store)
+        _bust_confirmation_caches()
         await manager.broadcast({"type": "order.tag_added", "id": order_gid, "tag": payload.tag})
         await _maybe_log_agent_tag_action(user, session, order_gid=order_gid, tag=payload.tag, op="add", store=store)
         return {"ok": True, "result": data}
@@ -2635,6 +2648,7 @@ if HAVE_AUTH_DB:
         session: AsyncSession = Depends(get_session),  # type: ignore
     ):
         data = await _shopify_remove_tag(order_gid, payload.tag, store)
+        _bust_confirmation_caches()
         await manager.broadcast({"type": "order.tag_removed", "id": order_gid, "tag": payload.tag})
         await _maybe_log_agent_tag_action(user, session, order_gid=order_gid, tag=payload.tag, op="remove", store=store)
         return {"ok": True, "result": data}

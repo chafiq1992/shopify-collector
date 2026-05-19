@@ -244,8 +244,9 @@ async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
     return None
 
 
-_VALID_LEVELS = {"n1", "n2", "n3", "n4", "nowtp", "new"}
+_VALID_LEVELS = {"n1", "n2", "n3", "n4", "nowtp", "enatt", "new"}
 _NOWTP_TAGS = ("nowtp1", "nowtp2", "nowtp3", "nowtp4")
+_ENATT_TAGS = ("enatt1", "enatt2", "enatt3", "enatt4")
 
 
 def apply_level_filter(q: str, level: Optional[str]) -> str:
@@ -253,7 +254,8 @@ def apply_level_filter(q: str, level: Optional[str]) -> str:
 
     n1/n2/n3/n4 → only orders carrying that exact attempt tag.
     nowtp       → orders carrying any of nowtp1/nowtp2/nowtp3/nowtp4.
-    new         → orders with none of n1/n2/n3/n4/nowtp* (not yet handled).
+    enatt       → orders carrying any of enatt1/enatt2/enatt3/enatt4.
+    new         → orders with none of n1/n2/n3/n4/nowtp*/enatt* (not yet handled).
     """
     if not q or not level:
         return q
@@ -265,9 +267,13 @@ def apply_level_filter(q: str, level: Optional[str]) -> str:
     if lv == "nowtp":
         nowtp_or = " OR ".join(f"tag:{_escape_tag(t)}" for t in _NOWTP_TAGS)
         return f"{q} ({nowtp_or})"
+    if lv == "enatt":
+        enatt_or = " OR ".join(f"tag:{_escape_tag(t)}" for t in _ENATT_TAGS)
+        return f"{q} ({enatt_or})"
     if lv == "new":
         nowtp_neg = " ".join(f"-tag:{_escape_tag(t)}" for t in _NOWTP_TAGS)
-        return f"{q} -tag:n1 -tag:n2 -tag:n3 -tag:n4 {nowtp_neg}"
+        enatt_neg = " ".join(f"-tag:{_escape_tag(t)}" for t in _ENATT_TAGS)
+        return f"{q} -tag:n1 -tag:n2 -tag:n3 -tag:n4 {nowtp_neg} {enatt_neg}"
     return q
 
 
@@ -292,7 +298,7 @@ _BREAKDOWN_HARD_CAP = 10_000  # safety net
 
 
 def _empty_breakdown() -> Dict[str, int]:
-    return {"total": 0, "n1": 0, "n2": 0, "n3": 0, "n4": 0, "nowtp": 0, "new": 0}
+    return {"total": 0, "n1": 0, "n2": 0, "n3": 0, "n4": 0, "nowtp": 0, "enatt": 0, "new": 0}
 
 
 async def accurate_assigned_breakdown(store: str, user_id: str, base_q: str) -> Dict[str, int]:
@@ -341,6 +347,9 @@ async def accurate_assigned_breakdown(store: str, user_id: str, base_q: str) -> 
             if any(t in tlower for t in _NOWTP_TAGS):
                 counts["nowtp"] += 1
                 has_any = True
+            if any(t in tlower for t in _ENATT_TAGS):
+                counts["enatt"] += 1
+                has_any = True
             if not has_any:
                 counts["new"] += 1
         page_info = ((data or {}).get("orders") or {}).get("pageInfo") or {}
@@ -364,6 +373,37 @@ async def accurate_assigned_count(store: str, user_id: str, base_q: str) -> int:
     """Thin wrapper for callers that only need the total. Shares the breakdown cache."""
     bd = await accurate_assigned_breakdown(store, user_id, base_q)
     return int(bd.get("total") or 0)
+
+
+def invalidate_breakdown_cache_for_user(user_id: str, store: Optional[str] = None) -> int:
+    """Drop cached breakdowns for a user (optionally limited to a single store).
+
+    Called after the agent writes a tag so the next /api/agent/queue (or team-stats)
+    call recomputes counts instead of returning a stale snapshot. Returns the number
+    of cache entries removed.
+    """
+    if not user_id:
+        return 0
+    keys = []
+    for key in list(_BREAKDOWN_CACHE.keys()):
+        u, s, _q = key
+        if u != user_id:
+            continue
+        if store is not None and s != store:
+            continue
+        keys.append(key)
+    for k in keys:
+        _BREAKDOWN_CACHE.pop(k, None)
+    return len(keys)
+
+
+def invalidate_all_breakdown_caches() -> int:
+    """Wipe every breakdown cache entry (used when a tag change might affect any agent's
+    counts — e.g. when a confirmation tag is added that takes an order out of every
+    queue at once)."""
+    n = len(_BREAKDOWN_CACHE)
+    _BREAKDOWN_CACHE.clear()
+    return n
 
 
 QUEUE_QUERY_GQL = """
@@ -544,7 +584,7 @@ async def agent_queue(
 
     # `Assigned` reflects the active filter so it agrees with what's visible in the table.
     lv = (level or "").lower().strip()
-    if lv in ("n1", "n2", "n3", "n4", "nowtp", "new"):
+    if lv in ("n1", "n2", "n3", "n4", "nowtp", "enatt", "new"):
         assigned_total = int(breakdown.get(lv, 0))
     else:
         assigned_total = int(breakdown.get("total", 0))
@@ -560,6 +600,7 @@ async def agent_queue(
             "n3": int(breakdown.get("n3", 0)),
             "n4": int(breakdown.get("n4", 0)),
             "nowtp": int(breakdown.get("nowtp", 0)),
+            "enatt": int(breakdown.get("enatt", 0)),
             "new": int(breakdown.get("new", 0)),
         },
         "nextCursor": next_cursor,

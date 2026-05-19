@@ -6,8 +6,9 @@ import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 import { enqueueTagWrite, useSyncQueueLength, readQueue } from "../lib/syncQueue";
 import { copyNodeAsPng, triggerDownload } from "../lib/labelClipboard";
 import {
-  PHONE_TAGS, NOWTP_TAGS, nextInCycle, tagsInCycle, hasNowtpTag,
-  copyToClipboard,
+  PHONE_TAGS, NOWTP_TAGS, ENATT_TAGS,
+  nextInCycle, tagsInCycle, hasNowtpTag, hasEnattTag,
+  moroccoInternational, copyToClipboard,
   todayDDMMYY, todayISO, isoToDDMMYY, isCodTag,
 } from "../lib/confirmationActions";
 
@@ -337,6 +338,19 @@ function AgentView({ me }) {
     return () => clearInterval(t);
   }, []);
 
+  // When the sync queue empties — meaning every tag write the agent just clicked has
+  // landed in Shopify — refetch the queue + team stats. The backend's breakdown cache
+  // was already invalidated by the tag mutation, so this returns fresh N1..N4/Nowtp/
+  // Enatt/New counts and prevents the "pill says N1=1 but filtered view is empty" drift.
+  const prevSyncCountRef = useRef(0);
+  useEffect(() => {
+    if (prevSyncCountRef.current > 0 && syncCount === 0) {
+      if (pageIndex === 0) loadFirst();
+      loadTeam();
+    }
+    prevSyncCountRef.current = syncCount;
+  }, [syncCount, loadFirst, loadTeam, pageIndex]);
+
   // Close the per-row "..." dropdown whenever the user clicks anywhere else.
   useEffect(() => {
     if (!actionsDropdownFor) return;
@@ -413,6 +427,19 @@ function AgentView({ me }) {
   function handleNowtp(order) {
     // Cycles nowtp1 → nowtp2 → nowtp3 → nowtp4 (locks at nowtp4).
     cyclePhone(order, NOWTP_TAGS);
+  }
+
+  function handleEnatt(order) {
+    // Cycles enatt1 → enatt2 → enatt3 → enatt4 (locks at enatt4). Use for "en attente"
+    // (order pending follow-up).
+    cyclePhone(order, ENATT_TAGS);
+  }
+
+  async function handleCopyPhone(order) {
+    // Copies the customer's phone in WhatsApp-friendly international format, sans the
+    // leading '+'. moroccoInternational already strips the '+'.
+    const intl = moroccoInternational(order.phone || "");
+    await copyToClipboard(intl);
   }
 
   function openDatePicker(order) {
@@ -516,6 +543,7 @@ function AgentView({ me }) {
       n3: Number(c.n3 || 0),
       n4: Number(c.n4 || 0),
       nowtp: Number(c.nowtp || 0),
+      enatt: Number(c.enatt || 0),
       fresh,
       contacted: Math.max(0, total - fresh),
     };
@@ -608,6 +636,14 @@ function AgentView({ me }) {
             icon="🚫"
             active={filterLevel === "nowtp"}
             onClick={() => setFilterLevel((p) => (p === "nowtp" ? "" : "nowtp"))}
+          />
+          <StatPill
+            label="Enatt"
+            value={stats.enatt}
+            color="fuchsia"
+            icon="⏳"
+            active={filterLevel === "enatt"}
+            onClick={() => setFilterLevel((p) => (p === "enatt" ? "" : "enatt"))}
           />
           <StatPill label="Contacted" value={stats.contacted} color="teal" icon="💬" />
           <StatPill label="Confirmed today" value={confirmedToday} color="emerald" icon="✅" />
@@ -756,7 +792,21 @@ function AgentView({ me }) {
                           })()}
                         </td>
                         <td className="px-3 py-2">{o.customer_name || <span className="text-gray-400">—</span>}</td>
-                        <td className="px-3 py-2 font-mono text-xs">{o.phone || <span className="text-gray-400">—</span>}</td>
+                        <td className="px-3 py-2 font-mono text-xs">
+                          {o.phone ? (
+                            <div className="inline-flex items-center gap-1.5">
+                              <span>{o.phone}</span>
+                              <button
+                                type="button"
+                                onClick={(ev) => { ev.stopPropagation(); handleCopyPhone(o); }}
+                                title={`Copy ${moroccoInternational(o.phone)} (international, no +)`}
+                                className="text-gray-400 hover:text-emerald-600"
+                              >📋</button>
+                            </div>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-xs text-gray-700">
                           {[o.shipping_address1, o.shipping_city].filter(Boolean).join(", ") || <span className="text-gray-400">—</span>}
                         </td>
@@ -795,6 +845,16 @@ function AgentView({ me }) {
                               🚫 {(() => {
                                 const t = tagsInCycle(o.tags || [], NOWTP_TAGS).slice(-1)[0];
                                 return t ? t.replace("nowtp", "nw") : "Nowtp";
+                              })()}
+                            </button>
+                            <button
+                              onClick={(ev) => { ev.stopPropagation(); handleEnatt(o); }}
+                              className="text-xs px-3 py-1 rounded-lg bg-fuchsia-600 text-white hover:bg-fuchsia-700"
+                              title="En attente — cycles enatt1 → enatt2 → enatt3 → enatt4"
+                            >
+                              ⏳ {(() => {
+                                const t = tagsInCycle(o.tags || [], ENATT_TAGS).slice(-1)[0];
+                                return t ? t.replace("enatt", "ea") : "Enatt";
                               })()}
                             </button>
                             <button
@@ -1059,6 +1119,7 @@ const PILL_THEMES = {
   rose:    { idle: "bg-rose-50 text-rose-700 border-rose-200",    active: "bg-rose-500 text-white border-rose-600" },
   red:     { idle: "bg-red-50 text-red-700 border-red-200",       active: "bg-red-600 text-white border-red-700" },
   violet:  { idle: "bg-violet-50 text-violet-700 border-violet-200", active: "bg-violet-600 text-white border-violet-700" },
+  fuchsia: { idle: "bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200", active: "bg-fuchsia-600 text-white border-fuchsia-700" },
   teal:    { idle: "bg-teal-50 text-teal-700 border-teal-200",    active: "bg-teal-600 text-white border-teal-700" },
   emerald: { idle: "bg-emerald-50 text-emerald-700 border-emerald-200", active: "bg-emerald-600 text-white border-emerald-700" },
 };

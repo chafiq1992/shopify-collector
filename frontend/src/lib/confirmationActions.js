@@ -3,9 +3,11 @@
 
 export const PHONE_TAGS = ["n1", "n2", "n3", "n4"];
 export const NOWTP_TAGS = ["nowtp1", "nowtp2", "nowtp3", "nowtp4"];
+export const ENATT_TAGS = ["enatt1", "enatt2", "enatt3", "enatt4"];
 
 const PHONE_SET = new Set(PHONE_TAGS);
 const NOWTP_SET = new Set(NOWTP_TAGS);
+const ENATT_SET = new Set(ENATT_TAGS);
 
 export function nextInCycle(currentTags, cycle) {
   // Find the highest tag in `cycle` already on the order; return the next one.
@@ -31,6 +33,12 @@ export function isNowtpTag(tag) {
 }
 export function hasNowtpTag(tags) {
   return (tags || []).some(isNowtpTag);
+}
+export function isEnattTag(tag) {
+  return ENATT_SET.has(String(tag || "").trim().toLowerCase());
+}
+export function hasEnattTag(tags) {
+  return (tags || []).some(isEnattTag);
 }
 
 export function moroccoInternational(phone) {
