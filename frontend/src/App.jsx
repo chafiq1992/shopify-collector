@@ -305,6 +305,9 @@ export default function App(){
 
   const wsRef = useRef(null);
   const requestIdRef = useRef(0);
+  const currentOrderIdRef = useRef(null);
+  const wsReloadTimerRef = useRef(null);
+  const recentSelfActionRef = useRef(new Map());
   function handleLogout(){
     clearAuth();
     setAuth(null);
@@ -389,8 +392,9 @@ export default function App(){
     } catch { return ""; }
   }
 
-  async function load(){
+  async function load({ preserveIndex = false } = {}){
     const reqId = ++requestIdRef.current;
+    const prevOrderId = preserveIndex ? currentOrderIdRef.current : null;
     setLoading(true);
     setApiError(null);
     if (!auth?.access_token){
@@ -508,7 +512,20 @@ export default function App(){
     setTags(data.tags || []);
     setPageInfo(data.pageInfo || { hasNextPage: false });
     setNextCursor(data.nextCursor || null);
-    setIndex(0);
+    if (prevOrderId){
+      const newIdx = ords.findIndex(o => o && o.id === prevOrderId);
+      if (newIdx >= 0){
+        setIndex(newIdx);
+      } else {
+        // Order disappeared (e.g. tag changed). Keep current numeric position clamped to new bounds.
+        setIndex(prev => {
+          if (!ords.length) return 0;
+          return Math.min(prev, ords.length - 1);
+        });
+      }
+    } else {
+      setIndex(0);
+    }
     setLoading(false);
     setTotalCount(pidFilter ? ords.length : (totalCountFromApi || ords.length));
   }
@@ -586,6 +603,7 @@ export default function App(){
     const url = `${proto}://${location.host}/ws`;
     const ws = new WebSocket(url);
     wsRef.current = ws;
+    const pendingIds = new Set();
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
@@ -595,15 +613,43 @@ export default function App(){
           msg.type === "order.note_updated" ||
           msg.type === "order.fulfilled"
         ){
-          load();
+          if (msg.id) pendingIds.add(String(msg.id));
+          if (wsReloadTimerRef.current) clearTimeout(wsReloadTimerRef.current);
+          wsReloadTimerRef.current = setTimeout(() => {
+            wsReloadTimerRef.current = null;
+            // Skip reload if every event was for an order we just acted on ourselves.
+            try {
+              const now = Date.now();
+              for (const [k, t] of recentSelfActionRef.current){
+                if (now - t > 12000) recentSelfActionRef.current.delete(k);
+              }
+              if (pendingIds.size > 0){
+                let allSelf = true;
+                for (const id of pendingIds){
+                  if (!recentSelfActionRef.current.has(id)) { allSelf = false; break; }
+                }
+                pendingIds.clear();
+                if (allSelf) return;
+              }
+            } catch {}
+            load({ preserveIndex: true });
+          }, 1500);
         }
       } catch {}
     };
     ws.onclose = () => {
       setTimeout(() => { if (wsRef.current === ws) wsRef.current = null; }, 1000);
     };
-    return () => ws.close();
+    return () => {
+      try { if (wsReloadTimerRef.current) clearTimeout(wsReloadTimerRef.current); } catch {}
+      ws.close();
+    };
   }, []);
+
+  // Keep a ref of the currently visible order id so reloads can preserve position.
+  useEffect(() => {
+    try { currentOrderIdRef.current = (orders[index] && orders[index].id) || null; } catch {}
+  }, [orders, index]);
 
   const [totalCount, setTotalCount] = useState(0);
   const total = orders.length;
@@ -1201,6 +1247,8 @@ export default function App(){
     if (!targetOrders || targetOrders.length === 0) return;
     setActionBusy(true);
     try {
+      const now = Date.now();
+      for (const o of targetOrders){ try { recentSelfActionRef.current.set(String(o.id), now); } catch {} }
       // sequential for reliability + nicer UX pacing
       for (const o of targetOrders){
         await withRetries(() => API.markCollected(o.id, o.number, store, { source }), { attempts: 3 });
@@ -1235,6 +1283,8 @@ export default function App(){
     if (!items || items.length === 0) return;
     setActionBusy(true);
     try {
+      const now = Date.now();
+      for (const it of items){ try { recentSelfActionRef.current.set(String(it.order.id), now); } catch {} }
       for (const it of items){
         await withRetries(() => API.markOut(it.order.id, it.order.number, store, { titles: it.titles }), { attempts: 3 });
         setSelectedOutMap(prev => ({ ...prev, [it.order.id]: new Set() }));
@@ -1273,7 +1323,9 @@ export default function App(){
     try {
       // Trigger webhook by tagging before printing so overrides get cached
       try {
+        const now = Date.now();
         for (const o of orders.filter(x => list.includes(x.number))){
+          try { recentSelfActionRef.current.set(String(o.id), now); } catch {}
           await withRetries(() => API.addTag(o.id, "cod print", store), { attempts: 2, baseDelayMs: 250 });
         }
       } catch {}
