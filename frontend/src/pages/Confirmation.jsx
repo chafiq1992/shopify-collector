@@ -1069,9 +1069,11 @@ function AgentView({ me }) {
           </div>
         </section>
 
-        {/* Orders — desktop table at lg+, scroll-free card list below lg. */}
+        {/* Orders — desktop table only at xl+ (≥1280px effective width). At anything
+            narrower (including a zoomed-in desktop) the scroll-free card list below
+            takes over so the action buttons can never end up clipped. */}
         <section className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
-          <div className="hidden lg:block overflow-auto">
+          <div className="hidden xl:block overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
                 <tr>
@@ -1084,14 +1086,14 @@ function AgentView({ me }) {
                       aria-label="Select all visible orders"
                     />
                   </th>
-                  <th className="px-3 py-2">Order</th>
-                  <th className="px-3 py-2">Customer</th>
-                  <th className="px-3 py-2">Phone</th>
-                  <th className="px-3 py-2">Address</th>
-                  <th className="px-3 py-2">Total</th>
-                  <th className="px-3 py-2">Created</th>
-                  <th className="px-3 py-2">Tags</th>
-                  <th className="px-3 py-2 text-right">Actions</th>
+                  <th className="px-2 py-2">Order</th>
+                  <th className="px-2 py-2">Customer</th>
+                  <th className="px-2 py-2">Phone</th>
+                  <th className="px-2 py-2 hidden 2xl:table-cell">Address</th>
+                  <th className="px-2 py-2">Total</th>
+                  <th className="px-2 py-2 hidden 2xl:table-cell">Created</th>
+                  <th className="px-2 py-2">Tags</th>
+                  <th className="px-2 py-2 text-right sticky right-0 bg-gray-50 shadow-[-6px_0_8px_-6px_rgba(0,0,0,0.08)]">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1163,11 +1165,11 @@ function AgentView({ me }) {
                             <span className="text-gray-400 text-xs">—</span>
                           )}
                         </td>
-                        <td className="px-3 py-2 text-xs text-gray-700">
+                        <td className="px-2 py-2 text-xs text-gray-700 hidden 2xl:table-cell">
                           {[o.shipping_address1, o.shipping_city].filter(Boolean).join(", ") || <span className="text-gray-400">—</span>}
                         </td>
-                        <td className="px-3 py-2 whitespace-nowrap">{o.total_price} {o.currency}</td>
-                        <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">
+                        <td className="px-2 py-2 whitespace-nowrap font-semibold tabular-nums">{o.total_price} <span className="text-[11px] font-medium text-gray-500">{o.currency}</span></td>
+                        <td className="px-2 py-2 text-xs text-gray-500 whitespace-nowrap hidden 2xl:table-cell">
                           {o.created_at ? new Date(o.created_at).toLocaleString() : ""}
                         </td>
                         <td className="px-3 py-2">
@@ -1184,11 +1186,11 @@ function AgentView({ me }) {
                             ))}
                           </div>
                         </td>
-                        <td className="px-3 py-2 text-right whitespace-nowrap">
+                        <td className="px-2 py-2 text-right whitespace-nowrap sticky right-0 bg-white shadow-[-6px_0_8px_-6px_rgba(0,0,0,0.08)]">
                           <div className="inline-flex items-center gap-1">
                             <button
                               onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
-                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky}`}
+                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky} !min-w-[44px] !px-2`}
                               title="Copy phone + advance n1/n2/n3/n4"
                             >
                               <span aria-hidden className="text-sm">📞</span>
@@ -1196,29 +1198,29 @@ function AgentView({ me }) {
                             </button>
                             <button
                               onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
-                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.violet}`}
+                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.violet} !min-w-[44px] !px-2`}
                               title="No-WhatsApp attempt — cycles nowtp1 → nowtp2 → nowtp3 → nowtp4"
                             >
                               <span aria-hidden className="text-sm">🚫</span>
                               <span>{(() => {
                                 const t = tagsInCycle(o.tags || [], NOWTP_TAGS).slice(-1)[0];
-                                return t ? t.replace("nowtp", "NW").toUpperCase() : "NoWTP";
+                                return t ? t.replace("nowtp", "NW").toUpperCase() : "NW";
                               })()}</span>
                             </button>
                             <button
                               onClick={(ev) => { ev.stopPropagation(); handleEnatt(o); }}
-                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.fuchsia}`}
+                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.fuchsia} !min-w-[44px] !px-2`}
                               title="En attente — cycles enatt1 → enatt2 → enatt3 → enatt4"
                             >
                               <span aria-hidden className="text-sm">⏳</span>
                               <span>{(() => {
                                 const t = tagsInCycle(o.tags || [], ENATT_TAGS).slice(-1)[0];
-                                return t ? t.replace("enatt", "EA").toUpperCase() : "Enatt";
+                                return t ? t.replace("enatt", "EA").toUpperCase() : "EA";
                               })()}</span>
                             </button>
                             <button
                               onClick={(ev) => { ev.stopPropagation(); openDatePicker(o); }}
-                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.emerald} !min-w-[44px]`}
+                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.emerald} !min-w-[36px] !px-2`}
                               title="Confirm for a delivery date"
                             >
                               <span aria-hidden className="text-base">✅</span>
@@ -1288,8 +1290,9 @@ function AgentView({ me }) {
             </table>
           </div>
 
-          {/* Mobile / tablet card list — full-width per order, no horizontal scroll. */}
-          <div className="lg:hidden divide-y divide-gray-100">
+          {/* Card list — used on anything narrower than xl (≤1280px), including
+              zoomed-in desktops, so the action buttons never get clipped. */}
+          <div className="xl:hidden divide-y divide-gray-100">
             {ordersForView.length === 0 && !loading && (
               <div className="px-3 py-6 text-center text-gray-500">No orders in your queue.</div>
             )}
