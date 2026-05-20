@@ -313,6 +313,52 @@ function AgentView({ me }) {
     setSearchQuery("");
     setSearchResults(null);
     setSearchError(null);
+    setExpandedCustomerId(null);
+  }
+
+  // Inline customer expansion from the search panel — one at a time. Loads the
+  // customer's orders via /api/agent/customer-orders so renderOrderCard can render
+  // them as the same interactive card the queue uses.
+  const [expandedCustomerId, setExpandedCustomerId] = useState(null);
+  const [customerOrdersById, setCustomerOrdersById] = useState({});
+
+  async function toggleSearchCustomerExpand(customerId) {
+    if (!customerId) return;
+    if (expandedCustomerId === customerId) {
+      setExpandedCustomerId(null);
+      return;
+    }
+    setExpandedCustomerId(customerId);
+    // Use cached data if already fetched.
+    if (customerOrdersById[customerId]?.orders) return;
+    setCustomerOrdersById((prev) => ({ ...prev, [customerId]: { orders: [], loading: true } }));
+    try {
+      const js = await API.customerOrders(store, customerId);
+      setCustomerOrdersById((prev) => ({ ...prev, [customerId]: { orders: js.orders || [], loading: false } }));
+    } catch (e) {
+      setCustomerOrdersById((prev) => ({ ...prev, [customerId]: { orders: [], loading: false, error: e?.message || "Failed to load" } }));
+    }
+  }
+
+  // Apply a patch function to an order across every array that may contain it: the
+  // current queue page, the global search results, and any expanded customer's orders.
+  // Keeps the UI consistent when the agent acts on an order from any of those places.
+  function patchOrderInPlace(orderId, patch) {
+    const patchArr = (arr) => (arr || []).map((o) => (o.id === orderId ? patch(o) : o));
+    setPages((prev) => prev.map((p, idx) => (idx === pageIndex ? { ...p, orders: patchArr(p.orders) } : p)));
+    setSearchResults((prev) => (prev ? { ...prev, orders: patchArr(prev.orders) } : prev));
+    setCustomerOrdersById((prev) => {
+      let touched = false;
+      const next = { ...prev };
+      for (const cid of Object.keys(next)) {
+        const entry = next[cid];
+        if (entry?.orders) {
+          next[cid] = { ...entry, orders: patchArr(entry.orders) };
+          touched = true;
+        }
+      }
+      return touched ? next : prev;
+    });
   }
   // Per-row "..." dropdown + cancel-order modal
   const [actionsDropdownFor, setActionsDropdownFor] = useState(null);
@@ -457,15 +503,7 @@ function AgentView({ me }) {
 
   // ---------- Optimistic local mutations ----------
   function updateLocalOrderTags(orderId, mutate) {
-    setPages((prev) => prev.map((p, idx) => {
-      if (idx !== pageIndex) return p;
-      return {
-        ...p,
-        orders: p.orders.map((o) =>
-          o.id === orderId ? { ...o, tags: mutate([...(o.tags || [])]) } : o
-        ),
-      };
-    }));
+    patchOrderInPlace(orderId, (o) => ({ ...o, tags: mutate([...(o.tags || [])]) }));
   }
 
   function removeLocalOrder(orderId) {
@@ -545,7 +583,9 @@ function AgentView({ me }) {
     const dd = isoToDDMMYY(chosenDate);
     if (!dd) return;
     const tag = `cod ${dd}`;
-    // Any cod-dated order disappears from the queue immediately — see backend filter.
+    // Add the cod tag everywhere (queue, search results, expanded customer)…
+    updateLocalOrderTags(order.id, (tags) => dedupTags([...tags, tag]));
+    // …then drop the row from the agent's queue (matches backend filter).
     removeLocalOrder(order.id);
     enqueueTagWrite({ orderId: order.id, action: "add", tag, store });
     setDatePickerFor(null);
@@ -659,6 +699,196 @@ function AgentView({ me }) {
 
   const tagsAssigned = agentInfo?.tags || me?.tags || [];
 
+  // Reusable order card — same look and behaviour for the queue (mobile), the global
+  // search results, and the expanded customer's order list. Closes over every action
+  // handler and piece of state so callers don't need to pass anything beyond the order.
+  function renderOrderCard(o) {
+    const isOpen = expanded.has(o.id);
+    const pickerOpen = datePickerFor === o.id;
+    const isSelected = selected.has(o.id);
+    const isActive = isOpen || pickerOpen;
+    const url = shopifyOrderUrl(o, meta.shop_domain);
+    const label = o.name || `#${o.number}`;
+    return (
+      <div
+        key={o.id}
+        className={`p-3 transition-colors ${
+          isActive
+            ? "bg-indigo-50/80 border-l-4 border-indigo-500 shadow-inner"
+            : isSelected
+              ? "bg-indigo-50/40 border-l-4 border-indigo-200"
+              : "border-l-4 border-transparent"
+        }`}
+        onClick={(e) => {
+          const tag = (e.target?.tagName || "").toLowerCase();
+          if (["button", "input", "select", "a", "svg", "path", "label", "textarea"].includes(tag)) return;
+          setExpanded((prev) => {
+            const next = new Set(prev);
+            if (next.has(o.id)) next.delete(o.id); else next.add(o.id);
+            return next;
+          });
+        }}
+      >
+        {/* Row 1: select + order # + total + created */}
+        <div className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={() => toggleRowSelected(o.id)}
+            onClick={(ev) => ev.stopPropagation()}
+            aria-label={`Select order ${label}`}
+            className="w-4 h-4"
+          />
+          {url ? (
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(ev) => ev.stopPropagation()}
+              className="text-base font-bold text-indigo-700 hover:underline"
+            >{label}</a>
+          ) : (
+            <span className="text-base font-bold">{label}</span>
+          )}
+          <span className="ml-auto text-base font-bold text-gray-900 tabular-nums whitespace-nowrap">
+            {o.total_price} <span className="text-xs font-medium text-gray-500">{o.currency}</span>
+          </span>
+        </div>
+        <div className="text-[11px] text-gray-500 mt-0.5">
+          {o.created_at ? new Date(o.created_at).toLocaleString() : ""}
+        </div>
+
+        {/* Customer + phone (highlighted) */}
+        <div className="mt-2 flex items-start gap-2 flex-wrap">
+          <div className="text-base font-bold text-gray-900 flex-1 min-w-0 truncate">
+            {o.customer_name || <span className="text-gray-400 font-medium">—</span>}
+          </div>
+        </div>
+        {o.phone ? (
+          <div className="mt-1.5 inline-flex items-center gap-2 bg-sky-50 border border-sky-200 rounded-lg px-2.5 py-1">
+            <span className="font-mono font-bold text-base text-sky-900 tracking-tight">{o.phone}</span>
+            <button
+              type="button"
+              onClick={(ev) => { ev.stopPropagation(); handleCopyPhone(o); }}
+              title={`Copy ${moroccoInternational(o.phone)}`}
+              className={`text-sky-500 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
+            >📋</button>
+          </div>
+        ) : (
+          <div className="mt-1.5 text-xs text-gray-400">no phone</div>
+        )}
+
+        {/* Address */}
+        <div className="mt-1.5 text-sm font-medium text-gray-700">
+          {[o.shipping_address1, o.shipping_city].filter(Boolean).join(", ") || <span className="text-gray-400">—</span>}
+        </div>
+
+        {/* Tags */}
+        {(o.tags || []).length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {(o.tags || []).map((t) => (
+              <span key={t} className={`inline-flex items-center text-[11px] px-2 py-0.5 rounded-full border ${isCodTag(t) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-50 text-gray-700 border-gray-200"}`}>
+                {t}
+                <button
+                  onClick={(ev) => { ev.stopPropagation(); removeTagOptimistic(o, t); }}
+                  className={`ml-1 text-gray-400 hover:text-rose-600 hover:scale-110 ${BTN_TAP}`}
+                  title="Remove tag"
+                >×</button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Action row */}
+        <div className="mt-2.5 grid grid-cols-5 gap-1.5">
+          <button
+            onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
+            className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky} !min-w-0 col-span-1`}
+            title="Copy phone + advance n1/n2/n3/n4"
+          >
+            <span aria-hidden className="text-sm">📞</span>
+            <span>{(tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "").toUpperCase() || "Call"}</span>
+          </button>
+          <button
+            onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
+            className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.violet} !min-w-0 col-span-1`}
+            title="No-WhatsApp — cycles nowtp1 → nowtp4"
+          >
+            <span aria-hidden className="text-sm">🚫</span>
+            <span>{(() => {
+              const t = tagsInCycle(o.tags || [], NOWTP_TAGS).slice(-1)[0];
+              return t ? t.replace("nowtp", "NW").toUpperCase() : "NW";
+            })()}</span>
+          </button>
+          <button
+            onClick={(ev) => { ev.stopPropagation(); handleEnatt(o); }}
+            className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.fuchsia} !min-w-0 col-span-1`}
+            title="En attente — cycles enatt1 → enatt4"
+          >
+            <span aria-hidden className="text-sm">⏳</span>
+            <span>{(() => {
+              const t = tagsInCycle(o.tags || [], ENATT_TAGS).slice(-1)[0];
+              return t ? t.replace("enatt", "EA").toUpperCase() : "EA";
+            })()}</span>
+          </button>
+          <button
+            onClick={(ev) => { ev.stopPropagation(); openDatePicker(o); }}
+            className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.emerald} !min-w-0 col-span-1`}
+            title="Confirm for a delivery date"
+          >
+            <span aria-hidden className="text-base">✅</span>
+          </button>
+          <button
+            onClick={(ev) => { ev.stopPropagation(); setActionsDropdownFor((p) => (p === o.id ? null : o.id)); }}
+            className={`inline-flex items-center justify-center px-2 py-1.5 rounded-xl border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 ${BTN_TAP} col-span-1`}
+            title="More actions"
+            aria-haspopup="menu"
+            aria-expanded={actionsDropdownFor === o.id}
+          >⋯</button>
+        </div>
+
+        {actionsDropdownFor === o.id && (
+          <div
+            className="mt-2 border border-gray-200 rounded-lg shadow-sm bg-white overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <button
+              onClick={() => { setCancelModalFor(o); setActionsDropdownFor(null); }}
+              className="block w-full text-left text-sm px-3 py-2 text-rose-700 hover:bg-rose-50"
+            >🚫 Cancel order…</button>
+          </div>
+        )}
+
+        {pickerOpen && (
+          <div className="mt-2 rounded-lg bg-indigo-50/50 border border-indigo-200 p-2 flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-medium text-indigo-900">Confirm for:</span>
+            <input
+              type="date"
+              value={chosenDate}
+              onChange={(e) => setChosenDate(e.target.value)}
+              onClick={(ev) => ev.stopPropagation()}
+              className="text-sm border border-gray-300 rounded px-2 py-1"
+            />
+            <button
+              onClick={(ev) => { ev.stopPropagation(); submitConfirm(o); }}
+              className={`text-xs px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm ${BTN_TAP}`}
+            >Confirm</button>
+            <button
+              onClick={(ev) => { ev.stopPropagation(); setDatePickerFor(null); }}
+              className={`text-xs px-3 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
+            >Cancel</button>
+          </div>
+        )}
+
+        {isOpen && (
+          <div className="mt-3" onClick={(ev) => ev.stopPropagation()}>
+            <OrderExpanded order={o} store={store} shopDomain={meta.shop_domain} onToast={pushToast} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen w-full bg-gray-50 text-gray-900">
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
@@ -694,6 +924,10 @@ function AgentView({ me }) {
           results={searchResults}
           store={store}
           pushToast={pushToast}
+          renderOrderCard={renderOrderCard}
+          expandedCustomerId={expandedCustomerId}
+          customerOrdersById={customerOrdersById}
+          onToggleCustomer={toggleSearchCustomerExpand}
         />
 
         {/* Stats pills */}
@@ -1059,195 +1293,7 @@ function AgentView({ me }) {
             {ordersForView.length === 0 && !loading && (
               <div className="px-3 py-6 text-center text-gray-500">No orders in your queue.</div>
             )}
-            {ordersForView.map((o) => {
-              const isOpen = expanded.has(o.id);
-              const pickerOpen = datePickerFor === o.id;
-              const isSelected = selected.has(o.id);
-              const isActive = isOpen || pickerOpen;
-              const url = shopifyOrderUrl(o, meta.shop_domain);
-              const label = o.name || `#${o.number}`;
-              return (
-                <div
-                  key={o.id}
-                  className={`p-3 transition-colors ${
-                    isActive
-                      ? "bg-indigo-50/80 border-l-4 border-indigo-500 shadow-inner"
-                      : isSelected
-                        ? "bg-indigo-50/40 border-l-4 border-indigo-200"
-                        : "border-l-4 border-transparent"
-                  }`}
-                  onClick={(e) => {
-                    const tag = (e.target?.tagName || "").toLowerCase();
-                    if (["button", "input", "select", "a", "svg", "path", "label", "textarea"].includes(tag)) return;
-                    setExpanded((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(o.id)) next.delete(o.id); else next.add(o.id);
-                      return next;
-                    });
-                  }}
-                >
-                  {/* Row 1: select + order # + total + created */}
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => toggleRowSelected(o.id)}
-                      onClick={(ev) => ev.stopPropagation()}
-                      aria-label={`Select order ${label}`}
-                      className="w-4 h-4"
-                    />
-                    {url ? (
-                      <a
-                        href={url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        onClick={(ev) => ev.stopPropagation()}
-                        className="text-base font-bold text-indigo-700 hover:underline"
-                      >{label}</a>
-                    ) : (
-                      <span className="text-base font-bold">{label}</span>
-                    )}
-                    <span className="ml-auto text-base font-bold text-gray-900 tabular-nums whitespace-nowrap">
-                      {o.total_price} <span className="text-xs font-medium text-gray-500">{o.currency}</span>
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-gray-500 mt-0.5">
-                    {o.created_at ? new Date(o.created_at).toLocaleString() : ""}
-                  </div>
-
-                  {/* Customer + phone (highlighted) */}
-                  <div className="mt-2 flex items-start gap-2 flex-wrap">
-                    <div className="text-base font-bold text-gray-900 flex-1 min-w-0 truncate">
-                      {o.customer_name || <span className="text-gray-400 font-medium">—</span>}
-                    </div>
-                  </div>
-                  {o.phone ? (
-                    <div className="mt-1.5 inline-flex items-center gap-2 bg-sky-50 border border-sky-200 rounded-lg px-2.5 py-1">
-                      <span className="font-mono font-bold text-base text-sky-900 tracking-tight">{o.phone}</span>
-                      <button
-                        type="button"
-                        onClick={(ev) => { ev.stopPropagation(); handleCopyPhone(o); }}
-                        title={`Copy ${moroccoInternational(o.phone)}`}
-                        className={`text-sky-500 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
-                      >📋</button>
-                    </div>
-                  ) : (
-                    <div className="mt-1.5 text-xs text-gray-400">no phone</div>
-                  )}
-
-                  {/* Address */}
-                  <div className="mt-1.5 text-sm font-medium text-gray-700">
-                    {[o.shipping_address1, o.shipping_city].filter(Boolean).join(", ") || <span className="text-gray-400">—</span>}
-                  </div>
-
-                  {/* Tags */}
-                  {(o.tags || []).length > 0 && (
-                    <div className="mt-1.5 flex flex-wrap gap-1">
-                      {(o.tags || []).map((t) => (
-                        <span key={t} className={`inline-flex items-center text-[11px] px-2 py-0.5 rounded-full border ${isCodTag(t) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-50 text-gray-700 border-gray-200"}`}>
-                          {t}
-                          <button
-                            onClick={(ev) => { ev.stopPropagation(); removeTagOptimistic(o, t); }}
-                            className={`ml-1 text-gray-400 hover:text-rose-600 hover:scale-110 ${BTN_TAP}`}
-                            title="Remove tag"
-                          >×</button>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Action row */}
-                  <div className="mt-2.5 grid grid-cols-5 gap-1.5">
-                    <button
-                      onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
-                      className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky} !min-w-0 col-span-1`}
-                      title="Copy phone + advance n1/n2/n3/n4"
-                    >
-                      <span aria-hidden className="text-sm">📞</span>
-                      <span>{(tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "").toUpperCase() || "Call"}</span>
-                    </button>
-                    <button
-                      onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
-                      className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.violet} !min-w-0 col-span-1`}
-                      title="No-WhatsApp — cycles nowtp1 → nowtp4"
-                    >
-                      <span aria-hidden className="text-sm">🚫</span>
-                      <span>{(() => {
-                        const t = tagsInCycle(o.tags || [], NOWTP_TAGS).slice(-1)[0];
-                        return t ? t.replace("nowtp", "NW").toUpperCase() : "NW";
-                      })()}</span>
-                    </button>
-                    <button
-                      onClick={(ev) => { ev.stopPropagation(); handleEnatt(o); }}
-                      className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.fuchsia} !min-w-0 col-span-1`}
-                      title="En attente — cycles enatt1 → enatt4"
-                    >
-                      <span aria-hidden className="text-sm">⏳</span>
-                      <span>{(() => {
-                        const t = tagsInCycle(o.tags || [], ENATT_TAGS).slice(-1)[0];
-                        return t ? t.replace("enatt", "EA").toUpperCase() : "EA";
-                      })()}</span>
-                    </button>
-                    <button
-                      onClick={(ev) => { ev.stopPropagation(); openDatePicker(o); }}
-                      className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.emerald} !min-w-0 col-span-1`}
-                      title="Confirm for a delivery date"
-                    >
-                      <span aria-hidden className="text-base">✅</span>
-                    </button>
-                    <button
-                      onClick={(ev) => { ev.stopPropagation(); setActionsDropdownFor((p) => (p === o.id ? null : o.id)); }}
-                      className={`inline-flex items-center justify-center px-2 py-1.5 rounded-xl border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 ${BTN_TAP} col-span-1`}
-                      title="More actions"
-                      aria-haspopup="menu"
-                      aria-expanded={actionsDropdownFor === o.id}
-                    >⋯</button>
-                  </div>
-
-                  {/* "More actions" dropdown for this card (mobile) */}
-                  {actionsDropdownFor === o.id && (
-                    <div
-                      className="mt-2 border border-gray-200 rounded-lg shadow-sm bg-white overflow-hidden"
-                      onClick={(ev) => ev.stopPropagation()}
-                    >
-                      <button
-                        onClick={() => { setCancelModalFor(o); setActionsDropdownFor(null); }}
-                        className="block w-full text-left text-sm px-3 py-2 text-rose-700 hover:bg-rose-50"
-                      >🚫 Cancel order…</button>
-                    </div>
-                  )}
-
-                  {/* Date picker (inline) */}
-                  {pickerOpen && (
-                    <div className="mt-2 rounded-lg bg-indigo-50/50 border border-indigo-200 p-2 flex items-center gap-2 flex-wrap">
-                      <span className="text-xs font-medium text-indigo-900">Confirm for:</span>
-                      <input
-                        type="date"
-                        value={chosenDate}
-                        onChange={(e) => setChosenDate(e.target.value)}
-                        onClick={(ev) => ev.stopPropagation()}
-                        className="text-sm border border-gray-300 rounded px-2 py-1"
-                      />
-                      <button
-                        onClick={(ev) => { ev.stopPropagation(); submitConfirm(o); }}
-                        className={`text-xs px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm ${BTN_TAP}`}
-                      >Confirm</button>
-                      <button
-                        onClick={(ev) => { ev.stopPropagation(); setDatePickerFor(null); }}
-                        className={`text-xs px-3 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
-                      >Cancel</button>
-                    </div>
-                  )}
-
-                  {/* Expanded panel (full detail) */}
-                  {isOpen && (
-                    <div className="mt-3" onClick={(ev) => ev.stopPropagation()}>
-                      <OrderExpanded order={o} store={store} shopDomain={meta.shop_domain} onToast={pushToast} />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {ordersForView.map(renderOrderCard)}
           </div>
 
           {/* Pagination */}
@@ -1424,7 +1470,10 @@ function CancelOrderModal({ order, store, onClose, onSuccess }) {
 // Global Shopify search panel — orders + customers in the selected store. Independent
 // of the agent's tag-filtered queue. Phone-like input is normalized server-side so
 // `+212 614 162-654`, `0614162654`, and `614162654` all match the same record.
-function GlobalSearch({ query, onQueryChange, onClear, loading, error, results, store, pushToast }) {
+function GlobalSearch({
+  query, onQueryChange, onClear, loading, error, results, store, pushToast,
+  renderOrderCard, expandedCustomerId, customerOrdersById, onToggleCustomer,
+}) {
   const shopDomain = results?.shop_domain || "";
   const orders = results?.orders || [];
   const customers = results?.customers || [];
@@ -1478,62 +1527,16 @@ function GlobalSearch({ query, onQueryChange, onClear, loading, error, results, 
       )}
 
       {hasResults && (
-        <div className="mt-3 space-y-3">
+        <div className="mt-3 space-y-4">
           {orders.length > 0 && (
             <div>
               <div className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600 mb-1.5">
                 Orders ({orders.length})
               </div>
-              <div className="grid gap-2">
-                {orders.map((o) => {
-                  const url = shopifyOrderUrl(o, shopDomain);
-                  const label = o.name || `#${o.number}`;
-                  const isCancelled = !!o.cancelled_at;
-                  return (
-                    <div key={o.id} className="border border-gray-200 rounded-xl p-3 bg-white hover:bg-gray-50 transition">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {url ? (
-                          <a href={url} target="_blank" rel="noopener noreferrer" className="text-base font-bold text-indigo-700 hover:underline">{label}</a>
-                        ) : (
-                          <span className="text-base font-bold">{label}</span>
-                        )}
-                        <span className="text-base font-bold text-gray-900 tabular-nums">
-                          {o.total_price} <span className="text-xs font-medium text-gray-500">{o.currency}</span>
-                        </span>
-                        <span className="ml-auto inline-flex items-center gap-1.5">
-                          <StatusBadge kind="fulfillment" value={o.fulfillment_status} />
-                          <StatusBadge kind="financial" value={o.financial_status} />
-                          {isCancelled && <StatusBadge kind="lifecycle" value="cancelled" />}
-                        </span>
-                      </div>
-                      <div className="mt-1.5 flex items-start gap-3 flex-wrap">
-                        <div className="text-sm font-semibold text-gray-900">{o.customer_name || "—"}</div>
-                        {o.phone && (
-                          <div className="inline-flex items-center gap-1.5 bg-sky-50 border border-sky-200 rounded-lg px-2 py-0.5">
-                            <span className="font-mono font-bold text-sm text-sky-900">{o.phone}</span>
-                            <button
-                              type="button"
-                              onClick={() => copyText(moroccoInternational(o.phone), o.phone)}
-                              className={`text-sky-500 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
-                              title="Copy international format"
-                            >📋</button>
-                          </div>
-                        )}
-                      </div>
-                      <div className="mt-1 text-xs text-gray-600">
-                        {[o.shipping_address1, o.shipping_city, o.shipping_country].filter(Boolean).join(", ") || "—"}
-                        <span className="ml-2 text-[11px] text-gray-400">{o.created_at ? new Date(o.created_at).toLocaleString() : ""}</span>
-                      </div>
-                      {(o.tags || []).length > 0 && (
-                        <div className="mt-1.5 flex flex-wrap gap-1">
-                          {(o.tags || []).map((t) => (
-                            <span key={t} className={`text-[11px] px-2 py-0.5 rounded-full border ${isCodTag(t) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-50 text-gray-700 border-gray-200"}`}>{t}</span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+              <div className="rounded-xl border border-gray-200 bg-white overflow-hidden divide-y divide-gray-100">
+                {orders.map((o) => (
+                  <React.Fragment key={o.id}>{renderOrderCard(o)}</React.Fragment>
+                ))}
               </div>
             </div>
           )}
@@ -1541,34 +1544,79 @@ function GlobalSearch({ query, onQueryChange, onClear, loading, error, results, 
           {customers.length > 0 && (
             <div>
               <div className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600 mb-1.5">
-                Customers ({customers.length})
+                Customers ({customers.length}) — tap a card to see their orders
               </div>
-              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                {customers.map((c) => (
-                  <div key={c.id} className="border border-gray-200 rounded-xl p-3 bg-white">
-                    <div className="text-sm font-bold text-gray-900 truncate" title={c.name}>{c.name || "—"}</div>
-                    {c.phone && (
-                      <div className="mt-1 inline-flex items-center gap-1.5 bg-sky-50 border border-sky-200 rounded-lg px-2 py-0.5">
-                        <span className="font-mono font-bold text-sm text-sky-900">{c.phone}</span>
-                        <button
-                          type="button"
-                          onClick={() => copyText(moroccoInternational(c.phone), c.phone)}
-                          className={`text-sky-500 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
-                          title="Copy international format"
-                        >📋</button>
-                      </div>
-                    )}
-                    {c.email && (
-                      <div className="mt-1 text-xs text-gray-600 truncate" title={c.email}>{c.email}</div>
-                    )}
-                    <div className="mt-1.5 flex items-center gap-2 text-[11px] text-gray-500">
-                      {(c.city || c.country) && <span>{[c.city, c.country].filter(Boolean).join(", ")}</span>}
-                      <span className="ml-auto inline-flex items-center gap-1 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full px-2 py-0.5 font-semibold">
-                        {c.orders_count} order{c.orders_count === 1 ? "" : "s"}
-                      </span>
+              <div className="space-y-2">
+                {customers.map((c) => {
+                  const isExpanded = expandedCustomerId === c.id;
+                  const data = customerOrdersById?.[c.id];
+                  const custLoading = !!data?.loading;
+                  const custOrders = data?.orders || [];
+                  const custError = data?.error;
+                  return (
+                    <div key={c.id} className={`rounded-xl border bg-white overflow-hidden ${isExpanded ? "border-indigo-300 ring-1 ring-indigo-100" : "border-gray-200"}`}>
+                      <button
+                        type="button"
+                        onClick={() => onToggleCustomer?.(c.id)}
+                        className={`w-full text-left p-3 hover:bg-gray-50 ${BTN_TAP}`}
+                      >
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <div className="w-9 h-9 rounded-full bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center shrink-0">
+                            {((c.name || c.email || "?").trim().charAt(0) || "?").toUpperCase()}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-bold text-gray-900 truncate">{c.name || "—"}</div>
+                            {c.email && <div className="text-xs text-gray-500 truncate">{c.email}</div>}
+                          </div>
+                          {c.phone && (
+                            <div
+                              className="inline-flex items-center gap-1.5 bg-sky-50 border border-sky-200 rounded-lg px-2 py-0.5"
+                              onClick={(ev) => ev.stopPropagation()}
+                            >
+                              <span className="font-mono font-bold text-sm text-sky-900">{c.phone}</span>
+                              <button
+                                type="button"
+                                onClick={() => copyText(moroccoInternational(c.phone), c.phone)}
+                                className={`text-sky-500 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
+                                title="Copy international format"
+                              >📋</button>
+                            </div>
+                          )}
+                          <span className="inline-flex items-center gap-1 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full px-2 py-0.5 font-semibold text-[11px]">
+                            {c.orders_count} order{c.orders_count === 1 ? "" : "s"}
+                          </span>
+                          <span className={`text-gray-400 transition-transform ${isExpanded ? "rotate-180" : ""}`} aria-hidden>▾</span>
+                        </div>
+                        {(c.city || c.country) && (
+                          <div className="mt-1 text-[11px] text-gray-500">{[c.city, c.country].filter(Boolean).join(", ")}</div>
+                        )}
+                      </button>
+                      {isExpanded && (
+                        <div className="border-t border-gray-200 bg-gray-50/40">
+                          {custLoading && (
+                            <div className="px-3 py-4 text-xs text-gray-500 inline-flex items-center gap-2">
+                              <span className="inline-block w-3 h-3 rounded-full border-2 border-gray-300 border-t-indigo-600 animate-spin" />
+                              Loading orders…
+                            </div>
+                          )}
+                          {custError && (
+                            <div className="px-3 py-3 text-xs text-rose-700">{custError}</div>
+                          )}
+                          {!custLoading && !custError && custOrders.length === 0 && (
+                            <div className="px-3 py-4 text-xs text-gray-500">No orders found for this customer.</div>
+                          )}
+                          {!custLoading && !custError && custOrders.length > 0 && (
+                            <div className="divide-y divide-gray-100">
+                              {custOrders.map((o) => (
+                                <React.Fragment key={o.id}>{renderOrderCard(o)}</React.Fragment>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}

@@ -406,49 +406,56 @@ def invalidate_all_breakdown_caches() -> int:
     return n
 
 
-QUEUE_QUERY_GQL = """
-query AgentQueue($first: Int!, $after: String, $query: String) {
-  orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {
-    edges {
-      cursor
-      node {
+# Shared GraphQL field set for any "interactive" order card (queue, global search,
+# customer expansion). _flatten_order consumes the same shape, so the frontend gets
+# identical data regardless of which endpoint it came from.
+_ORDER_NODE_FIELDS = """
+id
+legacyResourceId
+name
+createdAt
+cancelledAt
+tags
+note
+displayFinancialStatus
+displayFulfillmentStatus
+currentTotalPriceSet { shopMoney { amount currencyCode } }
+shippingAddress { name city phone address1 address2 zip province country }
+customer { id displayName phone email }
+lineItems(first: 50) {
+  edges {
+    node {
+      quantity
+      currentQuantity
+      unfulfilledQuantity
+      sku
+      title
+      originalUnitPriceSet { shopMoney { amount currencyCode } }
+      variant {
         id
-        legacyResourceId
-        name
-        createdAt
-        tags
-        note
-        displayFinancialStatus
-        displayFulfillmentStatus
-        currentTotalPriceSet { shopMoney { amount currencyCode } }
-        shippingAddress { name city phone address1 address2 zip province country }
-        customer { id displayName phone }
-        lineItems(first: 50) {
-          edges {
-            node {
-              quantity
-              currentQuantity
-              unfulfilledQuantity
-              sku
-              title
-              originalUnitPriceSet { shopMoney { amount currencyCode } }
-              variant {
-                id
-                title
-                sku
-                selectedOptions { name value }
-                image { url }
-                product { id title featuredImage { url } }
-              }
-            }
-          }
-        }
+        title
+        sku
+        selectedOptions { name value }
+        image { url }
+        product { id title featuredImage { url } }
       }
     }
-    pageInfo { hasNextPage }
   }
-  ordersCount(query: $query) { count }
 }
+"""
+
+
+QUEUE_QUERY_GQL = f"""
+query AgentQueue($first: Int!, $after: String, $query: String) {{
+  orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {{
+    edges {{
+      cursor
+      node {{ {_ORDER_NODE_FIELDS} }}
+    }}
+    pageInfo {{ hasNextPage }}
+  }}
+  ordersCount(query: $query) {{ count }}
+}}
 """
 
 
@@ -505,7 +512,9 @@ def _flatten_order(node: Dict[str, Any]) -> Dict[str, Any]:
         "name": node.get("name") or "",
         "customer_id": (cust.get("id") or ""),
         "customer_phone": (cust.get("phone") or ""),
+        "customer_email": (cust.get("email") or ""),
         "created_at": node.get("createdAt"),
+        "cancelled_at": node.get("cancelledAt"),
         "tags": list(node.get("tags") or []),
         "note": node.get("note") or "",
         "financial_status": node.get("displayFinancialStatus") or "",
@@ -652,53 +661,32 @@ async def agent_queue(
 
 # ---------- Customer order history (for the row-expand panel) ----------
 
-CUSTOMER_ORDERS_GQL = """
-query CustomerOrders($id: ID!, $first: Int!) {
-  customer(id: $id) {
+CUSTOMER_ORDERS_GQL = f"""
+query CustomerOrders($id: ID!, $first: Int!) {{
+  customer(id: $id) {{
     id
     displayName
     numberOfOrders
-    orders(first: $first, sortKey: CREATED_AT, reverse: true) {
-      edges {
-        node {
-          id
-          legacyResourceId
-          name
-          createdAt
-          cancelledAt
-          displayFulfillmentStatus
-          displayFinancialStatus
-          currentTotalPriceSet { shopMoney { amount currencyCode } }
-        }
-      }
-    }
-  }
-}
+    orders(first: $first, sortKey: CREATED_AT, reverse: true) {{
+      edges {{
+        node {{ {_ORDER_NODE_FIELDS} }}
+      }}
+    }}
+  }}
+}}
 """
 
 
 # ---------- Global Shopify search (orders + customers) ----------
 
-SEARCH_ORDERS_GQL = """
-query SearchOrders($first: Int!, $query: String) {
-  orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {
-    edges {
-      node {
-        id
-        legacyResourceId
-        name
-        createdAt
-        cancelledAt
-        tags
-        displayFinancialStatus
-        displayFulfillmentStatus
-        currentTotalPriceSet { shopMoney { amount currencyCode } }
-        shippingAddress { name city phone address1 address2 zip country }
-        customer { id displayName phone email }
-      }
-    }
-  }
-}
+SEARCH_ORDERS_GQL = f"""
+query SearchOrders($first: Int!, $query: String) {{
+  orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {{
+    edges {{
+      node {{ {_ORDER_NODE_FIELDS} }}
+    }}
+  }}
+}}
 """
 
 SEARCH_CUSTOMERS_GQL = """
@@ -719,34 +707,6 @@ query SearchCustomers($first: Int!, $query: String) {
   }
 }
 """
-
-
-def _flatten_search_order(node: Dict[str, Any]) -> Dict[str, Any]:
-    shipping = node.get("shippingAddress") or {}
-    cust = node.get("customer") or {}
-    money = ((node.get("currentTotalPriceSet") or {}).get("shopMoney") or {})
-    return {
-        "id": node.get("id"),
-        "legacy_id": str(node.get("legacyResourceId") or "").strip(),
-        "name": node.get("name") or "",
-        "number": (node.get("name") or "").lstrip("#"),
-        "created_at": node.get("createdAt"),
-        "cancelled_at": node.get("cancelledAt"),
-        "tags": list(node.get("tags") or []),
-        "financial_status": node.get("displayFinancialStatus") or "",
-        "fulfillment_status": node.get("displayFulfillmentStatus") or "",
-        "customer_name": (shipping.get("name") or cust.get("displayName") or "").strip(),
-        "phone": (shipping.get("phone") or cust.get("phone") or "").strip(),
-        "shipping_address1": shipping.get("address1") or "",
-        "shipping_address2": shipping.get("address2") or "",
-        "shipping_city": shipping.get("city") or "",
-        "shipping_country": shipping.get("country") or "",
-        "shipping_zip": shipping.get("zip") or "",
-        "customer_id": cust.get("id") or "",
-        "customer_email": cust.get("email") or "",
-        "total_price": money.get("amount") or "0",
-        "currency": money.get("currencyCode") or "",
-    }
 
 
 @router.get("/api/agent/search")
@@ -822,7 +782,7 @@ async def agent_search(
             edges = ((data or {}).get("orders") or {}).get("edges") or []
             for e in edges:
                 node = e.get("node") or {}
-                orders_out.append(_flatten_search_order(node))
+                orders_out.append(_flatten_order(node))
         except Exception:
             # Search failures shouldn't 500 — return whatever we have.
             pass
@@ -886,22 +846,9 @@ async def customer_orders(
         raise he
     customer = (data or {}).get("customer") or {}
     edges = ((customer.get("orders") or {}).get("edges") or [])
-    orders_out: List[Dict[str, Any]] = []
-    for e in edges:
-        n = e.get("node") or {}
-        money = ((n.get("currentTotalPriceSet") or {}).get("shopMoney") or {})
-        orders_out.append({
-            "id": n.get("id"),
-            "legacy_id": str(n.get("legacyResourceId") or "").strip(),
-            "name": n.get("name") or "",
-            "number": (n.get("name") or "").lstrip("#"),
-            "created_at": n.get("createdAt"),
-            "cancelled_at": n.get("cancelledAt"),
-            "fulfillment_status": n.get("displayFulfillmentStatus") or "",
-            "financial_status": n.get("displayFinancialStatus") or "",
-            "total_price": money.get("amount") or "0",
-            "currency": money.get("currencyCode") or "",
-        })
+    # Full order shape (with line items + tags etc.) so the frontend can render the
+    # same interactive card it uses for the queue and global search.
+    orders_out: List[Dict[str, Any]] = [_flatten_order(e.get("node") or {}) for e in edges]
     return {
         "ok": True,
         "customer_id": customer.get("id") or cid,
