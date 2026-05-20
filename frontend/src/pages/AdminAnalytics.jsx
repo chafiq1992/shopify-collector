@@ -8,6 +8,45 @@ function todayISO(offsetDays = 0) {
   return d.toISOString().slice(0, 10);
 }
 
+// Render hint for an audit-log action — turns the bare action name from OrderEvent into
+// a readable label + emoji + Tailwind palette so the order search timeline is scannable.
+function describeOrderAction(action) {
+  const a = String(action || "").toLowerCase();
+  if (a === "confirmation_confirmed")
+    return { label: "Confirmed",  icon: "✅", palette: "bg-emerald-100 text-emerald-800 border border-emerald-200" };
+  if (a === "confirmation_cancelled")
+    return { label: "Cancelled",  icon: "🚫", palette: "bg-rose-100 text-rose-800 border border-rose-200" };
+  if (a.startsWith("confirmation_phone_")) {
+    const lv = a.replace("confirmation_phone_", "").toUpperCase();
+    const palettes = {
+      N1: "bg-amber-100 text-amber-800 border border-amber-200",
+      N2: "bg-orange-100 text-orange-800 border border-orange-200",
+      N3: "bg-rose-100 text-rose-800 border border-rose-200",
+      N4: "bg-red-100 text-red-800 border border-red-200",
+    };
+    return { label: `Call ${lv}`, icon: "📞", palette: palettes[lv] || palettes.N1 };
+  }
+  if (a.startsWith("confirmation_nowtp")) {
+    const lv = a.replace("confirmation_nowtp", "").toUpperCase();
+    return { label: `No-WTP ${lv}`, icon: "🚫", palette: "bg-violet-100 text-violet-800 border border-violet-200" };
+  }
+  if (a.startsWith("confirmation_enatt")) {
+    const lv = a.replace("confirmation_enatt", "").toUpperCase();
+    return { label: `En attente ${lv}`, icon: "⏳", palette: "bg-fuchsia-100 text-fuchsia-800 border border-fuchsia-200" };
+  }
+  if (a === "confirmation_tag_add")
+    return { label: "Tag added",   icon: "🏷", palette: "bg-indigo-100 text-indigo-800 border border-indigo-200" };
+  if (a === "confirmation_tag_remove")
+    return { label: "Tag removed", icon: "✂", palette: "bg-slate-100 text-slate-700 border border-slate-200" };
+  if (a === "collected")
+    return { label: "Collected",   icon: "📦", palette: "bg-green-100 text-green-800 border border-green-200" };
+  if (a === "fulfilled")
+    return { label: "Fulfilled",   icon: "📮", palette: "bg-blue-100 text-blue-800 border border-blue-200" };
+  if (a === "out")
+    return { label: "Out",         icon: "↩",  palette: "bg-red-100 text-red-800 border border-red-200" };
+  return { label: action || "—", icon: "•", palette: "bg-gray-100 text-gray-700 border border-gray-200" };
+}
+
 export default function AdminAnalytics(){
   const [fromDate, setFromDate] = useState(() => todayISO(-6));
   const [toDate, setToDate] = useState(() => todayISO(0));
@@ -475,37 +514,75 @@ export default function AdminAnalytics(){
         {adminMsg && <div className="mb-3 text-sm text-blue-800 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">{adminMsg}</div>}
         {orderSearchResults.length > 0 && (
           <section className="mb-6">
-            <h3 className="text-sm font-semibold text-gray-700 mb-2">Order #{orderSearchResults[0]?.order_number || orderSearch.replace(/^#/, "")} — who collected / fulfilled</h3>
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">
+              Order #{orderSearchResults[0]?.order_number || orderSearch.replace(/^#/, "")} — full activity history ({orderSearchResults.length} event{orderSearchResults.length === 1 ? "" : "s"})
+            </h3>
             <div className="overflow-x-auto border border-gray-200 rounded-xl bg-white">
               <table className="min-w-full text-sm">
                 <thead className="bg-gray-100 text-left">
                   <tr>
                     <th className="px-3 py-2 border-b border-gray-200">Action</th>
-                    <th className="px-3 py-2 border-b border-gray-200">User</th>
+                    <th className="px-3 py-2 border-b border-gray-200">Details</th>
+                    <th className="px-3 py-2 border-b border-gray-200">Agent</th>
                     <th className="px-3 py-2 border-b border-gray-200">Store</th>
-                    <th className="px-3 py-2 border-b border-gray-200">Time</th>
+                    <th className="px-3 py-2 border-b border-gray-200 whitespace-nowrap">When</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {orderSearchResults.map((r, idx) => (
-                    <tr key={idx} className="border-b last:border-b-0">
-                      <td className="px-3 py-2">
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                          r.action === "collected" ? "bg-green-100 text-green-800 border border-green-200" :
-                          r.action === "fulfilled" ? "bg-blue-100 text-blue-800 border border-blue-200" :
-                          "bg-red-100 text-red-800 border border-red-200"
-                        }`}>
-                          {r.action}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2">
-                        <div className="font-medium">{r?.user?.name || r?.user?.email || r?.user?.id || "—"}</div>
-                        <div className="text-xs text-gray-500">{r?.user?.email || ""}</div>
-                      </td>
-                      <td className="px-3 py-2">{r.store}</td>
-                      <td className="px-3 py-2 text-gray-600">{(r.created_at || "").replace("T", " ").slice(0, 19)}</td>
-                    </tr>
-                  ))}
+                  {orderSearchResults.map((r, idx) => {
+                    const info = describeOrderAction(r.action);
+                    const meta = r.metadata || {};
+                    const ts = r.created_at ? new Date(r.created_at) : null;
+                    return (
+                      <tr key={idx} className="border-b last:border-b-0 align-top">
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-semibold ${info.palette}`}>
+                            <span aria-hidden>{info.icon}</span>
+                            {info.label}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-xs text-gray-700">
+                          {meta.tag && (
+                            <div className="inline-flex items-center gap-1">
+                              <span className="text-[10px] uppercase tracking-wide text-gray-500">tag:</span>
+                              <span className="font-mono bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5">{meta.tag}</span>
+                              {meta.op && <span className="text-[10px] uppercase tracking-wide text-gray-500">({meta.op})</span>}
+                            </div>
+                          )}
+                          {meta.reason && (
+                            <div className="mt-0.5"><span className="text-[10px] uppercase tracking-wide text-gray-500">reason:</span> <span className="font-medium">{meta.reason}</span></div>
+                          )}
+                          {meta.staff_note && (
+                            <div className="mt-0.5 text-gray-600 italic">"{meta.staff_note}"</div>
+                          )}
+                          {meta.restock !== undefined && (
+                            <div className="mt-0.5 text-[11px] text-gray-500">
+                              {meta.restock ? "restocked" : "no restock"}{meta.refund !== undefined ? ` · ${meta.refund ? "refunded" : "no refund"}` : ""}
+                            </div>
+                          )}
+                          {meta.bulk && (
+                            <div className="mt-0.5 text-[11px] text-indigo-600 font-medium">bulk action</div>
+                          )}
+                          {!meta.tag && !meta.reason && !meta.staff_note && meta.restock === undefined && !meta.bulk && (
+                            <span className="text-gray-400">—</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="font-medium">{r?.user?.name || r?.user?.email || r?.user?.id || "—"}</div>
+                          {r?.user?.name && <div className="text-xs text-gray-500">{r?.user?.email || ""}</div>}
+                        </td>
+                        <td className="px-3 py-2 text-xs">{r.store}</td>
+                        <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">
+                          {ts ? (
+                            <>
+                              <div>{ts.toLocaleDateString()}</div>
+                              <div className="text-gray-500">{ts.toLocaleTimeString()}</div>
+                            </>
+                          ) : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

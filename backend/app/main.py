@@ -3073,27 +3073,26 @@ if HAVE_AUTH_DB:
                 OrderEvent.order_gid,
                 OrderEvent.store_key,
                 OrderEvent.action,
+                OrderEvent.event_metadata,
                 OrderEvent.created_at,
                 User.email,
                 User.name,
                 User.id,
             )
             .join(User, User.id == OrderEvent.user_id)
-            .where(
-                match_clause,
-                OrderEvent.action.in_(["collected", "fulfilled", "out"]),
-            )
+            .where(match_clause)
             .order_by(OrderEvent.created_at.desc())
         )
         result = await session.execute(stmt)
         rows: List[Dict[str, Any]] = []
-        for ord_num, ord_gid, store_val, action_val, created_at, email, name, uid in result.fetchall():
+        for ord_num, ord_gid, store_val, action_val, metadata, created_at, email, name, uid in result.fetchall():
             rows.append(
                 {
                     "order_number": ord_num,
                     "order_gid": ord_gid,
                     "store": store_val,
                     "action": action_val,
+                    "metadata": metadata or {},
                     "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
                     "user": {"id": uid, "email": email, "name": name},
                 }
