@@ -91,6 +91,15 @@ const API = {
     }
     return res.json();
   },
+  async search(store, q) {
+    const qs = new URLSearchParams({ store, q });
+    const res = await authFetch(`/api/agent/search?${qs}`, { headers: authHeaders() });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Search failed" }));
+      throw new Error(js.detail || `Search failed (${res.status})`);
+    }
+    return res.json();
+  },
   async appendNote(orderId, append, store) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
@@ -265,6 +274,46 @@ function AgentView({ me }) {
   const [filterLevel, setFilterLevel] = useState("");
   // Toast notifications (button feedback)
   const [toasts, pushToast, dismissToast] = useToasts();
+
+  // Global Shopify search (orders + customers). Independent of the agent's queue.
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState(null); // { orders, customers, shop_domain, query }
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState(null);
+  const searchReqIdRef = useRef(0);
+
+  // Debounced auto-search as the agent types (≥3 chars).
+  useEffect(() => {
+    const q = (searchQuery || "").trim();
+    if (q.length < 3) {
+      setSearchResults(null);
+      setSearchLoading(false);
+      setSearchError(null);
+      return;
+    }
+    const handle = setTimeout(async () => {
+      const reqId = ++searchReqIdRef.current;
+      setSearchLoading(true); setSearchError(null);
+      try {
+        const js = await API.search(store, q);
+        if (reqId !== searchReqIdRef.current) return;
+        setSearchResults(js);
+      } catch (e) {
+        if (reqId !== searchReqIdRef.current) return;
+        setSearchError(e?.message || "Search failed");
+        setSearchResults(null);
+      } finally {
+        if (reqId === searchReqIdRef.current) setSearchLoading(false);
+      }
+    }, 400);
+    return () => clearTimeout(handle);
+  }, [searchQuery, store]);
+
+  function clearSearch() {
+    setSearchQuery("");
+    setSearchResults(null);
+    setSearchError(null);
+  }
   // Per-row "..." dropdown + cancel-order modal
   const [actionsDropdownFor, setActionsDropdownFor] = useState(null);
   const [cancelModalFor, setCancelModalFor] = useState(null);
@@ -635,6 +684,18 @@ function AgentView({ me }) {
         }
       />
       <main className="max-w-7xl mx-auto px-4 py-4 space-y-4">
+        {/* Global Shopify search */}
+        <GlobalSearch
+          query={searchQuery}
+          onQueryChange={setSearchQuery}
+          onClear={clearSearch}
+          loading={searchLoading}
+          error={searchError}
+          results={searchResults}
+          store={store}
+          pushToast={pushToast}
+        />
+
         {/* Stats pills */}
         <div className="flex flex-wrap gap-2">
           <StatPill label="Assigned" value={meta.assigned_total} color="sky" icon="📦" />
@@ -1357,6 +1418,163 @@ function CancelOrderModal({ order, store, onClose, onSuccess }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// Global Shopify search panel — orders + customers in the selected store. Independent
+// of the agent's tag-filtered queue. Phone-like input is normalized server-side so
+// `+212 614 162-654`, `0614162654`, and `614162654` all match the same record.
+function GlobalSearch({ query, onQueryChange, onClear, loading, error, results, store, pushToast }) {
+  const shopDomain = results?.shop_domain || "";
+  const orders = results?.orders || [];
+  const customers = results?.customers || [];
+  const hasQuery = (query || "").trim().length >= 3;
+  const hasResults = hasQuery && (orders.length > 0 || customers.length > 0);
+
+  async function copyText(text, label) {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      pushToast(`📋 Copied ${label}`, "success");
+    } catch {
+      pushToast(`Clipboard blocked`, "warn");
+    }
+  }
+
+  return (
+    <section className="bg-white border border-gray-200 rounded-2xl p-3 shadow-sm">
+      <div className="flex items-center gap-2">
+        <span aria-hidden className="text-base">🔎</span>
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => onQueryChange(e.target.value)}
+          placeholder={`Search ${store || "Shopify"} — order number or phone (e.g. 71779 or +212 614 162 654)`}
+          className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400"
+        />
+        {loading && (
+          <span className="inline-flex items-center text-xs text-gray-500 gap-1.5">
+            <span className="inline-block w-3 h-3 rounded-full border-2 border-gray-300 border-t-indigo-600 animate-spin" />
+            Searching…
+          </span>
+        )}
+        {(query || "").length > 0 && (
+          <button
+            type="button"
+            onClick={onClear}
+            className={`text-xs px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
+          >Clear</button>
+        )}
+      </div>
+      <div className="mt-1 text-[11px] text-gray-500">
+        Searches every order + customer in <span className="font-mono">{store}</span>. Phone is matched with spaces / + / dashes stripped.
+      </div>
+
+      {error && (
+        <div className="mt-2 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-800">{error}</div>
+      )}
+
+      {hasQuery && !loading && !error && !hasResults && (
+        <div className="mt-3 text-sm text-gray-500 italic">No orders or customers match "{query}" in {store}.</div>
+      )}
+
+      {hasResults && (
+        <div className="mt-3 space-y-3">
+          {orders.length > 0 && (
+            <div>
+              <div className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600 mb-1.5">
+                Orders ({orders.length})
+              </div>
+              <div className="grid gap-2">
+                {orders.map((o) => {
+                  const url = shopifyOrderUrl(o, shopDomain);
+                  const label = o.name || `#${o.number}`;
+                  const isCancelled = !!o.cancelled_at;
+                  return (
+                    <div key={o.id} className="border border-gray-200 rounded-xl p-3 bg-white hover:bg-gray-50 transition">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {url ? (
+                          <a href={url} target="_blank" rel="noopener noreferrer" className="text-base font-bold text-indigo-700 hover:underline">{label}</a>
+                        ) : (
+                          <span className="text-base font-bold">{label}</span>
+                        )}
+                        <span className="text-base font-bold text-gray-900 tabular-nums">
+                          {o.total_price} <span className="text-xs font-medium text-gray-500">{o.currency}</span>
+                        </span>
+                        <span className="ml-auto inline-flex items-center gap-1.5">
+                          <StatusBadge kind="fulfillment" value={o.fulfillment_status} />
+                          <StatusBadge kind="financial" value={o.financial_status} />
+                          {isCancelled && <StatusBadge kind="lifecycle" value="cancelled" />}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 flex items-start gap-3 flex-wrap">
+                        <div className="text-sm font-semibold text-gray-900">{o.customer_name || "—"}</div>
+                        {o.phone && (
+                          <div className="inline-flex items-center gap-1.5 bg-sky-50 border border-sky-200 rounded-lg px-2 py-0.5">
+                            <span className="font-mono font-bold text-sm text-sky-900">{o.phone}</span>
+                            <button
+                              type="button"
+                              onClick={() => copyText(moroccoInternational(o.phone), o.phone)}
+                              className={`text-sky-500 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
+                              title="Copy international format"
+                            >📋</button>
+                          </div>
+                        )}
+                      </div>
+                      <div className="mt-1 text-xs text-gray-600">
+                        {[o.shipping_address1, o.shipping_city, o.shipping_country].filter(Boolean).join(", ") || "—"}
+                        <span className="ml-2 text-[11px] text-gray-400">{o.created_at ? new Date(o.created_at).toLocaleString() : ""}</span>
+                      </div>
+                      {(o.tags || []).length > 0 && (
+                        <div className="mt-1.5 flex flex-wrap gap-1">
+                          {(o.tags || []).map((t) => (
+                            <span key={t} className={`text-[11px] px-2 py-0.5 rounded-full border ${isCodTag(t) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-50 text-gray-700 border-gray-200"}`}>{t}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {customers.length > 0 && (
+            <div>
+              <div className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600 mb-1.5">
+                Customers ({customers.length})
+              </div>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {customers.map((c) => (
+                  <div key={c.id} className="border border-gray-200 rounded-xl p-3 bg-white">
+                    <div className="text-sm font-bold text-gray-900 truncate" title={c.name}>{c.name || "—"}</div>
+                    {c.phone && (
+                      <div className="mt-1 inline-flex items-center gap-1.5 bg-sky-50 border border-sky-200 rounded-lg px-2 py-0.5">
+                        <span className="font-mono font-bold text-sm text-sky-900">{c.phone}</span>
+                        <button
+                          type="button"
+                          onClick={() => copyText(moroccoInternational(c.phone), c.phone)}
+                          className={`text-sky-500 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
+                          title="Copy international format"
+                        >📋</button>
+                      </div>
+                    )}
+                    {c.email && (
+                      <div className="mt-1 text-xs text-gray-600 truncate" title={c.email}>{c.email}</div>
+                    )}
+                    <div className="mt-1.5 flex items-center gap-2 text-[11px] text-gray-500">
+                      {(c.city || c.country) && <span>{[c.city, c.country].filter(Boolean).join(", ")}</span>}
+                      <span className="ml-auto inline-flex items-center gap-1 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full px-2 py-0.5 font-semibold">
+                        {c.orders_count} order{c.orders_count === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 

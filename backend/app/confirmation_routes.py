@@ -677,6 +677,185 @@ query CustomerOrders($id: ID!, $first: Int!) {
 """
 
 
+# ---------- Global Shopify search (orders + customers) ----------
+
+SEARCH_ORDERS_GQL = """
+query SearchOrders($first: Int!, $query: String) {
+  orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {
+    edges {
+      node {
+        id
+        legacyResourceId
+        name
+        createdAt
+        cancelledAt
+        tags
+        displayFinancialStatus
+        displayFulfillmentStatus
+        currentTotalPriceSet { shopMoney { amount currencyCode } }
+        shippingAddress { name city phone address1 address2 zip country }
+        customer { id displayName phone email }
+      }
+    }
+  }
+}
+"""
+
+SEARCH_CUSTOMERS_GQL = """
+query SearchCustomers($first: Int!, $query: String) {
+  customers(first: $first, query: $query, sortKey: UPDATED_AT, reverse: true) {
+    edges {
+      node {
+        id
+        displayName
+        firstName
+        lastName
+        email
+        phone
+        numberOfOrders
+        defaultAddress { city country }
+      }
+    }
+  }
+}
+"""
+
+
+def _flatten_search_order(node: Dict[str, Any]) -> Dict[str, Any]:
+    shipping = node.get("shippingAddress") or {}
+    cust = node.get("customer") or {}
+    money = ((node.get("currentTotalPriceSet") or {}).get("shopMoney") or {})
+    return {
+        "id": node.get("id"),
+        "legacy_id": str(node.get("legacyResourceId") or "").strip(),
+        "name": node.get("name") or "",
+        "number": (node.get("name") or "").lstrip("#"),
+        "created_at": node.get("createdAt"),
+        "cancelled_at": node.get("cancelledAt"),
+        "tags": list(node.get("tags") or []),
+        "financial_status": node.get("displayFinancialStatus") or "",
+        "fulfillment_status": node.get("displayFulfillmentStatus") or "",
+        "customer_name": (shipping.get("name") or cust.get("displayName") or "").strip(),
+        "phone": (shipping.get("phone") or cust.get("phone") or "").strip(),
+        "shipping_address1": shipping.get("address1") or "",
+        "shipping_address2": shipping.get("address2") or "",
+        "shipping_city": shipping.get("city") or "",
+        "shipping_country": shipping.get("country") or "",
+        "shipping_zip": shipping.get("zip") or "",
+        "customer_id": cust.get("id") or "",
+        "customer_email": cust.get("email") or "",
+        "total_price": money.get("amount") or "0",
+        "currency": money.get("currencyCode") or "",
+    }
+
+
+@router.get("/api/agent/search")
+async def agent_search(
+    store: str,
+    q: str = "",
+    user: User = Depends(get_current_user),
+):
+    """Free-text lookup across orders + customers in the selected store. Accepts the kind
+    of messy input agents actually type: `+212 614 162-654`, `#71779`, `71779`, `Khadija`.
+
+    Phone-like queries are normalized (strip `+`, spaces, dashes) and matched as a
+    wildcard suffix so a Moroccan number works whether typed as `0614162654` or
+    `+212614162654`.
+    """
+    raw = (q or "").strip()
+    if not raw or len(raw) < 2:
+        return {"ok": True, "orders": [], "customers": [], "shop_domain": "", "query": raw}
+
+    digits = re.sub(r"\D", "", raw)
+    # Drop a leading 0 / 212 country code so the wildcard match catches all formats.
+    norm_tail = digits
+    if norm_tail.startswith("00"):
+        norm_tail = norm_tail[2:]
+    if norm_tail.startswith("212"):
+        norm_tail = norm_tail[3:]
+    elif norm_tail.startswith("0"):
+        norm_tail = norm_tail[1:]
+    # Use up to the last 9 digits as the wildcard tail — long enough to be unique, short
+    # enough to survive whatever country-code prefix the data was stored with.
+    tail = norm_tail[-9:] if len(norm_tail) >= 9 else norm_tail
+
+    has_digits = bool(digits)
+    looks_like_phone = has_digits and len(digits) >= 6
+
+    # Resolve store domain so the frontend can deep-link rows to Shopify admin.
+    from .main import shopify_graphql, resolve_store_settings_effective  # type: ignore
+    shop_domain = ""
+    try:
+        d, _t, _a = await resolve_store_settings_effective(store)
+        shop_domain = (d or "").strip()
+    except Exception:
+        shop_domain = ""
+
+    # Build order + customer search queries.
+    order_terms: List[str] = []
+    customer_terms: List[str] = []
+    if has_digits:
+        # Order-number match — Shopify accepts both `name:1001` and `name:#1001`.
+        order_terms.append(f"name:{digits}")
+        order_terms.append(f"name:#{digits}")
+    if looks_like_phone and tail:
+        order_terms.append(f"phone:*{tail}*")
+        customer_terms.append(f"phone:*{tail}*")
+    if not has_digits:
+        # Free-text — let Shopify try a default match across customer name / email.
+        order_terms.append(raw)
+        customer_terms.append(raw)
+    elif raw != digits:
+        # Mixed input (e.g. "John 1001") — also try the raw string as a fallback.
+        order_terms.append(raw)
+        customer_terms.append(raw)
+
+    order_query = " OR ".join(f"({t})" for t in order_terms) if order_terms else None
+    customer_query = " OR ".join(f"({t})" for t in customer_terms) if customer_terms else None
+
+    orders_out: List[Dict[str, Any]] = []
+    customers_out: List[Dict[str, Any]] = []
+
+    if order_query:
+        try:
+            data = await shopify_graphql(SEARCH_ORDERS_GQL, {"first": 25, "query": order_query}, store=store)
+            edges = ((data or {}).get("orders") or {}).get("edges") or []
+            for e in edges:
+                node = e.get("node") or {}
+                orders_out.append(_flatten_search_order(node))
+        except Exception:
+            # Search failures shouldn't 500 — return whatever we have.
+            pass
+
+    if customer_query:
+        try:
+            data = await shopify_graphql(SEARCH_CUSTOMERS_GQL, {"first": 10, "query": customer_query}, store=store)
+            edges = ((data or {}).get("customers") or {}).get("edges") or []
+            for e in edges:
+                node = e.get("node") or {}
+                addr = node.get("defaultAddress") or {}
+                customers_out.append({
+                    "id": node.get("id"),
+                    "name": node.get("displayName") or " ".join([x for x in [node.get("firstName"), node.get("lastName")] if x]) or "",
+                    "email": node.get("email") or "",
+                    "phone": node.get("phone") or "",
+                    "orders_count": int(node.get("numberOfOrders") or 0),
+                    "city": addr.get("city") or "",
+                    "country": addr.get("country") or "",
+                })
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "query": raw,
+        "normalized_digits": digits,
+        "orders": orders_out,
+        "customers": customers_out,
+        "shop_domain": shop_domain,
+    }
+
+
 @router.get("/api/agent/customer-orders")
 async def customer_orders(
     store: str,
