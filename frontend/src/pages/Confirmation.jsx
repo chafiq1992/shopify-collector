@@ -774,9 +774,9 @@ function AgentView({ me }) {
           </div>
         </section>
 
-        {/* Order table */}
+        {/* Orders — desktop table at lg+, scroll-free card list below lg. */}
         <section className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
-          <div className="overflow-auto">
+          <div className="hidden lg:block overflow-auto">
             <table className="min-w-full text-sm">
               <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
                 <tr>
@@ -992,6 +992,203 @@ function AgentView({ me }) {
               </tbody>
             </table>
           </div>
+
+          {/* Mobile / tablet card list — full-width per order, no horizontal scroll. */}
+          <div className="lg:hidden divide-y divide-gray-100">
+            {ordersForView.length === 0 && !loading && (
+              <div className="px-3 py-6 text-center text-gray-500">No orders in your queue.</div>
+            )}
+            {ordersForView.map((o) => {
+              const isOpen = expanded.has(o.id);
+              const pickerOpen = datePickerFor === o.id;
+              const isSelected = selected.has(o.id);
+              const isActive = isOpen || pickerOpen;
+              const url = shopifyOrderUrl(o, meta.shop_domain);
+              const label = o.name || `#${o.number}`;
+              return (
+                <div
+                  key={o.id}
+                  className={`p-3 transition-colors ${
+                    isActive
+                      ? "bg-indigo-50/80 border-l-4 border-indigo-500 shadow-inner"
+                      : isSelected
+                        ? "bg-indigo-50/40 border-l-4 border-indigo-200"
+                        : "border-l-4 border-transparent"
+                  }`}
+                  onClick={(e) => {
+                    const tag = (e.target?.tagName || "").toLowerCase();
+                    if (["button", "input", "select", "a", "svg", "path", "label", "textarea"].includes(tag)) return;
+                    setExpanded((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(o.id)) next.delete(o.id); else next.add(o.id);
+                      return next;
+                    });
+                  }}
+                >
+                  {/* Row 1: select + order # + total + created */}
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleRowSelected(o.id)}
+                      onClick={(ev) => ev.stopPropagation()}
+                      aria-label={`Select order ${label}`}
+                      className="w-4 h-4"
+                    />
+                    {url ? (
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(ev) => ev.stopPropagation()}
+                        className="text-base font-bold text-indigo-700 hover:underline"
+                      >{label}</a>
+                    ) : (
+                      <span className="text-base font-bold">{label}</span>
+                    )}
+                    <span className="ml-auto text-base font-bold text-gray-900 tabular-nums whitespace-nowrap">
+                      {o.total_price} <span className="text-xs font-medium text-gray-500">{o.currency}</span>
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-gray-500 mt-0.5">
+                    {o.created_at ? new Date(o.created_at).toLocaleString() : ""}
+                  </div>
+
+                  {/* Customer + phone (highlighted) */}
+                  <div className="mt-2 flex items-start gap-2 flex-wrap">
+                    <div className="text-base font-bold text-gray-900 flex-1 min-w-0 truncate">
+                      {o.customer_name || <span className="text-gray-400 font-medium">—</span>}
+                    </div>
+                  </div>
+                  {o.phone ? (
+                    <div className="mt-1.5 inline-flex items-center gap-2 bg-sky-50 border border-sky-200 rounded-lg px-2.5 py-1">
+                      <span className="font-mono font-bold text-base text-sky-900 tracking-tight">{o.phone}</span>
+                      <button
+                        type="button"
+                        onClick={(ev) => { ev.stopPropagation(); handleCopyPhone(o); }}
+                        title={`Copy ${moroccoInternational(o.phone)}`}
+                        className={`text-sky-500 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
+                      >📋</button>
+                    </div>
+                  ) : (
+                    <div className="mt-1.5 text-xs text-gray-400">no phone</div>
+                  )}
+
+                  {/* Address */}
+                  <div className="mt-1.5 text-sm font-medium text-gray-700">
+                    {[o.shipping_address1, o.shipping_city].filter(Boolean).join(", ") || <span className="text-gray-400">—</span>}
+                  </div>
+
+                  {/* Tags */}
+                  {(o.tags || []).length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {(o.tags || []).map((t) => (
+                        <span key={t} className={`inline-flex items-center text-[11px] px-2 py-0.5 rounded-full border ${isCodTag(t) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-50 text-gray-700 border-gray-200"}`}>
+                          {t}
+                          <button
+                            onClick={(ev) => { ev.stopPropagation(); removeTagOptimistic(o, t); }}
+                            className={`ml-1 text-gray-400 hover:text-rose-600 hover:scale-110 ${BTN_TAP}`}
+                            title="Remove tag"
+                          >×</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Action row */}
+                  <div className="mt-2.5 grid grid-cols-5 gap-1.5">
+                    <button
+                      onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
+                      className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky} !min-w-0 col-span-1`}
+                      title="Copy phone + advance n1/n2/n3/n4"
+                    >
+                      <span aria-hidden className="text-sm">📞</span>
+                      <span>{(tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "").toUpperCase() || "Call"}</span>
+                    </button>
+                    <button
+                      onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
+                      className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.violet} !min-w-0 col-span-1`}
+                      title="No-WhatsApp — cycles nowtp1 → nowtp4"
+                    >
+                      <span aria-hidden className="text-sm">🚫</span>
+                      <span>{(() => {
+                        const t = tagsInCycle(o.tags || [], NOWTP_TAGS).slice(-1)[0];
+                        return t ? t.replace("nowtp", "NW").toUpperCase() : "NW";
+                      })()}</span>
+                    </button>
+                    <button
+                      onClick={(ev) => { ev.stopPropagation(); handleEnatt(o); }}
+                      className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.fuchsia} !min-w-0 col-span-1`}
+                      title="En attente — cycles enatt1 → enatt4"
+                    >
+                      <span aria-hidden className="text-sm">⏳</span>
+                      <span>{(() => {
+                        const t = tagsInCycle(o.tags || [], ENATT_TAGS).slice(-1)[0];
+                        return t ? t.replace("enatt", "EA").toUpperCase() : "EA";
+                      })()}</span>
+                    </button>
+                    <button
+                      onClick={(ev) => { ev.stopPropagation(); openDatePicker(o); }}
+                      className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.emerald} !min-w-0 col-span-1`}
+                      title="Confirm for a delivery date"
+                    >
+                      <span aria-hidden className="text-base">✅</span>
+                    </button>
+                    <button
+                      onClick={(ev) => { ev.stopPropagation(); setActionsDropdownFor((p) => (p === o.id ? null : o.id)); }}
+                      className={`inline-flex items-center justify-center px-2 py-1.5 rounded-xl border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 ${BTN_TAP} col-span-1`}
+                      title="More actions"
+                      aria-haspopup="menu"
+                      aria-expanded={actionsDropdownFor === o.id}
+                    >⋯</button>
+                  </div>
+
+                  {/* "More actions" dropdown for this card (mobile) */}
+                  {actionsDropdownFor === o.id && (
+                    <div
+                      className="mt-2 border border-gray-200 rounded-lg shadow-sm bg-white overflow-hidden"
+                      onClick={(ev) => ev.stopPropagation()}
+                    >
+                      <button
+                        onClick={() => { setCancelModalFor(o); setActionsDropdownFor(null); }}
+                        className="block w-full text-left text-sm px-3 py-2 text-rose-700 hover:bg-rose-50"
+                      >🚫 Cancel order…</button>
+                    </div>
+                  )}
+
+                  {/* Date picker (inline) */}
+                  {pickerOpen && (
+                    <div className="mt-2 rounded-lg bg-indigo-50/50 border border-indigo-200 p-2 flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-medium text-indigo-900">Confirm for:</span>
+                      <input
+                        type="date"
+                        value={chosenDate}
+                        onChange={(e) => setChosenDate(e.target.value)}
+                        onClick={(ev) => ev.stopPropagation()}
+                        className="text-sm border border-gray-300 rounded px-2 py-1"
+                      />
+                      <button
+                        onClick={(ev) => { ev.stopPropagation(); submitConfirm(o); }}
+                        className={`text-xs px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm ${BTN_TAP}`}
+                      >Confirm</button>
+                      <button
+                        onClick={(ev) => { ev.stopPropagation(); setDatePickerFor(null); }}
+                        className={`text-xs px-3 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
+                      >Cancel</button>
+                    </div>
+                  )}
+
+                  {/* Expanded panel (full detail) */}
+                  {isOpen && (
+                    <div className="mt-3" onClick={(ev) => ev.stopPropagation()}>
+                      <OrderExpanded order={o} store={store} shopDomain={meta.shop_domain} onToast={pushToast} />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
           {/* Pagination */}
           <div className="flex items-center gap-2 px-3 py-2 border-t border-gray-100 bg-gray-50">
             <button
