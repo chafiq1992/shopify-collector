@@ -223,24 +223,47 @@ def build_queue_query(tags: List[str]) -> Optional[str]:
     return " ".join(parts)
 
 
-def build_catchall_query() -> str:
-    """Build a Shopify search query for an "untagged" agent: every open, unshipped order
-    that isn't already confirmed. Cancelled orders are excluded by `status:open`."""
-    return f"status:open fulfillment_status:unshipped {_COD_EXCLUSION}"
+def build_catchall_query(exclude_tags: Optional[List[str]] = None) -> str:
+    """Build a Shopify search query for an "untagged" agent — every open, unshipped order
+    that doesn't carry any OTHER agent's tag (so two agents never see the same order).
+    Cancelled orders are already excluded by `status:open`; cod-dated ones are dropped
+    by the Python post-filter (Shopify's tag wildcards don't match multi-word tags)."""
+    parts: List[str] = ["status:open", "fulfillment_status:unshipped", _COD_EXCLUSION]
+    for t in (exclude_tags or []):
+        if t:
+            parts.append(f"-tag:{_escape_tag(t)}")
+    return " ".join(parts)
+
+
+async def _other_agents_active_tags(db: AsyncSession, exclude_user_id: Optional[str] = None) -> List[str]:
+    """Every Shopify tag claimed by some OTHER active confirmation user, sorted + deduped."""
+    res = await db.execute(
+        select(User).where(User.is_active == True)  # noqa: E712
+    )
+    out: set = set()
+    for u in res.scalars().all():
+        if exclude_user_id and u.id == exclude_user_id:
+            continue
+        for t in (u.agent_tags or []):
+            if t:
+                out.add(t)
+    return sorted(out)
 
 
 async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
     """Return the Shopify search query an agent's queue should use.
 
     - Tags assigned             → positive OR-of-tags query
-    - No tags but role=="agent" → catch-all: every open, unshipped, not-yet-confirmed order
+    - No tags but role=="agent" → catch-all: open + unshipped + no cod + none of the
+                                  OTHER active agents' tags
     - Otherwise                 → None (their queue is intentionally empty)
     """
     tags = list(user.agent_tags or [])
     if tags:
         return build_queue_query(tags)
     if user.role == "agent":
-        return build_catchall_query()
+        other = await _other_agents_active_tags(db, exclude_user_id=user.id)
+        return build_catchall_query(other)
     return None
 
 
@@ -1068,10 +1091,13 @@ async def bulk_tag(
 
 @router.get("/api/agent/team-stats")
 async def team_stats(
-    store: str,
+    store: Optional[str] = None,  # noqa: ARG001 — accepted for backwards compat, but ignored
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
+    """Per-agent breakdown aggregated across EVERY connected store, plus confirmed-today
+    from the audit log (which is already cross-store). The `store` query param is kept
+    for backwards compatibility but no longer scopes the output."""
     today_label = today_cod_label()
 
     # Roster: any active user who is either intentionally an "agent" or has tags assigned.
@@ -1079,12 +1105,13 @@ async def team_stats(
     all_active = res.scalars().all()
     agents = [u for u in all_active if u.role == "agent" or (u.agent_tags or [])]
     if not agents:
-        return {"ok": True, "agents": [], "today_label": today_label}
+        return {"ok": True, "agents": [], "today_label": today_label, "stores": []}
 
     # ----- Confirmed today (audit log) -----
-    # An agent's confirmed_today is the number of distinct orders they marked Confirmed today
-    # in the app timezone, regardless of which delivery date they chose. This comes from the
-    # OrderEvent rows written when a `cod ...` tag is added by a user.
+    # An agent's confirmed_today is the number of distinct orders they marked Confirmed
+    # today in the app timezone, regardless of which delivery date they chose OR which
+    # store the order belongs to. The OrderEvent query does not constrain by store_key
+    # so the result is already cross-store.
     tz = _tz()
     today_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
     tomorrow_local = today_local + timedelta(days=1)
@@ -1106,31 +1133,47 @@ async def team_stats(
         for uid, count in rows.all():
             confirmed_map[uid] = int(count or 0)
 
-    # ----- Assigned per agent (Shopify ordersCount) -----
-    # Run all per-agent counts in parallel. Inflates counts slightly because Shopify search
-    # has no reliable wildcard exclusion for multi-word tags like "cod 18/05/26"; the agent's
-    # own /confirmation queue post-filters them away.
-    from .main import shopify_graphql  # type: ignore
+    # ----- Assigned per agent (Shopify, all stores combined) -----
+    # Build each agent's query once (it doesn't depend on the store), then ask each
+    # connected store for that agent's breakdown and sum the results.
+    from .main import known_store_labels  # type: ignore
 
-    queries: List[Optional[str]] = []
+    queries_by_agent: Dict[str, Optional[str]] = {}
     for a in agents:
-        queries.append(await query_for_user(db, a))
+        queries_by_agent[a.id] = await query_for_user(db, a)
 
-    async def _breakdown_for(idx: int) -> Dict[str, int]:
-        q = queries[idx]
-        if not q:
-            return _empty_breakdown()
-        try:
-            return await accurate_assigned_breakdown(store, agents[idx].id, q)
-        except Exception:
-            return _empty_breakdown()
+    try:
+        stores: List[str] = await known_store_labels()
+    except Exception:
+        stores = []
 
-    breakdowns = await asyncio.gather(*[_breakdown_for(i) for i in range(len(agents))])
-    breakdown_map = {a.id: breakdowns[i] for i, a in enumerate(agents)}
+    breakdown_map: Dict[str, Dict[str, int]] = {a.id: _empty_breakdown() for a in agents}
+
+    if stores:
+        async def _bd(agent_id: str, q: Optional[str], store_key: str) -> Tuple[str, Dict[str, int]]:
+            if not q:
+                return (agent_id, _empty_breakdown())
+            try:
+                bd = await accurate_assigned_breakdown(store_key, agent_id, q)
+                return (agent_id, bd)
+            except Exception:
+                return (agent_id, _empty_breakdown())
+
+        coros = []
+        for a in agents:
+            q = queries_by_agent[a.id]
+            for s in stores:
+                coros.append(_bd(a.id, q, s))
+        results = await asyncio.gather(*coros)
+        for agent_id, bd in results:
+            agg = breakdown_map[agent_id]
+            for k in agg:
+                agg[k] += int(bd.get(k) or 0)
 
     return {
         "ok": True,
         "today_label": today_label,
+        "stores": stores,
         "agents": [
             {
                 "id": a.id,

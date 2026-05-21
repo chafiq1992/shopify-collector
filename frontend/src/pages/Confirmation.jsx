@@ -1326,6 +1326,7 @@ function AgentView({ me }) {
             <div className="text-sm font-semibold flex items-center gap-2">
               <span>🏆</span>
               <span>Team performance today</span>
+              <span className="text-[10px] uppercase tracking-wide font-semibold bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-full px-2 py-0.5">all stores</span>
             </div>
             <div className="text-[11px] text-gray-500">
               {meta.today_label && <span>{meta.today_label} · confirmations counted by clicks today</span>}
