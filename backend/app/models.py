@@ -6,11 +6,11 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     JSON,
     func,
-    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
@@ -42,9 +42,12 @@ class User(Base):
 class OrderEvent(Base):
     __tablename__ = "order_events"
     __table_args__ = (
-        # Prevent double-counting the same order action for the same store.
-        # Note: existing SQLite DBs won't auto-migrate; new DBs will enforce it.
-        UniqueConstraint("order_gid", "store_key", "action", name="uq_order_events_order_store_action"),
+        # Analytics-driven indexes. No table-level uniqueness: per-(order, action)
+        # dedupe is enforced at the application layer where the rules differ by
+        # action type (collected/out/fulfilled are once-ever per order; confirmation
+        # events dedupe per user-per-day so legitimate re-attempts still count).
+        Index("ix_order_events_user_action_created", "user_id", "action", "created_at"),
+        Index("ix_order_events_order_action", "order_gid", "action"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)

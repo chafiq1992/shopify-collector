@@ -1,8 +1,11 @@
 import os
 import json
+import logging
 import re
 from typing import List, Optional, Dict, Any, Tuple
 import asyncio
+
+logger = logging.getLogger(__name__)
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header, Request, Depends, Response, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -2581,6 +2584,46 @@ def _classify_agent_tag_action(tag: str) -> Optional[str]:
     return None
 
 
+def _local_day_bounds_utc() -> Tuple[datetime, datetime]:
+    """Today's [start, end) in the app timezone, converted to UTC."""
+    try:
+        from .confirmation_routes import _tz as _conf_tz  # type: ignore
+        tz = _conf_tz()
+    except Exception:
+        tz = timezone.utc
+    today_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_local = today_local + timedelta(days=1)
+    return today_local.astimezone(timezone.utc), tomorrow_local.astimezone(timezone.utc)
+
+
+async def _already_logged_today(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    order_gid: str,
+    store_key: str,
+    action: str,
+) -> bool:
+    """Return True if the same user already has this action on this order today."""
+    today_utc, tomorrow_utc = _local_day_bounds_utc()
+    try:
+        existing = await session.scalar(
+            select(OrderEvent.id).where(
+                OrderEvent.user_id == user_id,
+                OrderEvent.order_gid == order_gid,
+                OrderEvent.store_key == store_key,
+                OrderEvent.action == action,
+                OrderEvent.created_at >= today_utc,
+                OrderEvent.created_at < tomorrow_utc,
+            )
+        )
+    except Exception:
+        # If the dedupe query itself fails, fall through and let the insert try —
+        # losing dedupe is better than losing the audit row.
+        return False
+    return existing is not None
+
+
 async def _maybe_log_agent_tag_action(
     user: Optional["User"],
     session: Optional[AsyncSession],
@@ -2590,24 +2633,62 @@ async def _maybe_log_agent_tag_action(
     op: str,
     store: Optional[str],
 ):
-    if user is None or session is None:
+    """Audit-log a tag write.
+
+    - Logs for every authenticated user, regardless of role (role is captured in
+      metadata so analytics can split by role later if needed). Without this, any
+      tag write made while logged in as admin/manager silently dropped from the
+      counts agents see on the confirmation page.
+    - Dedupes per (user, order, action, local day): an agent re-attempting the
+      same call later that day or the worker retrying a single click won't inflate
+      counts, but a different agent or a different day will count separately.
+    - Surfaces failures via logger.exception so we can diagnose drops in prod
+      instead of silently swallowing every error.
+    """
+    if session is None:
         return
-    if getattr(user, "role", None) != "agent":
+    if user is None:
+        # Worker replayed a queued tag write with a stale/missing token. Tag still
+        # reaches Shopify (this endpoint allows optional auth), but we lose
+        # attribution. Log it so frequency is visible.
+        logger.warning(
+            "tag audit skipped: no authenticated user (order=%s tag=%s op=%s)",
+            order_gid, tag, op,
+        )
         return
+    action_name = _classify_agent_tag_action(tag) or f"confirmation_tag_{op}"
+    store_key = _normalize_store(store)
     try:
-        action_name = _classify_agent_tag_action(tag) or f"confirmation_tag_{op}"
+        if await _already_logged_today(
+            session,
+            user_id=user.id,
+            order_gid=order_gid,
+            store_key=store_key,
+            action=action_name,
+        ):
+            return
         await _record_user_action(
             session,
             user_id=user.id,
             order_number=None,
             order_gid=order_gid,
-            store_key=_normalize_store(store),
+            store_key=store_key,
             action=action_name,
-            metadata={"tag": tag, "op": op},
+            metadata={"tag": tag, "op": op, "role": getattr(user, "role", None)},
         )
         await session.commit()
+    except IntegrityError:
+        # Another concurrent request wrote the same (user, order, action) today.
+        # Benign — dedupe already covers this; just roll back and move on.
+        try:
+            await session.rollback()
+        except Exception:
+            pass
     except Exception:
-        # Audit failure must never block a tag write
+        logger.exception(
+            "tag audit failed (order=%s tag=%s op=%s user=%s store=%s)",
+            order_gid, tag, op, getattr(user, "id", None), store_key,
+        )
         try:
             await session.rollback()
         except Exception:

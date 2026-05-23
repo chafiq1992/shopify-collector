@@ -85,7 +85,14 @@ async function attemptItem(item) {
     body: JSON.stringify({ tag: item.tag }),
   });
   if (!res.ok) {
-    // 4xx (except 408/429) are permanent: drop the item to avoid spamming Shopify.
+    // 401/403: keep the item queued — the user just needs to re-auth and the
+    // worker will replay it. Dropping these silently was a key source of
+    // missing audit rows ("agent says 30 confirmed, dashboard shows 0").
+    // 408/429: transient — retry with backoff.
+    // Other 4xx: permanent (bad request, gone, etc.) — drop to avoid spam.
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, drop: false, status: res.status };
+    }
     if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
       return { ok: false, drop: true, status: res.status };
     }

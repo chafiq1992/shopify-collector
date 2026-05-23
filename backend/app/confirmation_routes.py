@@ -13,6 +13,7 @@ Provides:
 """
 
 import asyncio
+import logging
 import os
 import re
 import time
@@ -23,7 +24,10 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import case, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from .auth_routes import get_current_user, hash_password, require_admin
 from .db import get_session
@@ -952,24 +956,43 @@ async def cancel_order(
         msg = "; ".join(f"{e.get('field') or '?'}: {e.get('message') or ''}" for e in errs)
         raise HTTPException(status_code=400, detail=f"Shopify cancel failed: {msg}")
 
-    # Best-effort audit log (independent of any tag mutations).
+    # Best-effort audit log (independent of any tag mutations). Dedupe per-day
+    # per-user so a double-click doesn't double-count but a re-cancel on a
+    # different day from a different agent does.
+    from .main import _already_logged_today  # type: ignore
+    store_key_norm = _normalize_store(store)
     try:
-        await _record_user_action(
+        if not await _already_logged_today(
             db,
             user_id=user.id,
-            order_number=None,
             order_gid=order_gid,
-            store_key=_normalize_store(store),
+            store_key=store_key_norm,
             action="confirmation_cancelled",
-            metadata={
-                "reason": reason,
-                "restock": bool(body.restock),
-                "refund": bool(body.refund),
-                "staff_note": (body.staff_note or "").strip() or None,
-            },
-        )
-        await db.commit()
+        ):
+            await _record_user_action(
+                db,
+                user_id=user.id,
+                order_number=None,
+                order_gid=order_gid,
+                store_key=store_key_norm,
+                action="confirmation_cancelled",
+                metadata={
+                    "reason": reason,
+                    "restock": bool(body.restock),
+                    "refund": bool(body.refund),
+                    "staff_note": (body.staff_note or "").strip() or None,
+                    "role": getattr(user, "role", None),
+                },
+            )
+            await db.commit()
+    except IntegrityError:
+        try: await db.rollback()
+        except Exception: pass
     except Exception:
+        logger.exception(
+            "cancel audit failed (order=%s user=%s store=%s)",
+            order_gid, getattr(user, "id", None), store_key_norm,
+        )
         try: await db.rollback()
         except Exception: pass
 
@@ -1047,7 +1070,13 @@ async def bulk_tag(
         return {"ok": True, "tagged": 0, "total": 0, "tag": tag}
 
     # Tag each order with bounded concurrency.
-    from .main import _shopify_add_tag, _record_user_action, _normalize_store, _classify_agent_tag_action  # type: ignore
+    from .main import (  # type: ignore
+        _shopify_add_tag,
+        _record_user_action,
+        _normalize_store,
+        _classify_agent_tag_action,
+        _already_logged_today,
+    )
 
     sem = asyncio.Semaphore(_BULK_CONCURRENCY)
     audit_records: List[Dict[str, Any]] = []
@@ -1059,17 +1088,28 @@ async def bulk_tag(
                 audit_records.append({"order_gid": oid})
                 return True
             except Exception:
+                logger.exception("bulk tag write failed (order=%s tag=%s)", oid, tag)
                 return False
 
     results = await asyncio.gather(*[_tag_one(o) for o in order_ids])
     tagged = sum(1 for r in results if r)
 
-    # Best-effort audit log. We commit per record so a single unique-constraint clash
-    # (e.g. the user already confirmed an order earlier) doesn't roll back the others.
+    # Audit log: commit per record so one failure doesn't roll back the others.
+    # Dedupe per-(user, order, action, local day) so worker retries / re-applies
+    # don't inflate counts while still recording every distinct attempt.
     action_name = _classify_agent_tag_action(tag) or "confirmation_tag_add"
     store_key_norm = _normalize_store(store)
+    audited = 0
     for rec in audit_records:
         try:
+            if await _already_logged_today(
+                db,
+                user_id=user.id,
+                order_gid=rec["order_gid"],
+                store_key=store_key_norm,
+                action=action_name,
+            ):
+                continue
             await _record_user_action(
                 db,
                 user_id=user.id,
@@ -1077,14 +1117,27 @@ async def bulk_tag(
                 order_gid=rec["order_gid"],
                 store_key=store_key_norm,
                 action=action_name,
-                metadata={"tag": tag, "op": "add", "bulk": True},
+                metadata={
+                    "tag": tag,
+                    "op": "add",
+                    "bulk": True,
+                    "role": getattr(user, "role", None),
+                },
             )
             await db.commit()
+            audited += 1
+        except IntegrityError:
+            try: await db.rollback()
+            except Exception: pass
         except Exception:
+            logger.exception(
+                "bulk tag audit failed (order=%s tag=%s user=%s)",
+                rec["order_gid"], tag, getattr(user, "id", None),
+            )
             try: await db.rollback()
             except Exception: pass
 
-    return {"ok": True, "tagged": tagged, "total": len(order_ids), "tag": tag}
+    return {"ok": True, "tagged": tagged, "total": len(order_ids), "tag": tag, "audited": audited}
 
 
 # ---------- Agent team stats (confirmed today across team) ----------
