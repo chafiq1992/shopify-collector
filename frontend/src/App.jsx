@@ -598,6 +598,13 @@ export default function App(){
     return () => clearTimeout(t);
   }, [search, auth?.access_token]);
 
+  // Keep a ref to the latest load() so the WebSocket handler (mounted once)
+  // always uses the freshest filter state — otherwise webhook-triggered reloads
+  // refetch with stale closure values (e.g. empty productIdFilter) and silently
+  // wipe out an active Product filter.
+  const loadRef = useRef(load);
+  useEffect(() => { loadRef.current = load; });
+
   useEffect(() => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const url = `${proto}://${location.host}/ws`;
@@ -632,7 +639,11 @@ export default function App(){
                 if (allSelf) return;
               }
             } catch {}
-            load({ preserveIndex: true });
+            // Use loadRef so we always reload with the LATEST filter state
+            // (productIdFilter, statusFilter, etc.). The WS handler is bound
+            // once with `[]` deps, so calling `load` directly would use the
+            // stale closure from first render and silently drop active filters.
+            try { (loadRef.current || load)({ preserveIndex: true }); } catch {}
           }, 1500);
         }
       } catch {}
@@ -987,6 +998,11 @@ export default function App(){
                   className="inline-flex items-center px-3 py-1 rounded-full text-[11px] font-semibold bg-gray-200 text-gray-800 active:scale-[.98]"
                   onClick={()=>{ vibrate(15); setCodFromDate(""); setCodToDate(""); setReloadCounter(c=>c+1); }}
                 >Clear</button>
+                <button
+                  disabled={selectedOrderNumbers.size === 0}
+                  className="inline-flex items-center px-3 py-1 rounded-full text-[11px] font-semibold bg-red-600 text-white active:scale-[.98] shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  onClick={()=>{ vibrate(15); setSelectedOrderNumbers(new Set()); }}
+                >Clear selection{selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}</button>
               </div>
             </div>
           )}
