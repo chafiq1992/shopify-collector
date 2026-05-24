@@ -227,6 +227,10 @@ export default function App(){
   const [codFromDate, setCodFromDate] = useState(""); // YYYY-MM-DD
   const [codToDate, setCodToDate] = useState(""); // YYYY-MM-DD
   const [tagFilter, setTagFilter] = useState(null);
+  const [showDeliveryPicker, setShowDeliveryPicker] = useState(false);
+  // Available delivery company tags (dedup; "pal" appears once even though it
+  // was listed twice in the source spec).
+  const DELIVERY_COMPANIES = ["ibex", "l24", "oscario", "meta", "pal", "12livery", "lx", "k", "fast"];
   const [loading, setLoading] = useState(false);
   const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
   const [nextCursor, setNextCursor] = useState(null);
@@ -955,6 +959,11 @@ export default function App(){
                   }
                 }}
               />
+              <Chip
+                label={tagFilter ? `Delivery: ${tagFilter}` : "Delivery"}
+                active={!!tagFilter}
+                onClick={()=>{ setShowDeliveryPicker(true); }}
+              />
                 <div className="flex items-center gap-1">
                   <SmallChip
                     label="Exclude OUT"
@@ -1205,6 +1214,40 @@ export default function App(){
           onSelect={(p)=>{ setProfile(p); setShowProfilePicker(false); }}
         />
         </Suspense>
+      )}
+      {showDeliveryPicker && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center" onClick={()=>setShowDeliveryPicker(false)}>
+          <div className="w-full max-w-sm rounded-2xl bg-white shadow-lg border border-gray-200 p-4 mx-4" onClick={(e)=>e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-base font-semibold">Filter by delivery company</h3>
+              {tagFilter && (
+                <button
+                  className="text-[11px] font-semibold text-red-600 underline"
+                  onClick={()=>{ vibrate(10); setTagFilter(null); setShowDeliveryPicker(false); }}
+                >Clear</button>
+              )}
+            </div>
+            <p className="text-xs text-gray-500 mb-3">Adds <span className="font-mono">tag:&lt;company&gt;</span> on top of your current filters.</p>
+            <div className="grid grid-cols-3 gap-2">
+              {DELIVERY_COMPANIES.map(tag => {
+                const isActive = tagFilter === tag;
+                return (
+                  <button
+                    key={tag}
+                    onClick={()=>{ vibrate(10); setTagFilter(tag); setShowDeliveryPicker(false); }}
+                    className={`inline-flex items-center justify-center h-9 px-2 rounded-xl text-xs font-semibold border transition-colors ${isActive ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
+                  >{tag}</button>
+                );
+              })}
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={()=>setShowDeliveryPicker(false)}
+                className="px-3 py-1.5 rounded-xl border border-gray-300 text-xs font-medium hover:bg-gray-50"
+              >Close</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
