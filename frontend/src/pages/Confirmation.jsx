@@ -100,6 +100,30 @@ const API = {
     }
     return res.json();
   },
+  async pullPreview({ store, level, exclude_tags }) {
+    const res = await authFetch(`/api/agent/pull/preview`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ store, level, exclude_tags }),
+    });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Preview failed" }));
+      throw new Error(js.detail || `Preview failed (${res.status})`);
+    }
+    return res.json();
+  },
+  async pullExecute({ store, level, exclude_tags, limit, agent_tag }) {
+    const res = await authFetch(`/api/agent/pull/execute`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ store, level, exclude_tags, limit, agent_tag }),
+    });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Pull failed" }));
+      throw new Error(js.detail || `Pull failed (${res.status})`);
+    }
+    return res.json();
+  },
   async appendNote(orderId, append, store) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
@@ -272,6 +296,10 @@ function AgentView({ me }) {
   const [bulkBusy, setBulkBusy] = useState(false);
   // Filter for the top stat pills: "" | "n1" | "n2" | "n3" | "n4" | "new"
   const [filterLevel, setFilterLevel] = useState("");
+  // Pull-orders modal — opened by the "Get more orders" panel. `pullMode` is the
+  // level being pulled ("new" | "n1" | "n2" | "n3" | "n4" | "nowtp" | "enatt");
+  // null = closed.
+  const [pullMode, setPullMode] = useState(null);
   // Toast notifications (button feedback)
   const [toasts, pushToast, dismissToast] = useToasts();
 
@@ -1069,6 +1097,59 @@ function AgentView({ me }) {
           </div>
         </section>
 
+        {/* Pull-orders panel — claim unassigned orders or yank level-tagged
+            orders away from other agents. Each button opens a modal that
+            previews the available count and lets the agent choose how many to
+            take. After approve, those orders are tagged with the agent's own
+            tag and every other active agent's tag is stripped off them. */}
+        <section className="bg-gradient-to-br from-indigo-50 to-violet-50 border border-indigo-200 rounded-2xl p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-xs font-semibold text-indigo-900 mr-2">
+              ➕ Get more orders
+            </div>
+            <button
+              type="button"
+              onClick={() => setPullMode("new")}
+              className={`text-xs px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 shadow-sm ${BTN_TAP}`}
+              title="Pull unassigned new orders into your queue"
+            >✨ New</button>
+            <button
+              type="button"
+              onClick={() => setPullMode("n1")}
+              className={`text-xs px-3 py-1.5 rounded-lg bg-amber-500 text-white font-medium hover:bg-amber-600 shadow-sm ${BTN_TAP}`}
+              title="Pull N1 orders (with optional exclusion tags) into your queue"
+            >📞 N1</button>
+            <button
+              type="button"
+              onClick={() => setPullMode("n2")}
+              className={`text-xs px-3 py-1.5 rounded-lg bg-orange-500 text-white font-medium hover:bg-orange-600 shadow-sm ${BTN_TAP}`}
+            >📞 N2</button>
+            <button
+              type="button"
+              onClick={() => setPullMode("n3")}
+              className={`text-xs px-3 py-1.5 rounded-lg bg-rose-500 text-white font-medium hover:bg-rose-600 shadow-sm ${BTN_TAP}`}
+            >📞 N3</button>
+            <button
+              type="button"
+              onClick={() => setPullMode("n4")}
+              className={`text-xs px-3 py-1.5 rounded-lg bg-red-500 text-white font-medium hover:bg-red-600 shadow-sm ${BTN_TAP}`}
+            >📞 N4</button>
+            <button
+              type="button"
+              onClick={() => setPullMode("nowtp")}
+              className={`text-xs px-3 py-1.5 rounded-lg bg-violet-500 text-white font-medium hover:bg-violet-600 shadow-sm ${BTN_TAP}`}
+            >🚫 Nowtp</button>
+            <button
+              type="button"
+              onClick={() => setPullMode("enatt")}
+              className={`text-xs px-3 py-1.5 rounded-lg bg-fuchsia-500 text-white font-medium hover:bg-fuchsia-600 shadow-sm ${BTN_TAP}`}
+            >⏳ Enatt</button>
+            <div className="text-[11px] text-indigo-700/80 ml-auto">
+              Pulled orders are tagged with your tag and any other agent's tag is removed.
+            </div>
+          </div>
+        </section>
+
         {/* Orders — desktop table only at xl+ (≥1280px effective width). At anything
             narrower (including a zoomed-in desktop) the scroll-free card list below
             takes over so the action buttons can never end up clipped. */}
@@ -1359,6 +1440,24 @@ function AgentView({ me }) {
           }}
         />
       )}
+      {pullMode && (
+        <PullOrdersModal
+          mode={pullMode}
+          store={store}
+          myTags={agentInfo?.tags || me?.tags || []}
+          onClose={() => setPullMode(null)}
+          onSuccess={(result) => {
+            setPullMode(null);
+            pushToast(
+              `✅ Pulled ${result.pulled} order${result.pulled === 1 ? "" : "s"} into your queue`,
+              "success",
+            );
+            // The agent's queue + every other agent's queue changed — refresh both.
+            loadFirst();
+            loadTeam();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1465,6 +1564,247 @@ function CancelOrderModal({ order, store, onClose, onSuccess }) {
               Cancelling…
             </span>
           ) : "Cancel order"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Pull-orders modal — opened by the "Get more orders" panel. Lets the agent
+// claim a batch of orders into their queue. Two flavours, picked by `mode`:
+//
+//   "new"   — orders that no other active agent has claimed (no other agent
+//             tag is present). No extra inputs needed.
+//   "n1"/"n2"/"n3"/"n4"/"nowtp"/"enatt" — orders carrying that call-attempt
+//             tag, optionally MINUS up to two agent-specified exclude tags
+//             (e.g. "n2 but not fz and not zineb"). These can currently sit in
+//             other agents' queues; the execute call strips those tags so the
+//             pulled order becomes exclusively this agent's.
+//
+// The modal previews the available count as the agent edits the exclude
+// inputs (debounced), then lets them pick how many to actually pull via
+// preset chips (10/20/50/100/All) or a free-form number.
+const PULL_LABELS = {
+  new:   { title: "Pull new (unassigned) orders", icon: "✨", color: "indigo" },
+  n1:    { title: "Pull N1 orders", icon: "📞", color: "amber" },
+  n2:    { title: "Pull N2 orders", icon: "📞", color: "orange" },
+  n3:    { title: "Pull N3 orders", icon: "📞", color: "rose" },
+  n4:    { title: "Pull N4 orders", icon: "📞", color: "red" },
+  nowtp: { title: "Pull Nowtp orders", icon: "🚫", color: "violet" },
+  enatt: { title: "Pull Enatt orders", icon: "⏳", color: "fuchsia" },
+};
+
+function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
+  const cfg = PULL_LABELS[mode] || PULL_LABELS.new;
+  const isLevelMode = mode !== "new";
+  const [excludeA, setExcludeA] = useState("");
+  const [excludeB, setExcludeB] = useState("");
+  // Server-reported count for the current (mode, exclude_tags) combo.
+  const [available, setAvailable] = useState(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [previewErr, setPreviewErr] = useState(null);
+  // Which of the user's agent_tags to apply on pull. Defaults to first.
+  const [agentTag, setAgentTag] = useState(() => (myTags && myTags[0]) || "");
+  // How many orders to pull. `takeAll` overrides the number with the full pool.
+  const [takeAll, setTakeAll] = useState(false);
+  const [amount, setAmount] = useState(20);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const previewReqRef = useRef(0);
+
+  const excludeTags = useMemo(
+    () => [excludeA, excludeB].map((t) => String(t || "").trim()).filter(Boolean),
+    [excludeA, excludeB],
+  );
+
+  // Debounced preview. Re-fetches the count whenever the exclude inputs settle.
+  useEffect(() => {
+    const handle = setTimeout(async () => {
+      const reqId = ++previewReqRef.current;
+      setPreviewing(true); setPreviewErr(null);
+      try {
+        const js = await API.pullPreview({ store, level: mode, exclude_tags: excludeTags });
+        if (reqId !== previewReqRef.current) return;
+        setAvailable(Number(js.available || 0));
+        // If the server reports a different "default agent tag" and the user
+        // hasn't picked one yet, pre-fill it.
+        if (!agentTag && js.agent_tag) setAgentTag(js.agent_tag);
+      } catch (e) {
+        if (reqId !== previewReqRef.current) return;
+        setPreviewErr(e?.message || "Preview failed");
+        setAvailable(0);
+      } finally {
+        if (reqId === previewReqRef.current) setPreviewing(false);
+      }
+    }, 350);
+    return () => clearTimeout(handle);
+    // We intentionally ignore agentTag in the deps — it doesn't affect the count.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store, mode, excludeA, excludeB]);
+
+  async function submit() {
+    const limit = takeAll ? 0 : Math.max(0, Number(amount) || 0);
+    if (!takeAll && limit <= 0) {
+      setErr("Enter a number greater than 0 (or tick Take all).");
+      return;
+    }
+    if (!agentTag) {
+      setErr("No agent tag selected. Ask admin to assign one to your account.");
+      return;
+    }
+    setBusy(true); setErr(null);
+    try {
+      const js = await API.pullExecute({
+        store, level: mode, exclude_tags: excludeTags, limit, agent_tag: agentTag,
+      });
+      onSuccess?.(js);
+    } catch (e) {
+      setErr(e?.message || "Pull failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Esc to close (when not busy).
+  useEffect(() => {
+    function onKey(e) { if (e.key === "Escape" && !busy) onClose?.(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  const presets = [10, 20, 50, 100];
+  const submitDisabled = busy || previewing || (available != null && available === 0);
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 px-4"
+      onClick={() => { if (!busy) onClose?.(); }}
+    >
+      <div
+        className="bg-white border border-gray-200 rounded-2xl p-5 w-full max-w-md shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-base font-semibold mb-1">
+          {cfg.icon} {cfg.title}
+        </div>
+        <div className="text-[11px] text-gray-500 mb-4">
+          Store: <span className="font-medium">{store}</span>
+        </div>
+
+        {isLevelMode && (
+          <div className="mb-3 grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">Exclude tag #1</label>
+              <input
+                type="text"
+                value={excludeA}
+                onChange={(e) => setExcludeA(e.target.value)}
+                placeholder="e.g. fz"
+                className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">Exclude tag #2</label>
+              <input
+                type="text"
+                value={excludeB}
+                onChange={(e) => setExcludeB(e.target.value)}
+                placeholder="e.g. zineb"
+                className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+              />
+            </div>
+          </div>
+        )}
+
+        <div className="mb-4 rounded-xl bg-indigo-50 border border-indigo-200 px-3 py-2 flex items-center gap-2">
+          <span className="text-xs text-indigo-700">Available now</span>
+          <span className="text-xl font-bold tabular-nums text-indigo-900 ml-auto">
+            {previewing ? "…" : (available != null ? available : "—")}
+          </span>
+        </div>
+        {previewErr && (
+          <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 mb-3">
+            {previewErr}
+          </div>
+        )}
+
+        {(myTags || []).length > 1 && (
+          <div className="mb-3">
+            <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">Apply tag</label>
+            <select
+              value={agentTag}
+              onChange={(e) => setAgentTag(e.target.value)}
+              className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm bg-white"
+            >
+              {(myTags || []).map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div className="mb-3">
+          <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">How many</label>
+          <div className="flex items-center gap-2 flex-wrap">
+            {presets.map((n) => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => { setAmount(n); setTakeAll(false); }}
+                disabled={busy || (available != null && n > available)}
+                className={`text-xs px-3 py-1 rounded-full border font-medium ${BTN_TAP} ${
+                  !takeAll && Number(amount) === n
+                    ? "border-indigo-500 bg-indigo-600 text-white"
+                    : "border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+                }`}
+              >{n}</button>
+            ))}
+            <button
+              type="button"
+              onClick={() => setTakeAll((p) => !p)}
+              disabled={busy}
+              className={`text-xs px-3 py-1 rounded-full border font-medium ${BTN_TAP} ${
+                takeAll
+                  ? "border-indigo-500 bg-indigo-600 text-white"
+                  : "border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+              }`}
+            >Take all{available != null ? ` (${available})` : ""}</button>
+            <input
+              type="number"
+              min={1}
+              max={available || 9999}
+              value={amount}
+              onChange={(e) => { setAmount(e.target.value); setTakeAll(false); }}
+              disabled={busy || takeAll}
+              className="w-24 border border-gray-300 rounded-lg px-2 py-1.5 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+            />
+          </div>
+        </div>
+
+        {err && (
+          <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 mb-3">{err}</div>
+        )}
+
+        <div className="text-[11px] text-gray-500 mb-3">
+          Pulled orders get tagged{agentTag ? <> with <code className="bg-gray-100 px-1 rounded">{agentTag}</code></> : ""} and any other agent's tag is removed.
+        </div>
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="text-sm px-4 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50 active:scale-[0.96] transition-transform duration-75"
+          >Cancel</button>
+          <button
+            onClick={submit}
+            disabled={submitDisabled}
+            className="text-sm px-4 py-1.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-50 active:scale-[0.96] transition-transform duration-75 shadow-sm"
+          >{busy ? (
+            <span className="inline-flex items-center gap-1.5">
+              <span className="inline-block w-3 h-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+              Pulling…
+            </span>
+          ) : `Approve & pull${takeAll ? " all" : (amount ? ` ${amount}` : "")}`}</button>
         </div>
       </div>
     </div>
