@@ -62,3 +62,19 @@ async def init_db():
             # Column already exists or DB rejected addition (safe to ignore on repeat starts).
             pass
 
+        # Additive columns for the Return Scanner PDF export (order detail).
+        return_scan_cols = ("total_price", "currency", "city", "phone", "fulfilled_at")
+        for col in return_scan_cols:
+            try:
+                if is_sqlite_engine:
+                    await conn.exec_driver_sql(
+                        f"ALTER TABLE return_scans ADD COLUMN {col} TEXT DEFAULT ''"
+                    )
+                else:
+                    await conn.exec_driver_sql(
+                        f"ALTER TABLE return_scans ADD COLUMN IF NOT EXISTS {col} TEXT DEFAULT ''"
+                    )
+            except Exception:
+                # Column already exists (safe to ignore on repeat starts).
+                pass
+

@@ -187,28 +187,20 @@ export default function ReturnScanner() {
     const onScan = (code) => {
       const now = Date.now();
       const last = recentCodesRef.current.get(code) || 0;
-      if (now - last < 2000) return;
+      // Dedupe the same barcode held in view; different codes scan instantly.
+      if (now - last < 2500) return;
       recentCodesRef.current.set(code, now);
       if (navigator.vibrate) navigator.vibrate(60);
+      playTone(660, 0.05);
       setResult("⏳ Processing scan...");
+      setResultClass("");
 
-      if (scannerRef.current) {
-        scannerRef.current
-          .stop()
-          .then(() => {
-            setScanning(false);
-            setShowAgain(true);
-          })
-          .catch(() => {
-            setScanning(false);
-            setShowAgain(true);
-          });
-      } else {
-        setScanning(false);
-        setShowAgain(true);
-      }
-
+      // Continuous mode: keep the camera running so the next return can be
+      // scanned immediately. Each scan is tracked by a temp id so out-of-order
+      // backend responses update the correct row.
+      const id = `${now}-${Math.random().toString(36).slice(2, 8)}`;
       addToSession({
+        _id: id,
         result: "⏳ Processing",
         order: code,
         store: "",
@@ -217,7 +209,7 @@ export default function ReturnScanner() {
         financial: "",
         ts: new Date().toISOString(),
       });
-      processReturnScan(code);
+      processReturnScan(code, id);
     };
 
     const handleStartError = (err) => {
@@ -331,7 +323,21 @@ export default function ReturnScanner() {
     }
   }
 
-  async function processReturnScan(barcode) {
+  async function stopScanner() {
+    const qr = scannerRef.current;
+    if (qr) {
+      try {
+        if (qr.isScanning) await qr.stop();
+      } catch {}
+    }
+    setScanning(false);
+    setShowStart(true);
+    setShowAgain(false);
+    setToast("Scanner stopped");
+    setTimeout(() => setToast(""), 1000);
+  }
+
+  async function processReturnScan(barcode, id) {
     try {
       const resp = await authFetch("/api/return-scan", {
         method: "POST",
@@ -344,18 +350,31 @@ export default function ReturnScanner() {
         setResult(`❌ Error: ${msg}`);
         setResultClass("rs-result-error");
         playErrorSound();
+        markSessionError(id, msg);
         return;
       }
-      updateScanUI(data);
+      updateScanUI(data, id);
     } catch {
       setResult("❌ Error: Network error");
       setResultClass("rs-result-error");
       playErrorSound();
+      markSessionError(id, "Network error");
     }
   }
 
-  function updateScanUI(data) {
-    const { result: res, order, store, fulfillment, status, financial, ts } = data;
+  function markSessionError(id, msg) {
+    setSessionScans((prev) =>
+      prev.map((o) =>
+        o._id === id
+          ? { ...o, result: `❌ ${msg || "Error"}` }
+          : o
+      )
+    );
+  }
+
+  function updateScanUI(data, id) {
+    const { result: res, order, store, fulfillment, status, financial,
+      total_price, currency, city, phone, fulfilled_at, ts } = data;
     setResult(`${statusIcon(res)} ${res}`);
     setResultClass(
       res.includes("✅")
@@ -367,18 +386,17 @@ export default function ReturnScanner() {
     if (res.includes("✅")) playSuccessSound();
     else playErrorSound();
 
+    const updated = {
+      result: res, order, store, fulfillment, status, financial,
+      total_price, currency, city, phone, fulfilled_at, ts,
+    };
+
     setSessionScans((prev) => {
-      if (prev.length && (prev[0].result || "").startsWith("⏳")) {
-        const [, ...rest] = prev;
-        return [
-          { result: res, order, store, fulfillment, status, financial, ts },
-          ...rest,
-        ].slice(0, 50);
+      // Update the pending row created for this scan, if it still exists.
+      if (id && prev.some((o) => o._id === id)) {
+        return prev.map((o) => (o._id === id ? { ...o, ...updated } : o));
       }
-      return [
-        { result: res, order, store, fulfillment, status, financial, ts },
-        ...prev,
-      ].slice(0, 50);
+      return [updated, ...prev].slice(0, 50);
     });
   }
 
@@ -453,6 +471,45 @@ export default function ReturnScanner() {
       setHistoryRows([]);
     } finally {
       setHistoryLoading(false);
+    }
+  }
+
+  async function downloadPdf() {
+    const start = historyDateStart;
+    const end = historyDateEnd || historyDateStart;
+    try {
+      setToast("Generating PDF…");
+      const params = new URLSearchParams({ start, end });
+      const res = await authFetch(`/api/return-scans/pdf?${params.toString()}`, {
+        headers: authHeaders({ Accept: "application/pdf" }),
+      });
+      if (!res.ok) {
+        let msg = "Failed to generate PDF";
+        try {
+          const js = await res.json();
+          msg = js?.detail || msg;
+        } catch {}
+        setToast(msg);
+        setTimeout(() => setToast(""), 2500);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download =
+        start === end
+          ? `return-scans-${start}.pdf`
+          : `return-scans-${start}_${end}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      setToast("PDF downloaded ✓");
+      setTimeout(() => setToast(""), 1500);
+    } catch {
+      setToast("Failed to generate PDF");
+      setTimeout(() => setToast(""), 2500);
     }
   }
 
@@ -810,17 +867,29 @@ export default function ReturnScanner() {
               📷 Start Scanner
             </button>
           )}
-          {showAgain && (
+          {scanning && (
             <button
               style={{
                 ...styles.scanBtn,
-                background: "linear-gradient(135deg, #059669, #0d9488)",
-                boxShadow: "0 4px 20px rgba(5, 150, 105, 0.25)",
+                background: "linear-gradient(135deg, #dc2626, #b91c1c)",
+                boxShadow: "0 4px 20px rgba(220, 38, 38, 0.25)",
               }}
-              onClick={startScanner}
+              onClick={stopScanner}
             >
-              🔄 Scan Again
+              ⏹ Stop Scanner
             </button>
+          )}
+          {scanning && (
+            <div
+              style={{
+                textAlign: "center",
+                fontSize: 12,
+                color: "#64748b",
+                marginBottom: 10,
+              }}
+            >
+              Continuous mode — keep scanning, no need to tap between orders.
+            </div>
           )}
           <button
             style={styles.manualBtn}
@@ -861,10 +930,13 @@ export default function ReturnScanner() {
                       {o.store
                         ? o.store.toUpperCase()
                         : ""}
+                      {o.total_price
+                        ? ` · ${o.total_price}${o.currency ? " " + o.currency : ""}`
+                        : ""}
+                      {o.city ? ` · ${o.city}` : ""}
                       {o.fulfillment
                         ? ` · ${o.fulfillment}`
                         : ""}
-                      {o.financial ? ` · ${o.financial}` : ""}
                     </div>
                   </div>
                   <div
@@ -926,6 +998,20 @@ export default function ReturnScanner() {
             >
               {historyLoading ? "Loading…" : "🔄 Refresh"}
             </button>
+            <button
+              onClick={downloadPdf}
+              disabled={historyLoading || historyRows.length === 0}
+              style={{
+                ...styles.navBtn,
+                marginLeft: 0,
+                color: "#4ade80",
+                borderColor: "rgba(74, 222, 128, 0.35)",
+                opacity: historyRows.length === 0 ? 0.5 : 1,
+                cursor: historyRows.length === 0 ? "not-allowed" : "pointer",
+              }}
+            >
+              📄 PDF
+            </button>
             <div
               style={{
                 marginLeft: "auto",
@@ -944,10 +1030,12 @@ export default function ReturnScanner() {
                 <tr>
                   <th style={styles.th}>Order #</th>
                   <th style={styles.th}>Store</th>
-                  <th style={styles.th}>Fulfillment</th>
-                  <th style={styles.th}>Financial</th>
+                  <th style={styles.th}>Total</th>
+                  <th style={styles.th}>City</th>
+                  <th style={styles.th}>Phone</th>
+                  <th style={styles.th}>Fulfilled</th>
                   <th style={styles.th}>Result</th>
-                  <th style={styles.th}>Time</th>
+                  <th style={styles.th}>Scanned</th>
                 </tr>
               </thead>
               <tbody>
@@ -959,8 +1047,18 @@ export default function ReturnScanner() {
                     <td style={styles.td}>
                       {(o.store || "").toUpperCase()}
                     </td>
-                    <td style={styles.td}>{o.fulfillment || ""}</td>
-                    <td style={styles.td}>{o.financial || ""}</td>
+                    <td style={styles.td}>
+                      {o.total_price
+                        ? `${o.total_price}${o.currency ? " " + o.currency : ""}`
+                        : ""}
+                    </td>
+                    <td style={styles.td}>{o.city || ""}</td>
+                    <td style={styles.td}>{o.phone || ""}</td>
+                    <td style={{ ...styles.td, fontSize: 11, color: "#94a3b8" }}>
+                      {(o.fulfilled_at || "")
+                        .replace("T", " ")
+                        .slice(0, 10)}
+                    </td>
                     <td
                       style={{
                         ...styles.td,
@@ -984,7 +1082,7 @@ export default function ReturnScanner() {
                 {historyRows.length === 0 && (
                   <tr>
                     <td
-                      colSpan={6}
+                      colSpan={8}
                       style={{
                         ...styles.td,
                         textAlign: "center",

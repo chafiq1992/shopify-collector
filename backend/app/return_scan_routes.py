@@ -6,11 +6,14 @@ Provides endpoints for the return-scanner page:
   - POST /api/return-scans/manual — manually add a return scan
 """
 
+import asyncio
+import io
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,6 +59,11 @@ class ReturnScanOut(BaseModel):
     fulfillment: str = ""
     status: str = ""
     financial: str = ""
+    total_price: str = ""
+    currency: str = ""
+    city: str = ""
+    phone: str = ""
+    fulfilled_at: str = ""
     ts: str = ""
 
 
@@ -72,79 +80,131 @@ class ReturnScanRecord(BaseModel):
     status: str = ""
     financial: str = ""
     result: str = ""
+    total_price: str = ""
+    currency: str = ""
+    city: str = ""
+    phone: str = ""
+    fulfilled_at: str = ""
 
 
 # ---- Shopify lookup helper (uses the main app's GraphQL) ----
 
+_FIND_ORDER_QUERY = """
+query FindOrder($first: Int!, $query: String) {
+  orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {
+    edges {
+      node {
+        id
+        name
+        tags
+        displayFulfillmentStatus
+        displayFinancialStatus
+        cancelledAt
+        totalPriceSet { shopMoney { amount currencyCode } }
+        shippingAddress { city phone }
+        billingAddress { city phone }
+        customer { phone }
+        fulfillments(first: 1) { createdAt }
+      }
+    }
+  }
+}
+"""
+
+
+def _parse_order_node(node: dict, store_key: str) -> dict:
+    """Map a Shopify order node to the flat dict used by the scanner/DB."""
+    cancelled = bool(node.get("cancelledAt"))
+    fulfillment_raw = (node.get("displayFulfillmentStatus") or "UNFULFILLED").lower()
+    financial_raw = (node.get("displayFinancialStatus") or "").lower()
+    # Map Shopify GraphQL display statuses to simpler labels
+    fulfillment = fulfillment_raw.replace("_", " ")
+    financial = financial_raw.replace("_", " ")
+    status = "cancelled" if cancelled else "open"
+    result = (
+        "⚠️ Cancelled" if cancelled
+        else ("❌ Unfulfilled" if "unfulfilled" in fulfillment else "✅ OK")
+    )
+
+    money = ((node.get("totalPriceSet") or {}).get("shopMoney") or {})
+    total_price = str(money.get("amount") or "")
+    currency = str(money.get("currencyCode") or "")
+
+    ship = node.get("shippingAddress") or {}
+    bill = node.get("billingAddress") or {}
+    cust = node.get("customer") or {}
+    city = ship.get("city") or bill.get("city") or ""
+    phone = ship.get("phone") or cust.get("phone") or bill.get("phone") or ""
+
+    fulfilled_at = ""
+    fulfillments = (node.get("fulfillments") or [])
+    if fulfillments:
+        fulfilled_at = fulfillments[0].get("createdAt") or ""
+
+    return {
+        "found": True,
+        "store": store_key,
+        "tags": ", ".join(node.get("tags") or []),
+        "fulfillment": fulfillment,
+        "status": status,
+        "financial": financial,
+        "result": result,
+        "total_price": total_price,
+        "currency": currency,
+        "city": city,
+        "phone": phone,
+        "fulfilled_at": fulfilled_at,
+    }
+
+
+_NOT_FOUND = {
+    "found": False,
+    "store": "",
+    "tags": "",
+    "fulfillment": "",
+    "status": "",
+    "financial": "",
+    "result": "❌ Not Found",
+    "total_price": "",
+    "currency": "",
+    "city": "",
+    "phone": "",
+    "fulfilled_at": "",
+}
+
+
 async def _find_order_in_shopify(order_name: str) -> dict:
     """Look up *order_name* (e.g. ``#123456``) across configured Shopify stores.
 
-    Uses the main app's ``shopify_graphql`` helper.  Tries both stores
-    (irrakids, irranova) and returns the first match.
+    Queries all configured stores **in parallel** and returns the first match
+    (in the stores' sorted order) for faster scanning.
     """
     # Import lazily to avoid circular imports
     from .main import known_store_labels, shopify_graphql
 
-    query = """
-    query FindOrder($first: Int!, $query: String) {
-      orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {
-        edges {
-          node {
-            id
-            name
-            tags
-            displayFulfillmentStatus
-            displayFinancialStatus
-            cancelledAt
-          }
-        }
-      }
-    }
-    """
     # Strip '#' for the Shopify search query
     name_q = order_name.lstrip("#")
+    stores = await known_store_labels()
 
-    for store_key in await known_store_labels():
+    async def _lookup(store_key: str) -> Optional[dict]:
         try:
             data = await shopify_graphql(
-                query, {"first": 1, "query": f"name:{name_q}"}, store=store_key
+                _FIND_ORDER_QUERY, {"first": 1, "query": f"name:{name_q}"}, store=store_key
             )
             edges = (data.get("orders") or {}).get("edges") or []
             if not edges:
-                continue
+                return None
             node = edges[0].get("node") or {}
-            cancelled = bool(node.get("cancelledAt"))
-            fulfillment_raw = (node.get("displayFulfillmentStatus") or "UNFULFILLED").lower()
-            financial_raw = (node.get("displayFinancialStatus") or "").lower()
-            # Map Shopify GraphQL display statuses to simpler labels
-            fulfillment = fulfillment_raw.replace("_", " ")
-            financial = financial_raw.replace("_", " ")
-            status = "cancelled" if cancelled else "open"
-            result = (
-                "⚠️ Cancelled" if cancelled
-                else ("❌ Unfulfilled" if "unfulfilled" in fulfillment else "✅ OK")
-            )
-            return {
-                "found": True,
-                "store": store_key,
-                "tags": ", ".join(node.get("tags") or []),
-                "fulfillment": fulfillment,
-                "status": status,
-                "financial": financial,
-                "result": result,
-            }
+            return _parse_order_node(node, store_key)
         except Exception:
-            continue
+            return None
 
-    return {
-        "found": False,
-        "store": "",
-        "tags": "",
-        "fulfillment": "",
-        "status": "",
-        "financial": "",
-        "result": "❌ Not Found",
-    }
+    results = await asyncio.gather(*[_lookup(s) for s in stores])
+    for res in results:
+        if res:
+            return res
+
+    return dict(_NOT_FOUND)
 
 
 def _row_to_record(row: ReturnScan) -> dict:
@@ -161,6 +221,11 @@ def _row_to_record(row: ReturnScan) -> dict:
         "status": row.status or "",
         "financial": row.financial or "",
         "result": row.result or "",
+        "total_price": row.total_price or "",
+        "currency": row.currency or "",
+        "city": row.city or "",
+        "phone": row.phone or "",
+        "fulfilled_at": row.fulfilled_at or "",
     }
 
 
@@ -192,6 +257,11 @@ async def return_scan(
         status=order.get("status", ""),
         financial=order.get("financial", ""),
         result=result_text,
+        total_price=order.get("total_price", ""),
+        currency=order.get("currency", ""),
+        city=order.get("city", ""),
+        phone=order.get("phone", ""),
+        fulfilled_at=order.get("fulfilled_at", ""),
     )
     db.add(row)
     try:
@@ -206,18 +276,17 @@ async def return_scan(
         fulfillment=order.get("fulfillment", "") if found else "",
         status=order.get("status", "") if found else "",
         financial=order.get("financial", "") if found else "",
+        total_price=order.get("total_price", "") if found else "",
+        currency=order.get("currency", "") if found else "",
+        city=order.get("city", "") if found else "",
+        phone=order.get("phone", "") if found else "",
+        fulfilled_at=order.get("fulfilled_at", "") if found else "",
         ts=now.isoformat(),
     )
 
 
-@router.get("/api/return-scans")
-async def list_return_scans(
-    start: str,
-    end: Optional[str] = None,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_session),
-):
-    """List return scans for the current user in a [start, end] date range (YYYY-MM-DD, UTC)."""
+async def _scans_in_range(db: AsyncSession, user_id: str, start: str, end: Optional[str]):
+    """Return ReturnScan rows for *user_id* in a [start, end] date range (YYYY-MM-DD, UTC)."""
     start_day = datetime.fromisoformat(start).replace(
         hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
     )
@@ -235,15 +304,156 @@ async def list_return_scans(
         select(ReturnScan)
         .options(selectinload(ReturnScan.user))
         .where(
-            ReturnScan.user_id == user.id,
+            ReturnScan.user_id == user_id,
             ReturnScan.ts >= start_day,
             ReturnScan.ts < end_day,
         )
         .order_by(ReturnScan.ts.desc())
     )
     q = await db.execute(stmt)
-    rows = q.scalars().all()
+    return q.scalars().all()
+
+
+@router.get("/api/return-scans")
+async def list_return_scans(
+    start: str,
+    end: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """List return scans for the current user in a [start, end] date range (YYYY-MM-DD, UTC)."""
+    rows = await _scans_in_range(db, user.id, start, end)
     return {"rows": [_row_to_record(r) for r in rows]}
+
+
+def _fmt_dt(value, *, with_time: bool = True) -> str:
+    """Format an ISO datetime string (or datetime) to a short, readable form."""
+    if not value:
+        return ""
+    dt = value
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except Exception:
+            return value[:16].replace("T", " ")
+    try:
+        return dt.strftime("%Y-%m-%d %H:%M" if with_time else "%Y-%m-%d")
+    except Exception:
+        return str(value)
+
+
+@router.get("/api/return-scans/pdf")
+async def return_scans_pdf(
+    start: str,
+    end: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Generate a clean PDF table of return scans for the current user in a date range."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.platypus import (
+            SimpleDocTemplate,
+            Table,
+            TableStyle,
+            Paragraph,
+            Spacer,
+        )
+    except Exception:
+        raise HTTPException(
+            500,
+            "PDF support is not installed on the server (missing 'reportlab').",
+        )
+
+    rows = await _scans_in_range(db, user.id, start, end)
+
+    end_label = end or start
+    range_label = start if end_label == start else f"{start} → {end_label}"
+    who = (user.name or user.email or "").strip()
+
+    styles = getSampleStyleSheet()
+    title_style = styles["Title"]
+    sub_style = ParagraphStyle("sub", parent=styles["Normal"], fontSize=10, textColor=colors.HexColor("#475569"))
+    cell_style = ParagraphStyle("cell", parent=styles["Normal"], fontSize=8, leading=10)
+    head_style = ParagraphStyle(
+        "head", parent=styles["Normal"], fontSize=8, leading=10,
+        textColor=colors.white, fontName="Helvetica-Bold",
+    )
+
+    headers = ["Order #", "Store", "Total", "City", "Phone", "Fulfilled", "Scanned"]
+    table_data = [[Paragraph(h, head_style) for h in headers]]
+
+    for r in rows:
+        total = (r.total_price or "").strip()
+        if total and (r.currency or "").strip():
+            total = f"{total} {r.currency.strip()}"
+        cells = [
+            r.order_name or "",
+            (r.store or "").upper(),
+            total,
+            r.city or "",
+            r.phone or "",
+            _fmt_dt(r.fulfilled_at, with_time=False),
+            _fmt_dt(r.ts, with_time=True),
+        ]
+        table_data.append([Paragraph(str(c), cell_style) for c in cells])
+
+    if len(table_data) == 1:
+        table_data.append([Paragraph("No return scans for this date range.", cell_style)] + [Paragraph("", cell_style)] * (len(headers) - 1))
+
+    # Column widths tuned for A4 landscape (~277mm usable).
+    col_widths = [28 * mm, 26 * mm, 28 * mm, 45 * mm, 40 * mm, 38 * mm, 42 * mm]
+
+    table = Table(table_data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2563eb")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f1f5f9")]),
+                ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
+                ("LINEAFTER", (0, 0), (-2, -1), 0.4, colors.HexColor("#e2e8f0")),
+                ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#94a3b8")),
+            ]
+        )
+    )
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=landscape(A4),
+        leftMargin=10 * mm,
+        rightMargin=10 * mm,
+        topMargin=12 * mm,
+        bottomMargin=12 * mm,
+        title="Return Scans",
+    )
+    story = [
+        Paragraph("Return Scans", title_style),
+        Paragraph(
+            f"{range_label} &nbsp;·&nbsp; {len(rows)} order(s)"
+            + (f" &nbsp;·&nbsp; {who}" if who else ""),
+            sub_style,
+        ),
+        Spacer(1, 8),
+        table,
+    ]
+    doc.build(story)
+    buf.seek(0)
+
+    fname = f"return-scans-{start}{('_' + end) if end and end != start else ''}.pdf"
+    return StreamingResponse(
+        buf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @router.post("/api/return-scans/manual")
@@ -271,6 +481,11 @@ async def manual_return_scan(
         status=order.get("status", ""),
         financial=order.get("financial", ""),
         result=result_text,
+        total_price=order.get("total_price", ""),
+        currency=order.get("currency", ""),
+        city=order.get("city", ""),
+        phone=order.get("phone", ""),
+        fulfilled_at=order.get("fulfilled_at", ""),
     )
     db.add(row)
     await db.commit()

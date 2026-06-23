@@ -133,6 +133,12 @@ class ReturnScan(Base):
     status = Column(String(32), default="")
     financial = Column(String(32), default="")
     result = Column(String(64), default="")
+    # Extra order detail captured for PDF export / reporting.
+    total_price = Column(String(32), default="")
+    currency = Column(String(8), default="")
+    city = Column(String(128), default="")
+    phone = Column(String(40), default="")
+    fulfilled_at = Column(String(40), default="")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
 
     user = relationship("User")
