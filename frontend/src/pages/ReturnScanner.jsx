@@ -36,6 +36,18 @@ function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Delivery company tags (kept in sync with App.jsx DELIVERY_COMPANIES).
+const DELIVERY_COMPANIES = ["ibex", "l24", "oscario", "meta", "pal", "12livery", "lx", "k", "fast"];
+
+// True if an order's tags string contains `company` as a whole tag.
+function tagsHaveCompany(tags, company) {
+  if (!company) return true;
+  const tokens = String(tags || "")
+    .split(",")
+    .map((t) => t.trim().toLowerCase());
+  return tokens.includes(company.toLowerCase());
+}
+
 // Status icon helper
 function statusIcon(result) {
   if (!result) return "";
@@ -109,6 +121,9 @@ export default function ReturnScanner() {
   const [showManual, setShowManual] = useState(false);
   const [manualOrder, setManualOrder] = useState("");
 
+  // Delivery-company filter for the current session ("Today's scans") list.
+  const [sessionCompany, setSessionCompany] = useState("");
+
   // History tab
   const isAdmin = (auth?.user?.role || "") === "admin";
   const [historyRows, setHistoryRows] = useState([]);
@@ -118,6 +133,8 @@ export default function ReturnScanner() {
   // Admin-only: filter history/PDF by scanner ("" = all users).
   const [historyUser, setHistoryUser] = useState("");
   const [scanUsers, setScanUsers] = useState([]);
+  // Filter history/PDF by delivery company ("" = all companies).
+  const [historyCompany, setHistoryCompany] = useState("");
 
   useEffect(() => {
     localStorage.setItem("returnScannerSession", JSON.stringify(sessionScans));
@@ -125,7 +142,7 @@ export default function ReturnScanner() {
 
   useEffect(() => {
     if (tab === "history") fetchHistory();
-  }, [tab, historyDateStart, historyDateEnd, historyUser]);
+  }, [tab, historyDateStart, historyDateEnd, historyUser, historyCompany]);
 
   // Admin: load the list of scanners for the History user filter.
   useEffect(() => {
@@ -392,7 +409,7 @@ export default function ReturnScanner() {
   }
 
   function updateScanUI(data, id) {
-    const { result: res, order, store, fulfillment, status, financial,
+    const { result: res, order, tags, store, fulfillment, status, financial,
       total_price, currency, city, phone, fulfilled_at, ts } = data;
     setResult(`${statusIcon(res)} ${res}`);
     setResultClass(
@@ -406,7 +423,7 @@ export default function ReturnScanner() {
     else playErrorSound();
 
     const updated = {
-      result: res, order, store, fulfillment, status, financial,
+      result: res, order, tags: tags || "", store, fulfillment, status, financial,
       total_price, currency, city, phone, fulfilled_at, ts,
     };
 
@@ -456,6 +473,7 @@ export default function ReturnScanner() {
           {
             result: resText,
             order: data.order_name || manualOrder,
+            tags: data.tags || "",
             store: data.store || "",
             fulfillment: data.fulfillment || "",
             status: data.status || "",
@@ -478,6 +496,7 @@ export default function ReturnScanner() {
       const end = historyDateEnd || historyDateStart;
       const params = new URLSearchParams({ start, end });
       if (isAdmin && historyUser) params.set("user_id", historyUser);
+      if (historyCompany) params.set("company", historyCompany);
       const res = await authFetch(`/api/return-scans?${params.toString()}`, {
         headers: authHeaders({ Accept: "application/json" }),
       });
@@ -501,6 +520,7 @@ export default function ReturnScanner() {
       setToast("Generating PDF…");
       const params = new URLSearchParams({ start, end });
       if (isAdmin && historyUser) params.set("user_id", historyUser);
+      if (historyCompany) params.set("company", historyCompany);
       const res = await authFetch(`/api/return-scans/pdf?${params.toString()}`, {
         headers: authHeaders({ Accept: "application/pdf" }),
       });
@@ -518,10 +538,11 @@ export default function ReturnScanner() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
+      const cSuffix = historyCompany ? `-${historyCompany}` : "";
       a.download =
         start === end
-          ? `return-scans-${start}.pdf`
-          : `return-scans-${start}_${end}.pdf`;
+          ? `return-scans-${start}${cSuffix}.pdf`
+          : `return-scans-${start}_${end}${cSuffix}.pdf`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -924,17 +945,46 @@ export default function ReturnScanner() {
             <div>
               <div
                 style={{
-                  fontSize: 12,
-                  fontWeight: 600,
-                  color: "#64748b",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
                   marginBottom: 6,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.05em",
                 }}
               >
-                Today's scans ({sessionScans.length})
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "#64748b",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  Today's scans (
+                  {
+                    sessionScans.filter((o) =>
+                      tagsHaveCompany(o.tags, sessionCompany)
+                    ).length
+                  }
+                  {sessionCompany ? ` / ${sessionScans.length}` : ""})
+                </div>
+                <select
+                  value={sessionCompany}
+                  onChange={(e) => setSessionCompany(e.target.value)}
+                  style={{ ...styles.dateInput, marginLeft: "auto", maxWidth: 150, fontSize: 12 }}
+                  title="Filter by delivery company"
+                >
+                  <option value="">All companies</option>
+                  {DELIVERY_COMPANIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c.toUpperCase()}
+                    </option>
+                  ))}
+                </select>
               </div>
-              {sessionScans.map((o, i) => (
+              {sessionScans
+                .filter((o) => tagsHaveCompany(o.tags, sessionCompany))
+                .map((o, i) => (
                 <div key={i} style={styles.sessionCard(o.result)}>
                   <div
                     style={{
@@ -1022,6 +1072,19 @@ export default function ReturnScanner() {
                 ))}
               </select>
             )}
+            <select
+              value={historyCompany}
+              onChange={(e) => setHistoryCompany(e.target.value)}
+              style={{ ...styles.dateInput, maxWidth: 160 }}
+              title="Filter by delivery company"
+            >
+              <option value="">All companies</option>
+              {DELIVERY_COMPANIES.map((c) => (
+                <option key={c} value={c}>
+                  {c.toUpperCase()}
+                </option>
+              ))}
+            </select>
             <button
               onClick={fetchHistory}
               disabled={historyLoading}

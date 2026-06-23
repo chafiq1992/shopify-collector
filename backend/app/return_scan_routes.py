@@ -55,6 +55,7 @@ class ManualScanIn(BaseModel):
 class ReturnScanOut(BaseModel):
     result: str
     order: str
+    tags: str = ""
     store: str = ""
     fulfillment: str = ""
     status: str = ""
@@ -207,6 +208,18 @@ async def _find_order_in_shopify(order_name: str) -> dict:
     return dict(_NOT_FOUND)
 
 
+def _tag_tokens(tags: str) -> list:
+    """Split a stored ``tags`` string ("a, b, c") into normalised lowercase tokens."""
+    return [t.strip().lower() for t in (tags or "").split(",") if t.strip()]
+
+
+def _matches_company(row: ReturnScan, company: str) -> bool:
+    """True if *row*'s order tags include *company* as a whole tag (case-insensitive)."""
+    if not company:
+        return True
+    return company.strip().lower() in _tag_tokens(row.tags)
+
+
 def _row_to_record(row: ReturnScan) -> dict:
     return {
         "id": row.id,
@@ -272,6 +285,7 @@ async def return_scan(
     return ReturnScanOut(
         result=result_text,
         order=order_name,
+        tags=order.get("tags", "") if found else "",
         store=order.get("store", "") if found else "",
         fulfillment=order.get("fulfillment", "") if found else "",
         status=order.get("status", "") if found else "",
@@ -291,6 +305,7 @@ async def _scans_in_range(
     start: str,
     end: Optional[str],
     target_user_id: Optional[str] = None,
+    company: Optional[str] = None,
 ):
     """Return ReturnScan rows in a [start, end] date range (YYYY-MM-DD, UTC).
 
@@ -298,6 +313,9 @@ async def _scans_in_range(
       - Admins see **all** users' scans by default, or a single user's scans
         when ``target_user_id`` is supplied.
       - Everyone else only ever sees their own scans (``target_user_id`` ignored).
+
+    When ``company`` is supplied, only rows whose order tags include that
+    delivery-company tag are returned.
     """
     start_day = datetime.fromisoformat(start).replace(
         hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
@@ -329,7 +347,10 @@ async def _scans_in_range(
         .order_by(ReturnScan.ts.desc())
     )
     q = await db.execute(stmt)
-    return q.scalars().all()
+    rows = q.scalars().all()
+    if company:
+        rows = [r for r in rows if _matches_company(r, company)]
+    return rows
 
 
 @router.get("/api/return-scans")
@@ -337,14 +358,16 @@ async def list_return_scans(
     start: str,
     end: Optional[str] = None,
     user_id: Optional[str] = None,
+    company: Optional[str] = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
     """List return scans in a [start, end] date range (YYYY-MM-DD, UTC).
 
     Admins see all users (or one user via ``user_id``); others see only their own.
+    Pass ``company`` to keep only orders tagged with that delivery company.
     """
-    rows = await _scans_in_range(db, user, start, end, target_user_id=user_id)
+    rows = await _scans_in_range(db, user, start, end, target_user_id=user_id, company=company)
     return {"rows": [_row_to_record(r) for r in rows]}
 
 
@@ -392,12 +415,14 @@ async def return_scans_pdf(
     start: str,
     end: Optional[str] = None,
     user_id: Optional[str] = None,
+    company: Optional[str] = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
     """Generate a clean PDF table of return scans for a date range.
 
     Admins get all users (or one user via ``user_id``); others get their own.
+    Pass ``company`` to keep only orders tagged with that delivery company.
     """
     try:
         from reportlab.lib import colors
@@ -417,7 +442,7 @@ async def return_scans_pdf(
             "PDF support is not installed on the server (missing 'reportlab').",
         )
 
-    rows = await _scans_in_range(db, user, start, end, target_user_id=user_id)
+    rows = await _scans_in_range(db, user, start, end, target_user_id=user_id, company=company)
 
     is_admin = (getattr(user, "role", "") or "") == "admin"
     # Show a "Scanned by" column only when the table can span multiple users.
@@ -425,6 +450,8 @@ async def return_scans_pdf(
 
     end_label = end or start
     range_label = start if end_label == start else f"{start} → {end_label}"
+    if company:
+        range_label += f" &nbsp;·&nbsp; {company.upper()}"
     if not is_admin:
         who = (user.name or user.email or "").strip()
     elif user_id:
@@ -514,7 +541,10 @@ async def return_scans_pdf(
     doc.build(story)
     buf.seek(0)
 
-    fname = f"return-scans-{start}{('_' + end) if end and end != start else ''}.pdf"
+    fname = (
+        f"return-scans-{start}{('_' + end) if end and end != start else ''}"
+        f"{('-' + company.lower()) if company else ''}.pdf"
+    )
     return StreamingResponse(
         buf,
         media_type="application/pdf",
