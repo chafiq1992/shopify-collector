@@ -110,10 +110,14 @@ export default function ReturnScanner() {
   const [manualOrder, setManualOrder] = useState("");
 
   // History tab
+  const isAdmin = (auth?.user?.role || "") === "admin";
   const [historyRows, setHistoryRows] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyDateStart, setHistoryDateStart] = useState(todayISO());
   const [historyDateEnd, setHistoryDateEnd] = useState("");
+  // Admin-only: filter history/PDF by scanner ("" = all users).
+  const [historyUser, setHistoryUser] = useState("");
+  const [scanUsers, setScanUsers] = useState([]);
 
   useEffect(() => {
     localStorage.setItem("returnScannerSession", JSON.stringify(sessionScans));
@@ -121,7 +125,22 @@ export default function ReturnScanner() {
 
   useEffect(() => {
     if (tab === "history") fetchHistory();
-  }, [tab, historyDateStart, historyDateEnd]);
+  }, [tab, historyDateStart, historyDateEnd, historyUser]);
+
+  // Admin: load the list of scanners for the History user filter.
+  useEffect(() => {
+    if (tab !== "history" || !isAdmin || scanUsers.length) return;
+    (async () => {
+      try {
+        const res = await authFetch("/api/return-scans/users", {
+          headers: authHeaders({ Accept: "application/json" }),
+        });
+        if (!res.ok) return;
+        const js = await res.json();
+        setScanUsers(js.users || []);
+      } catch {}
+    })();
+  }, [tab, isAdmin]);
 
   // Stop scanner when switching tabs
   useEffect(() => {
@@ -458,6 +477,7 @@ export default function ReturnScanner() {
       const start = historyDateStart;
       const end = historyDateEnd || historyDateStart;
       const params = new URLSearchParams({ start, end });
+      if (isAdmin && historyUser) params.set("user_id", historyUser);
       const res = await authFetch(`/api/return-scans?${params.toString()}`, {
         headers: authHeaders({ Accept: "application/json" }),
       });
@@ -480,6 +500,7 @@ export default function ReturnScanner() {
     try {
       setToast("Generating PDF…");
       const params = new URLSearchParams({ start, end });
+      if (isAdmin && historyUser) params.set("user_id", historyUser);
       const res = await authFetch(`/api/return-scans/pdf?${params.toString()}`, {
         headers: authHeaders({ Accept: "application/pdf" }),
       });
@@ -986,6 +1007,21 @@ export default function ReturnScanner() {
               placeholder="End date"
               style={styles.dateInput}
             />
+            {isAdmin && (
+              <select
+                value={historyUser}
+                onChange={(e) => setHistoryUser(e.target.value)}
+                style={{ ...styles.dateInput, maxWidth: 180 }}
+                title="Filter by scanner"
+              >
+                <option value="">All users</option>
+                {scanUsers.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {(u.name || u.email) + (u.count ? ` (${u.count})` : "")}
+                  </option>
+                ))}
+              </select>
+            )}
             <button
               onClick={fetchHistory}
               disabled={historyLoading}
@@ -1036,6 +1072,9 @@ export default function ReturnScanner() {
                   <th style={styles.th}>Fulfilled</th>
                   <th style={styles.th}>Result</th>
                   <th style={styles.th}>Scanned</th>
+                  {isAdmin && !historyUser && (
+                    <th style={styles.th}>Scanned by</th>
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -1077,12 +1116,17 @@ export default function ReturnScanner() {
                         .replace("T", " ")
                         .slice(0, 19)}
                     </td>
+                    {isAdmin && !historyUser && (
+                      <td style={{ ...styles.td, fontSize: 11, color: "#94a3b8" }}>
+                        {o.user_name || o.user_email || ""}
+                      </td>
+                    )}
                   </tr>
                 ))}
                 {historyRows.length === 0 && (
                   <tr>
                     <td
-                      colSpan={8}
+                      colSpan={isAdmin && !historyUser ? 9 : 8}
                       style={{
                         ...styles.td,
                         textAlign: "center",

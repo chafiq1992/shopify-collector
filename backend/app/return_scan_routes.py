@@ -285,8 +285,20 @@ async def return_scan(
     )
 
 
-async def _scans_in_range(db: AsyncSession, user_id: str, start: str, end: Optional[str]):
-    """Return ReturnScan rows for *user_id* in a [start, end] date range (YYYY-MM-DD, UTC)."""
+async def _scans_in_range(
+    db: AsyncSession,
+    user: User,
+    start: str,
+    end: Optional[str],
+    target_user_id: Optional[str] = None,
+):
+    """Return ReturnScan rows in a [start, end] date range (YYYY-MM-DD, UTC).
+
+    Scoping:
+      - Admins see **all** users' scans by default, or a single user's scans
+        when ``target_user_id`` is supplied.
+      - Everyone else only ever sees their own scans (``target_user_id`` ignored).
+    """
     start_day = datetime.fromisoformat(start).replace(
         hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
     )
@@ -298,16 +310,22 @@ async def _scans_in_range(db: AsyncSession, user_id: str, start: str, end: Optio
         + timedelta(days=1)
     )
 
+    is_admin = (getattr(user, "role", "") or "") == "admin"
+    if is_admin:
+        scope_user_id = target_user_id or None  # None => all users
+    else:
+        scope_user_id = user.id  # non-admins are always scoped to themselves
+
     from sqlalchemy.orm import selectinload
+
+    conditions = [ReturnScan.ts >= start_day, ReturnScan.ts < end_day]
+    if scope_user_id:
+        conditions.append(ReturnScan.user_id == scope_user_id)
 
     stmt = (
         select(ReturnScan)
         .options(selectinload(ReturnScan.user))
-        .where(
-            ReturnScan.user_id == user_id,
-            ReturnScan.ts >= start_day,
-            ReturnScan.ts < end_day,
-        )
+        .where(*conditions)
         .order_by(ReturnScan.ts.desc())
     )
     q = await db.execute(stmt)
@@ -318,12 +336,39 @@ async def _scans_in_range(db: AsyncSession, user_id: str, start: str, end: Optio
 async def list_return_scans(
     start: str,
     end: Optional[str] = None,
+    user_id: Optional[str] = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    """List return scans for the current user in a [start, end] date range (YYYY-MM-DD, UTC)."""
-    rows = await _scans_in_range(db, user.id, start, end)
+    """List return scans in a [start, end] date range (YYYY-MM-DD, UTC).
+
+    Admins see all users (or one user via ``user_id``); others see only their own.
+    """
+    rows = await _scans_in_range(db, user, start, end, target_user_id=user_id)
     return {"rows": [_row_to_record(r) for r in rows]}
+
+
+@router.get("/api/return-scans/users")
+async def return_scan_users(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """List users who have return scans (admin only) — powers the History user filter."""
+    if (getattr(user, "role", "") or "") != "admin":
+        return {"users": []}
+    stmt = (
+        select(User.id, User.email, User.name, func.count(ReturnScan.id).label("n"))
+        .join(ReturnScan, User.id == ReturnScan.user_id)
+        .group_by(User.id, User.email, User.name)
+        .order_by(func.count(ReturnScan.id).desc())
+    )
+    q = await db.execute(stmt)
+    return {
+        "users": [
+            {"id": uid, "email": email or "", "name": name or "", "count": int(n or 0)}
+            for uid, email, name, n in q.all()
+        ]
+    }
 
 
 def _fmt_dt(value, *, with_time: bool = True) -> str:
@@ -346,10 +391,14 @@ def _fmt_dt(value, *, with_time: bool = True) -> str:
 async def return_scans_pdf(
     start: str,
     end: Optional[str] = None,
+    user_id: Optional[str] = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    """Generate a clean PDF table of return scans for the current user in a date range."""
+    """Generate a clean PDF table of return scans for a date range.
+
+    Admins get all users (or one user via ``user_id``); others get their own.
+    """
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4, landscape
@@ -368,11 +417,21 @@ async def return_scans_pdf(
             "PDF support is not installed on the server (missing 'reportlab').",
         )
 
-    rows = await _scans_in_range(db, user.id, start, end)
+    rows = await _scans_in_range(db, user, start, end, target_user_id=user_id)
+
+    is_admin = (getattr(user, "role", "") or "") == "admin"
+    # Show a "Scanned by" column only when the table can span multiple users.
+    show_user_col = is_admin and not user_id
 
     end_label = end or start
     range_label = start if end_label == start else f"{start} → {end_label}"
-    who = (user.name or user.email or "").strip()
+    if not is_admin:
+        who = (user.name or user.email or "").strip()
+    elif user_id:
+        first_u = next((r.user for r in rows if r.user), None)
+        who = ((first_u.name or first_u.email) if first_u else "").strip()
+    else:
+        who = "All users"
 
     styles = getSampleStyleSheet()
     title_style = styles["Title"]
@@ -384,6 +443,8 @@ async def return_scans_pdf(
     )
 
     headers = ["Order #", "Store", "Total", "City", "Phone", "Fulfilled", "Scanned"]
+    if show_user_col:
+        headers.append("Scanned by")
     table_data = [[Paragraph(h, head_style) for h in headers]]
 
     for r in rows:
@@ -399,13 +460,18 @@ async def return_scans_pdf(
             _fmt_dt(r.fulfilled_at, with_time=False),
             _fmt_dt(r.ts, with_time=True),
         ]
+        if show_user_col:
+            cells.append((r.user.name or r.user.email) if r.user else "")
         table_data.append([Paragraph(str(c), cell_style) for c in cells])
 
     if len(table_data) == 1:
         table_data.append([Paragraph("No return scans for this date range.", cell_style)] + [Paragraph("", cell_style)] * (len(headers) - 1))
 
     # Column widths tuned for A4 landscape (~277mm usable).
-    col_widths = [28 * mm, 26 * mm, 28 * mm, 45 * mm, 40 * mm, 38 * mm, 42 * mm]
+    if show_user_col:
+        col_widths = [25 * mm, 22 * mm, 25 * mm, 36 * mm, 34 * mm, 30 * mm, 34 * mm, 36 * mm]
+    else:
+        col_widths = [28 * mm, 26 * mm, 28 * mm, 45 * mm, 40 * mm, 38 * mm, 42 * mm]
 
     table = Table(table_data, colWidths=col_widths, repeatRows=1)
     table.setStyle(
