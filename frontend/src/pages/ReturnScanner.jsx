@@ -135,6 +135,11 @@ export default function ReturnScanner() {
   const [scanUsers, setScanUsers] = useState([]);
   // Filter history/PDF by delivery company ("" = all companies).
   const [historyCompany, setHistoryCompany] = useState("");
+  const [orderSearch, setOrderSearch] = useState("");
+  const [orderSearchRows, setOrderSearchRows] = useState([]);
+  const [orderSearchOrder, setOrderSearchOrder] = useState("");
+  const [orderSearchLoading, setOrderSearchLoading] = useState(false);
+  const [orderSearchError, setOrderSearchError] = useState("");
 
   useEffect(() => {
     localStorage.setItem("returnScannerSession", JSON.stringify(sessionScans));
@@ -513,6 +518,42 @@ export default function ReturnScanner() {
     }
   }
 
+  async function searchReturnScans(event) {
+    event?.preventDefault?.();
+    const query = orderSearch.trim();
+    if (!query) return;
+    setOrderSearchLoading(true);
+    setOrderSearchError("");
+    try {
+      const params = new URLSearchParams({ order: query });
+      const res = await authFetch(`/api/return-scans/search?${params.toString()}`, {
+        headers: authHeaders({ Accept: "application/json" }),
+      });
+      const js = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setOrderSearchRows([]);
+        setOrderSearchOrder("");
+        setOrderSearchError(js?.detail || "Search failed");
+        return;
+      }
+      setOrderSearchOrder(js.order || query);
+      setOrderSearchRows(js.rows || []);
+    } catch {
+      setOrderSearchRows([]);
+      setOrderSearchOrder("");
+      setOrderSearchError("Network error");
+    } finally {
+      setOrderSearchLoading(false);
+    }
+  }
+
+  function clearOrderSearch() {
+    setOrderSearch("");
+    setOrderSearchRows([]);
+    setOrderSearchOrder("");
+    setOrderSearchError("");
+  }
+
   async function downloadPdf() {
     const start = historyDateStart;
     const end = historyDateEnd || historyDateStart;
@@ -723,6 +764,30 @@ export default function ReturnScanner() {
           : "rgba(148, 163, 184, 0.1)"
       }`,
     }),
+    searchPanel: {
+      borderRadius: 12,
+      padding: 12,
+      marginBottom: 14,
+      background: "rgba(30, 41, 59, 0.42)",
+      border: "1px solid rgba(148, 163, 184, 0.14)",
+    },
+    searchRow: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 8,
+      alignItems: "stretch",
+    },
+    compactBtn: {
+      padding: "0 14px",
+      borderRadius: 10,
+      border: "1px solid rgba(56, 189, 248, 0.3)",
+      background: "rgba(14, 165, 233, 0.14)",
+      color: "#7dd3fc",
+      fontSize: 13,
+      fontWeight: 700,
+      cursor: "pointer",
+      whiteSpace: "nowrap",
+    },
     toast: {
       position: "fixed",
       bottom: 24,
@@ -851,6 +916,108 @@ export default function ReturnScanner() {
       {/* Scan Tab */}
       {tab === "scan" && (
         <div style={styles.main}>
+          <form style={styles.searchPanel} onSubmit={searchReturnScans}>
+            <div style={styles.searchRow}>
+              <input
+                style={{ ...styles.input, flex: 1, minWidth: 0 }}
+                type="text"
+                placeholder="Search order number"
+                value={orderSearch}
+                onChange={(e) => setOrderSearch(e.target.value)}
+              />
+              <button
+                type="submit"
+                disabled={orderSearchLoading || !orderSearch.trim()}
+                style={{
+                  ...styles.compactBtn,
+                  opacity: orderSearchLoading || !orderSearch.trim() ? 0.55 : 1,
+                  cursor: orderSearchLoading || !orderSearch.trim() ? "not-allowed" : "pointer",
+                }}
+              >
+                {orderSearchLoading ? "Searching..." : "Search"}
+              </button>
+              {(orderSearchOrder || orderSearchError) && (
+                <button
+                  type="button"
+                  onClick={clearOrderSearch}
+                  style={{
+                    ...styles.compactBtn,
+                    borderColor: "rgba(148, 163, 184, 0.22)",
+                    background: "rgba(15, 23, 42, 0.6)",
+                    color: "#94a3b8",
+                  }}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            {(orderSearchOrder || orderSearchError) && (
+              <div style={{ marginTop: 10 }}>
+                {orderSearchError ? (
+                  <div style={{ color: "#f87171", fontSize: 13, fontWeight: 600 }}>
+                    {orderSearchError}
+                  </div>
+                ) : orderSearchRows.length > 0 ? (
+                  <>
+                    <div
+                      style={{
+                        color: "#94a3b8",
+                        fontSize: 12,
+                        fontWeight: 700,
+                        marginBottom: 6,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.05em",
+                      }}
+                    >
+                      {orderSearchOrder} found in {orderSearchRows.length} scan{orderSearchRows.length === 1 ? "" : "s"}
+                    </div>
+                    {orderSearchRows.map((o) => (
+                      <div key={o.id} style={styles.sessionCard(o.result)}>
+                        <div style={{ minWidth: 76 }}>
+                          <div style={{ fontSize: 15, fontWeight: 800, color: "#f1f5f9" }}>
+                            {o.order_name}
+                          </div>
+                          <div style={{ fontSize: 11, color: "#64748b" }}>
+                            {(o.ts || "").replace("T", " ").slice(0, 16)}
+                          </div>
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#cbd5e1" }}>
+                            {o.user_name || o.user_email || "Unknown scanner"}
+                          </div>
+                          <div style={{ fontSize: 11, color: "#94a3b8" }}>
+                            {(o.store || "").toUpperCase()}
+                            {o.total_price ? ` · ${o.total_price}${o.currency ? " " + o.currency : ""}` : ""}
+                            {o.city ? ` · ${o.city}` : ""}
+                            {o.fulfillment ? ` · ${o.fulfillment}` : ""}
+                          </div>
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 12,
+                            fontWeight: 700,
+                            color: (o.result || "").includes("âœ…")
+                              ? "#4ade80"
+                              : (o.result || "").includes("âŒ")
+                              ? "#f87171"
+                              : "#facc15",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {o.result || ""}
+                        </div>
+                      </div>
+                    ))}
+                  </>
+                ) : (
+                  <div style={{ color: "#94a3b8", fontSize: 13, fontWeight: 600 }}>
+                    No return scan found for {orderSearchOrder}.
+                  </div>
+                )}
+              </div>
+            )}
+          </form>
+
           {/* Camera / Scanner */}
           <div
             id="rs-reader"

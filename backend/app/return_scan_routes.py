@@ -371,6 +371,37 @@ async def list_return_scans(
     return {"rows": [_row_to_record(r) for r in rows]}
 
 
+@router.get("/api/return-scans/search")
+async def search_return_scans(
+    order: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Search an exact return order across every scanner.
+
+    Unlike the date-based history endpoint, this is intentionally not scoped to
+    the current scanner. Any authenticated user can check whether an order was
+    already scanned and see which agent scanned it.
+    """
+    try:
+        order_name = _clean(order)
+    except ValueError:
+        raise HTTPException(400, "Invalid order number")
+
+    from sqlalchemy.orm import selectinload
+
+    stmt = (
+        select(ReturnScan)
+        .options(selectinload(ReturnScan.user))
+        .where(ReturnScan.order_name == order_name)
+        .order_by(ReturnScan.ts.desc())
+        .limit(50)
+    )
+    q = await db.execute(stmt)
+    rows = q.scalars().all()
+    return {"order": order_name, "rows": [_row_to_record(r) for r in rows]}
+
+
 @router.get("/api/return-scans/users")
 async def return_scan_users(
     user: User = Depends(get_current_user),
