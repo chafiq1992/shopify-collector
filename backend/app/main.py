@@ -62,6 +62,12 @@ except Exception:
 from .geocode import geocode_order_address
 from .geo_zones import load_zones, find_zone_match
 
+# Delivery Rate Calculator routes (no DB/auth dependency, only Shopify)
+try:
+    from .delivery_rate_routes import router as delivery_rate_router
+except Exception:
+    delivery_rate_router = None  # type: ignore
+
 # ---------- Settings (multi-store) ----------
 SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2025-01").strip()
 try:
@@ -215,6 +221,8 @@ if HAVE_AUTH_DB and "return_scan_router" in globals() and return_scan_router is 
     app.include_router(return_scan_router)  # type: ignore[arg-type]
 if HAVE_AUTH_DB and "confirmation_router" in globals() and confirmation_router is not None:  # type: ignore[name-defined]
     app.include_router(confirmation_router)  # type: ignore[arg-type]
+if delivery_rate_router is not None:
+    app.include_router(delivery_rate_router)
 
 # CORS (relaxed for simplicity; tighten in prod)
 app.add_middleware(
@@ -1209,6 +1217,7 @@ class OrderDTO(BaseModel):
     fulfillment_times: List[str] = []
     financial_status: Optional[str] = None
     fulfillment_status: Optional[str] = None
+    return_status: Optional[str] = None
     cancelled_at: Optional[str] = None
     shipping_price: Optional[float] = None
     discount_total: Optional[float] = None
@@ -1567,11 +1576,145 @@ def map_order_node(node: Dict[str, Any]) -> OrderDTO:
         fulfillment_times=fulfillment_times,
         financial_status=node.get("displayFinancialStatus"),
         fulfillment_status=node.get("displayFulfillmentStatus"),
+        return_status=node.get("returnStatus"),
         cancelled_at=node.get("cancelledAt"),
         shipping_price=shipping_price_val,
         discount_total=discount_total_val,
         currency_code=currency_code_val,
     )
+
+# Lightweight query for bulk aggregation scans (no line items/images) used by
+# fetch_fulfilled_orders_in_range — keeps large-range pagination cheap.
+_FULFILLED_ORDERS_SCAN_QUERY = """
+query OrdersScan($first: Int!, $after: String, $query: String, $reverse: Boolean!) {
+  orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: $reverse) {
+    edges {
+      cursor
+      node {
+        id
+        name
+        createdAt
+        updatedAt
+        tags
+        fulfillments { createdAt status }
+        displayFinancialStatus
+        displayFulfillmentStatus
+        returnStatus
+        cancelledAt
+      }
+    }
+    pageInfo { hasNextPage }
+  }
+  ordersCount(query: $query) { count }
+}
+"""
+
+def _order_fulfilled_in_window(order: "OrderDTO", start_dt: Optional[datetime], end_dt: Optional[datetime]) -> bool:
+    """True if any fulfillment timestamp on *order* (falling back to fulfilled_at, then updated_at)
+    falls within [start_dt, end_dt). Mirrors the proven post-filter heuristic used by list_orders()."""
+    def _in_range(ts: Optional[str]) -> bool:
+        if not ts:
+            return False
+        dt = _parse_iso8601(ts)
+        if not dt:
+            return False
+        if not dt.tzinfo:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if start_dt and dt < start_dt:
+            return False
+        if end_dt and dt >= end_dt:
+            return False
+        return True
+    try:
+        ts_list = getattr(order, "fulfillment_times", None) or []
+        if ts_list:
+            return any(_in_range(t) for t in ts_list)
+        if _in_range(getattr(order, "fulfilled_at", None)):
+            return True
+        return _in_range(getattr(order, "updated_at", None))
+    except Exception:
+        return False
+
+async def fetch_fulfilled_orders_in_range(
+    store: Optional[str],
+    date_from: str,
+    date_to: str,
+    max_pages: int = 60,
+) -> List["OrderDTO"]:
+    """Fetch every FULFILLED order whose fulfillment date falls within [date_from, date_to]
+    (inclusive, ISO YYYY-MM-DD), for the delivery-rate calculator.
+
+    Standalone from list_orders()'s fulfillment-date fast/fallback logic on purpose: that code
+    path is proven but tightly coupled to cursor/limit/cache-key params of a single-page endpoint.
+    This function always fully paginates (up to max_pages) and always re-validates every page's
+    fulfillment timestamp against the requested window client-side — unlike list_orders()'s
+    aggregate_by mode, which only validates page 1. That extra validation matters here because
+    the result feeds a KPI, not just a browsing list.
+    """
+    try:
+        start_dt = datetime.fromisoformat(date_from).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+    except Exception:
+        start_dt = None
+    try:
+        end_dt = datetime.fromisoformat(date_to).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc) + timedelta(days=1)
+    except Exception:
+        end_dt = None
+
+    base = "status:any fulfillment_status:fulfilled"
+    q_fast = f"{base} fulfillment_date:>={date_from} fulfillment_date:<={date_to}".strip()
+    q_fallback = f"{base} updated_at:>={date_from}".strip()
+    try:
+        to_dt = datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc)
+        drift_cap = (to_dt + timedelta(days=8)).date()
+        now_cap = (datetime.now(timezone.utc).date() + timedelta(days=1))
+        cap = (now_cap if drift_cap < now_cap else drift_cap).isoformat()
+        q_fallback = f"{q_fallback} updated_at:<{cap}".strip()
+    except Exception:
+        pass
+
+    async def _fetch_page(q: str, reverse: bool, after: Optional[str]) -> Dict[str, Any]:
+        variables = {"first": 250, "after": after, "query": q, "reverse": reverse}
+        try:
+            return await shopify_graphql(_FULFILLED_ORDERS_SCAN_QUERY, variables, store=store)
+        except HTTPException as he:
+            if he.status_code in (429, 502, 503):
+                return {}
+            raise
+
+    async def _paginate_from(q: str, reverse: bool, first_data: Dict[str, Any]) -> List["OrderDTO"]:
+        results: List["OrderDTO"] = []
+        data = first_data
+        pages = 0
+        after: Optional[str] = None
+        while data and pages < max_pages:
+            ords = data.get("orders") or {}
+            edges = ords.get("edges") or []
+            page_items = [map_order_node(e["node"]) for e in edges if (e or {}).get("node")]
+            results.extend(o for o in page_items if _order_fulfilled_in_window(o, start_dt, end_dt))
+            pages += 1
+            has_more = (ords.get("pageInfo") or {}).get("hasNextPage") or False
+            if not has_more or not edges:
+                break
+            after = edges[-1].get("cursor")
+            data = await _fetch_page(q, reverse, after)
+        return results
+
+    # Fast path: try Shopify's server-side fulfillment_date search term first (cheap — one page).
+    data0 = await _fetch_page(q_fast, True, None)
+    edges0 = ((data0.get("orders") or {}).get("edges")) or []
+
+    should_fallback = not edges0
+    if not should_fallback:
+        # Shopify sometimes silently ignores fulfillment_date:* — detect that by checking
+        # whether the first returned order is actually inside the requested window.
+        sample = map_order_node(edges0[0]["node"])
+        should_fallback = not _order_fulfilled_in_window(sample, start_dt, end_dt)
+
+    if should_fallback:
+        data0 = await _fetch_page(q_fallback, False, None)
+        return await _paginate_from(q_fallback, False, data0)
+
+    return await _paginate_from(q_fast, True, data0)
 
 def _order_item_count(order: "OrderDTO") -> int:
     total = 0
@@ -1993,6 +2136,7 @@ async def list_orders(
             totalDiscountsSet { shopMoney { amount currencyCode } }
             displayFinancialStatus
             displayFulfillmentStatus
+            returnStatus
             cancelledAt
             lineItems(first: 50) {
               edges {

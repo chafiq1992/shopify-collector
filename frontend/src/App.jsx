@@ -5,6 +5,7 @@ import { printOrdersLocally } from "./lib/localPrintClient";
 import { enqueueOrdersToRelay, isRelayConfigured } from "./lib/printRelayClient";
 import StorePicker from "./components/StorePicker.jsx";
 import { persistStoreSelection, readCurrentStore } from "./lib/stores";
+import { DELIVERY_COMPANIES } from "./lib/deliveryCompanies";
 
 const OrderCard = React.lazy(() => import('./components/OrderCard.jsx'));
 const PresetSettingsModal = React.lazy(() => import('./components/PresetSettingsModal.jsx'));
@@ -228,9 +229,6 @@ export default function App(){
   const [codToDate, setCodToDate] = useState(""); // YYYY-MM-DD
   const [tagFilter, setTagFilter] = useState(null);
   const [showDeliveryPicker, setShowDeliveryPicker] = useState(false);
-  // Available delivery company tags (dedup; "pal" appears once even though it
-  // was listed twice in the source spec).
-  const DELIVERY_COMPANIES = ["ibex", "l24", "oscario", "meta", "pal", "12livery", "lx", "k", "fast"];
   const [loading, setLoading] = useState(false);
   const [pageInfo, setPageInfo] = useState({ hasNextPage: false });
   const [nextCursor, setNextCursor] = useState(null);

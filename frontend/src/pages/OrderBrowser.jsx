@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { authFetch, authHeaders } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
+import DeliveryRateTab from "../components/DeliveryRateTab";
 
 // Minimal API client reused across pages
 const API = {
@@ -49,6 +50,10 @@ export default function OrderBrowser(){
   useEffect(() => {
     persistStoreSelection(store);
   }, [store]);
+
+  // Tabs
+  const [activeTab, setActiveTab] = useState("orders"); // orders | delivery-rate
+  const [drillNonce, setDrillNonce] = useState(0);
 
   // Filters
   const [tagFilter, setTagFilter] = useState("");
@@ -136,6 +141,22 @@ export default function OrderBrowser(){
       setLoading(false);
     }
   }, [baseQuery, financialStatus, fulfilledFrom, fulfilledTo, perPage, search, store, tagFilter]);
+
+  // Drill-down from the Delivery Rate tab: filters are set, then this bumps a nonce so the
+  // effect below reloads once the new filter state has actually committed.
+  useEffect(() => {
+    if (drillNonce > 0) loadFirstPage();
+  }, [drillNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function drillIntoCompany(company, from, to){
+    setTagFilter(company || "");
+    setFulfilledFrom(from || "");
+    setFulfilledTo(to || "");
+    setFinancialStatus("all");
+    setShowFilters(true);
+    setActiveTab("orders");
+    setDrillNonce(n => n + 1);
+  }
 
   async function gotoNextPage(){
     // If next page is already cached, just navigate.
@@ -540,13 +561,25 @@ export default function OrderBrowser(){
         <div className="max-w-5xl mx-auto px-4 py-2 flex items-center gap-2">
           <div className="font-semibold">Order Browser</div>
           <StorePicker value={store} onChange={setStore} className="ml-3" />
-          <div className="ml-auto flex items-center gap-2">
-            <button onClick={()=>setShowFilters(v=>!v)} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">
-              {showFilters ? "Hide filters" : "Show filters"}
-            </button>
+          <div className="ml-3 flex items-center gap-1 bg-gray-100 rounded-full p-1">
+            <button
+              onClick={()=>setActiveTab('orders')}
+              className={`text-xs px-3 py-1 rounded-full font-medium transition-colors ${activeTab === 'orders' ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-800'}`}
+            >Orders</button>
+            <button
+              onClick={()=>setActiveTab('delivery-rate')}
+              className={`text-xs px-3 py-1 rounded-full font-medium transition-colors ${activeTab === 'delivery-rate' ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-800'}`}
+            >Delivery Rate</button>
           </div>
+          {activeTab === 'orders' && (
+            <div className="ml-auto flex items-center gap-2">
+              <button onClick={()=>setShowFilters(v=>!v)} className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">
+                {showFilters ? "Hide filters" : "Show filters"}
+              </button>
+            </div>
+          )}
         </div>
-        {showFilters && (
+        {activeTab === 'orders' && showFilters && (
           <div className="max-w-5xl mx-auto px-4 pb-3">
             <div className="grid md:grid-cols-3 gap-3">
               <div className="bg-gray-100 rounded-xl px-3 py-2">
@@ -626,27 +659,34 @@ export default function OrderBrowser(){
         )}
       </header>
       <main className="max-w-5xl mx-auto px-4 py-6">
-        {error && (
-          <div className="mb-4 text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-4 py-3 font-medium flex items-center gap-2">
-            <span>⚠️</span> {error}
-          </div>
-        )}
-        <SummaryBar />
-        <div className="flex flex-col gap-4">
-          {loading && orders.length === 0 ? (
-            Array.from({length: 5}).map((_, i) => <SkeletonRow key={i} />)
-          ) : (
-            orders.map(o => <OrderRow key={o.id} order={o} />)
-          )}
-          {!loading && orders.length === 0 && (
-            <div className="text-center py-12 bg-white rounded-2xl border border-dashed border-gray-300">
-              <div className="text-gray-400 mb-2 text-4xl">📦</div>
-              <div className="text-gray-500 font-medium">No orders found</div>
-              <div className="text-sm text-gray-400 mt-1">Try adjusting your filters</div>
+        {activeTab === 'orders' && (
+          <>
+            {error && (
+              <div className="mb-4 text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-4 py-3 font-medium flex items-center gap-2">
+                <span>⚠️</span> {error}
+              </div>
+            )}
+            <SummaryBar />
+            <div className="flex flex-col gap-4">
+              {loading && orders.length === 0 ? (
+                Array.from({length: 5}).map((_, i) => <SkeletonRow key={i} />)
+              ) : (
+                orders.map(o => <OrderRow key={o.id} order={o} />)
+              )}
+              {!loading && orders.length === 0 && (
+                <div className="text-center py-12 bg-white rounded-2xl border border-dashed border-gray-300">
+                  <div className="text-gray-400 mb-2 text-4xl">📦</div>
+                  <div className="text-gray-500 font-medium">No orders found</div>
+                  <div className="text-sm text-gray-400 mt-1">Try adjusting your filters</div>
+                </div>
+              )}
             </div>
-          )}
-        </div>
-        <PaginationBar />
+            <PaginationBar />
+          </>
+        )}
+        {activeTab === 'delivery-rate' && (
+          <DeliveryRateTab store={store} onDrillDown={drillIntoCompany} />
+        )}
       </main>
     </div>
   );
