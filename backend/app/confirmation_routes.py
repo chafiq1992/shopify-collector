@@ -319,27 +319,30 @@ def has_cod_tag(tags: List[str]) -> bool:
 # the queue endpoint and team-stats both read from this cache so the 15-second polling
 # and the per-level filter pills don't trigger fresh scans.
 _BREAKDOWN_CACHE: Dict[Tuple[str, str, str], Tuple[float, Dict[str, int]]] = {}
+_BREAKDOWN_INFLIGHT: Dict[Tuple[str, str, str], asyncio.Task] = {}
+_BREAKDOWN_CACHE_GENERATION = 0
 _BREAKDOWN_TTL_SECONDS = 60
 _BREAKDOWN_SCAN_PAGE = 250  # Shopify's max page size
 _BREAKDOWN_HARD_CAP = 10_000  # safety net
+
+# Team stats are identical for every authenticated confirmation user. A short cache
+# collapses the burst created when many open tabs poll on the same 15-second boundary.
+_TEAM_STATS_CACHE: Optional[Tuple[float, Dict[str, Any]]] = None
+_TEAM_STATS_CACHE_SECONDS = 10
+_TEAM_STATS_LOCK = asyncio.Lock()
 
 
 def _empty_breakdown() -> Dict[str, int]:
     return {"total": 0, "n1": 0, "n2": 0, "n3": 0, "n4": 0, "nowtp": 0, "enatt": 0, "new": 0}
 
 
-async def accurate_assigned_breakdown(store: str, user_id: str, base_q: str) -> Dict[str, int]:
-    """Walk every Shopify page for `base_q`, drop cod-tagged orders, and return the total
-    plus counts for each call-attempt level (n1/n2/n3/n4/new).
-
-    Cached per (user, store, base_query) for 60 seconds.
-    """
+async def _compute_assigned_breakdown(
+    store: str,
+    user_id: str,
+    base_q: str,
+    generation: int,
+) -> Dict[str, int]:
     key = (user_id, store, base_q)
-    now = time.time()
-    cached = _BREAKDOWN_CACHE.get(key)
-    if cached and (now - cached[0]) < _BREAKDOWN_TTL_SECONDS:
-        return cached[1]
-
     from .main import shopify_graphql  # type: ignore
 
     gql = """
@@ -384,8 +387,36 @@ async def accurate_assigned_breakdown(store: str, user_id: str, base_q: str) -> 
             break
         cursor = edges[-1].get("cursor")
 
-    _BREAKDOWN_CACHE[key] = (now, counts)
+    # A tag mutation may invalidate the cache while this scan is running. Return the
+    # result to its original caller, but never repopulate the cache with that stale scan.
+    if generation == _BREAKDOWN_CACHE_GENERATION:
+        _BREAKDOWN_CACHE[key] = (time.time(), counts)
     return counts
+
+
+async def accurate_assigned_breakdown(store: str, user_id: str, base_q: str) -> Dict[str, int]:
+    """Return an accurate queue breakdown with TTL caching and request coalescing.
+
+    When several tabs miss the same cache key simultaneously, only one Shopify
+    pagination scan runs; the other requests await that same task.
+    """
+    key = (user_id, store, base_q)
+    now = time.time()
+    cached = _BREAKDOWN_CACHE.get(key)
+    if cached and (now - cached[0]) < _BREAKDOWN_TTL_SECONDS:
+        return cached[1]
+
+    task = _BREAKDOWN_INFLIGHT.get(key)
+    if task is None:
+        task = asyncio.create_task(
+            _compute_assigned_breakdown(store, user_id, base_q, _BREAKDOWN_CACHE_GENERATION)
+        )
+        _BREAKDOWN_INFLIGHT[key] = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if task.done() and _BREAKDOWN_INFLIGHT.get(key) is task:
+            _BREAKDOWN_INFLIGHT.pop(key, None)
 
 
 def _cached_breakdown(store: str, user_id: str, base_q: str) -> Optional[Dict[str, int]]:
@@ -409,8 +440,11 @@ def invalidate_breakdown_cache_for_user(user_id: str, store: Optional[str] = Non
     call recomputes counts instead of returning a stale snapshot. Returns the number
     of cache entries removed.
     """
+    global _BREAKDOWN_CACHE_GENERATION, _TEAM_STATS_CACHE
     if not user_id:
         return 0
+    _BREAKDOWN_CACHE_GENERATION += 1
+    _TEAM_STATS_CACHE = None
     keys = []
     for key in list(_BREAKDOWN_CACHE.keys()):
         u, s, _q = key
@@ -421,6 +455,7 @@ def invalidate_breakdown_cache_for_user(user_id: str, store: Optional[str] = Non
         keys.append(key)
     for k in keys:
         _BREAKDOWN_CACHE.pop(k, None)
+        _BREAKDOWN_INFLIGHT.pop(k, None)
     return len(keys)
 
 
@@ -428,8 +463,12 @@ def invalidate_all_breakdown_caches() -> int:
     """Wipe every breakdown cache entry (used when a tag change might affect any agent's
     counts — e.g. when a confirmation tag is added that takes an order out of every
     queue at once)."""
+    global _BREAKDOWN_CACHE_GENERATION, _TEAM_STATS_CACHE
     n = len(_BREAKDOWN_CACHE)
+    _BREAKDOWN_CACHE_GENERATION += 1
+    _TEAM_STATS_CACHE = None
     _BREAKDOWN_CACHE.clear()
+    _BREAKDOWN_INFLIGHT.clear()
     return n
 
 
@@ -1496,11 +1535,10 @@ async def pull_execute(
 
 # ---------- Agent team stats (confirmed today across team) ----------
 
-@router.get("/api/agent/team-stats")
-async def team_stats(
-    store: Optional[str] = None,  # noqa: ARG001 — accepted for backwards compat, but ignored
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_session),
+async def _team_stats_uncached(
+    store: Optional[str],  # accepted for backwards compatibility, but ignored
+    user: User,
+    db: AsyncSession,
 ):
     """Per-agent breakdown aggregated across EVERY connected store, plus confirmed-today
     from the audit log (which is already cross-store). The `store` query param is kept
@@ -1597,6 +1635,31 @@ async def team_stats(
             for a in agents
         ],
     }
+
+
+@router.get("/api/agent/team-stats")
+async def team_stats(
+    store: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Return shared team stats while coalescing polling bursts across open tabs."""
+    global _TEAM_STATS_CACHE
+    now = time.time()
+    cached = _TEAM_STATS_CACHE
+    if cached and (now - cached[0]) < _TEAM_STATS_CACHE_SECONDS:
+        return cached[1]
+
+    async with _TEAM_STATS_LOCK:
+        now = time.time()
+        cached = _TEAM_STATS_CACHE
+        if cached and (now - cached[0]) < _TEAM_STATS_CACHE_SECONDS:
+            return cached[1]
+        generation = _BREAKDOWN_CACHE_GENERATION
+        payload = await _team_stats_uncached(store=store, user=user, db=db)
+        if generation == _BREAKDOWN_CACHE_GENERATION:
+            _TEAM_STATS_CACHE = (time.time(), payload)
+        return payload
 
 
 # ---------- Admin confirmation analytics ----------

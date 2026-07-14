@@ -479,14 +479,20 @@ function AgentView({ me }) {
 
   useEffect(() => { loadFirst(); loadTeam(); }, [loadFirst, loadTeam]);
 
-  // 15-second polling: refresh the first page only when the user is sitting on it. If they
-  // navigated to a later cached page, don't yank them back.
+  // Poll only while this tab is visible. Refresh immediately when the user returns so
+  // foreground freshness stays the same without paying for hidden-tab work.
   useEffect(() => {
-    const t = setInterval(() => {
+    const refreshVisible = () => {
+      if (document.visibilityState !== "visible") return;
       if (pageIndex === 0) loadFirst();
       loadTeam();
-    }, 15_000);
-    return () => clearInterval(t);
+    };
+    const t = setInterval(refreshVisible, 15_000);
+    document.addEventListener("visibilitychange", refreshVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", refreshVisible);
+    };
   }, [loadFirst, loadTeam, pageIndex]);
 
   // 1s freshness ticker + re-apply pending writes (so stats reflect just-clicked actions

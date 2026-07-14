@@ -18,6 +18,7 @@ from urllib.parse import quote
 from pydantic import BaseModel
 import random
 from functools import lru_cache
+from contextlib import asynccontextmanager
 from io import BytesIO
 import qrcode
 from qrcode.constants import ERROR_CORRECT_M
@@ -998,6 +999,41 @@ async def ws_updates(websocket: WebSocket):
         manager.disconnect(websocket)
 
 # ---------- Shopify GraphQL helper ----------
+_SHOPIFY_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
+_SHOPIFY_HTTP_CLIENT_LOCK = asyncio.Lock()
+
+
+async def _get_shopify_http_client() -> httpx.AsyncClient:
+    """Reuse TLS connections across Shopify calls handled by this instance."""
+    global _SHOPIFY_HTTP_CLIENT
+    client = _SHOPIFY_HTTP_CLIENT
+    if client is not None and not client.is_closed:
+        return client
+    async with _SHOPIFY_HTTP_CLIENT_LOCK:
+        client = _SHOPIFY_HTTP_CLIENT
+        if client is None or client.is_closed:
+            _SHOPIFY_HTTP_CLIENT = httpx.AsyncClient(
+                timeout=30,
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=30),
+            )
+        return _SHOPIFY_HTTP_CLIENT
+
+
+@asynccontextmanager
+async def _shared_shopify_http_client():
+    # Keep the existing call-site structure while deliberately leaving the shared
+    # client open until instance shutdown.
+    yield await _get_shopify_http_client()
+
+
+@app.on_event("shutdown")
+async def _close_shopify_http_client():
+    global _SHOPIFY_HTTP_CLIENT
+    client, _SHOPIFY_HTTP_CLIENT = _SHOPIFY_HTTP_CLIENT, None
+    if client is not None and not client.is_closed:
+        await client.aclose()
+
+
 def _shopify_graphql_url(domain: str, password: str, api_key: str) -> str:
     # Always use header token auth; do not embed credentials in URL
     return f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
@@ -1017,7 +1053,7 @@ async def shopify_graphql(query: str, variables: Dict[str, Any] | None, *, store
     base_delay = 0.35
     last_exc: Optional[Exception] = None
     url = _shopify_graphql_url(domain, access_token, api_key)
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with _shared_shopify_http_client() as client:
         for attempt in range(max_retries):
             try:
                 r = await client.post(url, headers=headers, json={"query": query, "variables": variables or {}})

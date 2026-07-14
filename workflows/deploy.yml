@@ -23,11 +23,18 @@ jobs:
           gcloud builds submit --tag ${{ secrets.GCP_ARTIFACT_REPO }}/order-collector:${{ github.sha }}
       - name: Deploy
         run: |
-          gcloud run deploy order-collector \
+          gcloud run deploy shopify-collector \
             --image ${{ secrets.GCP_ARTIFACT_REPO }}/order-collector:${{ github.sha }} \
             --region europe-west1 \
             --platform managed \
             --port 8080 \
             --allow-unauthenticated \
+            --cpu 1 \
+            --memory 512Mi \
+            --concurrency 30 \
+            --min-instances 0 \
+            --max-instances 5 \
+            --cpu-throttling \
+            --cpu-boost \
             --set-env-vars BASE_URL=${{ secrets.BASE_URL }},SHOPIFY_CLIENT_ID=${{ secrets.SHOPIFY_CLIENT_ID }},SHOPIFY_CLIENT_SECRET=${{ secrets.SHOPIFY_CLIENT_SECRET }},SHOPIFY_STORE_KEYS=${{ secrets.SHOPIFY_STORE_KEYS }},SHOPIFY_OAUTH_SCOPES=${{ secrets.SHOPIFY_OAUTH_SCOPES }},SHOPIFY_API_VERSION=2025-01
 

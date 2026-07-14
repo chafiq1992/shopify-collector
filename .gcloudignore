@@ -1,0 +1,14 @@
+# Upload only files used by the production Docker build. This keeps Cloud Build
+# transfers fast and avoids storing unrelated archives/worktrees in build sources.
+*
+!Dockerfile
+!requirements.txt
+!frontend/
+!frontend/**
+!backend/
+!backend/**
+
+frontend/node_modules/
+frontend/dist/
+backend/**/__pycache__/
+backend/**/*.py[cod]
