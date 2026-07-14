@@ -82,10 +82,10 @@ def pull_jobs() -> list:
         f"{RELAY_URL}/pull",
         params={
             "pc_id": PC_ID,
-            "secret": PC_SECRET,
             "max_items": MAX_ITEMS,
             "wait": LONG_POLL_SEC,
         },
+        headers={"X-PC-Secret": PC_SECRET},
         timeout=LONG_POLL_SEC + 10,
     )
     r.raise_for_status()

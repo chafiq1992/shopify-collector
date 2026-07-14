@@ -21,7 +21,8 @@ EDGE_PATH = (os.getenv("EDGE_PATH", "") or "").strip()
 def pull_jobs():
     r = requests.get(
         f"{RELAY_URL}/pull",
-        params={"pc_id": PC_ID, "secret": PC_SECRET, "max_items": 5},
+        params={"pc_id": PC_ID, "max_items": 5},
+        headers={"X-PC-Secret": PC_SECRET},
         timeout=10,
     )
     r.raise_for_status()
@@ -308,4 +309,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

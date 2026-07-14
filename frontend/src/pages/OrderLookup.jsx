@@ -7,6 +7,19 @@ const DeliveryLabelPopup = lazy(() => import("../components/DeliveryLabelPopup")
 const RECENT_TAG_CACHE_TTL_MS = 60 * 1000;
 const recentTagsCache = new Map();
 
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function normalizeOrderShape(value) {
+  if (!value || typeof value !== "object") return null;
+  return {
+    ...value,
+    tags: asArray(value.tags),
+    variants: asArray(value.variants),
+  };
+}
+
 const API = {
   async searchOneByNumber(number, store){
     const params = new URLSearchParams({
@@ -17,8 +30,8 @@ const API = {
     const res = await authFetch(`/api/orders?${params}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(`Failed to fetch order (${res.status})`);
     const js = await res.json();
-    const list = js.orders || [];
-    return list.length ? list[0] : null;
+    const list = asArray(js?.orders);
+    return list.length ? normalizeOrderShape(list[0]) : null;
   },
   async addTag(orderId, tag, store){
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
@@ -88,7 +101,7 @@ const API = {
     const res = await authFetch(`/api/orders?${params}`, { headers: authHeaders() });
     if (!res.ok) throw new Error("Failed to fetch tags");
     const js = await res.json();
-      const tags = js.tags || [];
+      const tags = asArray(js?.tags);
       recentTagsCache.set(cacheKey, { value: tags, expiresAt: Date.now() + RECENT_TAG_CACHE_TTL_MS, promise: null });
       return tags;
     })().catch((error) => {
@@ -99,6 +112,66 @@ const API = {
     return request;
   }
 };
+
+class DeliveryPopupBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null, retryKey: 0, autoRetried: false };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error("[DeliveryPopup] Render failure:", error, info);
+    if (this.props.background && !this.state.autoRetried) {
+      this.retryTimer = setTimeout(() => {
+        this.setState((state) => ({
+          error: null,
+          retryKey: state.retryKey + 1,
+          autoRetried: true,
+        }));
+      }, 500);
+      return;
+    }
+    this.props.onError?.(error);
+  }
+
+  componentDidUpdate(previousProps) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null, retryKey: this.state.retryKey + 1, autoRetried: false });
+    }
+  }
+
+  componentWillUnmount() {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+  }
+
+  retry = () => {
+    this.setState((state) => ({ error: null, retryKey: state.retryKey + 1, autoRetried: true }));
+  };
+
+  render() {
+    if (!this.state.error) {
+      return <React.Fragment key={this.state.retryKey}>{this.props.children}</React.Fragment>;
+    }
+    if (this.props.background) return null;
+    return (
+      <div className="fixed inset-0 z-[9999] bg-black/40 flex items-center justify-center p-4">
+        <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl text-center">
+          <div className="text-3xl mb-2">⚠️</div>
+          <h3 className="text-lg font-bold text-gray-900">Delivery label temporarily stopped</h3>
+          <p className="mt-2 text-sm text-gray-600">The order page is still safe. Retry this label flow or close it and continue working.</p>
+          <div className="mt-5 flex gap-2">
+            <button onClick={this.props.onClose} className="flex-1 rounded-xl border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700">Close</button>
+            <button onClick={this.retry} className="flex-1 rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Retry</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
 
 /* Custom searchable city dropdown — only shows cities from the list, no browser autocomplete */
 function CityDropdown({ value, onChange, options, placeholder = "City", className = "", inputClassName = "" }) {
@@ -681,7 +754,7 @@ export default function OrderLookup(){
   }, []);
 
   const removedItems = useMemo(() => {
-    if (!order || !order.variants) return [];
+    if (!Array.isArray(order?.variants)) return [];
     return order.variants.filter(_isRemovedVariant);
   }, [order, _isRemovedVariant]);
 
@@ -769,14 +842,15 @@ export default function OrderLookup(){
 
   const filteredTagSuggestions = useMemo(() => {
     const q = (tagQuery || newTag || "").trim().toLowerCase();
-    if (!q) return tagSuggestions.slice(0, 20);
-    return (tagSuggestions || []).filter(t => String(t).toLowerCase().includes(q)).slice(0, 20);
+    const suggestions = asArray(tagSuggestions);
+    if (!q) return suggestions.slice(0, 20);
+    return suggestions.filter(t => String(t).toLowerCase().includes(q)).slice(0, 20);
   }, [newTag, tagQuery, tagSuggestions]);
 
   /* ── Guide logic ─────────────────────────────────────── */
 
   const unfulfilledItems = useMemo(() => {
-    if (!order || !order.variants) return [];
+    if (!Array.isArray(order?.variants)) return [];
     return order.variants.filter(v => {
       if (_isRemovedVariant(v)) return false;
       const st = String(v?.status || "").toLowerCase();
@@ -787,7 +861,7 @@ export default function OrderLookup(){
   }, [order, _isRemovedVariant]);
 
   const fulfilledItems = useMemo(() => {
-    if (!order || !order.variants) return [];
+    if (!Array.isArray(order?.variants)) return [];
     return order.variants.filter(v => {
       if (_isRemovedVariant(v)) return false;
       const st = String(v?.status || "").toLowerCase();
@@ -2635,29 +2709,46 @@ export default function OrderLookup(){
 
       {/* Delivery Label Popup */}
       {showDeliveryPopup && order && (
-        <Suspense fallback={null}>
-          <DeliveryLabelPopup
-            key={`${order.id}-${store}`}
-            order={order}
-            store={store}
-            open={true}
-            onClose={() => setShowDeliveryPopup(false)}
-            onQueued={handlePrintedQueued}
-          />
-        </Suspense>
+        <DeliveryPopupBoundary
+          resetKey={`${order.id}-${store}`}
+          onClose={() => setShowDeliveryPopup(false)}
+        >
+          <Suspense fallback={null}>
+            <DeliveryLabelPopup
+              key={`${order.id}-${store}`}
+              order={order}
+              store={store}
+              open={true}
+              onClose={() => setShowDeliveryPopup(false)}
+              onQueued={handlePrintedQueued}
+            />
+          </Suspense>
+        </DeliveryPopupBoundary>
       )}
       {activeLabelQueueItems.map((queueItem) => (
-        <Suspense key={queueItem.queueId} fallback={null}>
-          <DeliveryLabelPopup
-            order={queueItem.order}
-            store={queueItem.store || store}
-            open={false}
-            autoRunWhenHidden={true}
-            onClose={() => {}}
-            onQueued={(payload) => handleQueueItemQueued(queueItem.queueId, payload)}
-            onStateChange={(nextState) => handleQueueItemStateChange(queueItem.queueId, nextState)}
-          />
-        </Suspense>
+        <DeliveryPopupBoundary
+          key={queueItem.queueId}
+          resetKey={queueItem.queueId}
+          background={true}
+          onError={(caughtError) => handleQueueItemStateChange(queueItem.queueId, {
+            statusKey: "error",
+            statusLabel: "Error",
+            phase: "error",
+            error: caughtError?.message || "Delivery label flow stopped unexpectedly.",
+          })}
+        >
+          <Suspense fallback={null}>
+            <DeliveryLabelPopup
+              order={queueItem.order}
+              store={queueItem.store || store}
+              open={false}
+              autoRunWhenHidden={true}
+              onClose={() => {}}
+              onQueued={(payload) => handleQueueItemQueued(queueItem.queueId, payload)}
+              onStateChange={(nextState) => handleQueueItemStateChange(queueItem.queueId, nextState)}
+            />
+          </Suspense>
+        </DeliveryPopupBoundary>
       ))}
       {printQueueFlight && (
         <div

@@ -72,8 +72,12 @@ def enqueue(job: EnqueueBody, x_api_key: Optional[str] = Header(default=None)):
 
 
 @app.get("/pull")
-def pull(pc_id: str, secret: str, max_items: int = 5):
-    _require_pc(pc_id, secret)
+def pull(
+    pc_id: str,
+    max_items: int = 5,
+    x_pc_secret: Optional[str] = Header(default=None, alias="X-PC-Secret"),
+):
+    _require_pc(pc_id, x_pc_secret or "")
     q = JOBS.get(pc_id, [])
     if not q:
         return {"ok": True, "jobs": []}

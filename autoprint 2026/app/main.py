@@ -918,8 +918,8 @@ def start_poller():
     def _pull() -> list:
         r = sess.get(
             f"{relay}/pull",
-            params={"pc_id": pc_id, "secret": pc_secret,
-                     "max_items": max_items, "wait": long_poll_sec},
+            params={"pc_id": pc_id, "max_items": max_items, "wait": long_poll_sec},
+            headers={"X-PC-Secret": pc_secret},
             timeout=long_poll_sec + 15,
         )
         r.raise_for_status()

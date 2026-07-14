@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
+import { parseExplicitDeliveryOrderId } from "../lib/deliveryOrderReference";
+import { findDeliveryQueueRow, normalizeDeliveryQueueRow, parseMerchantOrderReference } from "../lib/deliveryQueueRecovery";
 
 const LS_MERCHANT = "dlvMerchantId";
 const LS_ORDER_MAP = "dlvOrderIdMap";
@@ -95,14 +97,10 @@ function getCachedOrderId(num, store, merchant) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function isDigitsOnly(value) { return /^\d+$/.test(String(value || "").trim()); }
 function normalizeLookupValue(value) { return String(value || "").trim().replace(/^#/, ""); }
-function parseMerchantOrderReference(value) {
-  const m = String(value || "").trim().match(/^(\d+)-(\d+)$/);
-  if (!m) return null;
-  return { merchantId: Number(m[1]), orderNumber: m[2] };
-}
 function normalizeCompanyName(value) { return String(value || "").trim().toLowerCase(); }
 function normalizeCityName(value) { return String(value || "").trim().toLowerCase(); }
 function normalizeTagValue(value) { return String(value || "").trim().toLowerCase(); }
+function asArray(value) { return Array.isArray(value) ? value : []; }
 function getCompanyCities(company) {
   const set = new Set();
   for (const city of (company?.cities || [])) {
@@ -130,19 +128,26 @@ async function loadDeliveryBootstrap() {
         return { configured: false, merchants: [], companies: [], cities: [] };
       }
 
-      const [merchantRes, companyRes, cityRes] = await Promise.allSettled([
-        dlvApi("ext/admin/merchants"),
+      // Company metadata is the slowest request and is not needed to locate an
+      // order. Load it in parallel without keeping queue search waiting.
+      const merchantPromise = dlvApi("ext/admin/merchants");
+      const extrasPromise = Promise.allSettled([
         dlvApi("admin/envoy-companies"),
         dlvApi("ext/admin/cities"),
-      ]);
+      ]).then(([companyRes, cityRes]) => ({
+        companies: companyRes.status === "fulfilled"
+          ? (Array.isArray(companyRes.value) ? companyRes.value : asArray(companyRes.value?.items))
+          : [],
+        cities: cityRes.status === "fulfilled" ? asArray(cityRes.value?.items) : [],
+      }));
+      const [merchantRes] = await Promise.allSettled([merchantPromise]);
 
       return {
         configured: true,
-        merchants: merchantRes.status === "fulfilled" ? ((merchantRes.value && merchantRes.value.items) || []) : [],
-        companies: companyRes.status === "fulfilled"
-          ? (Array.isArray(companyRes.value) ? companyRes.value : (companyRes.value.items || []))
-          : [],
-        cities: cityRes.status === "fulfilled" ? ((cityRes.value && cityRes.value.items) || []) : [],
+        merchants: merchantRes.status === "fulfilled" ? asArray(merchantRes.value?.items) : [],
+        companies: [],
+        cities: [],
+        extrasPromise,
       };
     })().catch((error) => {
       deliveryBootstrapPromise = null;
@@ -246,6 +251,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
   const logEndRef = useRef(null);
   const initRan = useRef(false);
   const printButtonRef = useRef(null);
+  const recoveryInFlightRef = useRef(false);
 
   const [editFields, setEditFields] = useState({
     orderName: "",
@@ -370,6 +376,40 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     });
   }, [phase, merchantId, orderNum]);
 
+  // Fulfillment and the Delivery queue are eventually consistent. Resume as
+  // soon as a late queue row appears instead of stranding the operator here.
+  useEffect(() => {
+    if (phase !== "manual" || !shouldRunLiveFlow || !merchantId || !orderNum) return;
+    let cancelled = false;
+    let attempts = 0;
+    const recover = async () => {
+      if (cancelled || recoveryInFlightRef.current || attempts >= 12) return;
+      attempts += 1;
+      recoveryInFlightRef.current = true;
+      try {
+        const row = await fetchQueueRow(merchantId, orderNum);
+        if (!cancelled && row) {
+          setError(null);
+          addLog("Order appeared in the queue. Resuming automatically...");
+          await resumeQueueRow(merchantId, row, { warmOnly: false });
+        } else if (!cancelled && attempts % 3 === 0) {
+          await recoverExistingDeliveryOrder(merchantId, orderNum);
+        }
+      } catch {
+        // Keep manual controls usable during a transient recovery failure.
+      } finally {
+        recoveryInFlightRef.current = false;
+      }
+    };
+    const first = setTimeout(recover, 2500);
+    const timer = setInterval(recover, 5000);
+    return () => {
+      cancelled = true;
+      clearTimeout(first);
+      clearInterval(timer);
+    };
+  }, [phase, shouldRunLiveFlow, merchantId, orderNum]);
+
   useEffect(() => {
     if (!companies.length) return;
     if (!companyId || companyId === "unassigned") return;
@@ -476,7 +516,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         include_total: true,
       },
     });
-    const rows = Array.isArray(res?.rows) ? res.rows : [];
+    const rows = asArray(res?.rows);
     const wantedOrder = normalizeLookupValue(query);
     const matched = rows.find(row => normalizeLookupValue(row?.orderName) === wantedOrder) || null;
     if (!matched?.id) return null;
@@ -486,6 +526,85 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       companyAssigned: Boolean(matched.envoyCompany),
       companyName: String(matched.envoyCompany || "").trim(),
     };
+  }
+
+  async function fetchQueueRow(mid, targetOrderNumber = orderNum) {
+    if (!mid || !targetOrderNumber) return null;
+    const q = await dlvApi(`ext/admin/merchant-queue/${mid}`, { query: { limit: 500 } });
+    return findDeliveryQueueRow(q?.items, targetOrderNumber);
+  }
+
+  async function resumeQueueRow(mid, row, { warmOnly: rowWarmOnly = false } = {}) {
+    const normalized = normalizeDeliveryQueueRow(row);
+    if (!normalized) return false;
+    addLog(`Found in queue (row #${normalized.id})${normalized.hasError ? ` — HAS ERROR: ${normalized.errorType || "unknown"}` : ""}`);
+    setQueueRow(normalized);
+    populateEditFromRow(normalized);
+    if (normalized.hasError) {
+      addLog("Fix the error fields below, then click Create.");
+      setShowEdit(true);
+      setPhase("fix_errors");
+    } else if (rowWarmOnly) {
+      addLog("Queue row is ready. Opening the popup will continue the label flow.");
+      setPhase("queue_ready");
+    } else {
+      await createNote(mid, normalized);
+    }
+    return true;
+  }
+
+  async function recoverExistingDeliveryOrder(mid, targetOrderNumber = orderNum) {
+    const existing = await lookupExistingDeliveryOrder({ merchant: mid, query: targetOrderNumber });
+    if (!existing?.deliveryOrderId) return false;
+    const id = Number(existing.deliveryOrderId);
+    setDeliveryOrderId(id);
+    setOrderMap(targetOrderNumber, id, store, mid);
+    addLog(`Recovered existing delivery order ID: ${id}`);
+    if (existing.envoyCode) {
+      setEnvoyCode(existing.envoyCode);
+      applyResolvedCompany(existing.companyName);
+      addLog(`Envoy: ${existing.envoyCode}${existing.companyName ? ` (${existing.companyName})` : ""}`);
+      setPhase("company_select");
+      return true;
+    }
+    try {
+      const env = await dlvApi(`ext/admin/envoy-notes/for-order/${id}`);
+      if (env?.code) {
+        setEnvoyCode(env.code);
+        applyResolvedCompany(env.company);
+        addLog(`Envoy: ${env.code}`);
+        setPhase("company_select");
+        return true;
+      }
+    } catch {}
+    try {
+      const env = await dlvApi(`ext/admin/envoy-notes/assign-order/${id}`, { method: "POST" });
+      if (env?.code) {
+        setEnvoyCode(env.code);
+        applyResolvedCompany(env.company);
+        addLog(`Envoy: ${env.code}`);
+        setPhase("company_select");
+        return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  async function recoverQueueReference(rawValue) {
+    const value = String(rawValue || "").trim();
+    const merchantOrderRef = parseMerchantOrderReference(value);
+    const mid = merchantOrderRef?.merchantId || merchantId;
+    const targetOrder = merchantOrderRef?.orderNumber || (isDigitsOnly(value) ? value : orderNum);
+    if (!mid || !targetOrder) return false;
+    const row = await fetchQueueRow(mid, targetOrder);
+    if (!row) return false;
+    if (Number(mid) !== Number(merchantId)) {
+      setMerchantId(Number(mid));
+      saveMerchant(Number(mid), store);
+    }
+    setError(null);
+    addLog("Found the order in the live merchant queue. Resuming...");
+    return resumeQueueRow(mid, row, { warmOnly: false });
   }
 
   function getEnvoyItemForOrder(envDet, oid = deliveryOrderId) {
@@ -530,7 +649,21 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
 
   async function resolveManualReference(rawValue) {
     const value = String(rawValue || "").trim();
-    if (!value) throw new Error("Enter a delivery order ID or envoy code.");
+    if (!value) throw new Error("Enter a Shopify order number, delivery ID, or envoy code.");
+
+    // A raw Shopify/display order number (for example 81381) is not the same
+    // as the delivery database ID (for example 48768). Require an explicit
+    // `id:` prefix when an operator really intends to enter an internal ID so
+    // an unresolved Shopify order can never be sent to ID-only API routes.
+    const explicitId = parseExplicitDeliveryOrderId(value);
+    if (explicitId) {
+      return {
+        deliveryOrderId: explicitId,
+        envoyCode: null,
+        companyAssigned: false,
+        companyName: "",
+      };
+    }
 
     const merchantOrderRef = parseMerchantOrderReference(value);
     if (merchantOrderRef) {
@@ -539,23 +672,26 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         query: merchantOrderRef.orderNumber,
       });
       if (existing) return existing;
+      throw new Error(
+        `Shopify order #${merchantOrderRef.orderNumber} has not been created in Delivery yet. ` +
+        "Fix any queue/city error and create the delivery order first."
+      );
     }
 
-    if (isDigitsOnly(value) && normalizeLookupValue(value) === normalizeLookupValue(orderNum) && merchantId) {
+    if (isDigitsOnly(value) && merchantId) {
       const existing = await lookupExistingDeliveryOrder({
         merchant: merchantId,
         query: value,
       });
       if (existing) return existing;
+      throw new Error(
+        `Shopify order #${normalizeLookupValue(value)} has not been created in Delivery yet. ` +
+        "Fix any queue/city error and create the delivery order first."
+      );
     }
 
     if (isDigitsOnly(value)) {
-      return {
-        deliveryOrderId: Number(value),
-        envoyCode: null,
-        companyAssigned: false,
-        companyName: "",
-      };
+      throw new Error("Select the matching merchant before resolving a Shopify order number.");
     }
 
     if (merchantId) {
@@ -623,6 +759,10 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       addLog("Loading companies & cities...");
       setCompanies(bootstrap.companies || []);
       setCities(bootstrap.cities || []);
+      bootstrap.extrasPromise?.then((extras) => {
+        setCompanies(asArray(extras?.companies));
+        setCities(asArray(extras?.cities));
+      }).catch(() => {});
 
       if (!mid) { setPhase("merchant_select"); setBusy(false); return; }
       populateEditFromOrder();
@@ -680,29 +820,17 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     try {
       if (autoRunWhenHidden) console.warn(`[DLP-BG] searchQueue() merchant=${mid}, orderNum=${orderNum}, attempt=${retryAttempt}`);
       const q = await dlvApi(`ext/admin/merchant-queue/${mid}`, { query: { limit: 500 } });
-      const items = (q?.items) || [];
+      const items = asArray(q?.items);
       if (autoRunWhenHidden) console.warn(`[DLP-BG] queue returned ${items.length} items, looking for orderNum="${orderNum}"`);
-      const row = items.find(r => String(r.orderName || "").replace(/^#/, "").trim() === orderNum);
+      const row = findDeliveryQueueRow(items, orderNum);
 
       if (row) {
         if (autoRunWhenHidden) console.warn(`[DLP-BG] FOUND in queue! row.id=${row.id}, hasError=${row.hasError}`);
-        addLog(`Found in queue (row #${row.id})${row.hasError ? ` — HAS ERROR: ${row.errorType || "unknown"}` : ""}`);
-        setQueueRow(row);
-        populateEditFromRow(row);
-
-        if (row.hasError) {
-          addLog("Fix the error fields below, then click Create.");
-          setShowEdit(true);
-          setPhase("fix_errors");
-        } else {
-          if (isWarmOnly) {
-            addLog("Queue row is ready. Opening the popup will continue the label flow.");
-            setPhase("queue_ready");
-          } else {
-            await createNote(mid, row);
-          }
-        }
+        await resumeQueueRow(mid, row, { warmOnly: isWarmOnly });
       } else {
+        if (!isWarmOnly && (retryAttempt === 0 || retryAttempt >= MAX_BG_RETRIES)) {
+          try { if (await recoverExistingDeliveryOrder(mid, orderNum)) return; } catch {}
+        }
         // --- Auto-retry logic for sidebar background processing ---
         if (autoRunWhenHidden && retryAttempt < MAX_BG_RETRIES) {
           const delay = RETRY_DELAYS[retryAttempt] || 20000;
@@ -716,24 +844,6 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         addLog("Not found in queue.");
         if (autoRunWhenHidden) console.warn(`[DLP-BG] NOT FOUND after ${retryAttempt} retries for merchant=${mid}. Setting phase=manual`);
         populateEditFromOrder();
-        if (!isWarmOnly) {
-          const cached = getCachedOrderId(orderNum, store, mid);
-          let cachedExact = null;
-          if (cached) {
-            try {
-              cachedExact = await lookupExistingDeliveryOrder({ merchant: mid, query: orderNum });
-            } catch {
-              cachedExact = null;
-            }
-          }
-          if (cached && cachedExact && Number(cachedExact.deliveryOrderId) === Number(cached)) {
-            setDeliveryOrderId(cached);
-            try {
-              const env = await dlvApi(`ext/admin/envoy-notes/assign-order/${cached}`, { method: "POST" });
-              if (env?.code) { setEnvoyCode(env.code); applyResolvedCompany(env.company); addLog(`Envoy: ${env.code}`); setPhase("company_select"); return; }
-            } catch {}
-          }
-        }
         setPhase("manual");
       }
     } catch (e) {
@@ -1046,6 +1156,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     setBusy(true);
     setError(null);
     try {
+      if (await recoverQueueReference(raw)) return;
       const resolved = await resolveManualReference(raw);
       setDeliveryOrderId(resolved.deliveryOrderId);
       setOrderMap(orderNum, resolved.deliveryOrderId, store, merchantId);
@@ -1072,6 +1183,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     setBusy(true);
     setError(null);
     try {
+      if (await recoverQueueReference(raw)) return;
       const resolved = await resolveManualReference(raw);
       const id = String(resolved.deliveryOrderId);
       setDeliveryOrderId(resolved.deliveryOrderId);
@@ -1513,7 +1625,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
             <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
               <div className="text-sm font-semibold text-amber-900 mb-2">Order not found in queue</div>
               <div className="text-xs text-amber-800 mb-3">
-                The order may have already been processed. Enter the delivery order ID, or an envoy code like {merchantId ? `${merchantId}-${orderNum}` : `7-${orderNum}`}, to reopen the normal print flow.
+                The order may have already been processed. Enter its Shopify order number, a merchant-order reference like {merchantId ? `${merchantId}-${orderNum}` : `7-${orderNum}`}, or an envoy code. To use a known internal delivery ID, prefix it with <span className="font-mono">id:</span> (for example <span className="font-mono">id:48768</span>).
               </div>
               <input
                 value={manualId}

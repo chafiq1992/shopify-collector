@@ -575,8 +575,16 @@ async def enqueue_orders(
     return result
 
 @app.get("/pull")
-async def pull(pc_id: str, secret: str, max_items: int = 5, wait: int = 0):
-    _require_pc(pc_id, secret)
+async def pull(
+    pc_id: str,
+    max_items: int = 5,
+    wait: int = 0,
+    x_pc_secret: Optional[str] = Header(default=None, alias="X-PC-Secret"),
+    secret: Optional[str] = Query(default=None, include_in_schema=False),
+):
+    # Prefer a header so credentials never appear in Cloud Run request URLs.
+    # Retain the hidden query parameter temporarily for older installed agents.
+    _require_pc(pc_id, x_pc_secret or secret or "")
     import time as _t
     wait = min(max(wait, 0), 25)
     deadline = _t.time() + wait

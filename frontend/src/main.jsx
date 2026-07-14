@@ -135,13 +135,28 @@ function RouteShell() {
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { hasError: false, error: null };
+    this.state = { hasError: false, error: null, retryKey: 0 };
   }
   static getDerivedStateFromError(error) {
     return { hasError: true, error };
   }
   componentDidCatch(error, info) {
     console.error('[ErrorBoundary] Uncaught error:', error, info);
+    const message = String(error?.message || error || '');
+    const isStaleAsset = /dynamically imported module|chunkloaderror|loading chunk|module script/i.test(message);
+    if (isStaleAsset) {
+      try {
+        const key = `orderCollectorAssetReload:${location.pathname}`;
+        const lastReload = Number(sessionStorage.getItem(key) || 0);
+        if (!lastReload || Date.now() - lastReload > 30000) {
+          sessionStorage.setItem(key, String(Date.now()));
+          window.location.reload();
+        }
+      } catch {}
+    }
+  }
+  retry = () => {
+    this.setState((state) => ({ hasError: false, error: null, retryKey: state.retryKey + 1 }));
   }
   render() {
     if (this.state.hasError) {
@@ -161,15 +176,26 @@ class ErrorBoundary extends React.Component {
             <p style={{ fontSize: 14, color: '#6b7280', margin: '0 0 20px', lineHeight: 1.5 }}>
               The app ran into an unexpected error. This usually fixes itself with a reload.
             </p>
-            <button
-              onClick={() => window.location.reload()}
-              style={{
-                padding: '10px 28px', borderRadius: 12, border: 'none', cursor: 'pointer',
-                background: '#2563eb', color: '#fff', fontSize: 14, fontWeight: 600,
-              }}
-            >
-              Reload Page
-            </button>
+            <div style={{ display: 'flex', justifyContent: 'center', gap: 8 }}>
+              <button
+                onClick={this.retry}
+                style={{
+                  padding: '10px 22px', borderRadius: 12, border: '1px solid #d1d5db', cursor: 'pointer',
+                  background: '#fff', color: '#374151', fontSize: 14, fontWeight: 600,
+                }}
+              >
+                Try Again
+              </button>
+              <button
+                onClick={() => window.location.reload()}
+                style={{
+                  padding: '10px 22px', borderRadius: 12, border: 'none', cursor: 'pointer',
+                  background: '#2563eb', color: '#fff', fontSize: 14, fontWeight: 600,
+                }}
+              >
+                Reload Page
+              </button>
+            </div>
             <details style={{ marginTop: 16, textAlign: 'left', fontSize: 11, color: '#9ca3af' }}>
               <summary style={{ cursor: 'pointer' }}>Error details</summary>
               <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
@@ -180,7 +206,7 @@ class ErrorBoundary extends React.Component {
         </div>
       );
     }
-    return this.props.children;
+    return <React.Fragment key={this.state.retryKey}>{this.props.children}</React.Fragment>;
   }
 }
 
