@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
+import { canDirectPrintEnvoyLabel, isDirectEnvoyPrintCompany } from "../lib/directEnvoyPrint";
 import { parseExplicitDeliveryOrderId } from "../lib/deliveryOrderReference";
 import { findDeliveryQueueRow, normalizeDeliveryQueueRow, parseMerchantOrderReference } from "../lib/deliveryQueueRecovery";
 
@@ -1087,7 +1088,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     return res.json();
   }
 
-  async function handlePrint(oid, envoyCodeOverride = "") {
+  async function handlePrint(oid, envoyCodeOverride = "", { bypassPartnerSend = false } = {}) {
     const id = oid || deliveryOrderId;
     if (!id) return;
     let validatedEnvoyCode = envoyCodeOverride || envoyCode;
@@ -1096,19 +1097,25 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       setPhase("company_select");
       return;
     }
-    if (partnerSendState.ok !== true) {
+    if (!bypassPartnerSend && partnerSendState.ok !== true) {
       setError("Send to partner must succeed before printing.");
       setPhase("company_select");
       return;
     }
     try {
       const assigned = await fetchAssignedEnvoyForOrder(id);
+      if (bypassPartnerSend && !isDirectEnvoyPrintCompany(assigned)) {
+        throw new Error("Direct printing without partner send is only available for Oscario and Marrakech.");
+      }
       const activeEnvoyCode = assigned.code || validatedEnvoyCode;
       const envDet = await dlvApi(`admin/envoy-notes/${encodeURIComponent(activeEnvoyCode)}`);
       assertSelectedCompanyMatchesEnvoy(assigned);
       assertEnvoyItemMatchesOrder(getEnvoyItemForOrder(envDet, id));
       validatedEnvoyCode = activeEnvoyCode;
       if (activeEnvoyCode !== envoyCode) setEnvoyCode(activeEnvoyCode);
+      if (bypassPartnerSend) {
+        addLog(`Direct print approved for ${assigned?.company || assigned?.companyShort || "assigned company"}; partner send skipped.`);
+      }
     } catch (gateErr) {
       setError(gateErr?.message || "Envoy validation failed before printing.");
       setPhase("company_select");
@@ -1147,6 +1154,11 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     if (queuedPayload && typeof onQueued === "function") {
       onQueued(queuedPayload);
     }
+  }
+
+  async function handleDirectPrint() {
+    setError(null);
+    await handlePrint(undefined, "", { bypassPartnerSend: true });
   }
 
   async function handleManualPrint() {
@@ -1271,19 +1283,27 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     if (!cityName) return allCityOptions.slice(0, 15);
     return allCityOptions.filter(c => String(c).toLowerCase().includes(cityName.toLowerCase())).slice(0, 15);
   }, [allCityOptions, cityName]);
+  const directPrintEligible = canDirectPrintEnvoyLabel({
+    deliveryOrderId,
+    envoyCode,
+    company: selectedCompany,
+  });
   const queueState = useMemo(() => {
     if (printStatus === "success") return { statusKey: "printed", statusLabel: "Printed" };
     if (phase === "fix_errors" || phase === "manual" || phase === "error") {
       return { statusKey: "information_error", statusLabel: "Information error" };
     }
     if (phase === "company_select" || ((phase === "ready_print" || phase === "done") && envoyCode && partnerSendState.ok !== true)) {
-      return { statusKey: "waiting_partner", statusLabel: "Waiting to send to partner" };
+      return {
+        statusKey: "waiting_partner",
+        statusLabel: directPrintEligible ? "Direct print available" : "Waiting to send to partner",
+      };
     }
     if ((phase === "ready_print" || (phase === "done" && printStatus !== "fallback")) && envoyCode && companyId && partnerSendState.ok === true) {
       return { statusKey: "ready_to_print", statusLabel: "Ready to print" };
     }
     return { statusKey: "preparing", statusLabel: "Preparing" };
-  }, [phase, printStatus, envoyCode, partnerSendState.ok]);
+  }, [phase, printStatus, envoyCode, companyId, partnerSendState.ok, directPrintEligible]);
   const needsControlPayload = queueState.statusKey === "waiting_partner" || queueState.statusKey === "information_error";
 
   // Use a ref to track the last emitted key values and avoid infinite loops
@@ -1295,6 +1315,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       order?.id, orderNum, queueState.statusKey, deliveryOrderId, envoyCode,
       selectedCompany?.name, selectedCompanyOrderTag, error, phase, busy,
       companyId, cityName, partnerSendState?.ok, partnerSendState?.message, printStatus,
+      directPrintEligible,
     ].join("|");
     if (fingerprint === lastEmitRef.current) return;
     lastEmitRef.current = fingerprint;
@@ -1321,17 +1342,19 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       globalCities: needsControlPayload ? cities : [],
       partnerSendState,
       printStatus,
+      directPrintEligible,
       actions: {
         setCompanyId,
         setCityName,
         setEditCity: (v) => { setField("city", v); setCityName(v); },
         handleSend,
         handlePrint: () => handlePrint(),
+        handleDirectPrint,
         handleFixAndCreate,
         handleRetry,
       },
     });
-  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, needsControlPayload, companies, companyId, cityName, filteredCities, allCityOptions, cities, partnerSendState, printStatus]);
+  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, needsControlPayload, companies, companyId, cityName, filteredCities, allCityOptions, cities, partnerSendState, printStatus, directPrintEligible]);
   const companyStepDone = partnerSendState.ok === true;
   const companyStepActive = phase === "company_select" || ((phase === "ready_print" || phase === "done") && !companyStepDone);
   const companyStepCls = companyStepDone
@@ -1348,6 +1371,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       ? (partnerSendState.message || "Last send failed")
       : (envoyCode ? "Not sent to partner yet" : "Create or assign an envoy note first");
   const canSendToPartner = Boolean(deliveryOrderId && envoyCode && companyId && String(cityName || editFields.city || "").trim()) && partnerSendState.ok !== true;
+  const canDirectPrintLabel = directPrintEligible && partnerSendState.ok !== true;
   const canPrintLabel = Boolean(deliveryOrderId) && (phase === "ready_print" || phase === "done") && Boolean(envoyCode) && Boolean(companyId) && partnerSendState.ok === true;
 
   if (!open) return null;
@@ -1564,6 +1588,25 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
                   >
                     {busy ? "Sending..." : partnerSendLabel}
                   </button>
+                )}
+                {canDirectPrintLabel && (
+                  <button
+                    ref={printButtonRef}
+                    onClick={handleDirectPrint}
+                    disabled={busy}
+                    className="w-full px-4 py-2.5 rounded-xl bg-violet-600 text-white text-sm font-bold hover:bg-violet-700 disabled:opacity-50 active:scale-[.98] shadow-md flex items-center justify-center gap-2"
+                  >
+                    {busy ? (
+                      <><span className="animate-spin">⏳</span> Sending to printer...</>
+                    ) : (
+                      <><span className="text-lg">&#128424;</span> Print Directly — Skip Partner</>
+                    )}
+                  </button>
+                )}
+                {canDirectPrintLabel && (
+                  <div className="text-xs text-violet-700">
+                    Available only for assigned Oscario and Marrakech envoys.
+                  </div>
                 )}
                 <div className={`text-xs ${partnerSendState.ok === true ? "text-green-700" : partnerSendState.ok === false ? "text-red-700" : "text-amber-700"}`}>
                   {partnerSendStatusText}

@@ -570,6 +570,9 @@ export default function OrderLookup(){
             globalCities: nextState?.globalCities || item.globalCities || [],
             partnerSendState: nextState?.partnerSendState || item.partnerSendState || {},
             printStatus: nextState?.printStatus || item.printStatus || null,
+            directPrintEligible: typeof nextState?.directPrintEligible === "boolean"
+              ? nextState.directPrintEligible
+              : !!item.directPrintEligible,
             actions: nextState?.actions || item.actions || null,
           }
         : item
@@ -2512,6 +2515,7 @@ export default function OrderLookup(){
               const showCityError = isError && item.phase === "fix_errors";
               const partnerOk = item.partnerSendState?.ok === true;
               const showSendBtn = showCompanyControls && item.envoyCode && !partnerOk;
+              const showDirectPrintBtn = showCompanyControls && item.envoyCode && !partnerOk && item.directPrintEligible && item.actions?.handleDirectPrint;
               const showPrintBtn = (isReadyPrint || isPrinted) && item.actions;
 
               const itemStoreKey = String(item.store || store || "").trim().toLowerCase();
@@ -2667,6 +2671,24 @@ export default function OrderLookup(){
                         >
                           {item.busy ? "Sending…" : (item.partnerSendState?.ok === false ? "Resend to Partner" : "Send to Partner")}
                         </button>
+                      )}
+                      {showDirectPrintBtn && (
+                        <button
+                          onClick={() => item.actions.handleDirectPrint()}
+                          disabled={item.busy}
+                          className="w-full px-2 py-2 rounded-lg bg-violet-600 text-white text-xs font-bold hover:bg-violet-700 disabled:opacity-50 flex items-center justify-center gap-1.5 shadow-sm"
+                        >
+                          {item.busy ? (
+                            <><span className="animate-spin">⏳</span> Sending to printer…</>
+                          ) : (
+                            <><span className="text-sm">🖨</span> Print Directly — Skip Partner</>
+                          )}
+                        </button>
+                      )}
+                      {showDirectPrintBtn && (
+                        <div className="text-[10px] text-violet-700 font-semibold">
+                          Available for Oscario and Marrakech only
+                        </div>
                       )}
                       {partnerOk && (
                         <div className="text-[10px] text-green-700 font-semibold">✓ Sent to partner</div>
