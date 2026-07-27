@@ -55,6 +55,8 @@ class ConfirmationSearchTests(unittest.TestCase):
     def test_customer_search_fetches_order_history_in_same_query(self):
         self.assertIn("orders(first: $ordersFirst", SEARCH_CUSTOMERS_GQL)
         self.assertIn("sortKey: CREATED_AT", SEARCH_CUSTOMERS_GQL)
+        self.assertIn("lineItems(first: 20)", SEARCH_CUSTOMERS_GQL)
+        self.assertNotIn("lineItems(first: 50)", SEARCH_CUSTOMERS_GQL)
 
 
 class ConfirmationActionIdempotencyTests(unittest.TestCase):

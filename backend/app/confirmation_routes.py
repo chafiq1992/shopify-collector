@@ -510,6 +510,14 @@ lineItems(first: 50) {
 }
 """
 
+# Global search does not need all 50 product rows just to identify and act on
+# an order. Keeping this connection bounded prevents customer + nested-order
+# searches from exceeding Shopify's 1,000-point single-query cost ceiling.
+_SEARCH_ORDER_NODE_FIELDS = _ORDER_NODE_FIELDS.replace(
+    "lineItems(first: 50)",
+    "lineItems(first: 20)",
+)
+
 
 QUEUE_QUERY_GQL = f"""
 query AgentQueue($first: Int!, $after: String, $query: String) {{
@@ -749,7 +757,7 @@ SEARCH_ORDERS_GQL = f"""
 query SearchOrders($first: Int!, $query: String) {{
   orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {{
     edges {{
-      node {{ {_ORDER_NODE_FIELDS} }}
+      node {{ {_SEARCH_ORDER_NODE_FIELDS} }}
     }}
   }}
 }}
@@ -770,7 +778,7 @@ query SearchCustomers($first: Int!, $ordersFirst: Int!, $query: String) {{
         defaultAddress {{ city country }}
         orders(first: $ordersFirst, sortKey: CREATED_AT, reverse: true) {{
           edges {{
-            node {{ {_ORDER_NODE_FIELDS} }}
+            node {{ {_SEARCH_ORDER_NODE_FIELDS} }}
           }}
         }}
       }}
@@ -1076,23 +1084,63 @@ async def agent_search(
             store=store,
         )
 
-    async def _customer_search(query: str):
-        return await shopify_graphql(
-            SEARCH_CUSTOMERS_GQL,
-            {"first": 10, "ordersFirst": 25, "query": query},
-            store=store,
-        )
+    async def _customer_search(
+        query: str,
+        *,
+        first: int,
+        orders_first: int,
+    ):
+        variables = {
+            "first": max(1, min(5, first)),
+            "ordersFirst": max(1, min(15, orders_first)),
+            "query": query,
+        }
+        try:
+            return await shopify_graphql(
+                SEARCH_CUSTOMERS_GQL,
+                variables,
+                store=store,
+            )
+        except HTTPException as exc:
+            # The query is deliberately below Shopify's normal max cost. Keep a
+            # deterministic smaller retry so a future cost-model adjustment does
+            # not turn a valid phone lookup into a user-facing 502.
+            if "MAX_COST_EXCEEDED" not in str(getattr(exc, "detail", exc)):
+                raise
+            return await shopify_graphql(
+                SEARCH_CUSTOMERS_GQL,
+                {
+                    "first": 1,
+                    "ordersFirst": min(10, variables["ordersFirst"]),
+                    "query": query,
+                },
+                store=store,
+            )
 
     domain_task = asyncio.create_task(_resolve_domain())
     requested: List[Tuple[str, Any]] = []
     if search["kind"] == "phone":
-        requested.append(("customers", _customer_search(search["customer_query"])))
+        requested.append((
+            "customers",
+            _customer_search(
+                search["customer_query"],
+                first=3,
+                orders_first=15,
+            ),
+        ))
     elif search["kind"] == "order":
         requested.append(("orders", _order_search(search["order_query"], first=8)))
     else:
         requested.extend([
             ("orders", _order_search(search["order_query"], first=25)),
-            ("customers", _customer_search(search["customer_query"])),
+            (
+                "customers",
+                _customer_search(
+                    search["customer_query"],
+                    first=5,
+                    orders_first=10,
+                ),
+            ),
         ])
 
     responses = await asyncio.gather(

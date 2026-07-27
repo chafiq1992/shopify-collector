@@ -3,7 +3,7 @@ import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import OrderLabel from "../components/OrderLabel";
 import { useToasts, ToastStack } from "../components/Toast";
-import { persistStoreSelection, readCurrentStore, titleStore } from "../lib/stores";
+import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 import { enqueueTagWrite, useSyncQueueLength, readQueue } from "../lib/syncQueue";
 import { copyNodeAsPng, triggerDownload } from "../lib/labelClipboard";
 import {
@@ -1874,70 +1874,60 @@ function GlobalSearch({
   }
 
   return (
-    <section className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
-      <div className="grid lg:grid-cols-[230px_minmax(0,1fr)]">
-        <aside className="bg-gradient-to-br from-slate-950 to-indigo-950 text-white p-4">
-          <div className="text-[10px] uppercase tracking-[0.18em] text-indigo-200 font-semibold">
-            Searching in store
-          </div>
-          <div className="mt-2 flex items-center gap-2">
-            <span className="w-9 h-9 rounded-xl bg-white/10 border border-white/15 flex items-center justify-center" aria-hidden>🏪</span>
-            <div className="min-w-0">
-              <div className="font-bold text-base truncate">{titleStore(store)}</div>
-              <div className="font-mono text-[10px] text-indigo-200 truncate">{store}</div>
-            </div>
-          </div>
+    <section className="bg-white border border-gray-200 rounded-2xl shadow-sm p-3">
+      <div className="flex flex-col sm:flex-row sm:items-stretch gap-2">
+        <div className="h-11 shrink-0 inline-flex items-center gap-1.5 rounded-xl border border-gray-300 bg-slate-50 px-2">
+          <span className="text-sm" aria-hidden>🏪</span>
+          <span className="hidden xl:inline text-[9px] uppercase tracking-wider font-semibold text-gray-500">
+            Store
+          </span>
           <StorePicker
             value={store}
             onChange={onStoreChange}
             allowCustom={false}
-            className="mt-4 w-full justify-between border-indigo-300/40 text-slate-900"
+            className="h-full !rounded-none !border-0 !bg-transparent !p-0 text-slate-900 shadow-none"
           />
-          <p className="mt-3 text-[11px] leading-relaxed text-indigo-100/80">
-            Switch before searching so results and actions always use the intended Shopify store.
-          </p>
-        </aside>
-
-        <div className="p-4 min-w-0">
-          <form
-            className="flex items-center gap-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              onSearchNow?.();
-            }}
+        </div>
+        <form
+          className="flex flex-1 min-w-0 items-center gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSearchNow?.();
+          }}
+        >
+          <span aria-hidden className="hidden sm:inline text-base">🔎</span>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => onQueryChange(e.target.value)}
+            placeholder="Paste phone or enter order number"
+            className="h-11 flex-1 min-w-0 text-sm border border-gray-300 rounded-xl px-3 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400"
+          />
+          {loading && (
+            <span className="hidden lg:inline-flex items-center text-xs text-gray-500 gap-1.5">
+              <span className="inline-block w-3 h-3 rounded-full border-2 border-gray-300 border-t-indigo-600 animate-spin" />
+              Searching…
+            </span>
+          )}
+          <button
+            type="submit"
+            disabled={(query || "").trim().length < 2}
+            className={`h-11 text-xs px-4 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-40 ${BTN_TAP}`}
           >
-            <span aria-hidden className="text-base">🔎</span>
-            <input
-              type="search"
-              value={query}
-              onChange={(e) => onQueryChange(e.target.value)}
-              placeholder="Paste a phone number or enter an order number"
-              className="flex-1 min-w-0 text-sm border border-gray-300 rounded-xl px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400"
-            />
-            {loading && (
-              <span className="hidden sm:inline-flex items-center text-xs text-gray-500 gap-1.5">
-                <span className="inline-block w-3 h-3 rounded-full border-2 border-gray-300 border-t-indigo-600 animate-spin" />
-                Searching…
-              </span>
-            )}
+            Search
+          </button>
+          {(query || "").length > 0 && (
             <button
-              type="submit"
-              disabled={(query || "").trim().length < 2}
-              className={`text-xs px-4 py-2.5 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-40 ${BTN_TAP}`}
-            >
-              Search
-            </button>
-            {(query || "").length > 0 && (
-              <button
-                type="button"
-                onClick={onClear}
-                className={`text-xs px-3 py-2.5 rounded-xl border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
-              >Clear</button>
-            )}
-          </form>
-          <div className="mt-1.5 text-[11px] text-gray-500">
-            Phone formatting is normalized automatically. Order numbers use a direct, fast lookup.
-          </div>
+              type="button"
+              onClick={onClear}
+              className={`h-11 text-xs px-3 rounded-xl border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
+            >Clear</button>
+          )}
+        </form>
+      </div>
+      <div className="mt-1.5 text-[11px] text-gray-500">
+        Searching <span className="font-mono font-semibold text-gray-700">{store}</span> · phone formatting is normalized automatically.
+      </div>
 
           {hasQuery && searchKind && !loading && (
             <div className="mt-2 flex flex-wrap gap-2">
@@ -2058,8 +2048,6 @@ function GlobalSearch({
           )}
         </div>
       )}
-        </div>
-      </div>
     </section>
   );
 }
