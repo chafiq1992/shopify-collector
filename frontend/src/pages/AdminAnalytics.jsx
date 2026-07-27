@@ -59,6 +59,7 @@ export default function AdminAnalytics(){
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [adminMsg, setAdminMsg] = useState(null);
+  const [activeTeam, setActiveTeam] = useState("confirmation");
 
   const [newUserEmail, setNewUserEmail] = useState("");
   const [newUserName, setNewUserName] = useState("");
@@ -425,6 +426,28 @@ export default function AdminAnalytics(){
   useEffect(() => { loadUsers(); }, []); // initial
   useEffect(() => { loadConfirmationStats(); }, []); // initial
 
+  function selectTeam(team){
+    setActiveTeam(team);
+    setAdminMsg(null);
+    if (team === "confirmation") loadConfirmationStats();
+    if (team === "collection") load();
+    if (team === "returns") {
+      loadReturnStats();
+      loadReturnEvents();
+    }
+    if (team === "users") loadUsers();
+  }
+
+  function applySelectedRange(){
+    if (activeTeam === "confirmation") loadConfirmationStats();
+    if (activeTeam === "collection") load();
+    if (activeTeam === "returns") {
+      loadReturnStats();
+      loadReturnEvents();
+    }
+    if (activeTeam === "users") loadUsers();
+  }
+
   function goto(path){
     try {
       const s = (store && store !== "all") ? String(store) : "";
@@ -505,7 +528,36 @@ export default function AdminAnalytics(){
             <input type="date" value={toDate} onChange={(e)=>setToDate(e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-2 py-1 bg-white" />
           </div>
           <div className="bg-gray-100 rounded-xl px-3 py-2 flex items-end">
-            <button onClick={() => { load(); loadConfirmationStats(); }} className="w-full text-sm px-3 py-2 rounded-lg bg-gray-900 text-white font-semibold active:scale-[.98]">Apply</button>
+            <button onClick={applySelectedRange} className="w-full text-sm px-3 py-2 rounded-lg bg-gray-900 text-white font-semibold active:scale-[.98]">Apply range</button>
+          </div>
+        </div>
+        <div className="max-w-6xl mx-auto px-4 pb-3">
+          <div className="flex gap-1 overflow-x-auto rounded-xl border border-gray-200 bg-gray-100 p-1" role="tablist" aria-label="Analytics team">
+            {[
+              { key: "confirmation", label: "Confirmation team", hint: "Calls and outcomes" },
+              { key: "collection", label: "Collection team", hint: "Collected, OUT and fulfilled" },
+              { key: "returns", label: "Returns team", hint: "Return scans" },
+              { key: "users", label: "Team setup", hint: "Users, roles and routing" },
+            ].map((tab) => {
+              const selected = activeTeam === tab.key;
+              return (
+                <button
+                  key={tab.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  onClick={() => selectTeam(tab.key)}
+                  className={`min-w-max flex-1 rounded-lg px-4 py-2 text-left transition ${
+                    selected
+                      ? "bg-white text-gray-900 shadow-sm ring-1 ring-gray-200"
+                      : "text-gray-500 hover:bg-white/60 hover:text-gray-800"
+                  }`}
+                >
+                  <span className="block text-sm font-semibold">{tab.label}</span>
+                  <span className="hidden sm:block text-[10px]">{tab.hint}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
       </header>
@@ -592,6 +644,7 @@ export default function AdminAnalytics(){
           <div className="text-gray-600">Loading…</div>
         ) : (
           <>
+            {activeTeam === "users" && (
             <section className="mb-6">
               <h3 className="text-sm font-semibold text-gray-700 mb-2">User management</h3>
               <div className="grid lg:grid-cols-2 gap-3 mb-3">
@@ -729,22 +782,42 @@ export default function AdminAnalytics(){
                 </div>
               </div>
             </section>
+            )}
 
+            {activeTeam === "confirmation" && (
             <section className="mb-6">
-              <div className="flex items-center mb-2">
-                <h3 className="text-sm font-semibold text-gray-700">Confirmation team metrics</h3>
-                <span className="ml-2 text-xs text-gray-500">
-                  Counts of each call-center action (N1..N4, NoWTP, Enatt, Confirmed, Cancelled) per agent in the selected date range.
-                </span>
+              <div className="flex flex-wrap items-start gap-3 mb-4">
+                <div>
+                  <h3 className="text-base font-semibold text-gray-900">Confirmation team performance</h3>
+                  <p className="mt-0.5 text-xs text-gray-500">
+                    Active confirmation agents only. Shared Collector and Order Tagger actions are excluded.
+                  </p>
+                </div>
                 <button onClick={loadConfirmationStats} className="ml-auto text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50">
                   {confStatsLoading ? "Loading…" : "Refresh"}
                 </button>
               </div>
-              <div className="overflow-x-auto bg-white border border-gray-200 rounded-xl">
-                <table className="min-w-full text-sm">
+              <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-4">
+                {[
+                  { label: "Active agents", value: confStatsRows.length, note: "Configured team", style: "border-indigo-200 bg-indigo-50 text-indigo-800" },
+                  { label: "Contact attempts", value: confStatsSummary?.contact_attempts || 0, note: "Calls and follow-ups", style: "border-sky-200 bg-sky-50 text-sky-800" },
+                  { label: "Confirmed", value: confStatsSummary?.confirmed || 0, note: "Successful outcomes", style: "border-emerald-200 bg-emerald-50 text-emerald-800" },
+                  { label: "Cancelled", value: confStatsSummary?.cancelled || 0, note: "Cancelled outcomes", style: "border-rose-200 bg-rose-50 text-rose-800" },
+                  { label: "Confirmation rate", value: `${Number(confStatsSummary?.confirmation_rate || 0).toFixed(1)}%`, note: "Confirmed / outcomes", style: "border-violet-200 bg-violet-50 text-violet-800" },
+                ].map((metric) => (
+                  <div key={metric.label} className={`rounded-xl border p-3 ${metric.style}`}>
+                    <div className="text-[10px] font-semibold uppercase tracking-wide opacity-75">{metric.label}</div>
+                    <div className="mt-1 text-2xl font-bold tabular-nums">{metric.value}</div>
+                    <div className="mt-0.5 text-[10px] opacity-70">{metric.note}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="overflow-x-auto bg-white border border-gray-200 rounded-xl shadow-sm">
+                <table className="min-w-[1160px] w-full text-sm">
                   <thead className="bg-gray-50 text-left text-[11px] uppercase tracking-wide text-gray-600">
                     <tr>
                       <th className="px-3 py-2">Agent</th>
+                      <th className="px-3 py-2 text-right">Contacts</th>
                       <th className="px-3 py-2 text-right">N1</th>
                       <th className="px-3 py-2 text-right">N2</th>
                       <th className="px-3 py-2 text-right">N3</th>
@@ -753,12 +826,13 @@ export default function AdminAnalytics(){
                       <th className="px-3 py-2 text-right">Enatt</th>
                       <th className="px-3 py-2 text-right">Confirmed</th>
                       <th className="px-3 py-2 text-right">Cancelled</th>
-                      <th className="px-3 py-2 text-right">Total</th>
+                      <th className="px-3 py-2 text-right">Success</th>
+                      <th className="px-3 py-2 text-right">Activity</th>
                     </tr>
                   </thead>
                   <tbody>
                     {(confStatsRows || []).length === 0 && !confStatsLoading && (
-                      <tr><td colSpan={10} className="px-3 py-4 text-center text-gray-500">No confirmation activity in this range.</td></tr>
+                      <tr><td colSpan={12} className="px-3 py-8 text-center text-gray-500">No active confirmation agents are configured.</td></tr>
                     )}
                     {(confStatsRows || []).map((r) => (
                       <tr key={r.user_id} className="border-t border-gray-100">
@@ -766,6 +840,7 @@ export default function AdminAnalytics(){
                           <div className="font-medium">{r.name || r.email || r.user_id}</div>
                           <div className="text-[11px] text-gray-500">{r.email}{r.role ? ` · ${r.role}` : ""}</div>
                         </td>
+                        <td className="px-3 py-2 text-right tabular-nums font-semibold">{r.contact_attempts || 0}</td>
                         <td className="px-3 py-2 text-right tabular-nums">
                           <span className="inline-block min-w-[28px] px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">{r.n1}</span>
                         </td>
@@ -790,7 +865,12 @@ export default function AdminAnalytics(){
                         <td className="px-3 py-2 text-right tabular-nums">
                           <span className="inline-block min-w-[28px] px-2 py-0.5 rounded bg-gray-100 text-gray-700 border border-gray-200">{r.cancelled}</span>
                         </td>
-                        <td className="px-3 py-2 text-right tabular-nums font-semibold">{r.total_attempts}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          <span className={`inline-block min-w-[52px] rounded-full px-2 py-1 text-xs font-semibold ${
+                            r.outcomes ? "bg-emerald-50 text-emerald-700" : "bg-gray-100 text-gray-400"
+                          }`}>{Number(r.confirmation_rate || 0).toFixed(1)}%</span>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums font-semibold">{r.total_actions || 0}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -798,6 +878,7 @@ export default function AdminAnalytics(){
                     <tfoot className="bg-gray-50">
                       <tr className="border-t border-gray-200 font-semibold text-gray-800">
                         <td className="px-3 py-2 text-right">Total</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.contact_attempts || 0}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.n1 || 0}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.n2 || 0}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.n3 || 0}</td>
@@ -806,17 +887,23 @@ export default function AdminAnalytics(){
                         <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.enatt || 0}</td>
                         <td className="px-3 py-2 text-right tabular-nums text-emerald-700">{confStatsSummary?.confirmed || 0}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.cancelled || 0}</td>
-                        <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.total_attempts || 0}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-emerald-700">{Number(confStatsSummary?.confirmation_rate || 0).toFixed(1)}%</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.total_actions || 0}</td>
                       </tr>
                     </tfoot>
                   )}
                 </table>
               </div>
-              <div className="text-[11px] text-gray-500 mt-1">
-                Computed live from the order audit log (every Phone/Nowtp/Enatt/Confirm/Cancel click).
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-gray-500 mt-2">
+                <span><strong>Contacts</strong> = N1-N4 + No-WTP + En attente.</span>
+                <span><strong>Success</strong> = confirmed / (confirmed + cancelled).</span>
+                <span>Tag removals and non-confirmation users are excluded.</span>
               </div>
             </section>
+            )}
 
+            {activeTeam === "collection" && (
+            <>
             <section className="mb-4">
               <h3 className="text-sm font-semibold text-gray-700 mb-2">Per-user totals</h3>
               <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
@@ -919,7 +1006,10 @@ export default function AdminAnalytics(){
                 Tip: this list comes from collector actions (not Shopify tag history). If your database is not persistent, you may see missing rows.
               </div>
             </section>
+            </>
+            )}
             {/* Return Scan Analytics */}
+            {activeTeam === "returns" && (
             <section className="mt-6">
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-sm font-semibold text-gray-700">↩️ Return Scan Analytics</h3>
@@ -1022,6 +1112,7 @@ export default function AdminAnalytics(){
                 <div className="text-sm text-gray-500">Click "Load Return Stats" or "Load Return Events" to see return scan analytics for the selected date range.</div>
               )}
             </section>
+            )}
           </>
         )}
       </main>

@@ -2627,6 +2627,10 @@ async def list_orders(
 
 class TagPayload(BaseModel):
     tag: str
+    # Only the confirmation page sets this marker.  The tag endpoints are shared
+    # with Collector, Order Tagger, and offline retry flows, so the tag value alone
+    # is not enough to decide which team's analytics should receive credit.
+    source: Optional[str] = None
 
 class OrderActionBody(BaseModel):
     order_number: Optional[str] = None
@@ -2772,6 +2776,27 @@ def _classify_agent_tag_action(tag: str) -> Optional[str]:
     return None
 
 
+def _tag_write_audit_action(
+    *,
+    tag: str,
+    op: str,
+    source: Optional[str],
+    user_role: Optional[str],
+) -> str:
+    """Choose the audit action without confusing shared tag writes with confirmations."""
+    source_norm = (source or "").strip().lower()
+    is_confirmation_action = (
+        source_norm == "confirmation"
+        and op == "add"
+        and user_role == "agent"
+    )
+    return (
+        _classify_agent_tag_action(tag)
+        if is_confirmation_action
+        else None
+    ) or f"confirmation_tag_{op}"
+
+
 def _local_day_bounds_utc() -> Tuple[datetime, datetime]:
     """Today's [start, end) in the app timezone, converted to UTC."""
     try:
@@ -2820,13 +2845,14 @@ async def _maybe_log_agent_tag_action(
     tag: str,
     op: str,
     store: Optional[str],
+    source: Optional[str] = None,
 ):
     """Audit-log a tag write.
 
-    - Logs for every authenticated user, regardless of role (role is captured in
-      metadata so analytics can split by role later if needed). Without this, any
-      tag write made while logged in as admin/manager silently dropped from the
-      counts agents see on the confirmation page.
+    - Classifies a write as a confirmation metric only when it is an add operation
+      explicitly marked as coming from the Confirmation page and the actor currently
+      has the confirmation-agent role. Other shared tag writes stay in the audit log
+      as generic add/remove events.
     - Dedupes per (user, order, action, local day): an agent re-attempting the
       same call later that day or the worker retrying a single click won't inflate
       counts, but a different agent or a different day will count separately.
@@ -2844,7 +2870,13 @@ async def _maybe_log_agent_tag_action(
             order_gid, tag, op,
         )
         return
-    action_name = _classify_agent_tag_action(tag) or f"confirmation_tag_{op}"
+    source_norm = (source or "").strip().lower()
+    action_name = _tag_write_audit_action(
+        tag=tag,
+        op=op,
+        source=source_norm,
+        user_role=getattr(user, "role", None),
+    )
     store_key = _normalize_store(store)
     try:
         if await _already_logged_today(
@@ -2862,7 +2894,12 @@ async def _maybe_log_agent_tag_action(
             order_gid=order_gid,
             store_key=store_key,
             action=action_name,
-            metadata={"tag": tag, "op": op, "role": getattr(user, "role", None)},
+            metadata={
+                "tag": tag,
+                "op": op,
+                "role": getattr(user, "role", None),
+                "source": source_norm or None,
+            },
         )
         await session.commit()
     except IntegrityError:
@@ -2905,7 +2942,15 @@ if HAVE_AUTH_DB:
         data = await _shopify_add_tag(order_gid, payload.tag, store)
         _bust_confirmation_caches()
         await manager.broadcast({"type": "order.tag_added", "id": order_gid, "tag": payload.tag})
-        await _maybe_log_agent_tag_action(user, session, order_gid=order_gid, tag=payload.tag, op="add", store=store)
+        await _maybe_log_agent_tag_action(
+            user,
+            session,
+            order_gid=order_gid,
+            tag=payload.tag,
+            op="add",
+            store=store,
+            source=payload.source,
+        )
         return {"ok": True, "result": data}
 
     @app.post("/api/orders/{order_gid:path}/remove-tag")
@@ -2919,7 +2964,15 @@ if HAVE_AUTH_DB:
         data = await _shopify_remove_tag(order_gid, payload.tag, store)
         _bust_confirmation_caches()
         await manager.broadcast({"type": "order.tag_removed", "id": order_gid, "tag": payload.tag})
-        await _maybe_log_agent_tag_action(user, session, order_gid=order_gid, tag=payload.tag, op="remove", store=store)
+        await _maybe_log_agent_tag_action(
+            user,
+            session,
+            order_gid=order_gid,
+            tag=payload.tag,
+            op="remove",
+            store=store,
+            source=payload.source,
+        )
         return {"ok": True, "result": data}
 else:
     @app.post("/api/orders/{order_gid:path}/add-tag")
@@ -3093,7 +3146,12 @@ if HAVE_AUTH_DB:
                 func.sum(case((OrderEvent.action == "fulfilled", 1), else_=0)).label("fulfilled"),
             )
             .join(OrderEvent, User.id == OrderEvent.user_id)
-            .where(OrderEvent.created_at >= start_dt, OrderEvent.created_at < end_dt_inclusive)
+            .where(
+                User.role == "collector",
+                OrderEvent.action.in_(("collected", "out", "fulfilled")),
+                OrderEvent.created_at >= start_dt,
+                OrderEvent.created_at < end_dt_inclusive,
+            )
             .group_by(User.id, User.email, User.name, func.date(OrderEvent.created_at), OrderEvent.store_key)
             .order_by(func.date(OrderEvent.created_at).desc())
         )
@@ -3281,6 +3339,7 @@ if HAVE_AUTH_DB:
             )
             .join(User, User.id == OrderEvent.user_id)
             .where(
+                User.role == "collector",
                 OrderEvent.action == "out",
                 OrderEvent.created_at >= start_dt,
                 OrderEvent.created_at < end_dt_inclusive,

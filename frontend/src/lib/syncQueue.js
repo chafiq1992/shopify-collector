@@ -42,7 +42,7 @@ function uid() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function enqueueTagWrite({ orderId, action, tag, store }) {
+export function enqueueTagWrite({ orderId, action, tag, store, source = "confirmation" }) {
   // action: "add" | "remove"
   if (!orderId || !tag || (action !== "add" && action !== "remove")) return null;
   const items = read();
@@ -52,6 +52,7 @@ export function enqueueTagWrite({ orderId, action, tag, store }) {
     action,
     tag,
     store: store || "",
+    source,
     attempts: 0,
     nextAttemptAt: Date.now(),
     enqueuedAt: Date.now(),
@@ -82,7 +83,7 @@ async function attemptItem(item) {
   const res = await authFetch(url, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ tag: item.tag }),
+    body: JSON.stringify({ tag: item.tag, source: item.source || "confirmation" }),
   });
   if (!res.ok) {
     // 401/403: keep the item queued — the user just needs to re-auth and the

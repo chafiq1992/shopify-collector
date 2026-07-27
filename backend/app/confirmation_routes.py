@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -242,7 +242,7 @@ def build_catchall_query(exclude_tags: Optional[List[str]] = None) -> str:
 async def _other_agents_active_tags(db: AsyncSession, exclude_user_id: Optional[str] = None) -> List[str]:
     """Every Shopify tag claimed by some OTHER active confirmation user, sorted + deduped."""
     res = await db.execute(
-        select(User).where(User.is_active == True)  # noqa: E712
+        select(User).where(User.is_active == True, User.role == "agent")  # noqa: E712
     )
     out: set = set()
     for u in res.scalars().all():
@@ -1545,10 +1545,15 @@ async def _team_stats_uncached(
     for backwards compatibility but no longer scopes the output."""
     today_label = today_cod_label()
 
-    # Roster: any active user who is either intentionally an "agent" or has tags assigned.
-    res = await db.execute(select(User).where(User.is_active == True))  # noqa: E712
-    all_active = res.scalars().all()
-    agents = [u for u in all_active if u.role == "agent" or (u.agent_tags or [])]
+    # Team membership is explicit: only active users with the confirmation-agent role.
+    # A collector can also have Shopify tags for unrelated workflows, so tags alone must
+    # never make that user appear in confirmation analytics.
+    res = await db.execute(
+        select(User)
+        .where(User.is_active == True, User.role == "agent")  # noqa: E712
+        .order_by(User.name.asc(), User.email.asc())
+    )
+    agents = res.scalars().all()
     if not agents:
         return {"ok": True, "agents": [], "today_label": today_label, "stores": []}
 
@@ -1570,6 +1575,8 @@ async def _team_stats_uncached(
             .where(
                 OrderEvent.action == "confirmation_confirmed",
                 OrderEvent.user_id.in_(agent_ids),
+                func.coalesce(OrderEvent.event_metadata["op"].as_string(), "") != "remove",
+                func.coalesce(OrderEvent.event_metadata["role"].as_string(), "agent") == "agent",
                 OrderEvent.created_at >= today_utc,
                 OrderEvent.created_at < tomorrow_utc,
             )
@@ -1689,11 +1696,12 @@ async def admin_confirmation_stats(
     db: AsyncSession = Depends(get_session),
     _: User = Depends(require_admin),
 ):
-    """Per-user counts of confirmation-page actions in a date range.
+    """Per-agent counts of genuine confirmation-page actions in a date range.
 
-    Reads the OrderEvent audit table (single source of truth) and buckets the action
-    names into n1..n4 / nowtp / enatt / confirmed / cancelled. Returns one row per
-    active user that took at least one such action, plus a summary across all users.
+    Only active users configured with the ``agent`` role are part of this report.
+    Historical tag-removal events and events explicitly recorded while the actor had
+    another role are excluded so shared Collector/Tagger writes cannot inflate the
+    confirmation team's metrics.
     """
     from_dt = _parse_date_bound(from_date, end=False)
     to_dt = _parse_date_bound(to_date, end=True)
@@ -1705,7 +1713,45 @@ async def admin_confirmation_stats(
         today_local = datetime.now(_tz()).replace(hour=0, minute=0, second=0, microsecond=0)
         to_dt = (today_local + timedelta(days=1)).astimezone(timezone.utc)
 
-    conds = [OrderEvent.created_at >= from_dt, OrderEvent.created_at < to_dt]
+    # Build the roster first and include zero-activity agents in the response.  This
+    # keeps the dashboard aligned with the configured confirmation team instead of
+    # inferring team membership from whichever users happened to generate events.
+    agent_res = await db.execute(
+        select(User)
+        .where(User.role == "agent", User.is_active == True)  # noqa: E712
+        .order_by(User.name.asc(), User.email.asc())
+    )
+    agents = agent_res.scalars().all()
+    agent_ids = [a.id for a in agents]
+
+    relevant_action = or_(
+        OrderEvent.action.in_(
+            (
+                "confirmation_phone_n1",
+                "confirmation_phone_n2",
+                "confirmation_phone_n3",
+                "confirmation_phone_n4",
+                "confirmation_confirmed",
+                "confirmation_cancelled",
+            )
+        ),
+        OrderEvent.action.like("confirmation_nowtp%"),
+        OrderEvent.action.like("confirmation_enatt%"),
+    )
+    metadata_op = func.coalesce(OrderEvent.event_metadata["op"].as_string(), "")
+    metadata_role = func.coalesce(OrderEvent.event_metadata["role"].as_string(), "agent")
+    conds = [
+        OrderEvent.created_at >= from_dt,
+        OrderEvent.created_at < to_dt,
+        relevant_action,
+        metadata_op != "remove",
+        metadata_role == "agent",
+    ]
+    if agent_ids:
+        conds.append(OrderEvent.user_id.in_(agent_ids))
+    else:
+        # Avoid scanning/aggregating unrelated events when no confirmation team exists.
+        conds.append(OrderEvent.user_id.in_([]))
     store_key = (store or "").strip().lower()
     if store_key and store_key != "all":
         conds.append(OrderEvent.store_key == store_key)
@@ -1724,6 +1770,7 @@ async def admin_confirmation_stats(
             _sum_when(OrderEvent.action.like("confirmation_enatt%")).label("enatt"),
             _sum_when(OrderEvent.action == "confirmation_confirmed").label("confirmed"),
             _sum_when(OrderEvent.action == "confirmation_cancelled").label("cancelled"),
+            func.count(func.distinct(OrderEvent.order_gid)).label("orders_touched"),
         )
         .where(*conds)
         .group_by(OrderEvent.user_id)
@@ -1742,37 +1789,80 @@ async def admin_confirmation_stats(
             "enatt": int(m["enatt"] or 0),
             "confirmed": int(m["confirmed"] or 0),
             "cancelled": int(m["cancelled"] or 0),
+            "orders_touched": int(m["orders_touched"] or 0),
         }
 
-    # Pull user identity for the rows we found.
-    user_ids = list(by_user.keys())
-    name_by_id: Dict[str, Tuple[str, str, str]] = {}
-    if user_ids:
-        u_res = await db.execute(select(User).where(User.id.in_(user_ids)))
-        for u in u_res.scalars().all():
-            name_by_id[u.id] = (u.email or "", u.name or "", u.role or "")
-
     rows: List[Dict[str, Any]] = []
-    summary = {"n1": 0, "n2": 0, "n3": 0, "n4": 0, "nowtp": 0, "enatt": 0, "confirmed": 0, "cancelled": 0, "total_attempts": 0}
-    for uid, counts in by_user.items():
-        email, name, role = name_by_id.get(uid, ("", "", ""))
-        total_attempts = sum(counts.values())
+    summary = {
+        "n1": 0,
+        "n2": 0,
+        "n3": 0,
+        "n4": 0,
+        "nowtp": 0,
+        "enatt": 0,
+        "confirmed": 0,
+        "cancelled": 0,
+        "contact_attempts": 0,
+        "outcomes": 0,
+        "orders_touched": 0,
+        "total_actions": 0,
+        # Backwards-compatible alias for older clients.
+        "total_attempts": 0,
+    }
+    for agent in agents:
+        uid = agent.id
+        counts = by_user.get(
+            uid,
+            {
+                "n1": 0,
+                "n2": 0,
+                "n3": 0,
+                "n4": 0,
+                "nowtp": 0,
+                "enatt": 0,
+                "confirmed": 0,
+                "cancelled": 0,
+                "orders_touched": 0,
+            },
+        )
+        contact_attempts = sum(counts[k] for k in ("n1", "n2", "n3", "n4", "nowtp", "enatt"))
+        outcomes = counts["confirmed"] + counts["cancelled"]
+        total_actions = contact_attempts + outcomes
+        confirmation_rate = round((counts["confirmed"] / outcomes) * 100, 1) if outcomes else 0.0
         rows.append({
             "user_id": uid,
-            "email": email,
-            "name": name,
-            "role": role,
+            "email": agent.email or "",
+            "name": agent.name or "",
+            "role": agent.role or "",
+            "tags": list(agent.agent_tags or []),
             **counts,
-            "total_attempts": total_attempts,
+            "contact_attempts": contact_attempts,
+            "outcomes": outcomes,
+            "confirmation_rate": confirmation_rate,
+            "total_actions": total_actions,
+            "total_attempts": total_actions,
         })
-        for k in summary:
-            if k == "total_attempts":
-                summary[k] += total_attempts
-            else:
-                summary[k] += counts.get(k, 0)
+        for key in ("n1", "n2", "n3", "n4", "nowtp", "enatt", "confirmed", "cancelled", "orders_touched"):
+            summary[key] += counts.get(key, 0)
+        summary["contact_attempts"] += contact_attempts
+        summary["outcomes"] += outcomes
+        summary["total_actions"] += total_actions
+        summary["total_attempts"] += total_actions
 
-    # Stable order: confirmed-today desc, then cancelled desc, then email.
-    rows.sort(key=lambda r: (-(r.get("confirmed") or 0), -(r.get("cancelled") or 0), r.get("email") or ""))
+    summary["confirmation_rate"] = (
+        round((summary["confirmed"] / summary["outcomes"]) * 100, 1)
+        if summary["outcomes"]
+        else 0.0
+    )
+
+    # Stable productivity order while keeping zero-activity team members visible.
+    rows.sort(
+        key=lambda r: (
+            -(r.get("total_actions") or 0),
+            -(r.get("confirmed") or 0),
+            r.get("email") or "",
+        )
+    )
 
     return {
         "ok": True,
