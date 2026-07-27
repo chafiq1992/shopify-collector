@@ -42,12 +42,12 @@ class User(Base):
 class OrderEvent(Base):
     __tablename__ = "order_events"
     __table_args__ = (
-        # Analytics-driven indexes. No table-level uniqueness: per-(order, action)
-        # dedupe is enforced at the application layer where the rules differ by
-        # action type (collected/out/fulfilled are once-ever per order; confirmation
-        # events dedupe per user-per-day so legitimate re-attempts still count).
+        # Analytics-driven indexes. Confirmation-page writes additionally carry a
+        # unique client_action_id so a queued click is recorded exactly once even
+        # when several tabs or a network retry replay the same request.
         Index("ix_order_events_user_action_created", "user_id", "action", "created_at"),
         Index("ix_order_events_order_action", "order_gid", "action"),
+        Index("ux_order_events_client_action_id", "client_action_id", unique=True),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -56,6 +56,7 @@ class OrderEvent(Base):
     store_key = Column(String(32), nullable=False, index=True)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     action = Column(String(32), nullable=False, index=True)
+    client_action_id = Column(String(128), nullable=True)
     # "metadata" is reserved by SQLAlchemy Declarative; use event_metadata instead
     event_metadata = Column(_json_type(), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)

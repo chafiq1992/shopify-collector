@@ -3,7 +3,7 @@ import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import OrderLabel from "../components/OrderLabel";
 import { useToasts, ToastStack } from "../components/Toast";
-import { persistStoreSelection, readCurrentStore } from "../lib/stores";
+import { persistStoreSelection, readCurrentStore, titleStore } from "../lib/stores";
 import { enqueueTagWrite, useSyncQueueLength, readQueue } from "../lib/syncQueue";
 import { copyNodeAsPng, triggerDownload } from "../lib/labelClipboard";
 import {
@@ -165,13 +165,14 @@ function goto(path, store) {
 
 // Apply pending sync-queue tag writes to a list of orders so the UI keeps showing
 // recent agent clicks until Shopify has propagated the tag change.
-function applyPendingQueueWrites(orders) {
+function applyPendingQueueWrites(orders, store) {
   let pending;
   try { pending = readQueue(); } catch { pending = []; }
   if (!pending || pending.length === 0) return orders;
   const byOrder = new Map();
   for (const it of pending) {
     if (!it?.orderId) continue;
+    if (store && it.store && String(it.store).toLowerCase() !== String(store).toLowerCase()) continue;
     const arr = byOrder.get(it.orderId) || [];
     arr.push(it);
     byOrder.set(it.orderId, arr);
@@ -233,7 +234,7 @@ export default function Confirmation() {
 }
 
 // ---------- Header ----------
-function Header({ title, store, setStore, rightSlot, me }) {
+function Header({ title, rightSlot, me }) {
   const initial = ((me?.name || me?.email || "?").trim().charAt(0) || "?").toUpperCase();
   return (
     <header className="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-gray-200">
@@ -256,7 +257,6 @@ function Header({ title, store, setStore, rightSlot, me }) {
         )}
         <div className="ml-auto flex items-center gap-2">
           {rightSlot}
-          <StorePicker value={store} onChange={(v) => setStore(v)} />
           <button
             onClick={() => { clearAuth(); try { location.href = "/login"; } catch {} }}
             className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50 active:scale-[0.96] transition-transform duration-75"
@@ -309,46 +309,79 @@ function AgentView({ me }) {
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState(null);
   const searchReqIdRef = useRef(0);
+  const searchTimerRef = useRef(null);
+  const [expandedCustomerId, setExpandedCustomerId] = useState(null);
+  const [customerOrdersById, setCustomerOrdersById] = useState({});
 
-  // Debounced auto-search as the agent types (≥3 chars).
+  const runSearch = useCallback(async (queryValue) => {
+    const q = (queryValue || "").trim();
+    if (q.length < 2) return;
+    const reqId = ++searchReqIdRef.current;
+    setSearchLoading(true);
+    setSearchError(null);
+    try {
+      const js = await API.search(store, q);
+      if (reqId !== searchReqIdRef.current) return;
+      setSearchResults(js);
+      const primed = {};
+      for (const customer of (js.customers || [])) {
+        if (customer?.id && Array.isArray(customer.orders)) {
+          primed[customer.id] = { orders: customer.orders, loading: false };
+        }
+      }
+      setCustomerOrdersById(primed);
+    } catch (e) {
+      if (reqId !== searchReqIdRef.current) return;
+      setSearchError(e?.message || "Search failed");
+      setSearchResults(null);
+      setCustomerOrdersById({});
+    } finally {
+      if (reqId === searchReqIdRef.current) setSearchLoading(false);
+    }
+  }, [store]);
+
+  // Short debounce keeps typing smooth; Enter or the Search button runs immediately.
   useEffect(() => {
     const q = (searchQuery || "").trim();
-    if (q.length < 3) {
+    if (q.length < 2) {
+      searchReqIdRef.current += 1;
       setSearchResults(null);
       setSearchLoading(false);
       setSearchError(null);
+      setCustomerOrdersById({});
       return;
     }
-    const handle = setTimeout(async () => {
-      const reqId = ++searchReqIdRef.current;
-      setSearchLoading(true); setSearchError(null);
-      try {
-        const js = await API.search(store, q);
-        if (reqId !== searchReqIdRef.current) return;
-        setSearchResults(js);
-      } catch (e) {
-        if (reqId !== searchReqIdRef.current) return;
-        setSearchError(e?.message || "Search failed");
-        setSearchResults(null);
-      } finally {
-        if (reqId === searchReqIdRef.current) setSearchLoading(false);
-      }
-    }, 400);
-    return () => clearTimeout(handle);
-  }, [searchQuery, store]);
+    searchTimerRef.current = setTimeout(() => runSearch(q), 250);
+    return () => {
+      clearTimeout(searchTimerRef.current);
+      searchTimerRef.current = null;
+    };
+  }, [searchQuery, runSearch]);
+
+  function searchNow() {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = null;
+    runSearch(searchQuery);
+  }
 
   function clearSearch() {
+    searchReqIdRef.current += 1;
     setSearchQuery("");
     setSearchResults(null);
     setSearchError(null);
     setExpandedCustomerId(null);
+    setCustomerOrdersById({});
   }
 
-  // Inline customer expansion from the search panel — one at a time. Loads the
-  // customer's orders via /api/agent/customer-orders so renderOrderCard can render
-  // them as the same interactive card the queue uses.
-  const [expandedCustomerId, setExpandedCustomerId] = useState(null);
-  const [customerOrdersById, setCustomerOrdersById] = useState({});
+  function changeStore(nextStore) {
+    if (!nextStore || nextStore === store) return;
+    searchReqIdRef.current += 1;
+    setStore(nextStore);
+    setSearchResults(null);
+    setSearchError(null);
+    setExpandedCustomerId(null);
+    setCustomerOrdersById({});
+  }
 
   async function toggleSearchCustomerExpand(customerId) {
     if (!customerId) return;
@@ -529,10 +562,10 @@ function AgentView({ me }) {
 
   // Orders for the current page, with pending sync-queue writes layered on top.
   const ordersForView = useMemo(
-    () => applyPendingQueueWrites(currentOrders),
+    () => applyPendingQueueWrites(currentOrders, store),
     // recomputes on each `nowTick` so newly enqueued writes are picked up promptly
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [currentOrders, syncCount, nowTick]
+    [currentOrders, store, syncCount, nowTick]
   );
 
   // ---------- Optimistic local mutations ----------
@@ -929,8 +962,6 @@ function AgentView({ me }) {
       <Header
         title="Confirmation"
         me={me}
-        store={store}
-        setStore={setStore}
         rightSlot={
           <div className="flex items-center gap-2">
             {syncCount > 0 && (
@@ -952,11 +983,13 @@ function AgentView({ me }) {
         <GlobalSearch
           query={searchQuery}
           onQueryChange={setSearchQuery}
+          onSearchNow={searchNow}
           onClear={clearSearch}
           loading={searchLoading}
           error={searchError}
           results={searchResults}
           store={store}
+          onStoreChange={changeStore}
           pushToast={pushToast}
           renderOrderCard={renderOrderCard}
           expandedCustomerId={expandedCustomerId}
@@ -1821,14 +1854,15 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
 // of the agent's tag-filtered queue. Phone-like input is normalized server-side so
 // `+212 614 162-654`, `0614162654`, and `614162654` all match the same record.
 function GlobalSearch({
-  query, onQueryChange, onClear, loading, error, results, store, pushToast,
+  query, onQueryChange, onSearchNow, onClear, loading, error, results, store, onStoreChange, pushToast,
   renderOrderCard, expandedCustomerId, customerOrdersById, onToggleCustomer,
 }) {
-  const shopDomain = results?.shop_domain || "";
   const orders = results?.orders || [];
   const customers = results?.customers || [];
-  const hasQuery = (query || "").trim().length >= 3;
+  const hasQuery = (query || "").trim().length >= 2;
   const hasResults = hasQuery && (orders.length > 0 || customers.length > 0);
+  const searchKind = results?.search_kind || "";
+  const normalizedPhone = results?.normalized_phone || "";
 
   async function copyText(text, label) {
     try {
@@ -1840,37 +1874,87 @@ function GlobalSearch({
   }
 
   return (
-    <section className="bg-white border border-gray-200 rounded-2xl p-3 shadow-sm">
-      <div className="flex items-center gap-2">
-        <span aria-hidden className="text-base">🔎</span>
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => onQueryChange(e.target.value)}
-          placeholder={`Search ${store || "Shopify"} — order number or phone (e.g. 71779 or +212 614 162 654)`}
-          className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400"
-        />
-        {loading && (
-          <span className="inline-flex items-center text-xs text-gray-500 gap-1.5">
-            <span className="inline-block w-3 h-3 rounded-full border-2 border-gray-300 border-t-indigo-600 animate-spin" />
-            Searching…
-          </span>
-        )}
-        {(query || "").length > 0 && (
-          <button
-            type="button"
-            onClick={onClear}
-            className={`text-xs px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
-          >Clear</button>
-        )}
-      </div>
-      <div className="mt-1 text-[11px] text-gray-500">
-        Searches every order + customer in <span className="font-mono">{store}</span>. Phone is matched with spaces / + / dashes stripped.
-      </div>
+    <section className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
+      <div className="grid lg:grid-cols-[230px_minmax(0,1fr)]">
+        <aside className="bg-gradient-to-br from-slate-950 to-indigo-950 text-white p-4">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-indigo-200 font-semibold">
+            Searching in store
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <span className="w-9 h-9 rounded-xl bg-white/10 border border-white/15 flex items-center justify-center" aria-hidden>🏪</span>
+            <div className="min-w-0">
+              <div className="font-bold text-base truncate">{titleStore(store)}</div>
+              <div className="font-mono text-[10px] text-indigo-200 truncate">{store}</div>
+            </div>
+          </div>
+          <StorePicker
+            value={store}
+            onChange={onStoreChange}
+            allowCustom={false}
+            className="mt-4 w-full justify-between border-indigo-300/40 text-slate-900"
+          />
+          <p className="mt-3 text-[11px] leading-relaxed text-indigo-100/80">
+            Switch before searching so results and actions always use the intended Shopify store.
+          </p>
+        </aside>
 
-      {error && (
-        <div className="mt-2 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-800">{error}</div>
-      )}
+        <div className="p-4 min-w-0">
+          <form
+            className="flex items-center gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              onSearchNow?.();
+            }}
+          >
+            <span aria-hidden className="text-base">🔎</span>
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => onQueryChange(e.target.value)}
+              placeholder="Paste a phone number or enter an order number"
+              className="flex-1 min-w-0 text-sm border border-gray-300 rounded-xl px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400"
+            />
+            {loading && (
+              <span className="hidden sm:inline-flex items-center text-xs text-gray-500 gap-1.5">
+                <span className="inline-block w-3 h-3 rounded-full border-2 border-gray-300 border-t-indigo-600 animate-spin" />
+                Searching…
+              </span>
+            )}
+            <button
+              type="submit"
+              disabled={(query || "").trim().length < 2}
+              className={`text-xs px-4 py-2.5 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-40 ${BTN_TAP}`}
+            >
+              Search
+            </button>
+            {(query || "").length > 0 && (
+              <button
+                type="button"
+                onClick={onClear}
+                className={`text-xs px-3 py-2.5 rounded-xl border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
+              >Clear</button>
+            )}
+          </form>
+          <div className="mt-1.5 text-[11px] text-gray-500">
+            Phone formatting is normalized automatically. Order numbers use a direct, fast lookup.
+          </div>
+
+          {hasQuery && searchKind && !loading && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              <span className="inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-700">
+                {searchKind === "phone" ? "Phone match" : searchKind === "order" ? "Order-number match" : "Customer / order search"}
+              </span>
+              {normalizedPhone && (
+                <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-mono font-semibold text-emerald-700">
+                  Normalized: {normalizedPhone}
+                </span>
+              )}
+            </div>
+          )}
+
+          {error && (
+            <div className="mt-2 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-800">{error}</div>
+          )}
 
       {hasQuery && !loading && !error && !hasResults && (
         <div className="mt-3 text-sm text-gray-500 italic">No orders or customers match "{query}" in {store}.</div>
@@ -1881,7 +1965,9 @@ function GlobalSearch({
           {orders.length > 0 && (
             <div>
               <div className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600 mb-1.5">
-                Orders ({orders.length})
+                {searchKind === "phone"
+                  ? `Customer orders (${orders.length}) · newest first`
+                  : `Orders (${orders.length})`}
               </div>
               <div className="rounded-xl border border-gray-200 bg-white overflow-hidden divide-y divide-gray-100">
                 {orders.map((o) => (
@@ -1972,6 +2058,8 @@ function GlobalSearch({
           )}
         </div>
       )}
+        </div>
+      </div>
     </section>
   );
 }

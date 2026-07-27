@@ -2712,6 +2712,7 @@ async def _record_user_action(
     store_key: str,
     action: str,
     metadata: Optional[Dict[str, Any]] = None,
+    client_action_id: Optional[str] = None,
 ):
     ev = OrderEvent(
         order_number=(order_number or "").lstrip("#") or (order_gid or ""),
@@ -2719,6 +2720,7 @@ async def _record_user_action(
         store_key=_normalize_store(store_key),
         user_id=user_id,
         action=action,
+        client_action_id=(client_action_id or "").strip() or None,
         event_metadata=metadata or {},
     )
     session.add(ev)

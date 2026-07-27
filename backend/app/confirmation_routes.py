@@ -755,11 +755,11 @@ query SearchOrders($first: Int!, $query: String) {{
 }}
 """
 
-SEARCH_CUSTOMERS_GQL = """
-query SearchCustomers($first: Int!, $query: String) {
-  customers(first: $first, query: $query, sortKey: UPDATED_AT, reverse: true) {
-    edges {
-      node {
+SEARCH_CUSTOMERS_GQL = f"""
+query SearchCustomers($first: Int!, $ordersFirst: Int!, $query: String) {{
+  customers(first: $first, query: $query, sortKey: UPDATED_AT, reverse: true) {{
+    edges {{
+      node {{
         id
         displayName
         firstName
@@ -767,12 +767,274 @@ query SearchCustomers($first: Int!, $query: String) {
         email
         phone
         numberOfOrders
-        defaultAddress { city country }
-      }
-    }
-  }
-}
+        defaultAddress {{ city country }}
+        orders(first: $ordersFirst, sortKey: CREATED_AT, reverse: true) {{
+          edges {{
+            node {{ {_ORDER_NODE_FIELDS} }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
 """
+
+
+# ---------- Reliable, idempotent Confirmation action writes ----------
+
+class AgentTagActionBody(BaseModel):
+    order_id: str
+    tag: str
+    op: str
+    store: str
+    client_action_id: str
+    actor_id: Optional[str] = None
+
+
+def _same_client_action(
+    event: OrderEvent,
+    *,
+    user_id: str,
+    order_id: str,
+    store_key: str,
+    tag: str,
+    op: str,
+) -> bool:
+    metadata = event.event_metadata or {}
+    return (
+        event.user_id == user_id
+        and event.order_gid == order_id
+        and event.store_key == store_key
+        and str(metadata.get("tag") or "").strip().lower() == tag.lower()
+        and str(metadata.get("op") or "").strip().lower() == op
+    )
+
+
+@router.post("/api/agent/tag-action")
+async def agent_tag_action(
+    body: AgentTagActionBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Apply one Confirmation tag write and durably attribute it to its agent.
+
+    The browser supplies one stable client_action_id per click. A successful
+    response therefore means both the Shopify mutation and the audit event are
+    durable. Retried requests return the original event instead of double-counting.
+    """
+    if getattr(user, "role", None) != "agent":
+        raise HTTPException(status_code=403, detail="confirmation agent role required")
+
+    order_id = (body.order_id or "").strip()
+    tag = (body.tag or "").strip()
+    op = (body.op or "").strip().lower()
+    store = (body.store or "").strip()
+    client_action_id = (body.client_action_id or "").strip()
+    actor_id = (body.actor_id or "").strip()
+    if not order_id:
+        raise HTTPException(status_code=400, detail="order_id is required")
+    if not tag or len(tag) > 255:
+        raise HTTPException(status_code=400, detail="tag is required and must be at most 255 characters")
+    if op not in {"add", "remove"}:
+        raise HTTPException(status_code=400, detail="op must be add or remove")
+    if not store:
+        raise HTTPException(status_code=400, detail="store is required")
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", client_action_id):
+        raise HTTPException(status_code=400, detail="invalid client_action_id")
+    if actor_id and actor_id != user.id:
+        # A localStorage queue can survive logout. Never let the next signed-in
+        # user replay and inherit another agent's queued actions.
+        raise HTTPException(status_code=409, detail="queued action belongs to another agent")
+
+    from .main import (  # type: ignore
+        _classify_agent_tag_action,
+        _normalize_store,
+        _record_user_action,
+        _shopify_add_tag,
+        _shopify_remove_tag,
+    )
+
+    store_key = _normalize_store(store)
+    existing = await db.scalar(
+        select(OrderEvent).where(OrderEvent.client_action_id == client_action_id)
+    )
+    if existing is not None:
+        if not _same_client_action(
+            existing,
+            user_id=user.id,
+            order_id=order_id,
+            store_key=store_key,
+            tag=tag,
+            op=op,
+        ):
+            raise HTTPException(status_code=409, detail="client_action_id was already used for a different action")
+        return {
+            "ok": True,
+            "audited": True,
+            "deduped": True,
+            "action": existing.action,
+            "event_id": existing.id,
+        }
+
+    try:
+        if op == "add":
+            await _shopify_add_tag(order_id, tag, store)
+        else:
+            await _shopify_remove_tag(order_id, tag, store)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "confirmation tag write failed (order=%s tag=%s op=%s user=%s)",
+            order_id, tag, op, user.id,
+        )
+        raise HTTPException(status_code=502, detail=f"Shopify tag write failed: {exc}") from exc
+
+    action_name = (
+        _classify_agent_tag_action(tag)
+        if op == "add"
+        else None
+    ) or f"confirmation_tag_{op}"
+    metadata = {
+        "tag": tag,
+        "op": op,
+        "role": "agent",
+        "source": "confirmation",
+        "client_action_id": client_action_id,
+    }
+    try:
+        await _record_user_action(
+            db,
+            user_id=user.id,
+            order_number=None,
+            order_gid=order_id,
+            store_key=store_key,
+            action=action_name,
+            metadata=metadata,
+            client_action_id=client_action_id,
+        )
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        # Another tab can race the same localStorage item. The unique key picks
+        # one winner; verify that the winner represents this exact action.
+        existing = await db.scalar(
+            select(OrderEvent).where(OrderEvent.client_action_id == client_action_id)
+        )
+        if existing is None or not _same_client_action(
+            existing,
+            user_id=user.id,
+            order_id=order_id,
+            store_key=store_key,
+            tag=tag,
+            op=op,
+        ):
+            logger.exception(
+                "confirmation audit idempotency conflict (client_action_id=%s)",
+                client_action_id,
+            )
+            raise HTTPException(status_code=503, detail="action audit could not be verified; retrying is safe")
+        return {
+            "ok": True,
+            "audited": True,
+            "deduped": True,
+            "action": existing.action,
+            "event_id": existing.id,
+        }
+    except Exception as exc:
+        await db.rollback()
+        # Do not acknowledge the queue item. Shopify add/remove-tag is
+        # idempotent, so the client can safely retry until attribution commits.
+        logger.exception(
+            "confirmation audit failed after Shopify write (order=%s user=%s action=%s)",
+            order_id, user.id, action_name,
+        )
+        raise HTTPException(status_code=503, detail="action was not audited yet; retrying is safe") from exc
+
+    invalidate_all_breakdown_caches()
+    return {
+        "ok": True,
+        "audited": True,
+        "deduped": False,
+        "action": action_name,
+        "event_id": None,
+    }
+
+
+def _confirmation_phone_variants(raw: str) -> Dict[str, Any]:
+    """Normalize pasted Moroccan phone formats into exact Shopify search values."""
+    digits = re.sub(r"\D", "", raw or "")
+    without_00 = digits[2:] if digits.startswith("00") else digits
+    national = ""
+    if without_00.startswith("212") and len(without_00) == 12:
+        national = without_00[3:]
+    elif without_00.startswith("0") and len(without_00) == 10:
+        national = without_00[1:]
+    elif len(without_00) == 9:
+        national = without_00
+
+    variants: List[str] = []
+    if national:
+        candidates = [
+            f"+212{national}",
+            f"212{national}",
+            f"00212{national}",
+            f"0{national}",
+            national,
+        ]
+        normalized_phone = f"+212{national}"
+    else:
+        candidates = [
+            f"+{without_00}" if without_00 else "",
+            without_00,
+            digits,
+        ]
+        normalized_phone = (f"+{without_00}" if without_00 else "")
+
+    seen = set()
+    for value in candidates:
+        if value and value not in seen:
+            seen.add(value)
+            variants.append(value)
+    return {
+        "digits": digits,
+        "normalized_phone": normalized_phone or None,
+        "variants": variants,
+    }
+
+
+def _classify_confirmation_search(raw: str) -> Dict[str, Any]:
+    cleaned = (raw or "").strip()
+    details = _confirmation_phone_variants(cleaned)
+    digits = details["digits"]
+    compact = re.sub(r"[\s().+/\-]", "", cleaned)
+    numeric_only = bool(compact) and compact.isdigit()
+
+    if cleaned.startswith("#") or (numeric_only and 2 <= len(digits) <= 8):
+        return {
+            "kind": "order",
+            "digits": digits,
+            "order_query": f"(name:{digits}) OR (name:#{digits})",
+        }
+    if numeric_only and len(digits) >= 9:
+        variants = details["variants"]
+        return {
+            "kind": "phone",
+            "digits": digits,
+            "normalized_phone": details["normalized_phone"],
+            "customer_query": " OR ".join(f"(phone:{value})" for value in variants),
+        }
+
+    # Keep free-text support for customer names/emails while making phone and
+    # order-number searches take the smallest, fastest API path.
+    safe = cleaned.replace("\\", "\\\\").replace('"', '\\"')
+    phrase = f'"{safe}"'
+    return {
+        "kind": "text",
+        "digits": digits,
+        "order_query": phrase,
+        "customer_query": phrase,
+    }
 
 
 @router.get("/api/agent/search")
@@ -781,104 +1043,126 @@ async def agent_search(
     q: str = "",
     user: User = Depends(get_current_user),
 ):
-    """Free-text lookup across orders + customers in the selected store. Accepts the kind
-    of messy input agents actually type: `+212 614 162-654`, `#71779`, `71779`, `Khadija`.
-
-    Phone-like queries are normalized (strip `+`, spaces, dashes) and matched as a
-    wildcard suffix so a Moroccan number works whether typed as `0614162654` or
-    `+212614162654`.
-    """
+    """Fast order/customer lookup with explicit phone and order-number paths."""
     raw = (q or "").strip()
     if not raw or len(raw) < 2:
-        return {"ok": True, "orders": [], "customers": [], "shop_domain": "", "query": raw}
+        return {
+            "ok": True,
+            "orders": [],
+            "customers": [],
+            "shop_domain": "",
+            "query": raw,
+            "search_kind": "empty",
+        }
 
-    digits = re.sub(r"\D", "", raw)
-    # Drop a leading 0 / 212 country code so the wildcard match catches all formats.
-    norm_tail = digits
-    if norm_tail.startswith("00"):
-        norm_tail = norm_tail[2:]
-    if norm_tail.startswith("212"):
-        norm_tail = norm_tail[3:]
-    elif norm_tail.startswith("0"):
-        norm_tail = norm_tail[1:]
-    # Use up to the last 9 digits as the wildcard tail — long enough to be unique, short
-    # enough to survive whatever country-code prefix the data was stored with.
-    tail = norm_tail[-9:] if len(norm_tail) >= 9 else norm_tail
-
-    has_digits = bool(digits)
-    looks_like_phone = has_digits and len(digits) >= 6
-
-    # Resolve store domain so the frontend can deep-link rows to Shopify admin.
+    search = _classify_confirmation_search(raw)
     from .main import shopify_graphql, resolve_store_settings_effective  # type: ignore
-    shop_domain = ""
-    try:
-        d, _t, _a = await resolve_store_settings_effective(store)
-        shop_domain = (d or "").strip()
-    except Exception:
-        shop_domain = ""
-
-    # Build order + customer search queries.
-    order_terms: List[str] = []
-    customer_terms: List[str] = []
-    if has_digits:
-        # Order-number match — Shopify accepts both `name:1001` and `name:#1001`.
-        order_terms.append(f"name:{digits}")
-        order_terms.append(f"name:#{digits}")
-    if looks_like_phone and tail:
-        order_terms.append(f"phone:*{tail}*")
-        customer_terms.append(f"phone:*{tail}*")
-    if not has_digits:
-        # Free-text — let Shopify try a default match across customer name / email.
-        order_terms.append(raw)
-        customer_terms.append(raw)
-    elif raw != digits:
-        # Mixed input (e.g. "John 1001") — also try the raw string as a fallback.
-        order_terms.append(raw)
-        customer_terms.append(raw)
-
-    order_query = " OR ".join(f"({t})" for t in order_terms) if order_terms else None
-    customer_query = " OR ".join(f"({t})" for t in customer_terms) if customer_terms else None
 
     orders_out: List[Dict[str, Any]] = []
     customers_out: List[Dict[str, Any]] = []
+    warnings: List[str] = []
 
-    if order_query:
+    async def _resolve_domain() -> str:
         try:
-            data = await shopify_graphql(SEARCH_ORDERS_GQL, {"first": 25, "query": order_query}, store=store)
-            edges = ((data or {}).get("orders") or {}).get("edges") or []
-            for e in edges:
-                node = e.get("node") or {}
-                orders_out.append(_flatten_order(node))
+            domain, _token, _api = await resolve_store_settings_effective(store)
+            return (domain or "").strip()
         except Exception:
-            # Search failures shouldn't 500 — return whatever we have.
-            pass
+            return ""
 
-    if customer_query:
-        try:
-            data = await shopify_graphql(SEARCH_CUSTOMERS_GQL, {"first": 10, "query": customer_query}, store=store)
-            edges = ((data or {}).get("customers") or {}).get("edges") or []
-            for e in edges:
-                node = e.get("node") or {}
-                addr = node.get("defaultAddress") or {}
-                customers_out.append({
-                    "id": node.get("id"),
-                    "name": node.get("displayName") or " ".join([x for x in [node.get("firstName"), node.get("lastName")] if x]) or "",
-                    "email": node.get("email") or "",
-                    "phone": node.get("phone") or "",
-                    "orders_count": int(node.get("numberOfOrders") or 0),
-                    "city": addr.get("city") or "",
-                    "country": addr.get("country") or "",
-                })
-        except Exception:
-            pass
+    async def _order_search(query: str, first: int = 25):
+        return await shopify_graphql(
+            SEARCH_ORDERS_GQL,
+            {"first": first, "query": query},
+            store=store,
+        )
+
+    async def _customer_search(query: str):
+        return await shopify_graphql(
+            SEARCH_CUSTOMERS_GQL,
+            {"first": 10, "ordersFirst": 25, "query": query},
+            store=store,
+        )
+
+    domain_task = asyncio.create_task(_resolve_domain())
+    requested: List[Tuple[str, Any]] = []
+    if search["kind"] == "phone":
+        requested.append(("customers", _customer_search(search["customer_query"])))
+    elif search["kind"] == "order":
+        requested.append(("orders", _order_search(search["order_query"], first=8)))
+    else:
+        requested.extend([
+            ("orders", _order_search(search["order_query"], first=25)),
+            ("customers", _customer_search(search["customer_query"])),
+        ])
+
+    responses = await asyncio.gather(
+        *(task for _name, task in requested),
+        return_exceptions=True,
+    )
+    successful = 0
+    customer_order_nodes: List[Dict[str, Any]] = []
+    direct_order_nodes: List[Dict[str, Any]] = []
+    for (name, _task), result in zip(requested, responses):
+        if isinstance(result, Exception):
+            warnings.append(f"{name} lookup failed")
+            logger.warning(
+                "confirmation search %s lookup failed (store=%s kind=%s query=%r): %s",
+                name, store, search["kind"], raw, result,
+            )
+            continue
+        successful += 1
+        if name == "orders":
+            edges = ((result or {}).get("orders") or {}).get("edges") or []
+            direct_order_nodes.extend((edge.get("node") or {}) for edge in edges)
+            continue
+
+        edges = ((result or {}).get("customers") or {}).get("edges") or []
+        for edge in edges:
+            node = edge.get("node") or {}
+            addr = node.get("defaultAddress") or {}
+            nested_edges = ((node.get("orders") or {}).get("edges")) or []
+            nested_orders = [_flatten_order(e.get("node") or {}) for e in nested_edges]
+            customer_order_nodes.extend(e.get("node") or {} for e in nested_edges)
+            customers_out.append({
+                "id": node.get("id"),
+                "name": node.get("displayName") or " ".join(
+                    x for x in [node.get("firstName"), node.get("lastName")] if x
+                ) or "",
+                "email": node.get("email") or "",
+                "phone": node.get("phone") or "",
+                "orders_count": int(node.get("numberOfOrders") or 0),
+                "city": addr.get("city") or "",
+                "country": addr.get("country") or "",
+                "orders": nested_orders,
+            })
+
+    shop_domain = await domain_task
+    if successful == 0:
+        raise HTTPException(
+            status_code=502,
+            detail="Shopify search is temporarily unavailable; please retry",
+        )
+
+    # Customer-derived orders always come first. A pasted phone number becomes
+    # immediately useful without requiring a second customer-card click.
+    seen_order_ids = set()
+    for node in [*customer_order_nodes, *direct_order_nodes]:
+        oid = str(node.get("id") or "")
+        if not oid or oid in seen_order_ids:
+            continue
+        seen_order_ids.add(oid)
+        orders_out.append(_flatten_order(node))
 
     return {
         "ok": True,
         "query": raw,
-        "normalized_digits": digits,
+        "search_kind": search["kind"],
+        "normalized_digits": search.get("digits") or "",
+        "normalized_phone": search.get("normalized_phone"),
         "orders": orders_out,
         "customers": customers_out,
         "shop_domain": shop_domain,
+        "warnings": warnings,
     }
 
 

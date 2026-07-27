@@ -62,6 +62,31 @@ async def init_db():
             # Column already exists or DB rejected addition (safe to ignore on repeat starts).
             pass
 
+        # Durable idempotency key for Confirmation action writes. Shopify tag
+        # mutations are idempotent, and this key makes their audit row idempotent
+        # too, so browser retries cannot either lose or double-count an action.
+        try:
+            if is_sqlite_engine:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE order_events ADD COLUMN client_action_id VARCHAR(128)"
+                )
+            else:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE order_events ADD COLUMN IF NOT EXISTS client_action_id VARCHAR(128)"
+                )
+        except Exception:
+            # Column already exists.
+            pass
+        try:
+            await conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_order_events_client_action_id "
+                "ON order_events (client_action_id)"
+            )
+        except Exception:
+            # A legacy database may need manual cleanup if duplicate non-null keys
+            # were introduced outside this application. Startup must remain usable.
+            pass
+
         # Additive columns for the Return Scanner PDF export (order detail).
         return_scan_cols = ("total_price", "currency", "city", "phone", "fulfilled_at")
         for col in return_scan_cols:

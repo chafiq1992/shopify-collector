@@ -4,7 +4,7 @@
 // queue length via useSyncQueueLength().
 
 import { useEffect, useState } from "react";
-import { authFetch, authHeaders } from "./auth";
+import { authFetch, authHeaders, loadAuth } from "./auth";
 
 const STORAGE_KEY = "orderCollectorConfirmSyncQueue";
 const TICK_MS = 1000;
@@ -31,8 +31,24 @@ function write(items) {
   notify();
 }
 
+function currentActorId() {
+  return String(loadAuth()?.user?.id || "").trim();
+}
+
+function belongsToCurrentActor(item) {
+  const queuedActor = String(item?.actorId || "").trim();
+  const activeActor = currentActorId();
+  // Legacy queue items did not store actorId. Let the currently authenticated
+  // user drain those once; every new item is strictly agent-bound.
+  return !queuedActor || (!!activeActor && queuedActor === activeActor);
+}
+
+function visibleQueue() {
+  return read().filter(belongsToCurrentActor);
+}
+
 function notify() {
-  const items = read();
+  const items = visibleQueue();
   listeners.forEach((cb) => {
     try { cb(items.length); } catch {}
   });
@@ -53,6 +69,7 @@ export function enqueueTagWrite({ orderId, action, tag, store, source = "confirm
     tag,
     store: store || "",
     source,
+    actorId: currentActorId() || null,
     attempts: 0,
     nextAttemptAt: Date.now(),
     enqueuedAt: Date.now(),
@@ -63,27 +80,34 @@ export function enqueueTagWrite({ orderId, action, tag, store, source = "confirm
 }
 
 export function getQueueLength() {
-  return read().length;
+  return visibleQueue().length;
 }
 
 export function readQueue() {
-  return read();
+  return visibleQueue();
 }
 
 export function subscribeToQueue(cb) {
   listeners.add(cb);
-  try { cb(read().length); } catch {}
+  try { cb(visibleQueue().length); } catch {}
   return () => listeners.delete(cb);
 }
 
 async function attemptItem(item) {
-  const qs = item.store ? `?store=${encodeURIComponent(item.store)}` : "";
-  const path = item.action === "add" ? "add-tag" : "remove-tag";
-  const url = `/api/orders/${encodeURIComponent(item.orderId)}/${path}${qs}`;
-  const res = await authFetch(url, {
+  if (!belongsToCurrentActor(item)) {
+    return { ok: false, drop: false, blocked: true, status: "wrong-agent" };
+  }
+  const res = await authFetch("/api/agent/tag-action", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ tag: item.tag, source: item.source || "confirmation" }),
+    body: JSON.stringify({
+      order_id: item.orderId,
+      tag: item.tag,
+      op: item.action,
+      store: item.store || "",
+      client_action_id: item.id,
+      actor_id: item.actorId || currentActorId() || null,
+    }),
   });
   if (!res.ok) {
     // 401/403: keep the item queued — the user just needs to re-auth and the
@@ -91,7 +115,7 @@ async function attemptItem(item) {
     // missing audit rows ("agent says 30 confirmed, dashboard shows 0").
     // 408/429: transient — retry with backoff.
     // Other 4xx: permanent (bad request, gone, etc.) — drop to avoid spam.
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401 || res.status === 403 || res.status === 409) {
       return { ok: false, drop: false, status: res.status };
     }
     if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
@@ -106,7 +130,9 @@ async function tick() {
   let items = read();
   if (items.length === 0) return;
   const now = Date.now();
-  const idx = items.findIndex((it) => (it.nextAttemptAt || 0) <= now);
+  const idx = items.findIndex(
+    (it) => belongsToCurrentActor(it) && (it.nextAttemptAt || 0) <= now
+  );
   if (idx < 0) return;
   const item = items[idx];
   let result;
