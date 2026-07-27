@@ -44,7 +44,7 @@ substitutions:
   _SHOPIFY_CLIENT_ID_NEWSTORENAME: ''
   _SHOPIFY_CLIENT_SECRET_NEWSTORENAME: ''
   _SHOPIFY_STORE_KEYS: '*'
-  _SHOPIFY_OAUTH_SCOPES: 'read_orders,write_orders,read_products,write_products,read_content,write_content,read_inventory,write_inventory'
+  _SHOPIFY_OAUTH_SCOPES: 'read_orders,write_orders,read_order_edits,write_order_edits,read_customers,read_products,write_products,read_content,write_content,read_inventory,write_inventory'
   _VITE_PRINT_RELAY_URL: ''
   _VITE_PRINT_RELAY_API_KEY: ''
   _VITE_PRINT_RELAY_PC_ID: ''

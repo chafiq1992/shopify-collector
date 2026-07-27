@@ -21,7 +21,7 @@ This repo supports Shopify public-app OAuth for adding stores:
 ### Legacy method (static token fallback)
 
 Create a **custom app** in Shopify admin (or use your existing token) with Admin API scopes like:
-- `read_orders`, `write_orders` (plus any other features you use)
+- `read_orders`, `write_orders`, `read_order_edits`, `write_order_edits`, `read_customers`, `read_products` (plus any other features you use)
 
 This fallback is still supported for older stores, but new stores should use OAuth with `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, and a store key.
 
@@ -103,7 +103,7 @@ pip install -r requirements.txt
 # setx SHOPIFY_CLIENT_ID_newstorename "that_store_public_app_client_id"
 # setx SHOPIFY_CLIENT_SECRET_newstorename "shpss_..."
 # setx SHOPIFY_STORE_KEYS "*"
-# setx SHOPIFY_OAUTH_SCOPES "read_orders,write_orders,read_products,write_products,read_content,write_content,read_inventory,write_inventory"
+# setx SHOPIFY_OAUTH_SCOPES "read_orders,write_orders,read_order_edits,write_order_edits,read_customers,read_products,write_products,read_content,write_content,read_inventory,write_inventory"
 # setx SHOPIFY_API_VERSION "2025-01"
 # Then restart terminal to load env vars
 uvicorn backend.app.main:app --reload
@@ -170,7 +170,7 @@ docker run -p 8080:8080 \
   -e SHOPIFY_CLIENT_ID=your_public_app_client_id \
   -e SHOPIFY_CLIENT_SECRET=shpss_... \
   -e SHOPIFY_STORE_KEYS=* \
-  -e SHOPIFY_OAUTH_SCOPES=read_orders,write_orders,read_products,write_products,read_content,write_content,read_inventory,write_inventory \
+  -e SHOPIFY_OAUTH_SCOPES=read_orders,write_orders,read_order_edits,write_order_edits,read_customers,read_products,write_products,read_content,write_content,read_inventory,write_inventory \
   -e SHOPIFY_API_VERSION=2025-01 \
   order-collector:local
 # Open http://localhost:8080
@@ -187,7 +187,7 @@ gcloud run deploy order-collector \
   --region europe-west1 \
   --port 8080 \
   --allow-unauthenticated \
-  --set-env-vars BASE_URL=https://your-cloud-run-url.a.run.app,SHOPIFY_CLIENT_ID=your_public_app_client_id,SHOPIFY_CLIENT_SECRET=shpss_...,SHOPIFY_STORE_KEYS=*,SHOPIFY_OAUTH_SCOPES=read_orders,write_orders,read_products,write_products,read_content,write_content,read_inventory,write_inventory,SHOPIFY_API_VERSION=2025-01
+  --set-env-vars BASE_URL=https://your-cloud-run-url.a.run.app,SHOPIFY_CLIENT_ID=your_public_app_client_id,SHOPIFY_CLIENT_SECRET=shpss_...,SHOPIFY_STORE_KEYS=*,SHOPIFY_OAUTH_SCOPES=read_orders,write_orders,read_order_edits,write_order_edits,read_customers,read_products,write_products,read_content,write_content,read_inventory,write_inventory,SHOPIFY_API_VERSION=2025-01
 ```
 
 > Cloud Run supports **WebSockets** out of the box. For multi-instance fan-out, back WebSocket events with Pub/Sub or Redis instead of in-memory list.

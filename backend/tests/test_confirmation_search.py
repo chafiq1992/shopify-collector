@@ -5,10 +5,17 @@ from types import SimpleNamespace
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 
 from backend.app.confirmation_routes import (
+    ORDER_EDIT_ADD_VARIANT_GQL,
+    ORDER_EDIT_BEGIN_GQL,
+    ORDER_EDIT_COMMIT_GQL,
+    ORDER_EDIT_SET_QUANTITY_GQL,
+    ORDER_SHIPPING_UPDATE_GQL,
+    PRODUCT_VARIANTS_SEARCH_GQL,
     SEARCH_CUSTOMERS_GQL,
     _classify_confirmation_search,
     _confirmation_phone_variants,
     _same_client_action,
+    _shopify_gid_resource_key,
 )
 
 
@@ -88,6 +95,30 @@ class ConfirmationActionIdempotencyTests(unittest.TestCase):
                 op="add",
             )
         )
+
+
+class ConfirmationOrderEditingTests(unittest.TestCase):
+    def test_original_and_calculated_line_items_share_a_mapping_key(self):
+        self.assertEqual(
+            _shopify_gid_resource_key("gid://shopify/LineItem/2941798776854"),
+            _shopify_gid_resource_key("gid://shopify/CalculatedLineItem/2941798776854"),
+        )
+
+    def test_order_edit_workflow_queries_cover_begin_change_add_and_commit(self):
+        self.assertIn("orderEditBegin", ORDER_EDIT_BEGIN_GQL)
+        self.assertIn("editableQuantity", ORDER_EDIT_BEGIN_GQL)
+        self.assertIn("orderEditSetQuantity", ORDER_EDIT_SET_QUANTITY_GQL)
+        self.assertIn("restock: $restock", ORDER_EDIT_SET_QUANTITY_GQL)
+        self.assertIn("orderEditAddVariant", ORDER_EDIT_ADD_VARIANT_GQL)
+        self.assertIn("allowDuplicates: true", ORDER_EDIT_ADD_VARIANT_GQL)
+        self.assertIn("orderEditCommit", ORDER_EDIT_COMMIT_GQL)
+        self.assertIn("notifyCustomer: $notifyCustomer", ORDER_EDIT_COMMIT_GQL)
+
+    def test_catalog_and_shipping_queries_include_required_operations(self):
+        self.assertIn("productVariants", PRODUCT_VARIANTS_SEARCH_GQL)
+        self.assertIn("inventoryQuantity", PRODUCT_VARIANTS_SEARCH_GQL)
+        self.assertIn("orderUpdate", ORDER_SHIPPING_UPDATE_GQL)
+        self.assertIn("shippingAddress", ORDER_SHIPPING_UPDATE_GQL)
 
 
 if __name__ == "__main__":

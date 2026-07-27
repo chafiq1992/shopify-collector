@@ -1,4 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Check,
+  ChevronRight,
+  Minus,
+  Package,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+  X,
+  MapPin,
+} from "lucide-react";
 import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import OrderLabel from "../components/OrderLabel";
@@ -97,6 +109,39 @@ const API = {
     if (!res.ok) {
       const js = await res.json().catch(() => ({ detail: "Search failed" }));
       throw new Error(js.detail || `Search failed (${res.status})`);
+    }
+    return res.json();
+  },
+  async searchProductVariants(store, q) {
+    const qs = new URLSearchParams({ store, q, first: "20" });
+    const res = await authFetch(`/api/agent/product-variants/search?${qs}`, { headers: authHeaders() });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Product search failed" }));
+      throw new Error(js.detail || `Product search failed (${res.status})`);
+    }
+    return res.json();
+  },
+  async editOrderItems(payload) {
+    const res = await authFetch("/api/agent/order-items/edit", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Could not update order items" }));
+      throw new Error(js.detail || `Could not update order items (${res.status})`);
+    }
+    return res.json();
+  },
+  async updateOrderShipping(payload) {
+    const res = await authFetch("/api/agent/order-shipping/update", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Could not update shipping" }));
+      throw new Error(js.detail || `Could not update shipping (${res.status})`);
     }
     return res.json();
   },
@@ -238,7 +283,7 @@ function Header({ title, rightSlot, me }) {
   const initial = ((me?.name || me?.email || "?").trim().charAt(0) || "?").toUpperCase();
   return (
     <header className="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-gray-200">
-      <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3 flex-wrap">
+      <div className="w-full px-3 sm:px-4 xl:px-6 py-3 flex items-center gap-3 flex-wrap">
         <div className="text-lg font-semibold">{title}</div>
         {me && (
           <div className="inline-flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-full pl-1 pr-3 py-1">
@@ -949,7 +994,13 @@ function AgentView({ me }) {
 
         {isOpen && (
           <div className="mt-3" onClick={(ev) => ev.stopPropagation()}>
-            <OrderExpanded order={o} store={store} shopDomain={meta.shop_domain} onToast={pushToast} />
+            <OrderExpanded
+              order={o}
+              store={store}
+              shopDomain={meta.shop_domain}
+              onToast={pushToast}
+              onOrderUpdated={(updatedOrder) => patchOrderInPlace(o.id, () => updatedOrder)}
+            />
           </div>
         )}
       </div>
@@ -978,7 +1029,7 @@ function AgentView({ me }) {
           </div>
         }
       />
-      <main className="max-w-7xl mx-auto px-4 py-4 space-y-4">
+      <main className="w-full px-3 sm:px-4 xl:px-6 py-4 space-y-4">
         {/* Global Shopify search */}
         <GlobalSearch
           query={searchQuery}
@@ -1399,7 +1450,13 @@ function AgentView({ me }) {
                       {isOpen && (
                         <tr className="bg-gray-50/60">
                           <td colSpan={9} className="px-3 py-3">
-                            <OrderExpanded order={o} store={store} shopDomain={meta.shop_domain} onToast={pushToast} />
+                            <OrderExpanded
+                              order={o}
+                              store={store}
+                              shopDomain={meta.shop_domain}
+                              onToast={pushToast}
+                              onOrderUpdated={(updatedOrder) => patchOrderInPlace(o.id, () => updatedOrder)}
+                            />
                           </td>
                         </tr>
                       )}
@@ -2204,8 +2261,9 @@ function StatusBadge({ kind, value }) {
   );
 }
 
-function OrderExpanded({ order, store, shopDomain, onToast }) {
+function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
   const notify = onToast || (() => {});
+  const [editOpen, setEditOpen] = useState(false);
   const [noteText, setNoteText] = useState("");
   const [noteBusy, setNoteBusy] = useState(false);
   const [noteMsg, setNoteMsg] = useState(null);
@@ -2282,6 +2340,23 @@ function OrderExpanded({ order, store, shopDomain, onToast }) {
 
   return (
     <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-indigo-200 bg-gradient-to-r from-indigo-50 to-white px-4 py-3">
+        <div>
+          <div className="text-sm font-semibold text-gray-900">Order details</div>
+          <div className="text-xs text-gray-600">
+            Review the customer, products, variants, quantities, and delivery address.
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setEditOpen(true)}
+          className={`inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 ${BTN_TAP}`}
+        >
+          <Pencil size={15} aria-hidden />
+          Edit order
+        </button>
+      </div>
+
       {/* Customer & shipping  +  Add note */}
       <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
         <div className="md:col-span-3 bg-white border border-gray-200 rounded-2xl p-4 shadow-sm">
@@ -2447,7 +2522,631 @@ function OrderExpanded({ order, store, shopDomain, onToast }) {
           <OrderLabel order={order} store={store} />
         </div>
       </div>
+
+      {editOpen && (
+        <OrderEditModal
+          order={order}
+          store={store}
+          onClose={() => setEditOpen(false)}
+          onOrderUpdated={(updatedOrder, message) => {
+            onOrderUpdated?.(updatedOrder);
+            notify(message || `${order.name || `#${order.number}`} updated`, "success");
+            setEditOpen(false);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+function shippingDraftFromOrder(order) {
+  const fallbackName = String(order.customer_name || "").trim().split(/\s+/);
+  return {
+    first_name: order.shipping_first_name || fallbackName[0] || "",
+    last_name: order.shipping_last_name || fallbackName.slice(1).join(" "),
+    company: order.shipping_company || "",
+    phone: order.phone || order.customer_phone || "",
+    address1: order.shipping_address1 || "",
+    address2: order.shipping_address2 || "",
+    city: order.shipping_city || "",
+    province: order.shipping_province || "",
+    zip: order.shipping_zip || "",
+    country: order.shipping_country || "Morocco",
+  };
+}
+
+function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
+  const originalItems = order.line_items || [];
+  const [tab, setTab] = useState("items");
+  const [quantities, setQuantities] = useState(() => Object.fromEntries(
+    originalItems.filter((item) => item.id).map((item) => [item.id, Number(item.quantity || 0)]),
+  ));
+  const [additions, setAdditions] = useState([]);
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalogResults, setCatalogResults] = useState([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const catalogRequestRef = useRef(0);
+  const [replaceLineId, setReplaceLineId] = useState(null);
+  const [restock, setRestock] = useState(true);
+  const [notifyCustomer, setNotifyCustomer] = useState(false);
+  const [staffNote, setStaffNote] = useState("");
+  const [shipping, setShipping] = useState(() => shippingDraftFromOrder(order));
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveError, setSaveError] = useState("");
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (event) => {
+      if (event.key === "Escape" && !saveBusy) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose, saveBusy]);
+
+  useEffect(() => {
+    const query = catalogQuery.trim();
+    if (query.length < 2) {
+      catalogRequestRef.current += 1;
+      setCatalogResults([]);
+      setCatalogLoading(false);
+      setCatalogError("");
+      return undefined;
+    }
+    const requestId = ++catalogRequestRef.current;
+    setCatalogLoading(true);
+    setCatalogError("");
+    const timer = setTimeout(async () => {
+      try {
+        const result = await API.searchProductVariants(store, query);
+        if (requestId === catalogRequestRef.current) {
+          setCatalogResults(result.variants || []);
+        }
+      } catch (error) {
+        if (requestId === catalogRequestRef.current) {
+          setCatalogResults([]);
+          setCatalogError(error?.message || "Product search failed");
+        }
+      } finally {
+        if (requestId === catalogRequestRef.current) setCatalogLoading(false);
+      }
+    }, 220);
+    return () => clearTimeout(timer);
+  }, [catalogQuery, store]);
+
+  const itemChanges = useMemo(() => originalItems
+    .filter((item) => item.id)
+    .map((item) => ({
+      item,
+      from: Number(item.quantity || 0),
+      to: Number(quantities[item.id] ?? item.quantity ?? 0),
+    }))
+    .filter((change) => change.from !== change.to), [originalItems, quantities]);
+
+  const changedUnits = itemChanges.length + additions.length;
+  const replacingItem = originalItems.find((item) => item.id === replaceLineId) || null;
+
+  function minimumQuantity(item) {
+    const total = Number(item.quantity || 0);
+    const unfulfilled = Number(item.unfulfilled_quantity ?? total);
+    return Math.max(0, total - unfulfilled);
+  }
+
+  function setItemQuantity(item, nextQuantity) {
+    if (!item.id) return;
+    const min = minimumQuantity(item);
+    const next = Math.max(min, Math.min(999, Number(nextQuantity) || 0));
+    setQuantities((current) => ({ ...current, [item.id]: next }));
+  }
+
+  function setAddedQuantity(variantId, nextQuantity) {
+    const next = Math.max(0, Math.min(999, Number(nextQuantity) || 0));
+    setAdditions((current) => next <= 0
+      ? current.filter((item) => item.id !== variantId)
+      : current.map((item) => item.id === variantId ? { ...item, quantity: next } : item));
+  }
+
+  function chooseCatalogVariant(variant) {
+    if (replacingItem) {
+      if (variant.id === replacingItem.variant_id) {
+        setReplaceLineId(null);
+        return;
+      }
+      const replaceQuantity = Math.max(
+        1,
+        Number(replacingItem.unfulfilled_quantity ?? replacingItem.quantity ?? 1),
+      );
+      setItemQuantity(replacingItem, minimumQuantity(replacingItem));
+      setAdditions((current) => {
+        const existing = current.find((item) => item.id === variant.id);
+        if (existing) {
+          return current.map((item) => item.id === variant.id
+            ? { ...item, quantity: Math.min(999, item.quantity + replaceQuantity) }
+            : item);
+        }
+        return [...current, { ...variant, quantity: replaceQuantity }];
+      });
+      setReplaceLineId(null);
+      setCatalogQuery("");
+      setCatalogResults([]);
+      return;
+    }
+
+    const existingLine = originalItems.find((item) => (
+      item.variant_id === variant.id
+      && Number(item.unfulfilled_quantity ?? item.quantity ?? 0) > 0
+      && item.id
+    ));
+    if (existingLine) {
+      setItemQuantity(existingLine, Number(quantities[existingLine.id] ?? existingLine.quantity ?? 0) + 1);
+    } else {
+      setAdditions((current) => {
+        const existing = current.find((item) => item.id === variant.id);
+        if (existing) {
+          return current.map((item) => item.id === variant.id
+            ? { ...item, quantity: Math.min(999, item.quantity + 1) }
+            : item);
+        }
+        return [...current, { ...variant, quantity: 1 }];
+      });
+    }
+  }
+
+  async function saveItemChanges() {
+    if (changedUnits === 0) return;
+    setSaveBusy(true);
+    setSaveError("");
+    try {
+      const result = await API.editOrderItems({
+        store,
+        order_id: order.id,
+        items: itemChanges.map((change) => ({
+          line_item_id: change.item.id,
+          quantity: change.to,
+        })),
+        additions: additions.map((item) => ({
+          variant_id: item.id,
+          quantity: Number(item.quantity || 1),
+        })),
+        restock,
+        notify_customer: notifyCustomer,
+        staff_note: staffNote.trim() || null,
+      });
+      onOrderUpdated(result.order, "Order items updated in Shopify");
+    } catch (error) {
+      setSaveError(error?.message || "Could not update order items");
+    } finally {
+      setSaveBusy(false);
+    }
+  }
+
+  async function saveShipping() {
+    setSaveBusy(true);
+    setSaveError("");
+    try {
+      const result = await API.updateOrderShipping({
+        store,
+        order_id: order.id,
+        shipping_address: shipping,
+      });
+      onOrderUpdated(result.order, "Shipping information updated in Shopify");
+    } catch (error) {
+      setSaveError(error?.message || "Could not update shipping information");
+    } finally {
+      setSaveBusy(false);
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="order-edit-title"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/45 p-2 backdrop-blur-[2px] sm:p-4"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !saveBusy) onClose();
+      }}
+    >
+      <div className="flex h-[min(94vh,920px)] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-gray-50 shadow-2xl">
+        <header className="flex shrink-0 items-center gap-3 border-b border-gray-200 bg-white px-4 py-3 sm:px-6">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 text-indigo-700">
+            <Pencil size={18} aria-hidden />
+          </div>
+          <div className="min-w-0">
+            <h2 id="order-edit-title" className="truncate text-base font-semibold text-gray-950">
+              Edit {order.name || `#${order.number}`}
+            </h2>
+            <div className="flex items-center gap-1.5 text-xs text-gray-500">
+              <span className="font-medium text-gray-700">{store}</span>
+              <ChevronRight size={12} aria-hidden />
+              <span>Changes are saved directly to Shopify</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saveBusy}
+            className="ml-auto rounded-lg border border-gray-200 bg-white p-2 text-gray-500 hover:bg-gray-100 hover:text-gray-800 disabled:opacity-50"
+            aria-label="Close order editor"
+          >
+            <X size={18} aria-hidden />
+          </button>
+        </header>
+
+        <nav className="flex shrink-0 gap-1 border-b border-gray-200 bg-white px-4 sm:px-6" aria-label="Order edit sections">
+          {[
+            { id: "items", label: "Products and quantities", icon: Package },
+            { id: "shipping", label: "Shipping information", icon: MapPin },
+          ].map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => { setTab(id); setSaveError(""); }}
+              className={`relative inline-flex items-center gap-2 px-3 py-3 text-sm font-medium transition ${
+                tab === id ? "text-indigo-700" : "text-gray-600 hover:text-gray-900"
+              }`}
+            >
+              <Icon size={16} aria-hidden />
+              {label}
+              {id === "items" && changedUnits > 0 && (
+                <span className="rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] font-bold text-indigo-700">
+                  {changedUnits}
+                </span>
+              )}
+              {tab === id && <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-indigo-600" />}
+            </button>
+          ))}
+        </nav>
+
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {tab === "items" ? (
+            <div className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_320px] sm:p-6">
+              <div className="space-y-4">
+                <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                  <div className="border-b border-gray-200 px-4 py-3">
+                    <h3 className="text-sm font-semibold text-gray-900">Items in this order</h3>
+                    <p className="mt-0.5 text-xs text-gray-500">
+                      Adjust unfulfilled quantities, remove an item, or replace its variant.
+                    </p>
+                  </div>
+                  <div className="divide-y divide-gray-100">
+                    {originalItems.map((item, index) => {
+                      const quantity = Number(quantities[item.id] ?? item.quantity ?? 0);
+                      const min = minimumQuantity(item);
+                      const editableUnits = Number(item.unfulfilled_quantity ?? item.quantity ?? 0);
+                      const canEdit = Boolean(item.id) && editableUnits > 0;
+                      const changed = quantity !== Number(item.quantity || 0);
+                      return (
+                        <div key={item.id || `${item.title}-${index}`} className={`p-4 ${changed ? "bg-indigo-50/40" : ""}`}>
+                          <div className="flex gap-3">
+                            <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-gray-100">
+                              {item.image
+                                ? <img src={item.image} alt="" className="h-full w-full object-cover" />
+                                : <Package size={22} className="text-gray-400" aria-hidden />}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                  <div className="truncate text-sm font-semibold text-gray-900">{item.title}</div>
+                                  {item.variant_title && item.variant_title !== "Default Title" && (
+                                    <div className="mt-0.5 text-xs text-gray-600">{item.variant_title}</div>
+                                  )}
+                                  {item.sku && <div className="mt-1 text-[11px] font-mono text-gray-500">SKU {item.sku}</div>}
+                                </div>
+                                <div className="text-right text-xs">
+                                  <div className="font-semibold tabular-nums text-gray-900">{item.unit_price} {item.currency || order.currency}</div>
+                                  {changed && (
+                                    <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 font-medium text-indigo-700">
+                                      {item.quantity} <ChevronRight size={10} /> {quantity}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="mt-3 flex flex-wrap items-center gap-2">
+                                <div className={`inline-flex h-9 items-center rounded-lg border ${canEdit ? "border-gray-300 bg-white" : "border-gray-200 bg-gray-100"}`}>
+                                  <button
+                                    type="button"
+                                    onClick={() => setItemQuantity(item, quantity - 1)}
+                                    disabled={!canEdit || quantity <= min}
+                                    className="flex h-full w-9 items-center justify-center text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-30"
+                                    aria-label={`Decrease ${item.title}`}
+                                  ><Minus size={14} /></button>
+                                  <input
+                                    type="number"
+                                    min={min}
+                                    max={999}
+                                    value={quantity}
+                                    onChange={(event) => setItemQuantity(item, event.target.value)}
+                                    disabled={!canEdit}
+                                    className="h-full w-12 border-x border-gray-200 bg-transparent text-center text-sm font-semibold tabular-nums outline-none disabled:text-gray-400"
+                                    aria-label={`Quantity for ${item.title}`}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => setItemQuantity(item, quantity + 1)}
+                                    disabled={!canEdit || quantity >= 999}
+                                    className="flex h-full w-9 items-center justify-center text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-30"
+                                    aria-label={`Increase ${item.title}`}
+                                  ><Plus size={14} /></button>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setReplaceLineId(item.id);
+                                    setCatalogQuery("");
+                                    setCatalogResults([]);
+                                  }}
+                                  disabled={!canEdit}
+                                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  Change variant
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setItemQuantity(item, min)}
+                                  disabled={!canEdit || quantity <= min}
+                                  className="inline-flex items-center gap-1.5 rounded-lg px-2 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-30"
+                                >
+                                  <Trash2 size={14} aria-hidden />
+                                  Remove
+                                </button>
+                                <span className="ml-auto text-[11px] text-gray-500">
+                                  {editableUnits > 0
+                                    ? `${editableUnits} unfulfilled unit${editableUnits === 1 ? "" : "s"} editable`
+                                    : "Fulfilled item — locked"}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                {additions.length > 0 && (
+                  <section className="overflow-hidden rounded-xl border border-emerald-200 bg-white shadow-sm">
+                    <div className="border-b border-emerald-100 bg-emerald-50 px-4 py-3">
+                      <h3 className="text-sm font-semibold text-emerald-900">Products to add</h3>
+                    </div>
+                    <div className="divide-y divide-gray-100">
+                      {additions.map((item) => (
+                        <div key={item.id} className="flex items-center gap-3 p-4">
+                          <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-gray-100">
+                            {item.image
+                              ? <img src={item.image} alt="" className="h-full w-full object-cover" />
+                              : <Package size={18} className="text-gray-400" />}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-semibold">{item.product_title}</div>
+                            {item.variant_title && item.variant_title !== "Default Title" && (
+                              <div className="text-xs text-gray-600">{item.variant_title}</div>
+                            )}
+                            <div className="text-[11px] text-gray-500">
+                              {item.sku ? `SKU ${item.sku} · ` : ""}{item.price} {order.currency}
+                            </div>
+                          </div>
+                          <div className="inline-flex h-9 items-center rounded-lg border border-gray-300 bg-white">
+                            <button type="button" onClick={() => setAddedQuantity(item.id, item.quantity - 1)} className="flex h-full w-9 items-center justify-center hover:bg-gray-50"><Minus size={14} /></button>
+                            <div className="w-10 text-center text-sm font-semibold tabular-nums">{item.quantity}</div>
+                            <button type="button" onClick={() => setAddedQuantity(item.id, item.quantity + 1)} className="flex h-full w-9 items-center justify-center hover:bg-gray-50"><Plus size={14} /></button>
+                          </div>
+                          <button type="button" onClick={() => setAddedQuantity(item.id, 0)} className="rounded-lg p-2 text-gray-400 hover:bg-rose-50 hover:text-rose-700" aria-label={`Remove ${item.product_title}`}><X size={16} /></button>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                <section className={`rounded-xl border bg-white p-4 shadow-sm ${replaceLineId ? "border-indigo-300 ring-2 ring-indigo-100" : "border-gray-200"}`}>
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-900">
+                        {replacingItem ? `Choose a replacement for ${replacingItem.title}` : "Add another product"}
+                      </h3>
+                      <p className="mt-0.5 text-xs text-gray-500">
+                        Search all products and variants in the selected store.
+                      </p>
+                    </div>
+                    {replaceLineId && (
+                      <button type="button" onClick={() => setReplaceLineId(null)} className="text-xs font-medium text-gray-600 hover:text-gray-900">
+                        Cancel replacement
+                      </button>
+                    )}
+                  </div>
+                  <div className="relative mt-3">
+                    <Search size={17} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                    <input
+                      autoFocus={Boolean(replaceLineId)}
+                      value={catalogQuery}
+                      onChange={(event) => setCatalogQuery(event.target.value)}
+                      placeholder="Search product name, variant, SKU, or barcode"
+                      className="h-11 w-full rounded-lg border border-gray-300 bg-white pl-10 pr-10 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                    />
+                    {catalogLoading && <span className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600" />}
+                  </div>
+                  {catalogError && <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{catalogError}</div>}
+                  {catalogQuery.trim().length >= 2 && !catalogLoading && !catalogError && catalogResults.length === 0 && (
+                    <div className="mt-3 rounded-lg bg-gray-50 px-3 py-5 text-center text-xs text-gray-500">No matching variants found.</div>
+                  )}
+                  {catalogResults.length > 0 && (
+                    <div className="mt-3 max-h-72 divide-y divide-gray-100 overflow-y-auto rounded-lg border border-gray-200">
+                      {catalogResults.map((variant) => (
+                        <button
+                          key={variant.id}
+                          type="button"
+                          onClick={() => chooseCatalogVariant(variant)}
+                          className="flex w-full items-center gap-3 p-3 text-left hover:bg-indigo-50"
+                        >
+                          <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-gray-100">
+                            {variant.image
+                              ? <img src={variant.image} alt="" className="h-full w-full object-cover" />
+                              : <Package size={17} className="text-gray-400" />}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-semibold text-gray-900">{variant.product_title}</div>
+                            <div className="truncate text-xs text-gray-600">
+                              {variant.variant_title && variant.variant_title !== "Default Title" ? variant.variant_title : "Default variant"}
+                              {variant.sku ? ` · SKU ${variant.sku}` : ""}
+                            </div>
+                          </div>
+                          <div className="shrink-0 text-right">
+                            <div className="text-sm font-semibold tabular-nums text-gray-900">{variant.price} {order.currency}</div>
+                            <div className="text-[11px] text-gray-500">
+                              {variant.inventory_quantity == null ? "Inventory not tracked" : `${variant.inventory_quantity} in inventory`}
+                            </div>
+                          </div>
+                          <span className="ml-1 inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white">
+                            {replacingItem ? "Replace" : "Add"} <Plus size={13} />
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </div>
+
+              <aside className="h-fit rounded-xl border border-gray-200 bg-white p-4 shadow-sm lg:sticky lg:top-4">
+                <h3 className="text-sm font-semibold text-gray-900">Review changes</h3>
+                <div className="mt-3 space-y-2 text-xs">
+                  {itemChanges.length === 0 && additions.length === 0 ? (
+                    <div className="rounded-lg bg-gray-50 px-3 py-4 text-center text-gray-500">No item changes yet.</div>
+                  ) : (
+                    <>
+                      {itemChanges.map(({ item, from, to }) => (
+                        <div key={item.id} className="flex items-start justify-between gap-3 rounded-lg bg-gray-50 px-3 py-2">
+                          <span className="min-w-0 truncate text-gray-700">{item.title}</span>
+                          <span className={`shrink-0 font-semibold tabular-nums ${to < from ? "text-rose-700" : "text-indigo-700"}`}>{from} → {to}</span>
+                        </div>
+                      ))}
+                      {additions.map((item) => (
+                        <div key={item.id} className="flex items-start justify-between gap-3 rounded-lg bg-emerald-50 px-3 py-2">
+                          <span className="min-w-0 truncate text-emerald-900">Add {item.product_title}</span>
+                          <span className="shrink-0 font-semibold text-emerald-700">+{item.quantity}</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+                <div className="mt-4 space-y-3 border-t border-gray-100 pt-4">
+                  <label className="flex cursor-pointer items-start gap-2 text-xs text-gray-700">
+                    <input type="checkbox" checked={restock} onChange={(event) => setRestock(event.target.checked)} className="mt-0.5 h-4 w-4 rounded border-gray-300" />
+                    <span><strong className="font-semibold">Restock removed units</strong><br /><span className="text-gray-500">Return reduced quantities to inventory.</span></span>
+                  </label>
+                  <label className="flex cursor-pointer items-start gap-2 text-xs text-gray-700">
+                    <input type="checkbox" checked={notifyCustomer} onChange={(event) => setNotifyCustomer(event.target.checked)} className="mt-0.5 h-4 w-4 rounded border-gray-300" />
+                    <span><strong className="font-semibold">Notify customer</strong><br /><span className="text-gray-500">Shopify emails the order update.</span></span>
+                  </label>
+                  <label className="block text-xs font-medium text-gray-700">
+                    Staff note
+                    <textarea
+                      value={staffNote}
+                      onChange={(event) => setStaffNote(event.target.value)}
+                      rows={2}
+                      maxLength={255}
+                      placeholder="Reason for the change (optional)"
+                      className="mt-1 w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm font-normal outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                    />
+                  </label>
+                </div>
+                <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
+                  Shopify recalculates taxes, discounts, and the order balance when these changes are saved.
+                </div>
+                {saveError && <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{saveError}</div>}
+                <button
+                  type="button"
+                  onClick={saveItemChanges}
+                  disabled={saveBusy || changedUnits === 0}
+                  className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  {saveBusy
+                    ? <><span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" /> Saving to Shopify…</>
+                    : <><Check size={16} /> Save item changes</>}
+                </button>
+              </aside>
+            </div>
+          ) : (
+            <div className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_340px] sm:p-6">
+              <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
+                <div className="mb-5">
+                  <h3 className="text-sm font-semibold text-gray-900">Shipping address</h3>
+                  <p className="mt-0.5 text-xs text-gray-500">Update the delivery contact and address exactly as it should appear on the shipment.</p>
+                </div>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <EditField label="First name" value={shipping.first_name} onChange={(value) => setShipping((current) => ({ ...current, first_name: value }))} />
+                  <EditField label="Last name" value={shipping.last_name} onChange={(value) => setShipping((current) => ({ ...current, last_name: value }))} />
+                  <EditField label="Phone" value={shipping.phone} onChange={(value) => setShipping((current) => ({ ...current, phone: value }))} placeholder="+212…" />
+                  <EditField label="Company" value={shipping.company} onChange={(value) => setShipping((current) => ({ ...current, company: value }))} optional />
+                  <div className="sm:col-span-2">
+                    <EditField label="Address" value={shipping.address1} onChange={(value) => setShipping((current) => ({ ...current, address1: value }))} placeholder="Street, neighborhood, building…" />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <EditField label="Apartment, suite, etc." value={shipping.address2} onChange={(value) => setShipping((current) => ({ ...current, address2: value }))} optional />
+                  </div>
+                  <EditField label="City" value={shipping.city} onChange={(value) => setShipping((current) => ({ ...current, city: value }))} />
+                  <EditField label="Province / region" value={shipping.province} onChange={(value) => setShipping((current) => ({ ...current, province: value }))} optional />
+                  <EditField label="Postal code" value={shipping.zip} onChange={(value) => setShipping((current) => ({ ...current, zip: value }))} optional />
+                  <EditField label="Country" value={shipping.country} onChange={(value) => setShipping((current) => ({ ...current, country: value }))} />
+                </div>
+              </section>
+
+              <aside className="h-fit rounded-xl border border-gray-200 bg-white p-4 shadow-sm lg:sticky lg:top-4">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700"><MapPin size={17} /></div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-900">Delivery preview</h3>
+                    <div className="text-[11px] text-gray-500">Saved to the Shopify order</div>
+                  </div>
+                </div>
+                <div className="mt-4 rounded-lg bg-gray-50 p-3 text-sm leading-relaxed text-gray-700">
+                  <div className="font-semibold text-gray-900">{[shipping.first_name, shipping.last_name].filter(Boolean).join(" ") || "Customer name"}</div>
+                  {shipping.company && <div>{shipping.company}</div>}
+                  <div>{shipping.address1 || "Address"}</div>
+                  {shipping.address2 && <div>{shipping.address2}</div>}
+                  <div>{[shipping.city, shipping.province, shipping.zip].filter(Boolean).join(", ") || "City"}</div>
+                  <div>{shipping.country || "Country"}</div>
+                  <div className="mt-2 font-mono text-xs">{shipping.phone || "Phone number"}</div>
+                </div>
+                <div className="mt-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-[11px] leading-relaxed text-sky-800">
+                  This changes the shipping address on this order only. It does not overwrite the customer’s saved address.
+                </div>
+                {saveError && <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{saveError}</div>}
+                <button
+                  type="button"
+                  onClick={saveShipping}
+                  disabled={saveBusy || !shipping.address1.trim() || !shipping.city.trim() || !shipping.country.trim()}
+                  className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  {saveBusy
+                    ? <><span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" /> Saving to Shopify…</>
+                    : <><Check size={16} /> Save shipping information</>}
+                </button>
+              </aside>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditField({ label, value, onChange, placeholder = "", optional = false }) {
+  return (
+    <label className="block text-xs font-medium text-gray-700">
+      <span>{label}</span>
+      {optional && <span className="ml-1 font-normal text-gray-400">Optional</span>}
+      <input
+        type="text"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="mt-1 h-10 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm font-normal text-gray-900 outline-none placeholder:text-gray-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+      />
+    </label>
   );
 }
 

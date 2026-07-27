@@ -486,11 +486,24 @@ note
 displayFinancialStatus
 displayFulfillmentStatus
 currentTotalPriceSet { shopMoney { amount currencyCode } }
-shippingAddress { name city phone address1 address2 zip province country }
+shippingAddress {
+  name
+  firstName
+  lastName
+  company
+  city
+  phone
+  address1
+  address2
+  zip
+  province
+  country
+}
 customer { id displayName phone email }
 lineItems(first: 50) {
   edges {
     node {
+      id
       quantity
       currentQuantity
       unfulfilledQuantity
@@ -569,11 +582,15 @@ def _flatten_order(node: Dict[str, Any]) -> Dict[str, Any]:
         img = (variant.get("image") or {}).get("url") or ((product.get("featuredImage") or {}).get("url"))
         unit = _money(n.get("originalUnitPriceSet"))
         line_items.append({
+            "id": n.get("id") or "",
             "title": n.get("title") or product.get("title") or "",
             "variant_title": variant.get("title") or "",
+            "variant_id": variant.get("id") or "",
+            "product_id": product.get("id") or "",
             "options": variant.get("selectedOptions") or [],
             "sku": n.get("sku") or variant.get("sku") or "",
             "quantity": current_qty,
+            "unfulfilled_quantity": max(0, int(n.get("unfulfilledQuantity") or 0)),
             "unit_price": unit["amount"],
             "currency": unit["currency"],
             "image": img,
@@ -595,9 +612,13 @@ def _flatten_order(node: Dict[str, Any]) -> Dict[str, Any]:
         "fulfillment_status": node.get("displayFulfillmentStatus") or "",
         "customer_name": (shipping.get("name") or cust.get("displayName") or "").strip(),
         "phone": _gather_phone(node),
+        "shipping_first_name": shipping.get("firstName") or "",
+        "shipping_last_name": shipping.get("lastName") or "",
+        "shipping_company": shipping.get("company") or "",
         "shipping_address1": shipping.get("address1") or "",
         "shipping_address2": shipping.get("address2") or "",
         "shipping_city": shipping.get("city") or "",
+        "shipping_province": shipping.get("province") or "",
         "shipping_country": shipping.get("country") or "",
         "shipping_zip": shipping.get("zip") or "",
         "total_price": total["amount"],
@@ -1255,6 +1276,457 @@ async def customer_orders(
         "orders": orders_out,
         "shop_domain": shop_domain,
     }
+
+
+# ---------- Edit Shopify order items and shipping ----------
+
+PRODUCT_VARIANTS_SEARCH_GQL = """
+query ConfirmationProductVariants($first: Int!, $query: String!) {
+  productVariants(first: $first, query: $query, sortKey: RELEVANCE) {
+    nodes {
+      id
+      title
+      sku
+      price
+      inventoryQuantity
+      selectedOptions { name value }
+      image { url }
+      product {
+        id
+        title
+        featuredImage { url }
+      }
+    }
+  }
+}
+"""
+
+ORDER_EDIT_BEGIN_GQL = """
+mutation ConfirmationOrderEditBegin($id: ID!) {
+  orderEditBegin(id: $id) {
+    calculatedOrder {
+      id
+      lineItems(first: 100) {
+        nodes {
+          id
+          quantity
+          editableQuantity
+        }
+      }
+    }
+    userErrors { field message }
+  }
+}
+"""
+
+ORDER_EDIT_SET_QUANTITY_GQL = """
+mutation ConfirmationOrderEditSetQuantity(
+  $id: ID!,
+  $lineItemId: ID!,
+  $quantity: Int!,
+  $restock: Boolean
+) {
+  orderEditSetQuantity(
+    id: $id,
+    lineItemId: $lineItemId,
+    quantity: $quantity,
+    restock: $restock
+  ) {
+    calculatedLineItem { id quantity }
+    userErrors { field message }
+  }
+}
+"""
+
+ORDER_EDIT_ADD_VARIANT_GQL = """
+mutation ConfirmationOrderEditAddVariant(
+  $id: ID!,
+  $variantId: ID!,
+  $quantity: Int!
+) {
+  orderEditAddVariant(
+    id: $id,
+    variantId: $variantId,
+    quantity: $quantity,
+    allowDuplicates: true
+  ) {
+    calculatedLineItem { id quantity }
+    userErrors { field message }
+  }
+}
+"""
+
+ORDER_EDIT_COMMIT_GQL = f"""
+mutation ConfirmationOrderEditCommit(
+  $id: ID!,
+  $notifyCustomer: Boolean,
+  $staffNote: String
+) {{
+  orderEditCommit(
+    id: $id,
+    notifyCustomer: $notifyCustomer,
+    staffNote: $staffNote
+  ) {{
+    order {{ {_ORDER_NODE_FIELDS} }}
+    successMessages
+    userErrors {{ field message }}
+  }}
+}}
+"""
+
+ORDER_SHIPPING_UPDATE_GQL = f"""
+mutation ConfirmationOrderShippingUpdate($input: OrderInput!) {{
+  orderUpdate(input: $input) {{
+    order {{ {_ORDER_NODE_FIELDS} }}
+    userErrors {{ field message }}
+  }}
+}}
+"""
+
+
+class OrderLineQuantityInput(BaseModel):
+    line_item_id: str
+    quantity: int
+
+
+class OrderVariantAdditionInput(BaseModel):
+    variant_id: str
+    quantity: int = 1
+
+
+class OrderItemsEditBody(BaseModel):
+    store: str
+    order_id: str
+    items: List[OrderLineQuantityInput]
+    additions: Optional[List[OrderVariantAdditionInput]] = None
+    restock: bool = True
+    notify_customer: bool = False
+    staff_note: Optional[str] = None
+
+
+class OrderShippingAddressInput(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    company: Optional[str] = None
+    phone: Optional[str] = None
+    address1: Optional[str] = None
+    address2: Optional[str] = None
+    city: Optional[str] = None
+    province: Optional[str] = None
+    zip: Optional[str] = None
+    country: Optional[str] = None
+
+
+class OrderShippingEditBody(BaseModel):
+    store: str
+    order_id: str
+    shipping_address: OrderShippingAddressInput
+
+
+def _mutation_payload_or_error(data: Dict[str, Any], key: str) -> Dict[str, Any]:
+    payload = (data or {}).get(key) or {}
+    errors = payload.get("userErrors") or []
+    if errors:
+        messages = []
+        for error in errors:
+            field = ".".join(str(x) for x in (error.get("field") or []) if x)
+            message = str(error.get("message") or "Shopify rejected the change")
+            messages.append(f"{field}: {message}" if field else message)
+        raise HTTPException(status_code=422, detail="; ".join(messages))
+    return payload
+
+
+def _shopify_gid_resource_key(value: str) -> str:
+    """Return the numeric/resource tail shared by LineItem and CalculatedLineItem GIDs."""
+    return str(value or "").strip().rsplit("/", 1)[-1]
+
+
+def _raise_clear_order_edit_error(error: HTTPException) -> None:
+    detail = str(getattr(error, "detail", "") or "")
+    upper = detail.upper()
+    if "ACCESS_DENIED" in upper or "WRITE_ORDER_EDITS" in upper:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This store has not granted order-edit permission yet. "
+                "Reconnect it from Shopify Connect, then try again."
+            ),
+        ) from error
+    raise error
+
+
+async def _audit_confirmation_order_change(
+    db: AsyncSession,
+    *,
+    user: User,
+    store: str,
+    order_id: str,
+    action: str,
+    metadata: Dict[str, Any],
+) -> None:
+    """Best-effort audit entry; editing must not fail because audit storage is offline."""
+    try:
+        from .main import _normalize_store, _record_user_action  # type: ignore
+
+        await _record_user_action(
+            db,
+            user_id=user.id,
+            order_number=None,
+            order_gid=order_id,
+            store_key=_normalize_store(store),
+            action=action,
+            metadata={**metadata, "role": getattr(user, "role", None)},
+        )
+        await db.commit()
+    except Exception:
+        logger.exception(
+            "confirmation order-change audit failed (order=%s action=%s user=%s)",
+            order_id,
+            action,
+            getattr(user, "id", None),
+        )
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+
+@router.get("/api/agent/product-variants/search")
+async def search_product_variants(
+    store: str,
+    q: str,
+    first: int = 20,
+    _: User = Depends(get_current_user),
+):
+    query = (q or "").strip()
+    if len(query) < 2:
+        return {"ok": True, "variants": [], "query": query}
+
+    from .main import shopify_graphql  # type: ignore
+
+    data = await shopify_graphql(
+        PRODUCT_VARIANTS_SEARCH_GQL,
+        {"first": max(1, min(30, int(first or 20))), "query": query},
+        store=(store or "").strip(),
+    )
+    nodes = ((data or {}).get("productVariants") or {}).get("nodes") or []
+    variants = []
+    for node in nodes:
+        product = node.get("product") or {}
+        image = (node.get("image") or {}).get("url") or (
+            (product.get("featuredImage") or {}).get("url")
+        )
+        variants.append({
+            "id": node.get("id") or "",
+            "product_id": product.get("id") or "",
+            "product_title": product.get("title") or "",
+            "variant_title": node.get("title") or "",
+            "options": node.get("selectedOptions") or [],
+            "sku": node.get("sku") or "",
+            "price": str(node.get("price") or "0"),
+            "inventory_quantity": node.get("inventoryQuantity"),
+            "image": image,
+        })
+    return {"ok": True, "variants": variants, "query": query}
+
+
+@router.post("/api/agent/order-items/edit")
+async def edit_order_items(
+    body: OrderItemsEditBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    store = (body.store or "").strip()
+    order_id = (body.order_id or "").strip()
+    if not store or not order_id:
+        raise HTTPException(status_code=400, detail="store and order_id are required")
+
+    requested_quantities: Dict[str, int] = {}
+    for item in body.items or []:
+        line_id = (item.line_item_id or "").strip()
+        if not line_id:
+            raise HTTPException(status_code=400, detail="Every edited item needs a line_item_id")
+        quantity = int(item.quantity)
+        if quantity < 0 or quantity > 999:
+            raise HTTPException(status_code=400, detail="Item quantity must be between 0 and 999")
+        requested_quantities[line_id] = quantity
+
+    requested_additions: Dict[str, int] = {}
+    for addition in body.additions or []:
+        variant_id = (addition.variant_id or "").strip()
+        quantity = int(addition.quantity)
+        if not variant_id:
+            raise HTTPException(status_code=400, detail="Every added item needs a variant_id")
+        if quantity < 1 or quantity > 999:
+            raise HTTPException(status_code=400, detail="Added quantity must be between 1 and 999")
+        requested_additions[variant_id] = min(
+            999,
+            requested_additions.get(variant_id, 0) + quantity,
+        )
+
+    if not requested_quantities and not requested_additions:
+        raise HTTPException(status_code=400, detail="No item changes were provided")
+
+    from .main import shopify_graphql  # type: ignore
+
+    try:
+        begin_data = await shopify_graphql(
+            ORDER_EDIT_BEGIN_GQL,
+            {"id": order_id},
+            store=store,
+        )
+        begin = _mutation_payload_or_error(begin_data, "orderEditBegin")
+        calculated_order = begin.get("calculatedOrder") or {}
+        calculated_id = calculated_order.get("id")
+        if not calculated_id:
+            raise HTTPException(status_code=502, detail="Shopify did not start the order edit")
+
+        line_map: Dict[str, Dict[str, Any]] = {}
+        for line in ((calculated_order.get("lineItems") or {}).get("nodes") or []):
+            calculated_line_id = str(line.get("id") or "")
+            entry = {
+                "calculated_id": calculated_line_id,
+                "quantity": int(line.get("quantity") or 0),
+                "editable_quantity": int(line.get("editableQuantity") or 0),
+            }
+            if calculated_line_id:
+                line_map[calculated_line_id] = entry
+                # Shopify represents an original Order LineItem and its edit-session
+                # CalculatedLineItem with the same numeric resource key but a different
+                # GID type. Index that stable key so the UI can send the order line ID
+                # it already has without ever guessing a CalculatedLineItem GID.
+                line_map[_shopify_gid_resource_key(calculated_line_id)] = entry
+
+        changed_count = 0
+        for requested_line_id, quantity in requested_quantities.items():
+            mapped = line_map.get(requested_line_id) or line_map.get(
+                _shopify_gid_resource_key(requested_line_id)
+            )
+            if not mapped:
+                raise HTTPException(
+                    status_code=409,
+                    detail="An order item changed in Shopify. Refresh the order and try again.",
+                )
+            if quantity == mapped["quantity"]:
+                continue
+            set_data = await shopify_graphql(
+                ORDER_EDIT_SET_QUANTITY_GQL,
+                {
+                    "id": calculated_id,
+                    "lineItemId": mapped["calculated_id"],
+                    "quantity": quantity,
+                    "restock": bool(body.restock),
+                },
+                store=store,
+            )
+            _mutation_payload_or_error(set_data, "orderEditSetQuantity")
+            changed_count += 1
+
+        for variant_id, quantity in requested_additions.items():
+            add_data = await shopify_graphql(
+                ORDER_EDIT_ADD_VARIANT_GQL,
+                {
+                    "id": calculated_id,
+                    "variantId": variant_id,
+                    "quantity": quantity,
+                },
+                store=store,
+            )
+            _mutation_payload_or_error(add_data, "orderEditAddVariant")
+            changed_count += 1
+
+        if changed_count == 0:
+            raise HTTPException(status_code=400, detail="No item quantities changed")
+
+        staff_note = (body.staff_note or "").strip()
+        if not staff_note:
+            staff_note = f"Edited in confirmation app by {user.email}"
+        commit_data = await shopify_graphql(
+            ORDER_EDIT_COMMIT_GQL,
+            {
+                "id": calculated_id,
+                "notifyCustomer": bool(body.notify_customer),
+                "staffNote": staff_note[:255],
+            },
+            store=store,
+        )
+        committed = _mutation_payload_or_error(commit_data, "orderEditCommit")
+    except HTTPException as error:
+        _raise_clear_order_edit_error(error)
+
+    order_node = committed.get("order") or {}
+    if not order_node:
+        raise HTTPException(status_code=502, detail="Shopify saved the edit but returned no order")
+    flattened = _flatten_order(order_node)
+    await _audit_confirmation_order_change(
+        db,
+        user=user,
+        store=store,
+        order_id=order_id,
+        action="order_items_edit",
+        metadata={
+            "changed_lines": changed_count,
+            "added_variants": len(requested_additions),
+            "notify_customer": bool(body.notify_customer),
+        },
+    )
+    return {
+        "ok": True,
+        "order": flattened,
+        "success_messages": committed.get("successMessages") or [],
+    }
+
+
+@router.post("/api/agent/order-shipping/update")
+async def update_order_shipping(
+    body: OrderShippingEditBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    store = (body.store or "").strip()
+    order_id = (body.order_id or "").strip()
+    if not store or not order_id:
+        raise HTTPException(status_code=400, detail="store and order_id are required")
+
+    source = body.shipping_address
+    address = {
+        "firstName": (source.first_name or "").strip(),
+        "lastName": (source.last_name or "").strip(),
+        "company": (source.company or "").strip(),
+        "phone": (source.phone or "").strip(),
+        "address1": (source.address1 or "").strip(),
+        "address2": (source.address2 or "").strip(),
+        "city": (source.city or "").strip(),
+        "province": (source.province or "").strip(),
+        "zip": (source.zip or "").strip(),
+        "country": (source.country or "").strip(),
+    }
+
+    from .main import shopify_graphql  # type: ignore
+
+    try:
+        data = await shopify_graphql(
+            ORDER_SHIPPING_UPDATE_GQL,
+            {"input": {"id": order_id, "shippingAddress": address}},
+            store=store,
+        )
+        updated = _mutation_payload_or_error(data, "orderUpdate")
+    except HTTPException as error:
+        _raise_clear_order_edit_error(error)
+
+    order_node = updated.get("order") or {}
+    if not order_node:
+        raise HTTPException(status_code=502, detail="Shopify saved the address but returned no order")
+    flattened = _flatten_order(order_node)
+    await _audit_confirmation_order_change(
+        db,
+        user=user,
+        store=store,
+        order_id=order_id,
+        action="order_shipping_edit",
+        metadata={"city": address["city"], "country": address["country"]},
+    )
+    return {"ok": True, "order": flattened}
 
 
 # ---------- Cancel a Shopify order ----------
