@@ -2492,6 +2492,186 @@ def _parse_date_bound(value: Optional[str], end: bool = False) -> Optional[datet
     return dt_local.astimezone(timezone.utc)
 
 
+_INTAKE_LEVELS = ("new", "n1", "n2", "n3", "n4", "nowtp", "enatt")
+_INTAKE_NEXT_STAGE = {
+    "new": ("n1", "confirmation_phone_n1"),
+    "n1": ("n2", "confirmation_phone_n2"),
+    "n2": ("n3", "confirmation_phone_n3"),
+    "n3": ("n4", "confirmation_phone_n4"),
+}
+
+
+def _empty_intake_bucket(level: str) -> Dict[str, Any]:
+    next_stage = (_INTAKE_NEXT_STAGE.get(level) or (None, None))[0]
+    return {
+        "level": level,
+        "taken": 0,
+        "confirmed": 0,
+        "cancelled": 0,
+        "open": 0,
+        "advanced": 0,
+        "advanced_to": next_stage,
+        "confirmation_rate": 0.0,
+        "resolution_rate": 0.0,
+        "advanced_rate": 0.0,
+    }
+
+
+def _finalize_intake_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:
+    taken = int(bucket.get("taken") or 0)
+    confirmed = int(bucket.get("confirmed") or 0)
+    cancelled = int(bucket.get("cancelled") or 0)
+    advanced = int(bucket.get("advanced") or 0)
+    bucket["open"] = max(0, taken - confirmed - cancelled)
+    bucket["confirmation_rate"] = round((confirmed / taken) * 100, 1) if taken else 0.0
+    bucket["resolution_rate"] = (
+        round(((confirmed + cancelled) / taken) * 100, 1) if taken else 0.0
+    )
+    bucket["advanced_rate"] = round((advanced / taken) * 100, 1) if taken else 0.0
+    return bucket
+
+
+def _aggregate_intake_cohorts(
+    pulls: List[Dict[str, Any]],
+    followups: List[Dict[str, Any]],
+    agent_ids: List[str],
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    """Attribute later actions to the most recent matching Get-more-orders intake.
+
+    Ownership follows the intake event, not the person who later clicked the
+    outcome. If another agent explicitly re-pulls the order, that newer intake
+    owns subsequent progress.
+    """
+    by_user: Dict[str, Dict[str, Any]] = {
+        uid: {
+            "total_taken": 0,
+            "confirmed": 0,
+            "cancelled": 0,
+            "open": 0,
+            "confirmation_rate": 0.0,
+            "cohorts": {level: _empty_intake_bucket(level) for level in _INTAKE_LEVELS},
+        }
+        for uid in agent_ids
+    }
+    records: Dict[int, Dict[str, Any]] = {}
+    timeline: Dict[Tuple[str, str], List[Tuple[Any, int, int, Dict[str, Any]]]] = {}
+
+    for pull in pulls:
+        uid = str(pull.get("user_id") or "")
+        order_gid = str(pull.get("order_gid") or "")
+        store_key = str(pull.get("store_key") or "")
+        pull_id = int(pull.get("id") or 0)
+        if uid not in by_user or not order_gid or not pull_id:
+            continue
+        level = str(pull.get("level") or "new").strip().lower()
+        if level not in _INTAKE_LEVELS:
+            level = "new"
+        record = {
+            "id": pull_id,
+            "user_id": uid,
+            "level": level,
+            "terminal": None,
+            "advanced": False,
+        }
+        records[pull_id] = record
+        key = (store_key, order_gid)
+        timeline.setdefault(key, []).append(
+            (pull.get("created_at"), pull_id, 0, {"kind": "pull", "pull_id": pull_id})
+        )
+
+    for event in followups:
+        uid = str(event.get("user_id") or "")
+        order_gid = str(event.get("order_gid") or "")
+        store_key = str(event.get("store_key") or "")
+        event_id = int(event.get("id") or 0)
+        if uid not in by_user or not order_gid or not event_id:
+            continue
+        key = (store_key, order_gid)
+        if key not in timeline:
+            continue
+        timeline[key].append(
+            (
+                event.get("created_at"),
+                event_id,
+                1,
+                {"kind": "action", "action": str(event.get("action") or "")},
+            )
+        )
+
+    for events in timeline.values():
+        events.sort(key=lambda item: (item[0], item[1], item[2]))
+        current: Optional[Dict[str, Any]] = None
+        for _created_at, _event_id, _kind_order, item in events:
+            if item["kind"] == "pull":
+                current = records.get(int(item["pull_id"]))
+                continue
+            if current is None:
+                continue
+            action = item["action"]
+            if action == "confirmation_confirmed":
+                current["terminal"] = "confirmed"
+            elif action == "confirmation_cancelled":
+                current["terminal"] = "cancelled"
+            next_action = (_INTAKE_NEXT_STAGE.get(current["level"]) or (None, None))[1]
+            if next_action and action == next_action:
+                current["advanced"] = True
+
+    for record in records.values():
+        user_bucket = by_user[record["user_id"]]
+        cohort = user_bucket["cohorts"][record["level"]]
+        user_bucket["total_taken"] += 1
+        cohort["taken"] += 1
+        if record["terminal"] == "confirmed":
+            user_bucket["confirmed"] += 1
+            cohort["confirmed"] += 1
+        elif record["terminal"] == "cancelled":
+            user_bucket["cancelled"] += 1
+            cohort["cancelled"] += 1
+        if record["advanced"]:
+            cohort["advanced"] += 1
+
+    summary: Dict[str, Any] = {
+        "total_taken": 0,
+        "confirmed": 0,
+        "cancelled": 0,
+        "open": 0,
+        "confirmation_rate": 0.0,
+        "cohorts": {level: _empty_intake_bucket(level) for level in _INTAKE_LEVELS},
+    }
+    for user_bucket in by_user.values():
+        user_bucket["open"] = max(
+            0,
+            int(user_bucket["total_taken"])
+            - int(user_bucket["confirmed"])
+            - int(user_bucket["cancelled"]),
+        )
+        user_bucket["confirmation_rate"] = (
+            round((user_bucket["confirmed"] / user_bucket["total_taken"]) * 100, 1)
+            if user_bucket["total_taken"]
+            else 0.0
+        )
+        summary["total_taken"] += user_bucket["total_taken"]
+        summary["confirmed"] += user_bucket["confirmed"]
+        summary["cancelled"] += user_bucket["cancelled"]
+        for level in _INTAKE_LEVELS:
+            source = _finalize_intake_bucket(user_bucket["cohorts"][level])
+            target = summary["cohorts"][level]
+            for key in ("taken", "confirmed", "cancelled", "advanced"):
+                target[key] += int(source.get(key) or 0)
+
+    summary["open"] = max(
+        0, summary["total_taken"] - summary["confirmed"] - summary["cancelled"]
+    )
+    summary["confirmation_rate"] = (
+        round((summary["confirmed"] / summary["total_taken"]) * 100, 1)
+        if summary["total_taken"]
+        else 0.0
+    )
+    for level in _INTAKE_LEVELS:
+        _finalize_intake_bucket(summary["cohorts"][level])
+    return by_user, summary
+
+
 @router.get("/api/admin/confirmation-stats")
 async def admin_confirmation_stats(
     from_date: Optional[str] = None,
@@ -2596,6 +2776,85 @@ async def admin_confirmation_stats(
             "orders_touched": int(m["orders_touched"] or 0),
         }
 
+    # Anchor the report to the intake date, then follow those orders through the
+    # present. This answers "what happened to the orders taken in this range?"
+    pull_conds = [
+        OrderEvent.action == "confirmation_pulled",
+        OrderEvent.created_at >= from_dt,
+        OrderEvent.created_at < to_dt,
+    ]
+    if agent_ids:
+        pull_conds.append(OrderEvent.user_id.in_(agent_ids))
+    else:
+        pull_conds.append(OrderEvent.user_id.in_([]))
+    if store_key and store_key != "all":
+        pull_conds.append(OrderEvent.store_key == store_key)
+    pull_res = await db.execute(
+        select(
+            OrderEvent.id,
+            OrderEvent.user_id,
+            OrderEvent.order_gid,
+            OrderEvent.store_key,
+            OrderEvent.created_at,
+            OrderEvent.event_metadata,
+        )
+        .where(*pull_conds)
+        .order_by(OrderEvent.created_at.asc(), OrderEvent.id.asc())
+    )
+    pulls: List[Dict[str, Any]] = []
+    for row in pull_res.all():
+        m = row._mapping
+        metadata = m["event_metadata"] or {}
+        pulls.append(
+            {
+                "id": m["id"],
+                "user_id": m["user_id"],
+                "order_gid": m["order_gid"],
+                "store_key": m["store_key"],
+                "created_at": m["created_at"],
+                "level": metadata.get("level") or "new",
+            }
+        )
+
+    followups: List[Dict[str, Any]] = []
+    if pulls:
+        earliest_pull = min(p["created_at"] for p in pulls)
+        followup_conds = [
+            OrderEvent.created_at >= earliest_pull,
+            OrderEvent.action.in_(
+                (
+                    "confirmation_phone_n1",
+                    "confirmation_phone_n2",
+                    "confirmation_phone_n3",
+                    "confirmation_phone_n4",
+                    "confirmation_confirmed",
+                    "confirmation_cancelled",
+                )
+            ),
+            metadata_op != "remove",
+            metadata_role == "agent",
+            OrderEvent.user_id.in_(agent_ids),
+        ]
+        if store_key and store_key != "all":
+            followup_conds.append(OrderEvent.store_key == store_key)
+        followup_res = await db.execute(
+            select(
+                OrderEvent.id,
+                OrderEvent.user_id,
+                OrderEvent.order_gid,
+                OrderEvent.store_key,
+                OrderEvent.action,
+                OrderEvent.created_at,
+            )
+            .where(*followup_conds)
+            .order_by(OrderEvent.created_at.asc(), OrderEvent.id.asc())
+        )
+        followups = [dict(row._mapping) for row in followup_res.all()]
+
+    intake_by_user, intake_summary = _aggregate_intake_cohorts(
+        pulls, followups, agent_ids
+    )
+
     rows: List[Dict[str, Any]] = []
     summary = {
         "n1": 0,
@@ -2645,6 +2904,7 @@ async def admin_confirmation_stats(
             "confirmation_rate": confirmation_rate,
             "total_actions": total_actions,
             "total_attempts": total_actions,
+            "intake": intake_by_user.get(uid),
         })
         for key in ("n1", "n2", "n3", "n4", "nowtp", "enatt", "confirmed", "cancelled", "orders_touched"):
             summary[key] += counts.get(key, 0)
@@ -2675,4 +2935,10 @@ async def admin_confirmation_stats(
         "store": store_key or "all",
         "rows": rows,
         "summary": summary,
+        "intake_summary": intake_summary,
+        "intake_definition": {
+            "date_scope": "taken_at",
+            "outcomes_followed_through": datetime.now(timezone.utc).isoformat(),
+            "levels": list(_INTAKE_LEVELS),
+        },
     }

@@ -8,6 +8,40 @@ function todayISO(offsetDays = 0) {
   return d.toISOString().slice(0, 10);
 }
 
+const INTAKE_LEVELS = [
+  { key: "new", label: "New", next: "N1" },
+  { key: "n1", label: "N1", next: "N2" },
+  { key: "n2", label: "N2", next: "N3" },
+  { key: "n3", label: "N3", next: "N4" },
+  { key: "n4", label: "N4", next: null },
+  { key: "nowtp", label: "No-WTP", next: null },
+  { key: "enatt", label: "En attente", next: null },
+];
+
+function percentOf(value, total) {
+  const n = Number(value || 0);
+  const d = Number(total || 0);
+  return d > 0 ? Math.max(0, Math.min(100, (n / d) * 100)) : 0;
+}
+
+function IntakeOutcomeBar({ bucket }) {
+  const taken = Number(bucket?.taken || 0);
+  const confirmed = Number(bucket?.confirmed || 0);
+  const cancelled = Number(bucket?.cancelled || 0);
+  const open = Math.max(0, Number(bucket?.open || 0));
+  return (
+    <div
+      className="flex h-3 w-full overflow-hidden rounded-full bg-slate-100"
+      title={`${confirmed} confirmed · ${cancelled} cancelled · ${open} still open`}
+      aria-label={`${confirmed} confirmed, ${cancelled} cancelled, ${open} still open out of ${taken} taken`}
+    >
+      <span className="bg-emerald-500" style={{ width: `${percentOf(confirmed, taken)}%` }} />
+      <span className="bg-rose-500" style={{ width: `${percentOf(cancelled, taken)}%` }} />
+      <span className="bg-slate-300" style={{ width: `${percentOf(open, taken)}%` }} />
+    </div>
+  );
+}
+
 // Render hint for an audit-log action — turns the bare action name from OrderEvent into
 // a readable label + emoji + Tailwind palette so the order search timeline is scannable.
 function describeOrderAction(action) {
@@ -72,6 +106,8 @@ export default function AdminAnalytics(){
   // Confirmation team metrics (n1..n4, nowtp, enatt, confirmed, cancelled per user/day-range)
   const [confStatsRows, setConfStatsRows] = useState([]);
   const [confStatsSummary, setConfStatsSummary] = useState({});
+  const [confIntakeSummary, setConfIntakeSummary] = useState({});
+  const [confIntakeDefinition, setConfIntakeDefinition] = useState({});
   const [confStatsLoading, setConfStatsLoading] = useState(false);
   const confStatsRequestIdRef = useRef(0);
 
@@ -249,6 +285,8 @@ export default function AdminAnalytics(){
       if (requestId !== confStatsRequestIdRef.current) return;
       setConfStatsRows(js.rows || []);
       setConfStatsSummary(js.summary || {});
+      setConfIntakeSummary(js.intake_summary || {});
+      setConfIntakeDefinition(js.intake_definition || {});
     } catch (e){
       if (requestId !== confStatsRequestIdRef.current) return;
       setAdminMsg(e?.message || "Failed to load confirmation stats");
@@ -797,9 +835,10 @@ export default function AdminAnalytics(){
                   {confStatsLoading ? "Loading…" : "Refresh"}
                 </button>
               </div>
-              <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-4">
+              <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-4">
                 {[
                   { label: "Active agents", value: confStatsRows.length, note: "Configured team", style: "border-indigo-200 bg-indigo-50 text-indigo-800" },
+                  { label: "Orders taken", value: confIntakeSummary?.total_taken || 0, note: "From Get more orders", style: "border-cyan-200 bg-cyan-50 text-cyan-800" },
                   { label: "Contact attempts", value: confStatsSummary?.contact_attempts || 0, note: "Calls and follow-ups", style: "border-sky-200 bg-sky-50 text-sky-800" },
                   { label: "Confirmed", value: confStatsSummary?.confirmed || 0, note: "Successful outcomes", style: "border-emerald-200 bg-emerald-50 text-emerald-800" },
                   { label: "Cancelled", value: confStatsSummary?.cancelled || 0, note: "Cancelled outcomes", style: "border-rose-200 bg-rose-50 text-rose-800" },
@@ -812,11 +851,191 @@ export default function AdminAnalytics(){
                   </div>
                 ))}
               </div>
+              <div className="mb-4 overflow-hidden rounded-2xl border border-cyan-200 bg-gradient-to-br from-cyan-50 via-white to-indigo-50 shadow-sm">
+                <div className="border-b border-cyan-100 px-4 py-3 sm:px-5">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <h4 className="font-semibold text-slate-900">Get more orders · intake results</h4>
+                      <p className="mt-0.5 text-xs text-slate-600">
+                        Orders taken from {fromDate} to {toDate}. Their later confirmation progress is followed through today.
+                      </p>
+                    </div>
+                    <span className="rounded-full border border-cyan-200 bg-white px-3 py-1 text-[11px] font-semibold text-cyan-800">
+                      Cohort view
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 p-4 sm:grid-cols-5 sm:px-5">
+                  {[
+                    { label: "Taken", value: confIntakeSummary?.total_taken || 0, tone: "text-cyan-700" },
+                    { label: "Confirmed", value: confIntakeSummary?.confirmed || 0, tone: "text-emerald-700" },
+                    { label: "Cancelled", value: confIntakeSummary?.cancelled || 0, tone: "text-rose-700" },
+                    { label: "Still open", value: confIntakeSummary?.open || 0, tone: "text-slate-700" },
+                    { label: "Intake conversion", value: `${Number(confIntakeSummary?.confirmation_rate || 0).toFixed(1)}%`, tone: "text-indigo-700" },
+                  ].map((metric) => (
+                    <div key={metric.label} className="rounded-xl border border-white bg-white/90 p-3 shadow-sm">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{metric.label}</div>
+                      <div className={`mt-1 text-xl font-bold tabular-nums ${metric.tone}`}>{metric.value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="grid gap-4 px-4 pb-4 sm:px-5 lg:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.9fr)]">
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">Outcome by intake source</div>
+                        <div className="text-[11px] text-slate-500">Each bar divides taken orders into confirmed, cancelled, and still open.</div>
+                      </div>
+                      <div className="flex gap-3 text-[10px] text-slate-600">
+                        <span className="flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-emerald-500" />Confirmed</span>
+                        <span className="flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-rose-500" />Cancelled</span>
+                        <span className="flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-slate-300" />Open</span>
+                      </div>
+                    </div>
+                    <div className="space-y-3">
+                      {INTAKE_LEVELS.map((level) => {
+                        const bucket = confIntakeSummary?.cohorts?.[level.key] || {};
+                        return (
+                          <div key={level.key} className="grid grid-cols-[76px_minmax(100px,1fr)] items-center gap-x-3 gap-y-1">
+                            <div>
+                              <div className="text-xs font-semibold text-slate-800">{level.label}</div>
+                              <div className="text-[10px] tabular-nums text-slate-500">{Number(bucket.taken || 0)} taken</div>
+                            </div>
+                            <div>
+                              <IntakeOutcomeBar bucket={bucket} />
+                              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] tabular-nums text-slate-500">
+                                <span className="text-emerald-700">{Number(bucket.confirmed || 0)} confirmed</span>
+                                <span className="text-rose-700">{Number(bucket.cancelled || 0)} cancelled</span>
+                                <span>{Number(bucket.open || 0)} open</span>
+                                {level.next && (
+                                  <span className="rounded bg-amber-50 px-1.5 py-0.5 font-semibold text-amber-800">
+                                    {Number(bucket.advanced || 0)} reached {level.next}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <div className="text-sm font-semibold text-slate-900">Taken orders by agent</div>
+                    <div className="mt-0.5 text-[11px] text-slate-500">Volume and conversion of each agent’s claimed orders.</div>
+                    <div className="mt-3 space-y-3">
+                      {(confStatsRows || []).map((agent) => {
+                        const intake = agent.intake || {};
+                        const total = Number(intake.total_taken || 0);
+                        const maxTaken = Math.max(
+                          1,
+                          ...(confStatsRows || []).map((row) => Number(row?.intake?.total_taken || 0))
+                        );
+                        return (
+                          <div key={agent.user_id}>
+                            <div className="mb-1 flex items-center justify-between gap-3">
+                              <span className="truncate text-xs font-medium text-slate-800">{agent.name || agent.email}</span>
+                              <span className="whitespace-nowrap text-[10px] tabular-nums text-slate-500">
+                                {total} taken · {Number(intake.confirmed || 0)} confirmed · {Number(intake.confirmation_rate || 0).toFixed(1)}%
+                              </span>
+                            </div>
+                            <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+                              <div
+                                className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-indigo-500"
+                                style={{ width: `${percentOf(total, maxTaken)}%` }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {(confStatsRows || []).length === 0 && (
+                        <div className="py-8 text-center text-xs text-slate-500">No confirmation agents configured.</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mx-4 mb-4 overflow-x-auto rounded-xl border border-slate-200 bg-white sm:mx-5">
+                  <div className="border-b border-slate-100 px-4 py-3">
+                    <div className="text-sm font-semibold text-slate-900">Agent intake detail</div>
+                    <div className="text-[11px] text-slate-500">Exactly what happened to every intake source for every agent.</div>
+                  </div>
+                  <table className="min-w-[900px] w-full text-xs">
+                    <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="px-3 py-2 text-left">Agent</th>
+                        <th className="px-3 py-2 text-left">Taken from</th>
+                        <th className="px-3 py-2 text-right">Taken</th>
+                        <th className="px-3 py-2 text-right">Confirmed</th>
+                        <th className="px-3 py-2 text-right">Cancelled</th>
+                        <th className="px-3 py-2 text-right">Still open</th>
+                        <th className="px-3 py-2 text-right">Next stage reached</th>
+                        <th className="px-3 py-2 text-right">Confirmed / taken</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(confStatsRows || []).flatMap((agent) =>
+                        INTAKE_LEVELS.map((level) => ({
+                          agent,
+                          level,
+                          bucket: agent?.intake?.cohorts?.[level.key] || {},
+                        }))
+                      ).filter((row) => Number(row.bucket.taken || 0) > 0).map(({ agent, level, bucket }) => (
+                        <tr key={`${agent.user_id}-${level.key}`} className="border-t border-slate-100">
+                          <td className="px-3 py-2">
+                            <div className="font-medium text-slate-800">{agent.name || agent.email}</div>
+                            <div className="text-[10px] text-slate-400">{agent.email}</div>
+                          </td>
+                          <td className="px-3 py-2 font-semibold text-slate-700">{level.label}</td>
+                          <td className="px-3 py-2 text-right font-bold tabular-nums text-cyan-700">{Number(bucket.taken || 0)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-emerald-700">{Number(bucket.confirmed || 0)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-rose-700">{Number(bucket.cancelled || 0)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-slate-600">{Number(bucket.open || 0)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">
+                            {level.next ? (
+                              <span className="rounded-full bg-amber-50 px-2 py-1 font-semibold text-amber-800">
+                                {Number(bucket.advanced || 0)} → {level.next}
+                              </span>
+                            ) : (
+                              <span className="text-slate-300">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            <span className="inline-flex min-w-[54px] justify-center rounded-full bg-indigo-50 px-2 py-1 font-semibold tabular-nums text-indigo-700">
+                              {Number(bucket.confirmation_rate || 0).toFixed(1)}%
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                      {(confStatsRows || []).every((agent) => Number(agent?.intake?.total_taken || 0) === 0) && (
+                        <tr>
+                          <td colSpan={8} className="px-3 py-8 text-center text-slate-500">
+                            No orders were taken from Get more orders in this date range.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="border-t border-cyan-100 bg-white/60 px-4 py-2 text-[10px] text-slate-500 sm:px-5">
+                  “Reached next stage” is a progression count and may overlap with a later confirmed or cancelled outcome.
+                  {confIntakeDefinition?.date_scope === "taken_at" ? " Date filters apply to when the order was taken." : ""}
+                </div>
+              </div>
+
+              <div className="mb-2">
+                <h4 className="text-sm font-semibold text-slate-900">All confirmation activity</h4>
+                <p className="text-[11px] text-slate-500">Calls and final outcomes recorded during the selected date range.</p>
+              </div>
               <div className="overflow-x-auto bg-white border border-gray-200 rounded-xl shadow-sm">
-                <table className="min-w-[1160px] w-full text-sm">
+                <table className="min-w-[1240px] w-full text-sm">
                   <thead className="bg-gray-50 text-left text-[11px] uppercase tracking-wide text-gray-600">
                     <tr>
                       <th className="px-3 py-2">Agent</th>
+                      <th className="px-3 py-2 text-right">Taken</th>
                       <th className="px-3 py-2 text-right">Contacts</th>
                       <th className="px-3 py-2 text-right">N1</th>
                       <th className="px-3 py-2 text-right">N2</th>
@@ -832,7 +1051,7 @@ export default function AdminAnalytics(){
                   </thead>
                   <tbody>
                     {(confStatsRows || []).length === 0 && !confStatsLoading && (
-                      <tr><td colSpan={12} className="px-3 py-8 text-center text-gray-500">No active confirmation agents are configured.</td></tr>
+                      <tr><td colSpan={13} className="px-3 py-8 text-center text-gray-500">No active confirmation agents are configured.</td></tr>
                     )}
                     {(confStatsRows || []).map((r) => (
                       <tr key={r.user_id} className="border-t border-gray-100">
@@ -840,6 +1059,7 @@ export default function AdminAnalytics(){
                           <div className="font-medium">{r.name || r.email || r.user_id}</div>
                           <div className="text-[11px] text-gray-500">{r.email}{r.role ? ` · ${r.role}` : ""}</div>
                         </td>
+                        <td className="px-3 py-2 text-right tabular-nums font-bold text-cyan-700">{Number(r?.intake?.total_taken || 0)}</td>
                         <td className="px-3 py-2 text-right tabular-nums font-semibold">{r.contact_attempts || 0}</td>
                         <td className="px-3 py-2 text-right tabular-nums">
                           <span className="inline-block min-w-[28px] px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">{r.n1}</span>
@@ -878,6 +1098,7 @@ export default function AdminAnalytics(){
                     <tfoot className="bg-gray-50">
                       <tr className="border-t border-gray-200 font-semibold text-gray-800">
                         <td className="px-3 py-2 text-right">Total</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-cyan-700">{confIntakeSummary?.total_taken || 0}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.contact_attempts || 0}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.n1 || 0}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{confStatsSummary?.n2 || 0}</td>
