@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -274,6 +274,30 @@ async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
 _VALID_LEVELS = {"n1", "n2", "n3", "n4", "nowtp", "enatt", "new"}
 _NOWTP_TAGS = ("nowtp1", "nowtp2", "nowtp3", "nowtp4")
 _ENATT_TAGS = ("enatt1", "enatt2", "enatt3", "enatt4")
+
+
+def _confirmation_metric_action_predicate():
+    return or_(
+        OrderEvent.action.in_(
+            (
+                "confirmation_phone_n1",
+                "confirmation_phone_n2",
+                "confirmation_phone_n3",
+                "confirmation_phone_n4",
+                "confirmation_confirmed",
+                "confirmation_cancelled",
+            )
+        ),
+        OrderEvent.action.like("confirmation_nowtp%"),
+        OrderEvent.action.like("confirmation_enatt%"),
+    )
+
+
+def _confirmation_actor_predicate():
+    """Recognize both legacy agent events and any durable Confirmation-page action."""
+    metadata_source = func.coalesce(OrderEvent.event_metadata["source"].as_string(), "")
+    metadata_role = func.coalesce(OrderEvent.event_metadata["role"].as_string(), "")
+    return or_(metadata_source == "confirmation", metadata_role == "agent")
 
 
 def apply_level_filter(q: str, level: Optional[str]) -> str:
@@ -820,6 +844,22 @@ class AgentTagActionBody(BaseModel):
     actor_id: Optional[str] = None
 
 
+async def _lock_client_action(db: AsyncSession, client_action_id: str) -> None:
+    """Serialize one browser action across Cloud Run instances.
+
+    PostgreSQL transaction advisory locks close the race where two open tabs
+    both see no audit row, both write Shopify, and then one crashes on the
+    unique audit key. The lock is released automatically on commit/rollback.
+    SQLite is already serialized for writes and is used only in local tests.
+    """
+    bind = db.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": client_action_id},
+        )
+
+
 def _same_client_action(
     event: OrderEvent,
     *,
@@ -851,9 +891,6 @@ async def agent_tag_action(
     response therefore means both the Shopify mutation and the audit event are
     durable. Retried requests return the original event instead of double-counting.
     """
-    if getattr(user, "role", None) != "agent":
-        raise HTTPException(status_code=403, detail="confirmation agent role required")
-
     order_id = (body.order_id or "").strip()
     tag = (body.tag or "").strip()
     op = (body.op or "").strip().lower()
@@ -884,6 +921,7 @@ async def agent_tag_action(
     )
 
     store_key = _normalize_store(store)
+    await _lock_client_action(db, client_action_id)
     existing = await db.scalar(
         select(OrderEvent).where(OrderEvent.client_action_id == client_action_id)
     )
@@ -927,8 +965,9 @@ async def agent_tag_action(
     metadata = {
         "tag": tag,
         "op": op,
-        "role": "agent",
+        "role": getattr(user, "role", None),
         "source": "confirmation",
+        "confirmation_actor": True,
         "client_action_id": client_action_id,
     }
     try:
@@ -944,7 +983,10 @@ async def agent_tag_action(
         )
         await db.commit()
     except IntegrityError:
-        await db.rollback()
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         # Another tab can race the same localStorage item. The unique key picks
         # one winner; verify that the winner represents this exact action.
         existing = await db.scalar(
@@ -958,7 +1000,7 @@ async def agent_tag_action(
             tag=tag,
             op=op,
         ):
-            logger.exception(
+            logger.warning(
                 "confirmation audit idempotency conflict (client_action_id=%s)",
                 client_action_id,
             )
@@ -1825,6 +1867,8 @@ async def cancel_order(
                     "refund": bool(body.refund),
                     "staff_note": (body.staff_note or "").strip() or None,
                     "role": getattr(user, "role", None),
+                    "source": "confirmation",
+                    "confirmation_actor": True,
                 },
             )
             await db.commit()
@@ -1965,6 +2009,8 @@ async def bulk_tag(
                     "op": "add",
                     "bulk": True,
                     "role": getattr(user, "role", None),
+                    "source": "confirmation",
+                    "confirmation_actor": True,
                 },
             )
             await db.commit()
@@ -2308,6 +2354,8 @@ async def pull_execute(
                     "exclude_tags": [t for t in (body.exclude_tags or []) if t],
                     "removed_other_agent_tags": other_active,
                     "role": getattr(user, "role", None),
+                    "source": "confirmation",
+                    "confirmation_actor": True,
                 },
             )
             await db.commit()
@@ -2349,12 +2397,31 @@ async def _team_stats_uncached(
     for backwards compatibility but no longer scopes the output."""
     today_label = today_cod_label()
 
-    # Team membership is explicit: only active users with the confirmation-agent role.
-    # A collector can also have Shopify tags for unrelated workflows, so tags alone must
-    # never make that user appear in confirmation analytics.
+    tz = _tz()
+    today_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_local = today_local + timedelta(days=1)
+    today_utc = today_local.astimezone(timezone.utc)
+    tomorrow_utc = tomorrow_local.astimezone(timezone.utc)
+
+    # Keep configured agents visible, and also include any active user who has
+    # genuinely acted from the Confirmation page today. This matches the page's
+    # long-standing rule that any signed-in staff member can help with an order,
+    # while preventing a role misconfiguration from losing the click or counter.
+    actor_ids = select(OrderEvent.user_id).where(
+        or_(
+            _confirmation_metric_action_predicate(),
+            OrderEvent.action == "confirmation_pulled",
+        ),
+        _confirmation_actor_predicate(),
+        OrderEvent.created_at >= today_utc,
+        OrderEvent.created_at < tomorrow_utc,
+    ).distinct()
     res = await db.execute(
         select(User)
-        .where(User.is_active == True, User.role == "agent")  # noqa: E712
+        .where(
+            User.is_active == True,  # noqa: E712
+            or_(User.role == "agent", User.id.in_(actor_ids)),
+        )
         .order_by(User.name.asc(), User.email.asc())
     )
     agents = res.scalars().all()
@@ -2366,11 +2433,6 @@ async def _team_stats_uncached(
     # today in the app timezone, regardless of which delivery date they chose OR which
     # store the order belongs to. The OrderEvent query does not constrain by store_key
     # so the result is already cross-store.
-    tz = _tz()
-    today_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
-    tomorrow_local = today_local + timedelta(days=1)
-    today_utc = today_local.astimezone(timezone.utc)
-    tomorrow_utc = tomorrow_local.astimezone(timezone.utc)
     agent_ids = [a.id for a in agents]
     confirmed_map: Dict[str, int] = {a.id: 0 for a in agents}
     if agent_ids:
@@ -2380,7 +2442,7 @@ async def _team_stats_uncached(
                 OrderEvent.action == "confirmation_confirmed",
                 OrderEvent.user_id.in_(agent_ids),
                 func.coalesce(OrderEvent.event_metadata["op"].as_string(), "") != "remove",
-                func.coalesce(OrderEvent.event_metadata["role"].as_string(), "agent") == "agent",
+                _confirmation_actor_predicate(),
                 OrderEvent.created_at >= today_utc,
                 OrderEvent.created_at < tomorrow_utc,
             )
@@ -2680,13 +2742,7 @@ async def admin_confirmation_stats(
     db: AsyncSession = Depends(get_session),
     _: User = Depends(require_admin),
 ):
-    """Per-agent counts of genuine confirmation-page actions in a date range.
-
-    Only active users configured with the ``agent`` role are part of this report.
-    Historical tag-removal events and events explicitly recorded while the actor had
-    another role are excluded so shared Collector/Tagger writes cannot inflate the
-    confirmation team's metrics.
-    """
+    """Per-user counts of genuine Confirmation-page actions in a date range."""
     from_dt = _parse_date_bound(from_date, end=False)
     to_dt = _parse_date_bound(to_date, end=True)
     if from_dt is None:
@@ -2697,39 +2753,35 @@ async def admin_confirmation_stats(
         today_local = datetime.now(_tz()).replace(hour=0, minute=0, second=0, microsecond=0)
         to_dt = (today_local + timedelta(days=1)).astimezone(timezone.utc)
 
-    # Build the roster first and include zero-activity agents in the response.  This
-    # keeps the dashboard aligned with the configured confirmation team instead of
-    # inferring team membership from whichever users happened to generate events.
+    relevant_action = _confirmation_metric_action_predicate()
+    actor_ids = select(OrderEvent.user_id).where(
+        OrderEvent.created_at >= from_dt,
+        OrderEvent.created_at < to_dt,
+        or_(relevant_action, OrderEvent.action == "confirmation_pulled"),
+        _confirmation_actor_predicate(),
+    ).distinct()
+
+    # Configured agents stay visible with zero activity. Staff who actually used
+    # the Confirmation page also appear even if their role was configured
+    # incorrectly, so their successful clicks are never hidden from analytics.
     agent_res = await db.execute(
         select(User)
-        .where(User.role == "agent", User.is_active == True)  # noqa: E712
+        .where(
+            User.is_active == True,  # noqa: E712
+            or_(User.role == "agent", User.id.in_(actor_ids)),
+        )
         .order_by(User.name.asc(), User.email.asc())
     )
     agents = agent_res.scalars().all()
     agent_ids = [a.id for a in agents]
 
-    relevant_action = or_(
-        OrderEvent.action.in_(
-            (
-                "confirmation_phone_n1",
-                "confirmation_phone_n2",
-                "confirmation_phone_n3",
-                "confirmation_phone_n4",
-                "confirmation_confirmed",
-                "confirmation_cancelled",
-            )
-        ),
-        OrderEvent.action.like("confirmation_nowtp%"),
-        OrderEvent.action.like("confirmation_enatt%"),
-    )
     metadata_op = func.coalesce(OrderEvent.event_metadata["op"].as_string(), "")
-    metadata_role = func.coalesce(OrderEvent.event_metadata["role"].as_string(), "agent")
     conds = [
         OrderEvent.created_at >= from_dt,
         OrderEvent.created_at < to_dt,
         relevant_action,
         metadata_op != "remove",
-        metadata_role == "agent",
+        _confirmation_actor_predicate(),
     ]
     if agent_ids:
         conds.append(OrderEvent.user_id.in_(agent_ids))
@@ -2832,7 +2884,7 @@ async def admin_confirmation_stats(
                 )
             ),
             metadata_op != "remove",
-            metadata_role == "agent",
+            _confirmation_actor_predicate(),
             OrderEvent.user_id.in_(agent_ids),
         ]
         if store_key and store_key != "all":

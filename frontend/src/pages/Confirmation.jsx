@@ -16,7 +16,13 @@ import StorePicker from "../components/StorePicker";
 import OrderLabel from "../components/OrderLabel";
 import { useToasts, ToastStack } from "../components/Toast";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
-import { enqueueTagWrite, useSyncQueueLength, readQueue } from "../lib/syncQueue";
+import {
+  enqueueTagWrite,
+  enqueueTagWrites,
+  retrySyncQueueNow,
+  useSyncQueueState,
+  readQueue,
+} from "../lib/syncQueue";
 import { copyNodeAsPng, triggerDownload } from "../lib/labelClipboard";
 import {
   PHONE_TAGS, NOWTP_TAGS, ENATT_TAGS,
@@ -31,7 +37,7 @@ const BTN_TAP = "active:scale-[0.96] transition-transform duration-75";
 
 // Shared "action chip" styling for the per-order action row. Gradient background +
 // soft shadow + ring on hover + tap press.
-const ACTION_BTN_BASE = "inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold text-white shadow-md hover:shadow-lg hover:-translate-y-px focus:outline-none focus:ring-2 focus:ring-offset-1 active:scale-[0.95] transition-all duration-100 min-w-[60px] justify-center";
+const ACTION_BTN_BASE = "inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold text-white shadow-md hover:shadow-lg hover:-translate-y-px focus:outline-none focus:ring-2 focus:ring-offset-1 active:scale-[0.95] transition-all duration-100 min-w-[60px] justify-center disabled:opacity-50 disabled:cursor-wait disabled:hover:translate-y-0 disabled:hover:shadow-md";
 const ACTION_BTN_THEMES = {
   sky:     "bg-gradient-to-br from-sky-500 to-sky-600 hover:from-sky-600 hover:to-sky-700 focus:ring-sky-400",
   violet:  "bg-gradient-to-br from-violet-500 to-violet-600 hover:from-violet-600 hover:to-violet-700 focus:ring-violet-400",
@@ -471,7 +477,8 @@ function AgentView({ me }) {
   const [cancelModalFor, setCancelModalFor] = useState(null);
   const requestIdRef = useRef(0);
   const teamRequestIdRef = useRef(0);
-  const syncCount = useSyncQueueLength();
+  const syncState = useSyncQueueState();
+  const syncCount = syncState.count;
 
   const loadAgentMe = useCallback(async () => {
     try {
@@ -593,6 +600,21 @@ function AgentView({ me }) {
     prevSyncCountRef.current = syncCount;
   }, [syncCount, loadFirst, loadTeam, pageIndex]);
 
+  // Success is announced only after the backend confirms that Shopify changed
+  // and the analytics event committed. The earlier UI used to say "success"
+  // immediately after queueing, which hid failed or unauthorized requests.
+  useEffect(() => {
+    function onSynced(event) {
+      const item = event?.detail?.item;
+      if (!item || item.action !== "add" || item.silentSuccess) return;
+      const rawTag = String(item.tag || "");
+      const label = isCodTag(rawTag) ? "Confirmation" : rawTag.toUpperCase();
+      pushToast(`✓ ${label} saved and counted`, "success", 2600);
+    }
+    window.addEventListener("confirmationActionSynced", onSynced);
+    return () => window.removeEventListener("confirmationActionSynced", onSynced);
+  }, [pushToast]);
+
   // Close the per-row "..." dropdown whenever the user clicks anywhere else.
   useEffect(() => {
     if (!actionsDropdownFor) return;
@@ -611,6 +633,14 @@ function AgentView({ me }) {
     // recomputes on each `nowTick` so newly enqueued writes are picked up promptly
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [currentOrders, store, syncCount, nowTick]
+  );
+  const pendingOrderIds = useMemo(
+    () => new Set(
+      (syncState.items || [])
+        .filter((item) => !item.store || item.store === store)
+        .map((item) => item.orderId)
+    ),
+    [syncState.items, store]
   );
 
   // ---------- Optimistic local mutations ----------
@@ -637,42 +667,52 @@ function AgentView({ me }) {
     return out;
   }
 
+  function queueActions(actions) {
+    const queued = enqueueTagWrites(actions);
+    if (!queued) {
+      pushToast("Action was not saved. Keep this order open and try again.", "error", 7000);
+      return false;
+    }
+    return true;
+  }
+
   function cyclePhone(order, cycle) {
     const next = nextInCycle(order.tags || [], cycle);
     const cycleSet = new Set(cycle.map((t) => t.toLowerCase()));
     const present = (order.tags || []).filter((t) => cycleSet.has(String(t || "").toLowerCase()));
+    const writes = present
+      .filter((old) => String(old).toLowerCase() !== next.toLowerCase())
+      .map((old) => ({ orderId: order.id, orderLabel: order.name || `#${order.number}`, action: "remove", tag: old, store }));
+    writes.push({ orderId: order.id, orderLabel: order.name || `#${order.number}`, action: "add", tag: next, store });
+    if (!queueActions(writes)) return null;
     updateLocalOrderTags(order.id, (tags) => {
       const filtered = tags.filter((t) => !cycleSet.has(String(t || "").toLowerCase()));
       return dedupTags([...filtered, next]);
     });
-    for (const old of present) {
-      if (String(old).toLowerCase() === next.toLowerCase()) continue;
-      enqueueTagWrite({ orderId: order.id, action: "remove", tag: old, store });
-    }
-    enqueueTagWrite({ orderId: order.id, action: "add", tag: next, store });
     return next;
   }
 
   async function handlePhone(order) {
     const ok = await copyToClipboard(order.phone || "");
     const next = cyclePhone(order, PHONE_TAGS);
+    if (!next) return;
     pushToast(
-      ok ? `📞 Copied ${order.phone} · ${(next || "").toUpperCase()}` : `📞 ${(next || "").toUpperCase()} — phone copy blocked`,
-      ok ? "success" : "warn",
+      ok ? `📞 Copied ${order.phone} · saving ${next.toUpperCase()}…` : `📞 Saving ${next.toUpperCase()} · phone copy blocked`,
+      ok ? "info" : "warn",
     );
   }
 
   function handleNowtp(order) {
     // Cycles nowtp1 → nowtp2 → nowtp3 → nowtp4 (locks at nowtp4).
     const next = cyclePhone(order, NOWTP_TAGS);
-    pushToast(`🚫 No-WhatsApp · ${next}`, "success");
+    if (next) pushToast(`🚫 Saving No-WhatsApp · ${next}…`, "info");
   }
 
   function handleEnatt(order) {
     // Cycles enatt1 → enatt2 → enatt3 → enatt4 (locks at enatt4). Use for "en attente"
     // (order pending follow-up).
     const next = cyclePhone(order, ENATT_TAGS);
-    pushToast(`⏳ En attente · ${next}`, "success");
+    if (next) pushToast(`⏳ Saving En attente · ${next}…`, "info");
   }
 
   async function handleCopyPhone(order) {
@@ -695,19 +735,22 @@ function AgentView({ me }) {
     const dd = isoToDDMMYY(chosenDate);
     if (!dd) return;
     const tag = `cod ${dd}`;
+    if (!queueActions([{ orderId: order.id, orderLabel: order.name || `#${order.number}`, action: "add", tag, store }])) return;
     // Add the cod tag everywhere (queue, search results, expanded customer)…
     updateLocalOrderTags(order.id, (tags) => dedupTags([...tags, tag]));
     // …then drop the row from the agent's queue (matches backend filter).
     removeLocalOrder(order.id);
-    enqueueTagWrite({ orderId: order.id, action: "add", tag, store });
     setDatePickerFor(null);
-    pushToast(`✅ ${order.name || `#${order.number}`} booked for ${dd}`, "success");
+    pushToast(`Saving ${order.name || `#${order.number}`} for ${dd}…`, "info");
   }
 
   function removeTagOptimistic(order, tag) {
+    if (!enqueueTagWrite({ orderId: order.id, orderLabel: order.name || `#${order.number}`, action: "remove", tag, store })) {
+      pushToast("Tag removal was not saved. Please try again.", "error", 6000);
+      return;
+    }
     updateLocalOrderTags(order.id, (tags) => tags.filter((t) => String(t || "").toLowerCase() !== String(tag || "").toLowerCase()));
-    enqueueTagWrite({ orderId: order.id, action: "remove", tag, store });
-    pushToast(`Tag removed · ${tag}`, "info");
+    pushToast(`Removing tag · ${tag}…`, "info");
   }
 
   // ---------- Bulk selection / bulk tagging ----------
@@ -760,15 +803,27 @@ function AgentView({ me }) {
     try {
       const ids = [...selected];
       const isCod = isCodTag(tag);
+      const orderById = new Map(ordersForView.map((order) => [order.id, order]));
+      const writes = ids.map((id) => {
+        const order = orderById.get(id);
+        return {
+          orderId: id,
+          orderLabel: order?.name || (order?.number ? `#${order.number}` : ""),
+          action: "add",
+          tag,
+          store,
+          silentSuccess: true,
+        };
+      });
+      if (!queueActions(writes)) return;
       for (const id of ids) {
         if (isCod) {
           removeLocalOrder(id);
         } else {
           updateLocalOrderTags(id, (tags) => dedupTags([...tags, tag]));
         }
-        enqueueTagWrite({ orderId: id, action: "add", tag, store });
       }
-      pushToast(`Tag "${tag}" applied to ${ids.length} order${ids.length === 1 ? "" : "s"}`, "success");
+      pushToast(`Saving "${tag}" on ${ids.length} order${ids.length === 1 ? "" : "s"}…`, "info");
       setBulkTag("");
       setShowBulkSuggestions(false);
       clearSelection();
@@ -819,6 +874,7 @@ function AgentView({ me }) {
     const pickerOpen = datePickerFor === o.id;
     const isSelected = selected.has(o.id);
     const isActive = isOpen || pickerOpen;
+    const isSyncing = pendingOrderIds.has(o.id);
     const url = shopifyOrderUrl(o, meta.shop_domain);
     const label = o.name || `#${o.number}`;
     return (
@@ -868,6 +924,7 @@ function AgentView({ me }) {
         </div>
         <div className="text-[11px] text-gray-500 mt-0.5">
           {o.created_at ? new Date(o.created_at).toLocaleString() : ""}
+          {isSyncing && <span className="ml-2 font-semibold text-amber-700">Saving action…</span>}
         </div>
 
         {/* Customer + phone (highlighted) */}
@@ -902,6 +959,7 @@ function AgentView({ me }) {
               <span key={t} className={`inline-flex items-center text-[11px] px-2 py-0.5 rounded-full border ${isCodTag(t) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-50 text-gray-700 border-gray-200"}`}>
                 {t}
                 <button
+                  disabled={isSyncing}
                   onClick={(ev) => { ev.stopPropagation(); removeTagOptimistic(o, t); }}
                   className={`ml-1 text-gray-400 hover:text-rose-600 hover:scale-110 ${BTN_TAP}`}
                   title="Remove tag"
@@ -914,6 +972,7 @@ function AgentView({ me }) {
         {/* Action row */}
         <div className="mt-2.5 grid grid-cols-5 gap-1.5">
           <button
+            disabled={isSyncing}
             onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
             className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky} !min-w-0 col-span-1`}
             title="Copy phone + advance n1/n2/n3/n4"
@@ -922,6 +981,7 @@ function AgentView({ me }) {
             <span>{(tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "").toUpperCase() || "Call"}</span>
           </button>
           <button
+            disabled={isSyncing}
             onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
             className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.violet} !min-w-0 col-span-1`}
             title="No-WhatsApp — cycles nowtp1 → nowtp4"
@@ -933,6 +993,7 @@ function AgentView({ me }) {
             })()}</span>
           </button>
           <button
+            disabled={isSyncing}
             onClick={(ev) => { ev.stopPropagation(); handleEnatt(o); }}
             className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.fuchsia} !min-w-0 col-span-1`}
             title="En attente — cycles enatt1 → enatt4"
@@ -944,6 +1005,7 @@ function AgentView({ me }) {
             })()}</span>
           </button>
           <button
+            disabled={isSyncing}
             onClick={(ev) => { ev.stopPropagation(); openDatePicker(o); }}
             className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.emerald} !min-w-0 col-span-1`}
             title="Confirm for a delivery date"
@@ -982,6 +1044,7 @@ function AgentView({ me }) {
               className="text-sm border border-gray-300 rounded px-2 py-1"
             />
             <button
+              disabled={isSyncing}
               onClick={(ev) => { ev.stopPropagation(); submitConfirm(o); }}
               className={`text-xs px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm ${BTN_TAP}`}
             >Confirm</button>
@@ -1016,9 +1079,18 @@ function AgentView({ me }) {
         rightSlot={
           <div className="flex items-center gap-2">
             {syncCount > 0 && (
-              <span className="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200">
-                Syncing {syncCount}
-              </span>
+              <button
+                type="button"
+                onClick={retrySyncQueueNow}
+                className={`text-xs px-2 py-1 rounded-full border ${
+                  syncState.blockedCount > 0
+                    ? "bg-rose-100 text-rose-800 border-rose-300"
+                    : "bg-amber-100 text-amber-800 border-amber-200"
+                }`}
+                title={syncState.lastError || "Actions are being saved"}
+              >
+                {syncState.blockedCount > 0 ? `Not saved yet ${syncCount} · Retry` : `Saving ${syncCount}`}
+              </button>
             )}
             <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700 border border-gray-200">
               {updatedAgoSec == null ? "Updating…" : `Updated ${updatedAgoSec}s ago`}
@@ -1122,6 +1194,32 @@ function AgentView({ me }) {
           </div>
         )}
         {error && <div className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</div>}
+        {syncCount > 0 && (
+          <div className={`rounded-xl border px-3 py-2 text-sm flex flex-wrap items-center gap-2 ${
+            syncState.blockedCount > 0
+              ? "border-rose-300 bg-rose-50 text-rose-900"
+              : "border-amber-300 bg-amber-50 text-amber-900"
+          }`} role="status" aria-live="polite">
+            <span className="font-semibold">
+              {syncState.blockedCount > 0
+                ? `${syncCount} action${syncCount === 1 ? "" : "s"} not saved yet`
+                : `Saving ${syncCount} action${syncCount === 1 ? "" : "s"}…`}
+            </span>
+            <span className="text-xs opacity-80">
+              {syncState.lastError || "Keep this page open; every action is queued safely and will be counted after confirmation."}
+            </span>
+            {syncState.items?.[0] && (
+              <span className="rounded-md bg-white/70 px-2 py-1 text-xs font-medium">
+                Next: {syncState.items[0].orderLabel || "order"} · {String(syncState.items[0].tag || "").toUpperCase()}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={retrySyncQueueNow}
+              className="ml-auto rounded-lg border border-current bg-white/70 px-3 py-1 text-xs font-semibold hover:bg-white"
+            >Retry now</button>
+          </div>
+        )}
 
         {/* Bulk-action bar */}
         <section className="bg-white border border-gray-200 rounded-2xl p-3">
@@ -1274,6 +1372,7 @@ function AgentView({ me }) {
                 {ordersForView.map((o) => {
                   const isOpen = expanded.has(o.id);
                   const pickerOpen = datePickerFor === o.id;
+                  const isSyncing = pendingOrderIds.has(o.id);
                   return (
                     <React.Fragment key={o.id}>
                       <tr
@@ -1349,6 +1448,7 @@ function AgentView({ me }) {
                               <span key={t} className={`inline-flex items-center text-xs px-2 py-0.5 rounded-full border ${isCodTag(t) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-50 text-gray-700 border-gray-200"}`}>
                                 {t}
                                 <button
+                                  disabled={isSyncing}
                                   onClick={(ev) => { ev.stopPropagation(); removeTagOptimistic(o, t); }}
                                   className={`ml-1 text-gray-400 hover:text-rose-600 hover:scale-110 ${BTN_TAP}`}
                                   title="Remove tag"
@@ -1360,6 +1460,7 @@ function AgentView({ me }) {
                         <td className="px-2 py-2 text-right whitespace-nowrap sticky right-0 bg-white shadow-[-6px_0_8px_-6px_rgba(0,0,0,0.08)]">
                           <div className="inline-flex items-center gap-1">
                             <button
+                              disabled={isSyncing}
                               onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
                               className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky} !min-w-[44px] !px-2`}
                               title="Copy phone + advance n1/n2/n3/n4"
@@ -1368,6 +1469,7 @@ function AgentView({ me }) {
                               <span>{(tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "").toUpperCase() || "Call"}</span>
                             </button>
                             <button
+                              disabled={isSyncing}
                               onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
                               className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.violet} !min-w-[44px] !px-2`}
                               title="No-WhatsApp attempt — cycles nowtp1 → nowtp2 → nowtp3 → nowtp4"
@@ -1379,6 +1481,7 @@ function AgentView({ me }) {
                               })()}</span>
                             </button>
                             <button
+                              disabled={isSyncing}
                               onClick={(ev) => { ev.stopPropagation(); handleEnatt(o); }}
                               className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.fuchsia} !min-w-[44px] !px-2`}
                               title="En attente — cycles enatt1 → enatt2 → enatt3 → enatt4"
@@ -1390,6 +1493,7 @@ function AgentView({ me }) {
                               })()}</span>
                             </button>
                             <button
+                              disabled={isSyncing}
                               onClick={(ev) => { ev.stopPropagation(); openDatePicker(o); }}
                               className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.emerald} !min-w-[36px] !px-2`}
                               title="Confirm for a delivery date"
@@ -1436,6 +1540,7 @@ function AgentView({ me }) {
                                 className="text-sm border border-gray-300 rounded px-2 py-1"
                               />
                               <button
+                                disabled={isSyncing}
                                 onClick={(ev) => { ev.stopPropagation(); submitConfirm(o); }}
                                 className={`text-xs px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm ${BTN_TAP}`}
                               >Confirm</button>
