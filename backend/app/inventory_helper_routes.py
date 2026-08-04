@@ -1,12 +1,11 @@
 """Inventory Helper API: import Shopify orders, compare crate counts, and store photos."""
 
-from datetime import date as date_type, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -76,16 +75,6 @@ def _clean_store(value: str) -> str:
     if not store or len(store) > 63 or not all(c.isalnum() or c in "_-" for c in store):
         raise HTTPException(status_code=400, detail="invalid store")
     return store
-
-
-def _day_bounds(value: str) -> tuple[str, str]:
-    try:
-        day = datetime.strptime((value or "").strip(), "%Y-%m-%d").date()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="date must use YYYY-MM-DD")
-    if day > date_type.today() + timedelta(days=1):
-        raise HTTPException(status_code=400, detail="date cannot be in the future")
-    return day.isoformat(), (day + timedelta(days=1)).isoformat()
 
 
 def _status(expected_crates: int, expected_items: int, actual_crates: Optional[int], actual_items: Optional[int]) -> str:
@@ -240,115 +229,12 @@ async def list_receipts(
             selectinload(InventoryReceipt.photos),
         )
         .order_by(InventoryReceipt.created_at.desc(), InventoryReceipt.id.desc())
-        .limit(250)
+        .limit(1000)
     )
     if store:
         stmt = stmt.where(InventoryReceipt.store_key == _clean_store(store))
     rows = (await db.scalars(stmt)).all()
     return {"receipts": [_serialize(row) for row in rows]}
-
-
-@router.post("/sync-day")
-async def sync_shopify_day(
-    date: str = Query(..., description="Shop date in YYYY-MM-DD format"),
-    store: str = Query(...),
-    db: AsyncSession = Depends(get_session),
-    user: User = Depends(get_current_user),
-):
-    """Import a day's Shopify orders without changing existing receiving work."""
-    from .main import shopify_graphql
-
-    day_start, next_day = _day_bounds(date)
-    store_key = _clean_store(store)
-    search_query = f"created_at:>={day_start} created_at:<{next_day}"
-    query = f"""
-      query InventoryHelperDay($first: Int!, $after: String, $query: String!) {{
-        orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT) {{
-          nodes {{ {_ORDER_FIELDS} }}
-          pageInfo {{ hasNextPage endCursor }}
-        }}
-      }}
-    """
-
-    shopify_orders: list[dict[str, Any]] = []
-    cursor: Optional[str] = None
-    # 1,250 orders is a generous safety ceiling for a single receiving day.
-    for _ in range(25):
-        data = await shopify_graphql(
-            query,
-            {"first": 50, "after": cursor, "query": search_query},
-            store=store_key,
-        )
-        connection = data.get("orders") or {}
-        shopify_orders.extend(connection.get("nodes") or [])
-        page_info = connection.get("pageInfo") or {}
-        if not page_info.get("hasNextPage") or not page_info.get("endCursor"):
-            break
-        cursor = page_info.get("endCursor")
-
-    gids = [str(order.get("id") or "") for order in shopify_orders if order.get("id")]
-    existing_gids: set[str] = set()
-    if gids:
-        existing_gids = set(
-            (await db.scalars(
-                select(InventoryReceipt.shopify_order_gid).where(
-                    InventoryReceipt.store_key == store_key,
-                    InventoryReceipt.shopify_order_gid.in_(gids),
-                )
-            )).all()
-        )
-
-    imported_count = 0
-    for order in shopify_orders:
-        gid = str(order.get("id") or "")
-        if not gid or gid in existing_gids:
-            continue
-        items = _line_items_from_shopify(order)
-        db.add(
-            InventoryReceipt(
-                store_key=store_key,
-                shopify_order_gid=gid,
-                order_number=str(order.get("name") or gid.rsplit("/", 1)[-1]),
-                po_number=(str(order.get("poNumber") or "").strip() or None),
-                shopify_created_at=order.get("createdAt"),
-                line_items=items,
-                ordered_crates=0,
-                expected_items=sum(item["ordered_quantity"] for item in items),
-                status="waiting",
-                created_by_id=user.id,
-            )
-        )
-        existing_gids.add(gid)
-        imported_count += 1
-
-    if imported_count:
-        try:
-            await db.commit()
-        except IntegrityError:
-            # Another device may have synced the same order at the same moment.
-            await db.rollback()
-
-    rows = (
-        await db.scalars(
-            select(InventoryReceipt)
-            .options(
-                selectinload(InventoryReceipt.created_by),
-                selectinload(InventoryReceipt.counted_by),
-                selectinload(InventoryReceipt.photos),
-            )
-            .where(
-                InventoryReceipt.store_key == store_key,
-                InventoryReceipt.shopify_created_at.like(f"{day_start}%"),
-            )
-            .order_by(InventoryReceipt.shopify_created_at.desc(), InventoryReceipt.id.desc())
-        )
-    ).all()
-    return {
-        "date": day_start,
-        "shopify_count": len(shopify_orders),
-        "imported_count": imported_count,
-        "receipts": [_serialize(row) for row in rows],
-    }
 
 
 @router.post("/receipts", status_code=201)

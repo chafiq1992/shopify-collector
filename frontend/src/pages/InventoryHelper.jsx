@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  X,
 } from "lucide-react";
 import StorePicker from "../components/StorePicker.jsx";
 import { authFetch, authHeaders, loadAuth } from "../lib/auth";
@@ -86,21 +87,6 @@ function ProductThumb({ src, alt = "Product" }) {
 }
 
 
-function localISO(day = new Date()) {
-  const year = day.getFullYear();
-  const month = String(day.getMonth() + 1).padStart(2, "0");
-  const date = String(day.getDate()).padStart(2, "0");
-  return `${year}-${month}-${date}`;
-}
-
-
-function yesterdayISO() {
-  const day = new Date();
-  day.setDate(day.getDate() - 1);
-  return localISO(day);
-}
-
-
 function shortDate(value) {
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ""));
   return match ? `${match[3]}/${match[2]}` : "";
@@ -110,8 +96,6 @@ function shortDate(value) {
 function orderedLabel(receipt) {
   const date = String(receipt?.shopify_created_at || "").slice(0, 10);
   if (!date) return "Shopify purchase order";
-  if (date === yesterdayISO()) return `Ordered yesterday ${shortDate(date)}`;
-  if (date === localISO()) return `Ordered today ${shortDate(date)}`;
   return `Ordered ${shortDate(date)}`;
 }
 
@@ -195,12 +179,12 @@ export default function InventoryHelper() {
   const [store, setStore] = useState(() => readCurrentStore());
   const [receipts, setReceipts] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
-  const [viewMode, setViewMode] = useState("yesterday");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
   const [reference, setReference] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
   const [lookupBusy, setLookupBusy] = useState(false);
   const [draft, setDraft] = useState(null);
   const [draftCrates, setDraftCrates] = useState(0);
@@ -225,8 +209,7 @@ export default function InventoryHelper() {
 
   useEffect(() => {
     persistStoreSelection(store);
-    if (viewMode === "yesterday") syncYesterday();
-    else loadReceipts();
+    loadReceipts();
   }, [store]);
 
   useEffect(() => {
@@ -255,43 +238,20 @@ export default function InventoryHelper() {
     }
   }
 
-  async function syncYesterday(preferredId) {
-    setLoading(true);
-    setError("");
-    try {
-      const day = yesterdayISO();
-      const data = await apiJson(`/api/inventory-helper/sync-day?store=${encodeURIComponent(store)}&date=${encodeURIComponent(day)}`, {
-        method: "POST",
-        headers: authHeaders({ Accept: "application/json" }),
-      });
-      const list = data.receipts || [];
-      setReceipts(list);
-      setSelectedId((current) => preferredId || (list.some((item) => item.id === current) ? current : null));
-      if (data.imported_count > 0) {
-        setNotice(`${data.imported_count} new purchase order${data.imported_count === 1 ? "" : "s"} loaded from Shopify.`);
-      }
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function changeView(next) {
-    setViewMode(next);
-    setSelectedId(null);
-    if (next === "yesterday") await syncYesterday();
-    else await loadReceipts();
-  }
-
   function openReceipt(receiptId) {
     setSelectedId(receiptId);
     window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);
   }
 
+  function closeCreate() {
+    if (savingDraft || lookupBusy) return;
+    setShowCreate(false);
+    setDraft(null);
+    setReference("");
+  }
+
   function refreshCurrent() {
-    if (viewMode === "yesterday") syncYesterday(selected?.id);
-    else loadReceipts(selected?.id);
+    loadReceipts(selected?.id);
   }
 
   function replaceReceipt(next) {
@@ -337,8 +297,9 @@ export default function InventoryHelper() {
       setDraft(null);
       setReference("");
       setNotice(`${saved.order_number} added to Inventory Helper.`);
-      setViewMode("all");
+      setShowCreate(false);
       await loadReceipts(saved.id);
+      window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -452,23 +413,16 @@ export default function InventoryHelper() {
           <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 px-4 py-4 sm:px-6">
             <div>
               <div className="text-xs font-bold uppercase tracking-wide text-indigo-600">Receiving queue</div>
-              <h2 className="text-lg font-black">
-                {viewMode === "yesterday" ? `Ordered yesterday ${shortDate(yesterdayISO())}` : "All purchase orders"}
-              </h2>
-              <p className="text-xs text-slate-500">
-                {viewMode === "yesterday" ? "Loaded automatically from Shopify when this page opens." : "Saved purchase orders from every date."}
-              </p>
+              <h2 className="text-lg font-black">Purchase orders</h2>
+              <p className="text-xs text-slate-500">Newest first · scroll down for older purchase orders.</p>
             </div>
-            <div className="ml-auto inline-flex rounded-xl border border-slate-200 bg-slate-100 p-1">
-              <button type="button" onClick={() => changeView("yesterday")} className={`rounded-lg px-3 py-1.5 text-xs font-bold ${viewMode === "yesterday" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}>Yesterday</button>
-              <button type="button" onClick={() => changeView("all")} className={`rounded-lg px-3 py-1.5 text-xs font-bold ${viewMode === "all" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}>All orders</button>
-            </div>
+            {isAdmin && <button type="button" onClick={() => { setShowCreate(true); setError(""); setNotice(""); }} className="ml-auto inline-flex h-10 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-xs font-black text-white shadow-sm"><Plus className="h-4 w-4" /> Create new purchase order</button>}
           </div>
 
           {loading ? (
-            <div className="flex items-center justify-center gap-2 p-10 text-sm font-semibold text-slate-500"><Loader2 className="h-5 w-5 animate-spin" /> Loading Shopify purchase orders…</div>
+            <div className="flex items-center justify-center gap-2 p-10 text-sm font-semibold text-slate-500"><Loader2 className="h-5 w-5 animate-spin" /> Loading purchase orders…</div>
           ) : !receipts.length ? (
-            <div className="p-10 text-center"><ClipboardList className="mx-auto mb-3 h-9 w-9 text-slate-300" /><div className="font-black">No purchase orders found</div><p className="mt-1 text-sm text-slate-500">{viewMode === "yesterday" ? `Shopify has no orders dated ${shortDate(yesterdayISO())}.` : "No orders have been saved yet."}</p></div>
+            <div className="p-10 text-center"><ClipboardList className="mx-auto mb-3 h-9 w-9 text-slate-300" /><div className="font-black">No purchase orders added yet</div><p className="mt-1 text-sm text-slate-500">{isAdmin ? "Copy a purchase-order name or number from Shopify, then create the first card." : "An admin has not added a purchase order yet."}</p></div>
           ) : (
             <div className="grid grid-cols-2 gap-2.5 p-2.5 sm:grid-cols-3 sm:gap-4 sm:p-4 lg:grid-cols-4">
               {receipts.map((receipt) => {
@@ -502,17 +456,20 @@ export default function InventoryHelper() {
           )}
         </section>
 
-        {isAdmin && (
-          <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+        {isAdmin && showCreate && (
+          <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/50 px-3 py-5 backdrop-blur-sm sm:py-10" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreate(); }}>
+          <section className="mx-auto max-w-3xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl">
             <div className="border-b border-slate-100 p-4 sm:p-6">
               <div className="mb-4 flex items-start gap-3">
                 <div className="rounded-xl bg-indigo-50 p-2 text-indigo-600"><Plus className="h-5 w-5" /></div>
-                <div><h2 className="font-bold">Add a purchase order</h2><p className="text-sm text-slate-500">Enter its Shopify order ID, order number, or PO number.</p></div>
+                <div><h2 className="font-bold">Create new purchase order</h2><p className="text-sm text-slate-500">Paste the purchase-order name or number copied from Shopify.</p></div>
+                <button type="button" onClick={closeCreate} className="ml-auto rounded-xl border border-slate-200 p-2 text-slate-500 hover:bg-slate-50" aria-label="Close"><X className="h-4 w-4" /></button>
               </div>
+              {error && <div className="mb-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-800">{error}</div>}
               <form onSubmit={lookup} className="flex flex-col gap-2 sm:flex-row">
                 <label className="relative flex-1">
                   <Search className="absolute left-3 top-3.5 h-4 w-4 text-slate-400" />
-                  <input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="e.g. #1048, PO-2026-018, or Shopify ID" className="h-11 w-full rounded-xl border border-slate-300 pl-10 pr-3 text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" />
+                  <input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="Paste Shopify PO name or number" autoFocus className="h-11 w-full rounded-xl border border-slate-300 pl-10 pr-3 text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" />
                 </label>
                 <button disabled={lookupBusy || !reference.trim()} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 text-sm font-bold text-white disabled:opacity-50">
                   {lookupBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />} Find in Shopify
@@ -540,16 +497,17 @@ export default function InventoryHelper() {
                   ))}
                 </div>
                 <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                  <button type="button" onClick={() => setDraft(null)} className="h-11 rounded-xl border border-slate-300 px-5 text-sm font-bold">Cancel</button>
-                  <button type="button" onClick={saveDraft} disabled={savingDraft || !draft.line_items.length} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-bold text-white disabled:opacity-50">{savingDraft && <Loader2 className="h-4 w-4 animate-spin" />} Save purchase order</button>
+                  <button type="button" onClick={() => setDraft(null)} className="h-11 rounded-xl border border-slate-300 px-5 text-sm font-bold">Back</button>
+                  <button type="button" onClick={saveDraft} disabled={savingDraft || !draft.line_items.length} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-bold text-white disabled:opacity-50">{savingDraft && <Loader2 className="h-4 w-4 animate-spin" />} Create purchase-order card</button>
                 </div>
               </div>
             )}
           </section>
+          </div>
         )}
 
         <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[['Shown POs', totals.all, 'text-slate-950'], ['Ready', totals.waiting, 'text-emerald-700'], ['Mismatch', totals.mismatch, 'text-rose-700'], ['Matched', totals.matched, 'text-emerald-700']].map(([label, value, tone]) => (
+          {[['Total POs', totals.all, 'text-slate-950'], ['Ready', totals.waiting, 'text-emerald-700'], ['Mismatch', totals.mismatch, 'text-rose-700'], ['Matched', totals.matched, 'text-emerald-700']].map(([label, value, tone]) => (
             <div key={label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-xs font-semibold text-slate-500">{label}</div><div className={`mt-1 text-2xl font-black ${tone}`}>{value}</div></div>
           ))}
         </section>

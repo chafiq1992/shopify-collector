@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Ilaf &amp; Daddy: City Slap Heroes</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<style>
+  html,body{margin:0;padding:0;background:#0a0a14;color:#fff;font-family:system-ui,Arial,sans-serif;overflow:hidden;height:100%;}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;}
+  canvas{background:#222;image-rendering:pixelated;max-width:100%;max-height:100%;box-shadow:0 0 40px #000;}
+  #hud{position:fixed;top:8px;left:8px;right:8px;display:flex;justify-content:space-between;pointer-events:none;font-weight:bold;text-shadow:2px 2px 0 #000;font-size:18px;}
+  #title,#mode{position:fixed;inset:0;background:linear-gradient(160deg,#1b1140,#341a5a);display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:20px;}
+  #title h1,#mode h1{font-size:42px;margin:0 0 10px;color:#ffd166;text-shadow:3px 3px 0 #c0392b;}
+  #title p,#mode p{max-width:560px;line-height:1.5;}
+  #title button,#mode button{margin:8px;font-size:22px;padding:14px 28px;background:#ffd166;color:#222;border:none;border-radius:10px;cursor:pointer;font-weight:bold;}
+  #title button:focus,#mode button:focus{outline:4px solid #fff;}
+  .key{background:#222;border:1px solid #555;padding:2px 8px;border-radius:6px;font-family:monospace;}
+  #pad{position:fixed;bottom:10px;left:10px;right:10px;display:none;justify-content:space-between;pointer-events:none;}
+  .stick,.btns{pointer-events:auto;}
+  .stick{width:140px;height:140px;background:rgba(255,255,255,.12);border-radius:50%;position:relative;}
+  .knob{position:absolute;left:40px;top:40px;width:60px;height:60px;background:rgba(255,255,255,.4);border-radius:50%;}
+  .btns{display:flex;gap:10px;align-items:flex-end;}
+  .btn{width:80px;height:80px;border-radius:50%;background:#ffd166;color:#222;font-weight:bold;border:none;font-size:18px;}
+  .btn.b{background:#ef476f;color:#fff;}
+  @media (pointer:coarse){#pad{display:flex;}}
+  #game-over{position:fixed;inset:0;background:rgba(0,0,0,.75);display:none;align-items:center;justify-content:center;flex-direction:column;text-align:center;}
+  #game-over h2{color:#ef476f;font-size:48px;margin:0;}
+  #game-over button{margin-top:18px;font-size:20px;padding:10px 24px;background:#ffd166;border:none;border-radius:10px;cursor:pointer;font-weight:bold;}
+  #mode{display:none;}
+  .row{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="960" height="540"></canvas></div>
+
+<div id="hud">
+  <div id="hp"></div>
+  <div id="score"></div>
+</div>
+
+<div id="pad">
+  <div class="stick" id="stick"><div class="knob" id="knob"></div></div>
+  <div class="btns">
+    <button class="btn" id="btnSwap">SWAP</button>
+    <button class="btn b" id="btnSlap">SLAP</button>
+  </div>
+</div>
+
+<div id="title">
+  <h1>Ilaf &amp; Daddy: City Slap Heroes</h1>
+  <p>Monsters are invading the little city! Ilaf (with her wild crazy hair) and her balding-on-the-sides Daddy team up to slap them all.</p>
+  <p>The closer the monsters get, the slower they crawl &mdash; but if they reach you they will <b>bite</b> and your blood meter drips down. Slap them away to stay alive!</p>
+  <div class="row">
+    <button id="btnOnePlayer" autofocus>1 PLAYER</button>
+    <button id="btnTwoPlayer">2 PLAYERS</button>
+  </div>
+</div>
+
+<div id="mode">
+  <h1 id="modeTitle">Controls</h1>
+  <div id="controlsHelp"></div>
+  <div class="row">
+    <button id="startBtn">START</button>
+    <button id="backBtn">Back</button>
+  </div>
+</div>
+
+<div id="game-over">
+  <h2>Both heroes fainted!</h2>
+  <p id="finalScore"></p>
+  <button id="againBtn">Play Again</button>
+</div>
+
+<script>
+(() => {
+const cvs = document.getElementById('c');
+const ctx = cvs.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+const W = cvs.width, H = cvs.height;
+
+const WORLD = { w: 1920, h: 1080 };
+
+const buildings = [
+  {x:120,y:120,w:220,h:160,c:'#c66',roof:'#933'},
+  {x:420,y:80, w:180,h:200,c:'#dca',roof:'#a86'},
+  {x:680,y:140,w:260,h:140,c:'#6ab',roof:'#358'},
+  {x:1020,y:90, w:200,h:200,c:'#cc6',roof:'#993'},
+  {x:1280,y:130,w:240,h:170,c:'#9c6',roof:'#583'},
+  {x:1580,y:100,w:220,h:200,c:'#c69',roof:'#936'},
+
+  {x:80,  y:760,w:220,h:200,c:'#bca',roof:'#876'},
+  {x:380, y:780,w:240,h:180,c:'#a9c',roof:'#669'},
+  {x:700, y:760,w:220,h:200,c:'#fc9',roof:'#a63'},
+  {x:1000,y:780,w:260,h:180,c:'#9cc',roof:'#377'},
+  {x:1340,y:760,w:220,h:200,c:'#cab',roof:'#866'},
+  {x:1620,y:780,w:220,h:180,c:'#bcb',roof:'#585'},
+
+  {x:880,y:480,w:160,h:120,c:'#88a',roof:'#557',fountain:true},
+];
+
+const trees = [];
+for(let i=0;i<22;i++){
+  trees.push({x:Math.random()*WORLD.w, y:300+Math.random()*(WORLD.h-600)});
+}
+
+function rectsOverlap(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y;}
+function solidAt(x,y,w,h){
+  const box={x,y,w,h};
+  for(const b of buildings){ if(rectsOverlap(box,b)) return true; }
+  if(x<10||y<10||x+w>WORLD.w-10||y+h>WORLD.h-10) return true;
+  return false;
+}
+
+// ---------- Heroes ----------
+function makeHero(name, isIlaf, slot){
+  return {
+    name, isIlaf, slot, // slot 0 or 1
+    x: 300 + slot*80, y: 500,
+    w: 30, h: 44,
+    dir: 1,
+    hp: 100, maxHp: 100,         // blood %
+    slapTimer:0, slapCool:0,
+    walkT:0,
+    biteFx:0,                    // visual splatter timer
+    speed: isIlaf? 3.2 : 2.8,
+  };
+}
+const ilaf  = makeHero('Ilaf', true, 0);
+const daddy = makeHero('Daddy', false, 1);
+let active = ilaf, other = daddy;     // used in 1P mode
+let playerCount = 1;                  // 1 or 2
+
+function swap(){
+  if(playerCount!==1) return;
+  [active, other] = [other, active];
+  other.x = active.x - 50; other.y = active.y + 10;
+}
+
+// ---------- Monsters ----------
+const monsters = [];
+let score = 0;
+let spawnTimer = 60;
+let difficulty = 1;
+
+function spawnMonster(){
+  const side = Math.floor(Math.random()*4);
+  let x,y;
+  if(side===0){x=20;y=200+Math.random()*(WORLD.h-400);}
+  else if(side===1){x=WORLD.w-40;y=200+Math.random()*(WORLD.h-400);}
+  else if(side===2){x=Math.random()*WORLD.w;y=20;}
+  else{x=Math.random()*WORLD.w;y=WORLD.h-40;}
+  monsters.push({
+    x,y,w:32,h:32,
+    hp:1+Math.floor(difficulty/3),
+    baseSpeed: 0.9+Math.random()*0.5,
+    color:`hsl(${Math.random()*360},70%,45%)`,
+    hitT:0,
+    wobble:Math.random()*6.28,
+    chomp:0,                        // animates jaws while biting
+  });
+}
+
+// ---------- Input ----------
+const keys={};
+window.addEventListener('keydown',e=>{
+  const k = e.key.length===1? e.key.toLowerCase() : e.key;
+  keys[k]=true;
+  if(e.key===' '||e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight') e.preventDefault();
+  if(playerCount===1 && (e.key==='Shift')) swap();
+});
+window.addEventListener('keyup',e=>{
+  const k = e.key.length===1? e.key.toLowerCase() : e.key;
+  keys[k]=false;
+});
+
+// Gamepads, indexed by slot
+function getPads(){
+  const out=[null,null];
+  const gps = navigator.getGamepads && navigator.getGamepads();
+  if(!gps) return out;
+  let i=0;
+  for(const g of gps){
+    if(g){ out[i]=g; i++; if(i>=2) break; }
+  }
+  return out;
+}
+const padPrev = [{a:false,b:false},{a:false,b:false}];
+
+// Touch (1P only — touch always controls "active")
+const stick=document.getElementById('stick'), knob=document.getElementById('knob');
+let stickV={x:0,y:0};
+let stickId=null, stickCenter={x:0,y:0};
+stick.addEventListener('touchstart',e=>{
+  const t=e.changedTouches[0];
+  stickId=t.identifier;
+  const r=stick.getBoundingClientRect();
+  stickCenter={x:r.left+r.width/2,y:r.top+r.height/2};
+});
+stick.addEventListener('touchmove',e=>{
+  for(const t of e.changedTouches){
+    if(t.identifier===stickId){
+      let dx=t.clientX-stickCenter.x, dy=t.clientY-stickCenter.y;
+      const m=Math.hypot(dx,dy), max=50;
+      if(m>max){dx*=max/m;dy*=max/m;}
+      knob.style.left=(40+dx)+'px'; knob.style.top=(40+dy)+'px';
+      stickV.x=dx/max; stickV.y=dy/max;
+    }
+  }
+  e.preventDefault();
+},{passive:false});
+function stickEnd(e){
+  for(const t of e.changedTouches){
+    if(t.identifier===stickId){
+      stickId=null; stickV={x:0,y:0};
+      knob.style.left='40px'; knob.style.top='40px';
+    }
+  }
+}
+stick.addEventListener('touchend',stickEnd);
+stick.addEventListener('touchcancel',stickEnd);
+
+document.getElementById('btnSlap').addEventListener('touchstart',e=>{e.preventDefault(); doSlap(active);});
+document.getElementById('btnSwap').addEventListener('touchstart',e=>{e.preventDefault(); swap();});
+
+// ---------- Slap ----------
+function doSlap(h){
+  if(h.hp<=0) return;
+  if(h.slapCool>0) return;
+  h.slapTimer = 12;
+  h.slapCool = 22;
+  const range = {x:h.x + (h.dir>0? h.w : -36), y:h.y+6, w:36, h:h.h-12};
+  for(const m of monsters){
+    if(rectsOverlap(range,m)){
+      m.hp--; m.hitT=15;
+      m.x += h.dir*22; m.y += (Math.random()-0.5)*8;
+    }
+  }
+}
+
+// per-hero input read
+function readInputFor(h){
+  let ix=0,iy=0,slap=false;
+  const pads = getPads();
+  const pad = pads[h.slot];
+  // keyboard mapping
+  if(playerCount===1){
+    // single player keyboard: WASD/Arrows control active
+    if(h === active){
+      if(keys['arrowleft']||keys['a']) ix-=1;
+      if(keys['arrowright']||keys['d']) ix+=1;
+      if(keys['arrowup']||keys['w']) iy-=1;
+      if(keys['arrowdown']||keys['s']) iy+=1;
+      if(keys[' ']) slap=true;
+      if(Math.abs(stickV.x)>.15) ix+=stickV.x;
+      if(Math.abs(stickV.y)>.15) iy+=stickV.y;
+    }
+  } else {
+    if(h.slot===0){
+      // Player 1 = Ilaf: WASD + Space
+      if(keys['a']) ix-=1;
+      if(keys['d']) ix+=1;
+      if(keys['w']) iy-=1;
+      if(keys['s']) iy+=1;
+      if(keys[' ']) slap=true;
+    } else {
+      // Player 2 = Daddy: Arrows + Enter (or /)
+      if(keys['ArrowLeft']) ix-=1;
+      if(keys['ArrowRight']) ix+=1;
+      if(keys['ArrowUp']) iy-=1;
+      if(keys['ArrowDown']) iy+=1;
+      if(keys['Enter']||keys['/']) slap=true;
+    }
+  }
+  // gamepad
+  if(pad){
+    const ax=pad.axes[0]||0, ay=pad.axes[1]||0;
+    if(Math.abs(ax)>.2) ix+=ax;
+    if(Math.abs(ay)>.2) iy+=ay;
+    if(pad.buttons[12]&&pad.buttons[12].pressed) iy-=1;
+    if(pad.buttons[13]&&pad.buttons[13].pressed) iy+=1;
+    if(pad.buttons[14]&&pad.buttons[14].pressed) ix-=1;
+    if(pad.buttons[15]&&pad.buttons[15].pressed) ix+=1;
+    const aP=pad.buttons[0]&&pad.buttons[0].pressed;
+    const bP=pad.buttons[1]&&pad.buttons[1].pressed;
+    if(aP && !padPrev[h.slot].a) slap=true;
+    if(bP && !padPrev[h.slot].b && playerCount===1) swap();
+    padPrev[h.slot].a=aP; padPrev[h.slot].b=bP;
+  }
+  return {ix,iy,slap};
+}
+
+// ---------- Update ----------
+let camX=0, camY=0;
+let started=false, gameOver=false;
+
+function updateHero(h, isControlled){
+  if(h.hp<=0) return;
+  let ix=0,iy=0,slap=false;
+  if(isControlled){
+    const r = readInputFor(h);
+    ix=r.ix; iy=r.iy; slap=r.slap;
+  } else {
+    // AI buddy follows active (only in 1P mode for the "other" hero)
+    const tdx = active.x - h.x - 60*active.dir;
+    const tdy = active.y - h.y;
+    const td = Math.hypot(tdx,tdy);
+    if(td>40){ ix = tdx/td; iy = tdy/td; }
+  }
+  const m=Math.hypot(ix,iy); if(m>1){ix/=m;iy/=m;}
+  if(ix!==0) h.dir = ix>0?1:-1;
+
+  const sp = isControlled? h.speed : h.speed*0.9;
+  let nx = h.x + ix*sp;
+  if(!solidAt(nx,h.y,h.w,h.h)) h.x=nx;
+  let ny = h.y + iy*sp;
+  if(!solidAt(h.x,ny,h.w,h.h)) h.y=ny;
+
+  h.walkT += (ix||iy)? 0.25:0;
+  if(slap) doSlap(h);
+  h.slapTimer=Math.max(0,h.slapTimer-1);
+  h.slapCool=Math.max(0,h.slapCool-1);
+  h.biteFx=Math.max(0,h.biteFx-1);
+}
+
+function update(){
+  if(!started || gameOver) return;
+
+  if(playerCount===1){
+    updateHero(active, true);
+    updateHero(other, false);
+  } else {
+    updateHero(ilaf, true);
+    updateHero(daddy, true);
+    // tether: don't let them stray more than 600px apart
+    const dx=daddy.x-ilaf.x, dy=daddy.y-ilaf.y, d=Math.hypot(dx,dy);
+    const MAX=600;
+    if(d>MAX){
+      const ox=(d-MAX)/2, ux=dx/d, uy=dy/d;
+      // pull both toward each other
+      const ax=ilaf.x+ux*ox, ay=ilaf.y+uy*ox;
+      if(!solidAt(ax,ilaf.y,ilaf.w,ilaf.h)) ilaf.x=ax;
+      if(!solidAt(ilaf.x,ay,ilaf.w,ilaf.h)) ilaf.y=ay;
+      const bx=daddy.x-ux*ox, by=daddy.y-uy*ox;
+      if(!solidAt(bx,daddy.y,daddy.w,daddy.h)) daddy.x=bx;
+      if(!solidAt(daddy.x,by,daddy.w,daddy.h)) daddy.y=by;
+    }
+  }
+
+  // Spawn
+  spawnTimer--;
+  if(spawnTimer<=0){
+    spawnMonster();
+    spawnTimer = Math.max(30, 90 - difficulty*4);
+  }
+
+  // Monsters: slow approach + bite drain
+  const heroes = [ilaf,daddy].filter(h=>h.hp>0);
+  for(let i=monsters.length-1;i>=0;i--){
+    const mo = monsters[i];
+    if(mo.hp<=0){
+      monsters.splice(i,1);
+      score++;
+      if(score%5===0) difficulty++;
+      continue;
+    }
+    if(heroes.length===0){ mo.chomp=0; continue; }
+
+    // target nearest hero
+    let tgt=heroes[0], best=Infinity;
+    for(const h of heroes){
+      const dd = Math.hypot(h.x-mo.x,h.y-mo.y);
+      if(dd<best){best=dd; tgt=h;}
+    }
+    const dx=tgt.x-mo.x, dy=tgt.y-mo.y, d=Math.hypot(dx,dy)||1;
+
+    // Slow down as it gets closer (cautious creep)
+    // Far away: full speed. Close (<160): scales down to 25% at touch.
+    let mult = 1;
+    if(d<160) mult = 0.25 + 0.75*(d/160);
+    const sp = mo.baseSpeed * mult;
+
+    // If touching, stop and bite
+    if(rectsOverlap(mo,tgt)){
+      mo.chomp = (mo.chomp+1) % 30;
+      // slow blood drain: ~ -0.25 per frame at 60fps = 15 hp/sec is too fast.
+      // Use -0.04 per frame ~= 2.4 hp/sec. With 100 maxHp that's ~40s of biting.
+      tgt.hp -= 0.04;
+      tgt.biteFx = 8;
+      // tiny nudge so monster doesn't perfectly overlap
+      mo.x -= dx/d*0.3;
+      mo.y -= dy/d*0.3;
+    } else {
+      mo.chomp = 0;
+      // move toward target but only along axes that don't push into a building
+      const nx = mo.x + (dx/d)*sp;
+      const ny = mo.y + (dy/d)*sp;
+      if(!solidAt(nx,mo.y,mo.w,mo.h)) mo.x=nx;
+      if(!solidAt(mo.x,ny,mo.w,mo.h)) mo.y=ny;
+    }
+
+    mo.wobble += 0.2;
+    if(mo.hitT>0) mo.hitT--;
+  }
+
+  // camera
+  let camTX, camTY;
+  if(playerCount===2){
+    camTX = (ilaf.x + daddy.x)/2 - W/2;
+    camTY = (ilaf.y + daddy.y)/2 - H/2;
+  } else {
+    camTX = active.x - W/2;
+    camTY = active.y - H/2;
+  }
+  camX += (camTX-camX)*0.15;
+  camY += (camTY-camY)*0.15;
+  camX = Math.max(0,Math.min(WORLD.w-W,camX));
+  camY = Math.max(0,Math.min(WORLD.h-H,camY));
+
+  // HUD
+  const bloodBar = h => {
+    const pct = Math.max(0,Math.round(h.hp));
+    const blocks = Math.round(pct/10);
+    return `${'█'.repeat(blocks)}${'░'.repeat(10-blocks)} ${pct}%`;
+  };
+  document.getElementById('hp').innerHTML =
+    `<span style="color:#ff8fbf">Ilaf 🩸 ${bloodBar(ilaf)}</span> &nbsp;&nbsp; <span style="color:#9fe7b3">Daddy 🩸 ${bloodBar(daddy)}</span>` +
+    (playerCount===1? ` &nbsp; playing as: <b>${active.name}</b>` : '');
+  document.getElementById('score').textContent = `Slapped: ${score}  Wave lvl: ${difficulty}`;
+
+  if(ilaf.hp<=0 && daddy.hp<=0){
+    gameOver=true;
+    document.getElementById('finalScore').textContent = `You slapped ${score} monsters. Wave level reached: ${difficulty}.`;
+    document.getElementById('game-over').style.display='flex';
+  } else if(playerCount===1 && active.hp<=0 && other.hp>0){
+    swap();
+  }
+}
+
+// ---------- Drawing ----------
+function drawCity(){
+  ctx.fillStyle='#3a7a3a';
+  ctx.fillRect(-camX,-camY,WORLD.w,WORLD.h);
+  ctx.fillStyle='#555';
+  ctx.fillRect(-camX,420-camY,WORLD.w,140);
+  ctx.fillStyle='#bbb';
+  for(let x=0;x<WORLD.w;x+=60){
+    ctx.fillRect(x+10-camX,485-camY,30,8);
+  }
+  ctx.fillStyle='#555';
+  ctx.fillRect(900-camX,-camY,120,WORLD.h);
+  ctx.fillStyle='#bbb';
+  for(let y=0;y<WORLD.h;y+=60){
+    if(y<420||y>560) ctx.fillRect(950-camX,y+10-camY,8,30);
+  }
+  for(const t of trees){ drawTree(t.x-camX,t.y-camY); }
+  for(const b of buildings){
+    const x=b.x-camX, y=b.y-camY;
+    if(b.fountain){
+      ctx.fillStyle='#557'; ctx.fillRect(x,y,b.w,b.h);
+      ctx.fillStyle='#9cf'; ctx.fillRect(x+10,y+10,b.w-20,b.h-20);
+      ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(x+b.w/2,y+b.h/2,16,0,6.28); ctx.fill();
+      continue;
+    }
+    ctx.fillStyle=b.c; ctx.fillRect(x,y+20,b.w,b.h-20);
+    ctx.fillStyle=b.roof;
+    ctx.beginPath(); ctx.moveTo(x-6,y+22); ctx.lineTo(x+b.w/2,y-10); ctx.lineTo(x+b.w+6,y+22); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#fff4a3';
+    for(let wx=20;wx<b.w-30;wx+=50){
+      for(let wy=30;wy<b.h-30;wy+=50){
+        ctx.fillRect(x+wx,y+wy,24,28);
+        ctx.strokeStyle='#222'; ctx.strokeRect(x+wx,y+wy,24,28);
+      }
+    }
+    ctx.fillStyle='#5a2'; ctx.fillRect(x+b.w/2-14,y+b.h-40,28,40);
+    ctx.fillStyle='#ff0'; ctx.fillRect(x+b.w/2+6,y+b.h-22,4,4);
+  }
+}
+function drawTree(x,y){
+  ctx.fillStyle='#5a3a1a';
+  ctx.fillRect(x-4,y-6,8,18);
+  ctx.fillStyle='#2a6a2a';
+  ctx.beginPath(); ctx.arc(x,y-14,18,0,6.28); ctx.fill();
+  ctx.fillStyle='#3a8a3a';
+  ctx.beginPath(); ctx.arc(x-8,y-18,12,0,6.28); ctx.fill();
+  ctx.beginPath(); ctx.arc(x+8,y-18,12,0,6.28); ctx.fill();
+}
+
+function drawHero(h, isActive){
+  const x = Math.round(h.x - camX), y = Math.round(h.y - camY);
+  const bob = Math.sin(h.walkT)*2;
+
+  // shadow
+  ctx.fillStyle='rgba(0,0,0,.35)';
+  ctx.beginPath(); ctx.ellipse(x+15,y+44,14,4,0,0,6.28); ctx.fill();
+
+  if(h.isIlaf){
+    ctx.fillStyle='#e84';
+    ctx.fillRect(x+6,y+38-bob,8,6);
+    ctx.fillRect(x+16,y+38+bob,8,6);
+    ctx.fillStyle='#ff5fa2';
+    ctx.beginPath();
+    ctx.moveTo(x+4,y+38); ctx.lineTo(x+26,y+38);
+    ctx.lineTo(x+22,y+22); ctx.lineTo(x+8,y+22); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.fillRect(x+13,y+28,4,4);
+    ctx.fillStyle='#f3c89a';
+    ctx.fillRect(x+2,y+22,6,12);
+    ctx.fillRect(x+22,y+22,6,12);
+    ctx.fillStyle='#f3c89a';
+    ctx.fillRect(x+7,y+8,16,14);
+    ctx.fillStyle='#4a2a14';
+    ctx.beginPath();
+    ctx.moveTo(x+5,y+12);
+    ctx.lineTo(x+8,y-2);
+    ctx.lineTo(x+11,y+6);
+    ctx.lineTo(x+14,y-6);
+    ctx.lineTo(x+17,y+4);
+    ctx.lineTo(x+20,y-3);
+    ctx.lineTo(x+23,y+6);
+    ctx.lineTo(x+26,y+0);
+    ctx.lineTo(x+28,y+14);
+    ctx.lineTo(x+24,y+10);
+    ctx.lineTo(x+6,y+10);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+3,y+16,5,0,6.28); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+27,y+16,5,0,6.28); ctx.fill();
+    ctx.fillRect(x-1,y+12,3,3);
+    ctx.fillRect(x+29,y+12,3,3);
+    ctx.fillRect(x+12,y-8,2,3);
+    ctx.fillRect(x+18,y-7,2,3);
+    ctx.fillStyle='#000';
+    ctx.fillRect(x+11,y+15,2,3);
+    ctx.fillRect(x+18,y+15,2,3);
+    ctx.fillRect(x+13,y+19,5,1);
+    ctx.fillStyle='#f99'; ctx.fillRect(x+9,y+18,2,2); ctx.fillRect(x+20,y+18,2,2);
+  } else {
+    ctx.fillStyle='#234';
+    ctx.fillRect(x+6,y+38-bob,8,8);
+    ctx.fillRect(x+16,y+38+bob,8,8);
+    ctx.fillStyle='#3a7';
+    ctx.fillRect(x+4,y+22,22,18);
+    ctx.fillStyle='#222'; ctx.fillRect(x+4,y+38,22,3);
+    ctx.fillStyle='#e9b890';
+    ctx.fillRect(x+1,y+22,5,14);
+    ctx.fillRect(x+24,y+22,5,14);
+    ctx.fillStyle='#e9b890';
+    ctx.fillRect(x+7,y+6,16,16);
+    ctx.fillStyle='#2a1a10';
+    ctx.fillRect(x+12,y+5,6,4);
+    ctx.fillRect(x+13,y+3,4,3);
+    ctx.fillRect(x+6,y+11,3,5);
+    ctx.fillRect(x+21,y+11,3,5);
+    ctx.fillStyle='rgba(255,255,255,.25)';
+    ctx.fillRect(x+8,y+7,3,2);
+    ctx.fillRect(x+19,y+7,3,2);
+    ctx.fillStyle='#000';
+    ctx.fillRect(x+11,y+13,2,3);
+    ctx.fillRect(x+18,y+13,2,3);
+    ctx.fillStyle='#2a1a10';
+    ctx.fillRect(x+10,y+18,10,2);
+    ctx.fillRect(x+12,y+20,6,1);
+  }
+
+  // bite splatter
+  if(h.biteFx>0){
+    ctx.fillStyle='#c00';
+    for(let i=0;i<5;i++){
+      const a=Math.random()*6.28, r=8+Math.random()*8;
+      ctx.fillRect(x+15+Math.cos(a)*r, y+20+Math.sin(a)*r, 3, 3);
+    }
+  }
+
+  if(h.slapTimer>0){
+    const sx = x + (h.dir>0? 30 : -36);
+    ctx.fillStyle='#fff';
+    ctx.font='bold 22px sans-serif';
+    ctx.fillText('SLAP!', sx-4, y+12);
+    ctx.strokeStyle='#ff0'; ctx.lineWidth=3;
+    ctx.beginPath();
+    ctx.arc(sx+10,y+24,18,0,6.28);
+    ctx.stroke();
+  }
+
+  // hero label / active marker
+  ctx.fillStyle='#fff';
+  ctx.font='bold 11px sans-serif';
+  ctx.textAlign='center';
+  ctx.strokeStyle='#000'; ctx.lineWidth=3;
+  const label = playerCount===2? (h.slot===0? 'P1 '+h.name : 'P2 '+h.name) : h.name;
+  ctx.strokeText(label, x+15, y-6);
+  ctx.fillText(label, x+15, y-6);
+  ctx.textAlign='left';
+  if(playerCount===1 && isActive){
+    ctx.fillStyle='#ffd166';
+    ctx.beginPath();
+    ctx.moveTo(x+15,y-14); ctx.lineTo(x+10,y-8); ctx.lineTo(x+20,y-8); ctx.closePath(); ctx.fill();
+  }
+}
+
+function drawMonster(mo){
+  const x=Math.round(mo.x-camX), y=Math.round(mo.y-camY);
+  const wob = Math.sin(mo.wobble)*2;
+  const chomping = mo.chomp>0;
+  const jaw = chomping? (Math.sin(mo.chomp*0.6)+1)*3 : 0;
+  ctx.fillStyle='rgba(0,0,0,.3)';
+  ctx.beginPath(); ctx.ellipse(x+16,y+32,14,4,0,0,6.28); ctx.fill();
+  ctx.fillStyle = mo.hitT>0? '#fff' : mo.color;
+  ctx.beginPath();
+  ctx.arc(x+16,y+18+wob,14,0,6.28); ctx.fill();
+  ctx.fillStyle='#222';
+  ctx.beginPath();
+  ctx.moveTo(x+4,y+12+wob); ctx.lineTo(x+2,y+4+wob); ctx.lineTo(x+10,y+10+wob); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x+28,y+12+wob); ctx.lineTo(x+30,y+4+wob); ctx.lineTo(x+22,y+10+wob); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#fff';
+  ctx.fillRect(x+10,y+14+wob,4,4);
+  ctx.fillRect(x+18,y+14+wob,4,4);
+  ctx.fillStyle='#000';
+  ctx.fillRect(x+11,y+15+wob,2,2);
+  ctx.fillRect(x+19,y+15+wob,2,2);
+  // mouth — opens & closes when biting, fangs visible
+  ctx.fillStyle='#400';
+  ctx.fillRect(x+8,y+22+wob,16,3+jaw);
+  ctx.fillStyle='#fff';
+  ctx.fillRect(x+10,y+22+wob,2,2);
+  ctx.fillRect(x+14,y+22+wob,2,2);
+  ctx.fillRect(x+18,y+22+wob,2,2);
+  ctx.fillRect(x+22,y+22+wob,2,2);
+  if(chomping){
+    // little blood drops
+    ctx.fillStyle='#c00';
+    ctx.fillRect(x+12,y+27+wob,2,3);
+    ctx.fillRect(x+20,y+27+wob,2,3);
+  }
+}
+
+function render(){
+  ctx.fillStyle='#222';
+  ctx.fillRect(0,0,W,H);
+
+  drawCity();
+
+  const ents = [
+    {y:ilaf.y, draw:()=>{ if(ilaf.hp>0) drawHero(ilaf, active===ilaf); }},
+    {y:daddy.y, draw:()=>{ if(daddy.hp>0) drawHero(daddy, active===daddy); }},
+    ...monsters.map(mo=>({y:mo.y, draw:()=>drawMonster(mo)})),
+  ];
+  ents.sort((a,b)=>a.y-b.y);
+  for(const e of ents) e.draw();
+
+  // low-blood red vignette (no flicker, just a steady redness when in danger)
+  const minHp = Math.min(
+    ilaf.hp>0?ilaf.hp:100,
+    daddy.hp>0?daddy.hp:100
+  );
+  if(minHp<40){
+    const intensity = (40-minHp)/40 * 0.5;
+    const g = ctx.createRadialGradient(W/2,H/2,H*0.2,W/2,H/2,H*0.8);
+    g.addColorStop(0,'rgba(0,0,0,0)');
+    g.addColorStop(1,`rgba(180,0,0,${intensity})`);
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  } else {
+    const g = ctx.createRadialGradient(W/2,H/2,H*0.3,W/2,H/2,H*0.8);
+    g.addColorStop(0,'rgba(0,0,0,0)');
+    g.addColorStop(1,'rgba(0,0,0,.45)');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  }
+}
+
+function resize(){
+  const ratio = W/H;
+  const aw = window.innerWidth, ah = window.innerHeight;
+  let cw=aw, ch=aw/ratio;
+  if(ch>ah){ ch=ah; cw=ah*ratio; }
+  cvs.style.width=cw+'px'; cvs.style.height=ch+'px';
+}
+window.addEventListener('resize',resize); resize();
+
+function loop(){
+  update();
+  render();
+  requestAnimationFrame(loop);
+}
+loop();
+
+// ---------- UI flow ----------
+function resetGame(){
+  ilaf.hp=ilaf.maxHp; daddy.hp=daddy.maxHp;
+  ilaf.x=300; ilaf.y=500; daddy.x=380; daddy.y=500;
+  monsters.length=0; score=0; difficulty=1; spawnTimer=60;
+  active=ilaf; other=daddy;
+  gameOver=false;
+  document.getElementById('game-over').style.display='none';
+}
+
+function showControlsScreen(){
+  const help = document.getElementById('controlsHelp');
+  if(playerCount===1){
+    help.innerHTML = `
+      <p><b>1 Player</b> — control Ilaf or Daddy; the other follows you.</p>
+      <p><b>Keyboard:</b> Move <span class="key">WASD</span> / <span class="key">Arrows</span> &nbsp;
+      Slap <span class="key">Space</span> &nbsp; Swap hero <span class="key">Shift</span></p>
+      <p><b>Gamepad / TV remote:</b> D-Pad move, <span class="key">A</span> slap, <span class="key">B</span> swap.</p>
+      <p><b>Touch:</b> on-screen joystick.</p>`;
+  } else {
+    help.innerHTML = `
+      <p><b>2 Players</b> — Player 1 controls Ilaf, Player 2 controls Daddy. Stay close to each other!</p>
+      <p><b>Keyboard (sharing one keyboard):</b><br>
+      P1 Ilaf — Move <span class="key">WASD</span>, Slap <span class="key">Space</span><br>
+      P2 Daddy — Move <span class="key">Arrows</span>, Slap <span class="key">Enter</span></p>
+      <p><b>Two gamepads:</b> connect both — first one is Ilaf, second is Daddy.<br>
+      D-Pad move, <span class="key">A</span> slap.</p>`;
+  }
+  document.getElementById('title').style.display='none';
+  document.getElementById('mode').style.display='flex';
+  document.getElementById('startBtn').focus();
+}
+
+document.getElementById('btnOnePlayer').addEventListener('click',()=>{
+  playerCount=1; showControlsScreen();
+});
+document.getElementById('btnTwoPlayer').addEventListener('click',()=>{
+  playerCount=2; showControlsScreen();
+});
+document.getElementById('backBtn').addEventListener('click',()=>{
+  document.getElementById('mode').style.display='none';
+  document.getElementById('title').style.display='flex';
+  document.getElementById('btnOnePlayer').focus();
+});
+document.getElementById('startBtn').addEventListener('click',()=>{
+  document.getElementById('mode').style.display='none';
+  resetGame();
+  started=true;
+});
+document.getElementById('againBtn').addEventListener('click',()=>{
+  resetGame();
+});
+
+window.addEventListener('keydown',e=>{
+  if(!started){
+    if(e.key==='Enter'||e.key===' '){
+      const active=document.activeElement;
+      if(active && active.tagName==='BUTTON'){ active.click(); }
+    }
+  }
+});
+
+})();
+</script>
+</body>
+</html>

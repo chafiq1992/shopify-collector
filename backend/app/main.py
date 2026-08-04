@@ -3701,7 +3701,30 @@ if HAVE_AUTH_DB:
                 pass
             return {"ok": False, "errors": [{"message": "Failed to persist fulfillment analytics"}], "result": (result or {}).get("result")}
 
-        return {"ok": True, "result": (result or {}).get("result")}
+        # Do not wait for Shopify's webhook delivery, which can take minutes.
+        # Delivery's backfill path is idempotent and reads the authoritative
+        # Shopify order, so overlapping webhooks remain safe.
+        delivery_sync = None
+        try:
+            from .delivery_sync import sync_fulfilled_order_to_delivery
+
+            delivery_sync = await sync_fulfilled_order_to_delivery(
+                delivery_url=DELVERY_BACKEND_URL,
+                admin_token=DELVERY_ADMIN_TOKEN,
+                store_key=store_key,
+                order_number=getattr(body, "order_number", None),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Immediate Delivery intake failed after Shopify fulfillment",
+                extra={"store": store_key, "error_type": type(exc).__name__},
+            )
+
+        return {
+            "ok": True,
+            "result": (result or {}).get("result"),
+            "delivery_sync": delivery_sync,
+        }
 
 @app.get("/api/orders/{order_gid:path}/fulfillment-orders")
 async def get_fulfillment_orders(order_gid: str, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):

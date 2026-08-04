@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Eid al-Adha Banner — Live Preview</title>
+<style>
+  body {
+    margin: 0;
+    font-family: system-ui, sans-serif;
+    background: #f3f4f6;
+  }
+  .preview-label {
+    text-align: center;
+    padding: 10px;
+    color: #6b7280;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .device-frame {
+    margin: 20px auto;
+    max-width: 100%;
+  }
+  /* Fake Shopify storefront context */
+  .storefront-mock {
+    background: #fff;
+    min-height: 800px;
+  }
+  .nav-mock {
+    height: 60px;
+    background: #fff;
+    border-bottom: 1px solid #e5e7eb;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #374151;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+  }
+  .content-mock {
+    padding: 40px 20px;
+    text-align: center;
+    color: #9ca3af;
+  }
+</style>
+</head>
+<body>
+
+<div class="preview-label">↓ Live preview — Eid al-Adha Banner ↓</div>
+
+<div class="storefront-mock">
+
+<!-- ============================================================
+     EID AL-ADHA BANNER — SOPHISTICATED VERSION
+     ============================================================ -->
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;0,700;1,600&family=Inter:wght@400;500;600;700;800;900&family=Cinzel:wght@500;600;700;800;900&display=swap');
+
+  :root {
+    --eid-emerald-deep: #022c22;
+    --eid-emerald:      #064e3b;
+    --eid-emerald-mid:  #065f46;
+    --eid-teal:         #0d4a3a;
+    --eid-gold:         #fbbf24;
+    --eid-gold-light:   #fde68a;
+    --eid-gold-bright:  #fcd34d;
+    --eid-copper:       #d97706;
+    --eid-cream:        #fef3c7;
+    --eid-white:        #ffffff;
+
+    --slide-ms: 6000ms;
+  }
+
+  .eid-banner-root {
+    position: relative;
+    width: 100%;
+    overflow: hidden;
+    font-family: 'Inter', sans-serif;
+    color: var(--eid-white);
+    isolation: isolate;
+  }
+
+  /* === LAYERED ANIMATED BACKGROUND === */
+  .eid-bg-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+  }
+  .eid-bg-base {
+    background:
+      radial-gradient(ellipse at 20% 30%, #0a6b52 0%, transparent 55%),
+      radial-gradient(ellipse at 80% 70%, #054a37 0%, transparent 55%),
+      linear-gradient(135deg, var(--eid-emerald-deep) 0%, var(--eid-emerald) 50%, #042e23 100%);
+  }
+  .eid-bg-shimmer {
+    background: linear-gradient(
+      120deg,
+      transparent 0%,
+      transparent 35%,
+      rgba(251, 191, 36, 0.08) 50%,
+      transparent 65%,
+      transparent 100%
+    );
+    background-size: 250% 100%;
+    animation: eidShimmer 8s ease-in-out infinite;
+    mix-blend-mode: screen;
+  }
+  @keyframes eidShimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -100% 0; }
+  }
+
+  /* Geometric Islamic pattern */
+  .eid-bg-pattern {
+    opacity: 0.08;
+    background-image: url("data:image/svg+xml,%3Csvg width='120' height='120' viewBox='0 0 120 120' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='%23fbbf24' stroke-width='1.2'%3E%3Cpath d='M60 10 L75 30 L95 30 L80 50 L90 70 L60 60 L30 70 L40 50 L25 30 L45 30 Z'/%3E%3Ccircle cx='60' cy='60' r='28'/%3E%3Cpath d='M60 32 L88 60 L60 88 L32 60 Z'/%3E%3C/g%3E%3C/svg%3E");
+    background-size: 140px;
+  }
+
+  /* Decorative SVG corners (mosque arches feel) */
+  .eid-corner {
+    position: absolute;
+    top: 0;
+    width: 80px;
+    height: 100%;
+    pointer-events: none;
+    opacity: 0.35;
+    z-index: 1;
+  }
+  .eid-corner.left  { left: 0;  background: linear-gradient(to right,  rgba(251,191,36,0.18), transparent); }
+  .eid-corner.right { right: 0; background: linear-gradient(to left,   rgba(251,191,36,0.18), transparent); }
+
+  /* Top + bottom gilded borders */
+  .eid-border-top,
+  .eid-border-bottom {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      var(--eid-gold) 20%,
+      var(--eid-gold-light) 50%,
+      var(--eid-gold) 80%,
+      transparent 100%
+    );
+    z-index: 5;
+  }
+  .eid-border-top    { top: 0; }
+  .eid-border-bottom { bottom: 0; }
+
+  /* === MAIN CONTAINER === */
+  .eid-container {
+    position: relative;
+    z-index: 10;
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 22px 24px 18px;
+    min-height: 130px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Crescent decoration on the sides (desktop only) */
+  .eid-crescent {
+    position: absolute;
+    width: 70px;
+    height: 70px;
+    color: var(--eid-gold);
+    opacity: 0.15;
+    filter: drop-shadow(0 0 12px rgba(251, 191, 36, 0.7));
+    z-index: 2;
+    display: none;
+  }
+  .eid-crescent.left  { left: 30px;  top: 50%; transform: translateY(-50%) rotate(-15deg); }
+  .eid-crescent.right { right: 30px; top: 50%; transform: translateY(-50%) rotate(20deg); }
+  @media (min-width: 992px) {
+    .eid-crescent { display: block; }
+  }
+
+  /* === SLIDES === */
+  .eid-slides-wrap {
+    position: relative;
+    width: 100%;
+    min-height: 100px;
+  }
+
+  .eid-slide {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+    transition: opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1),
+                transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+    pointer-events: none;
+    text-align: center;
+  }
+  .eid-slide.active {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+    position: relative;
+  }
+
+  /* === HEADLINE (gradient gold + glow) === */
+  .eid-eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-family: 'Inter', sans-serif;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.35em;
+    text-transform: uppercase;
+    color: var(--eid-gold-light);
+    opacity: 0.9;
+    margin: 0 0 2px;
+  }
+  .eid-eyebrow::before,
+  .eid-eyebrow::after {
+    content: '';
+    width: 26px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--eid-gold), transparent);
+  }
+
+  .eid-headline {
+    font-family: 'Cinzel', 'Playfair Display', serif;
+    font-size: clamp(20px, 5.2vw, 38px);
+    font-weight: 800;
+    line-height: 1.05;
+    letter-spacing: 0.04em;
+    margin: 0;
+    background: linear-gradient(
+      180deg,
+      #fff8dc 0%,
+      var(--eid-gold-light) 35%,
+      var(--eid-gold) 60%,
+      var(--eid-copper) 100%
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.55))
+            drop-shadow(0 0 22px rgba(251, 191, 36, 0.25));
+    text-transform: uppercase;
+  }
+  .eid-headline .eid-amp {
+    font-family: 'Cormorant Garamond', serif;
+    font-style: italic;
+    font-weight: 600;
+    text-transform: lowercase;
+    padding: 0 4px;
+  }
+
+  .eid-subtext {
+    font-family: 'Cormorant Garamond', serif;
+    font-style: italic;
+    font-size: clamp(13px, 3.4vw, 18px);
+    font-weight: 600;
+    color: var(--eid-cream);
+    margin: 0;
+    letter-spacing: 0.02em;
+    line-height: 1.3;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  }
+
+  /* === FEATURE PILLS === */
+  .eid-features {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .eid-feature {
+    --pill-bg: rgba(255, 255, 255, 0.06);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--pill-bg);
+    border: 1px solid rgba(251, 191, 36, 0.35);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    padding: 7px 14px;
+    border-radius: 999px;
+    font-size: clamp(11px, 2.6vw, 13px);
+    font-weight: 700;
+    color: var(--eid-cream);
+    letter-spacing: 0.04em;
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.08),
+      0 2px 8px rgba(0,0,0,0.25);
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.25s ease, border-color 0.25s ease;
+  }
+  .eid-feature:hover {
+    transform: translateY(-1px);
+    border-color: var(--eid-gold);
+  }
+  .eid-feature .eid-ico {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--eid-gold) 0%, var(--eid-copper) 100%);
+    color: var(--eid-emerald-deep);
+    font-size: 12px;
+    flex-shrink: 0;
+    box-shadow: 0 0 10px rgba(251, 191, 36, 0.45);
+  }
+  .eid-feature .eid-ico svg { width: 13px; height: 13px; }
+
+  /* === COD SLIDE === */
+  .eid-cod-card {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 22px;
+    border-radius: 14px;
+    background: linear-gradient(135deg, rgba(251, 191, 36, 0.12), rgba(217, 119, 6, 0.05));
+    border: 1px solid rgba(251, 191, 36, 0.3);
+    backdrop-filter: blur(6px);
+    max-width: 720px;
+    margin-top: 8px;
+  }
+  .eid-cod-line {
+    font-size: clamp(11px, 2.8vw, 14px);
+    color: var(--eid-cream);
+    font-weight: 500;
+    line-height: 1.45;
+    text-align: center;
+    margin: 0;
+    opacity: 0.95;
+  }
+  .eid-cod-line strong {
+    color: var(--eid-gold-light);
+    font-weight: 800;
+  }
+
+  .eid-cod-steps {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 4px;
+    font-size: clamp(10px, 2.4vw, 12px);
+    font-weight: 700;
+    color: var(--eid-gold-light);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .eid-cod-step {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .eid-cod-step .num {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--eid-gold);
+    color: var(--eid-emerald-deep);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 900;
+  }
+  .eid-cod-arrow { opacity: 0.55; }
+
+  /* === DOTS + PROGRESS === */
+  .eid-controls {
+    position: absolute;
+    bottom: 8px;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    z-index: 15;
+  }
+  .eid-dot {
+    width: 22px;
+    height: 4px;
+    border-radius: 4px;
+    background: rgba(253, 230, 138, 0.25);
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    overflow: hidden;
+    position: relative;
+    transition: width 0.4s ease;
+  }
+  .eid-dot.active {
+    width: 36px;
+    background: rgba(253, 230, 138, 0.25);
+  }
+  .eid-dot.active::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, var(--eid-gold), var(--eid-gold-bright));
+    transform-origin: left;
+    animation: eidProgress var(--slide-ms) linear forwards;
+  }
+  @keyframes eidProgress {
+    from { transform: scaleX(0); }
+    to   { transform: scaleX(1); }
+  }
+
+  /* === RESPONSIVE === */
+  @media (max-width: 640px) {
+    .eid-container { padding: 18px 14px 22px; min-height: 150px; }
+    .eid-features { gap: 6px; }
+    .eid-feature { padding: 6px 11px; }
+    .eid-feature .eid-ico { width: 20px; height: 20px; }
+    .eid-cod-card { padding: 8px 16px; margin-top: 6px; }
+    .eid-eyebrow { font-size: 9px; letter-spacing: 0.3em; }
+    .eid-eyebrow::before, .eid-eyebrow::after { width: 16px; }
+  }
+
+  /* === FLOATING PARTICLES === */
+  .eid-particle {
+    position: fixed;
+    top: -80px;
+    pointer-events: none;
+    z-index: 9999999;
+    color: var(--eid-gold);
+    user-select: none;
+    animation: eidFall linear forwards;
+    filter: drop-shadow(0 0 10px rgba(251, 191, 36, 0.85));
+    opacity: 0;
+  }
+  @keyframes eidFall {
+    0%   { transform: translateY(0) rotate(0deg) translateX(0); opacity: 0; }
+    15%  { opacity: 1; }
+    85%  { opacity: 1; }
+    100% { transform: translateY(110vh) rotate(360deg) translateX(120px); opacity: 0; }
+  }
+
+  /* Respect reduced motion */
+  @media (prefers-reduced-motion: reduce) {
+    .eid-bg-shimmer,
+    .eid-dot.active::after { animation: none !important; }
+    .eid-slide { transition: opacity 0.3s ease; }
+  }
+</style>
+
+<div class="eid-banner-root" id="eidBanner">
+  <!-- background layers -->
+  <div class="eid-bg-layer eid-bg-base"></div>
+  <div class="eid-bg-layer eid-bg-pattern"></div>
+  <div class="eid-bg-layer eid-bg-shimmer"></div>
+
+  <div class="eid-corner left"></div>
+  <div class="eid-corner right"></div>
+  <div class="eid-border-top"></div>
+  <div class="eid-border-bottom"></div>
+
+  <!-- decorative crescents -->
+  <svg class="eid-crescent left" viewBox="0 0 100 100" fill="currentColor" aria-hidden="true">
+    <path d="M65 50 a35 35 0 1 1 -25 -32 a28 28 0 1 0 25 32 z"/>
+    <circle cx="80" cy="22" r="3"/>
+    <circle cx="88" cy="38" r="2"/>
+  </svg>
+  <svg class="eid-crescent right" viewBox="0 0 100 100" fill="currentColor" aria-hidden="true">
+    <path d="M35 50 a35 35 0 1 0 25 -32 a28 28 0 1 1 -25 32 z"/>
+    <circle cx="18" cy="22" r="3"/>
+    <circle cx="10" cy="38" r="2"/>
+  </svg>
+
+  <div class="eid-container">
+    <div class="eid-slides-wrap">
+
+      <!-- Slide 1: Delivery -->
+      <div class="eid-slide active" data-slide="0">
+        <span class="eid-eyebrow">Eid Al-Adha · 2026</span>
+        <h2 class="eid-headline">Delivered <span class="eid-amp">&amp;</span> Guaranteed</h2>
+        <p class="eid-subtext">Celebrate without the wait — your order, on its way today.</p>
+        <div class="eid-features">
+          <span class="eid-feature">
+            <span class="eid-ico">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 2 4 14 12 14 11 22 20 10 12 10 13 2"/></svg>
+            </span>
+            Same-Day Delivery
+          </span>
+          <span class="eid-feature">
+            <span class="eid-ico">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
+            </span>
+            24-Hour Delivery
+          </span>
+          <span class="eid-feature">
+            <span class="eid-ico">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h13v8H3z"/><path d="M16 10h3l2 3v2h-5z"/><circle cx="7" cy="17" r="2"/><circle cx="18" cy="17" r="2"/></svg>
+            </span>
+            Free Shipping
+          </span>
+        </div>
+      </div>
+
+      <!-- Slide 2: Cash on Delivery -->
+      <div class="eid-slide" data-slide="1">
+        <span class="eid-eyebrow">Shop with Confidence</span>
+        <h2 class="eid-headline">Cash on Delivery</h2>
+        <p class="eid-subtext">Try first. Pay only when you're truly satisfied.</p>
+        <div class="eid-cod-card">
+          <p class="eid-cod-line">
+            <strong>Receive</strong> your order, <strong>inspect</strong> it, <strong>try it on</strong> — and only then pay. Zero risk, total peace of mind.
+          </p>
+          <div class="eid-cod-steps">
+            <span class="eid-cod-step"><span class="num">1</span>Receive</span>
+            <span class="eid-cod-arrow">›</span>
+            <span class="eid-cod-step"><span class="num">2</span>Verify</span>
+            <span class="eid-cod-arrow">›</span>
+            <span class="eid-cod-step"><span class="num">3</span>Pay</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="eid-controls">
+    <button class="eid-dot active" data-go="0" aria-label="Slide 1"></button>
+    <button class="eid-dot" data-go="1" aria-label="Slide 2"></button>
+  </div>
+</div>
+
+<script>
+  (function() {
+    const root   = document.getElementById('eidBanner');
+    const slides = root.querySelectorAll('.eid-slide');
+    const dots   = root.querySelectorAll('.eid-dot');
+    const SLIDE_MS = 6000;
+    let idx = 0, timer = null;
+
+    function show(i) {
+      idx = (i + slides.length) % slides.length;
+      slides.forEach((s, k) => s.classList.toggle('active', k === idx));
+      dots.forEach((d, k) => {
+        d.classList.remove('active');
+        // force-restart progress animation
+        d.offsetHeight;
+        if (k === idx) d.classList.add('active');
+      });
+    }
+    function start() { stop(); timer = setInterval(() => show(idx + 1), SLIDE_MS); }
+    function stop()  { if (timer) { clearInterval(timer); timer = null; } }
+
+    dots.forEach(d => d.addEventListener('click', () => {
+      show(parseInt(d.dataset.go, 10));
+      start();
+    }));
+
+    // Swipe support (mobile)
+    let startX = 0, startY = 0;
+    root.addEventListener('touchstart', e => {
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+    }, { passive: true });
+    root.addEventListener('touchend', e => {
+      const dx = e.changedTouches[0].clientX - startX;
+      const dy = e.changedTouches[0].clientY - startY;
+      if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+        show(idx + (dx < 0 ? 1 : -1));
+        start();
+      }
+    });
+
+    root.addEventListener('mouseenter', stop);
+    root.addEventListener('mouseleave', start);
+
+    start();
+
+    // Floating particles
+    const symbols = ['🌙', '⭐', '✨', '💫'];
+    function createParticle() {
+      if (document.hidden) return;
+      const p = document.createElement('div');
+      p.className = 'eid-particle';
+      p.innerText = symbols[Math.floor(Math.random() * symbols.length)];
+      p.style.left = (Math.random() * window.innerWidth) + 'px';
+      const duration = 10 + Math.random() * 8;
+      p.style.animationDuration = duration + 's';
+      p.style.fontSize = (18 + Math.random() * 15) + 'px';
+      document.body.appendChild(p);
+      setTimeout(() => p.remove(), duration * 1000);
+    }
+    setInterval(createParticle, 6000);
+    for (let i = 0; i < 2; i++) setTimeout(createParticle, i * 2000);
+  })();
+</script>
+
+<!-- ============================================================
+     END OF BANNER
+     ============================================================ -->
+
+  <div class="nav-mock">CHAFIQ STORE</div>
+  <div class="content-mock">
+    <h2>Storefront preview area</h2>
+    <p>(This grey area simulates where your product grid would appear below the banner.)</p>
+  </div>
+</div>
+
+</body>
+</html>
