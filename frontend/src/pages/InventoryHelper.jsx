@@ -95,8 +95,8 @@ function shortDate(value) {
 
 function orderedLabel(receipt) {
   const date = String(receipt?.shopify_created_at || "").slice(0, 10);
-  if (!date) return "Shopify purchase order";
-  return `Ordered ${shortDate(date)}`;
+  if (!date) return "Linked Shopify transfer";
+  return `Transfer created ${shortDate(date)}`;
 }
 
 
@@ -404,8 +404,13 @@ export default function InventoryHelper() {
 
       <main className="mx-auto max-w-7xl space-y-5 px-4 py-5 sm:px-6 sm:py-7">
         {(error || notice) && (
-          <div className={`rounded-2xl border px-4 py-3 text-sm font-medium ${error ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
-            {error || notice}
+          <div className={`flex flex-wrap items-center gap-3 rounded-2xl border px-4 py-3 text-sm font-medium ${error ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
+            <span>{error || notice}</span>
+            {isAdmin && error.includes("Reconnect this Shopify store") && (
+              <button type="button" onClick={() => go(`/shopify-connect?store=${encodeURIComponent(store)}`)} className="ml-auto rounded-xl bg-rose-800 px-3 py-2 text-xs font-black text-white">
+                Reconnect Shopify
+              </button>
+            )}
           </div>
         )}
 
@@ -422,7 +427,7 @@ export default function InventoryHelper() {
           {loading ? (
             <div className="flex items-center justify-center gap-2 p-10 text-sm font-semibold text-slate-500"><Loader2 className="h-5 w-5 animate-spin" /> Loading purchase orders…</div>
           ) : !receipts.length ? (
-            <div className="p-10 text-center"><ClipboardList className="mx-auto mb-3 h-9 w-9 text-slate-300" /><div className="font-black">No purchase orders added yet</div><p className="mt-1 text-sm text-slate-500">{isAdmin ? "Copy a purchase-order name or number from Shopify, then create the first card." : "An admin has not added a purchase order yet."}</p></div>
+            <div className="p-10 text-center"><ClipboardList className="mx-auto mb-3 h-9 w-9 text-slate-300" /><div className="font-black">No purchase orders added yet</div><p className="mx-auto mt-1 max-w-lg text-sm text-slate-500">{isAdmin ? "In Shopify, mark the purchase order as ordered and create its linked inventory transfer. Then paste the transfer name or PO reference here." : "An admin has not added a purchase order yet."}</p></div>
           ) : (
             <div className="grid grid-cols-2 gap-2.5 p-2.5 sm:grid-cols-3 sm:gap-4 sm:p-4 lg:grid-cols-4">
               {receipts.map((receipt) => {
@@ -462,14 +467,14 @@ export default function InventoryHelper() {
             <div className="border-b border-slate-100 p-4 sm:p-6">
               <div className="mb-4 flex items-start gap-3">
                 <div className="rounded-xl bg-indigo-50 p-2 text-indigo-600"><Plus className="h-5 w-5" /></div>
-                <div><h2 className="font-bold">Create new purchase order</h2><p className="text-sm text-slate-500">Paste the purchase-order name or number copied from Shopify.</p></div>
+                <div><h2 className="font-bold">Create new purchase order</h2><p className="text-sm text-slate-500">Paste the linked inventory transfer name or the PO reference from Shopify.</p></div>
                 <button type="button" onClick={closeCreate} className="ml-auto rounded-xl border border-slate-200 p-2 text-slate-500 hover:bg-slate-50" aria-label="Close"><X className="h-4 w-4" /></button>
               </div>
               {error && <div className="mb-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-800">{error}</div>}
               <form onSubmit={lookup} className="flex flex-col gap-2 sm:flex-row">
                 <label className="relative flex-1">
                   <Search className="absolute left-3 top-3.5 h-4 w-4 text-slate-400" />
-                  <input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="Paste Shopify PO name or number" autoFocus className="h-11 w-full rounded-xl border border-slate-300 pl-10 pr-3 text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" />
+                  <input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="Transfer name or PO reference" autoFocus className="h-11 w-full rounded-xl border border-slate-300 pl-10 pr-3 text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" />
                 </label>
                 <button disabled={lookupBusy || !reference.trim()} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 text-sm font-bold text-white disabled:opacity-50">
                   {lookupBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />} Find in Shopify
@@ -480,13 +485,13 @@ export default function InventoryHelper() {
             {draft && (
               <div className="bg-slate-50/70 p-4 sm:p-6">
                 <div className="mb-5 flex flex-wrap items-center gap-3">
-                  <div><div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Shopify order</div><div className="text-xl font-black">{draft.order_number}</div></div>
+                  <div><div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Linked Shopify transfer</div><div className="text-xl font-black">{draft.order_number}</div></div>
                   {draft.po_number && <span className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-bold text-indigo-700">PO {draft.po_number}</span>}
                   <div className="ml-auto w-full sm:w-40"><QuantityField label="Crates ordered" value={draftCrates} onChange={setDraftCrates} /></div>
                 </div>
                 <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
                   <div className="hidden grid-cols-[minmax(0,1fr)_110px_120px] gap-3 border-b border-slate-200 bg-slate-50 px-4 py-2 text-[11px] font-bold uppercase tracking-wide text-slate-500 sm:grid">
-                    <span>Variant</span><span>Shopify qty</span><span>Qty ordered</span>
+                    <span>Variant</span><span>Transfer qty</span><span>Qty ordered</span>
                   </div>
                   {draft.line_items.map((item, index) => (
                     <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_84px] items-center gap-3 border-b border-slate-100 p-3 last:border-0 sm:grid-cols-[minmax(0,1fr)_110px_120px] sm:px-4">

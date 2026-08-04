@@ -1045,11 +1045,23 @@ async def _close_shopify_http_client():
         await client.aclose()
 
 
-def _shopify_graphql_url(domain: str, password: str, api_key: str) -> str:
+def _shopify_graphql_url(
+    domain: str,
+    password: str,
+    api_key: str,
+    api_version: Optional[str] = None,
+) -> str:
     # Always use header token auth; do not embed credentials in URL
-    return f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    version = (api_version or SHOPIFY_API_VERSION).strip()
+    return f"https://{domain}/admin/api/{version}/graphql.json"
 
-async def shopify_graphql(query: str, variables: Dict[str, Any] | None, *, store: Optional[str]) -> Dict[str, Any]:
+async def shopify_graphql(
+    query: str,
+    variables: Dict[str, Any] | None,
+    *,
+    store: Optional[str],
+    api_version: Optional[str] = None,
+) -> Dict[str, Any]:
     domain, access_token, api_key = await resolve_store_settings_effective(store)
     if not domain or not access_token:
         raise HTTPException(status_code=400, detail="Shopify credentials not configured for selected store")
@@ -1063,7 +1075,7 @@ async def shopify_graphql(query: str, variables: Dict[str, Any] | None, *, store
     max_retries = 5
     base_delay = 0.35
     last_exc: Optional[Exception] = None
-    url = _shopify_graphql_url(domain, access_token, api_key)
+    url = _shopify_graphql_url(domain, access_token, api_key, api_version)
     async with _shared_shopify_http_client() as client:
         for attempt in range(max_retries):
             try:

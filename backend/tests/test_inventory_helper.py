@@ -14,29 +14,36 @@ def test_inventory_status_waiting_match_and_mismatch():
     assert _status(3, 24, 3, 25) == "mismatch"
 
 
-def test_shopify_line_items_become_editable_order_quantities():
-    order = {
+def test_shopify_transfer_line_items_become_editable_order_quantities():
+    transfer = {
         "lineItems": {
             "nodes": [
                 {
-                    "id": "gid://shopify/LineItem/1",
-                    "name": "Classic crate - Blue / M",
-                    "sku": "BLUE-M",
-                    "quantity": 12,
-                    "image": {"url": "https://cdn.example.test/blue.jpg", "altText": "Blue item"},
-                    "variant": {"id": "gid://shopify/ProductVariant/2", "title": "Blue / M"},
+                    "id": "gid://shopify/InventoryTransferLineItem/1",
+                    "title": "Classic crate",
+                    "totalQuantity": 12,
+                    "inventoryItem": {
+                        "id": "gid://shopify/InventoryItem/3",
+                        "sku": "BLUE-M",
+                        "variant": {
+                            "id": "gid://shopify/ProductVariant/2",
+                            "title": "Blue / M",
+                            "image": {"url": "https://cdn.example.test/blue.jpg", "altText": "Blue item"},
+                            "product": {"title": "Classic crate"},
+                        },
+                    },
                 }
             ]
         }
     }
 
-    items = _line_items_from_shopify(order)
+    items = _line_items_from_shopify(transfer)
 
     assert items == [
         {
-            "id": "gid://shopify/LineItem/1",
+            "id": "gid://shopify/InventoryTransferLineItem/1",
             "variant_id": "gid://shopify/ProductVariant/2",
-            "title": "Classic crate - Blue / M",
+            "title": "Classic crate",
             "variant_title": "Blue / M",
             "sku": "BLUE-M",
             "image_url": "https://cdn.example.test/blue.jpg",

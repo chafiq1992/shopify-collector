@@ -1,6 +1,7 @@
-"""Inventory Helper API: import Shopify orders, compare crate counts, and store photos."""
+"""Inventory Helper API: import Shopify inventory transfers and verify receipts."""
 
 from datetime import datetime, timezone
+import os
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
@@ -20,19 +21,31 @@ _MAX_PHOTOS = 4
 _MAX_PHOTO_BYTES = 6 * 1024 * 1024
 _ALLOWED_PHOTO_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
-_ORDER_FIELDS = """
+_TRANSFER_API_VERSION = os.environ.get("SHOPIFY_INVENTORY_API_VERSION", "2026-07").strip()
+
+_TRANSFER_FIELDS = """
   id
   name
-  poNumber
-  createdAt
+  referenceName
+  dateCreated
+  status
+  note
+  totalQuantity
   lineItems(first: 100) {
     nodes {
       id
-      name
-      sku
-      quantity
-      image { url altText }
-      variant { id title }
+      title
+      totalQuantity
+      inventoryItem {
+        id
+        sku
+        variant {
+          id
+          title
+          image { url altText }
+          product { title }
+        }
+      }
     }
   }
 """
@@ -128,19 +141,21 @@ def _serialize(row: InventoryReceipt) -> dict[str, Any]:
     }
 
 
-def _line_items_from_shopify(order: dict[str, Any]) -> list[dict[str, Any]]:
+def _line_items_from_shopify(transfer: dict[str, Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    for item in (((order.get("lineItems") or {}).get("nodes")) or []):
-        variant = item.get("variant") or {}
-        image = item.get("image") or {}
-        quantity = max(0, int(item.get("quantity") or 0))
+    for item in (((transfer.get("lineItems") or {}).get("nodes")) or []):
+        inventory_item = item.get("inventoryItem") or {}
+        variant = inventory_item.get("variant") or {}
+        product = variant.get("product") or {}
+        image = variant.get("image") or {}
+        quantity = max(0, int(item.get("totalQuantity") or 0))
         result.append(
             {
-                "id": str(item.get("id") or variant.get("id") or len(result)),
+                "id": str(item.get("id") or inventory_item.get("id") or len(result)),
                 "variant_id": variant.get("id"),
-                "title": item.get("name") or "Untitled item",
+                "title": product.get("title") or item.get("title") or "Untitled item",
                 "variant_title": variant.get("title"),
-                "sku": item.get("sku"),
+                "sku": inventory_item.get("sku"),
                 "image_url": image.get("url"),
                 "image_alt": image.get("altText"),
                 "shopify_quantity": quantity,
@@ -171,45 +186,75 @@ async def lookup_shopify_order(
     store: str = Query(...),
     _: User = Depends(require_admin),
 ):
-    """Find a Shopify order by GraphQL ID, order number/name, or PO number."""
+    """Find the inventory transfer linked to a Shopify purchase order."""
     from .main import shopify_graphql
 
     ref = reference.strip()
     store_key = _clean_store(store)
-    order: Optional[dict[str, Any]] = None
+    transfer: Optional[dict[str, Any]] = None
 
-    if ref.startswith("gid://shopify/Order/"):
-        gid = ref if ref.startswith("gid://") else f"gid://shopify/Order/{ref}"
-        query = f"query InventoryHelperOrderById($id: ID!) {{ order(id: $id) {{ {_ORDER_FIELDS} }} }}"
-        data = await shopify_graphql(query, {"id": gid}, store=store_key)
-        order = data.get("order")
-    else:
-        normalized = ref.lstrip("#").replace('"', "")
-        query = f"query InventoryHelperOrder($query: String!) {{ orders(first: 1, query: $query) {{ nodes {{ {_ORDER_FIELDS} }} }} }}"
-        for search_query in (f'name:"{normalized}"', f'po_number:"{normalized}"'):
-            data = await shopify_graphql(query, {"query": search_query}, store=store_key)
-            nodes = ((data.get("orders") or {}).get("nodes")) or []
-            if nodes:
-                order = nodes[0]
-                break
-        # A long numeric value may be Shopify's legacy order ID. Search order/PO
-        # numbers first so a valid numeric PO is never mistaken for an internal ID.
-        if not order and normalized.isdigit() and len(normalized) >= 9:
-            gid = f"gid://shopify/Order/{normalized}"
-            id_query = f"query InventoryHelperOrderById($id: ID!) {{ order(id: $id) {{ {_ORDER_FIELDS} }} }}"
-            data = await shopify_graphql(id_query, {"id": gid}, store=store_key)
-            order = data.get("order")
+    try:
+        if ref.startswith("gid://shopify/InventoryTransfer/"):
+            query = f"query InventoryHelperTransferById($id: ID!) {{ inventoryTransfer(id: $id) {{ {_TRANSFER_FIELDS} }} }}"
+            data = await shopify_graphql(
+                query,
+                {"id": ref},
+                store=store_key,
+                api_version=_TRANSFER_API_VERSION,
+            )
+            transfer = data.get("inventoryTransfer")
+        else:
+            normalized = ref.lstrip("#").replace('"', "").strip()
+            query = f"query InventoryHelperTransfer($query: String!) {{ inventoryTransfers(first: 20, query: $query, sortKey: CREATED_AT, reverse: true) {{ nodes {{ {_TRANSFER_FIELDS} }} }} }}"
+            data = await shopify_graphql(
+                query,
+                {"query": normalized},
+                store=store_key,
+                api_version=_TRANSFER_API_VERSION,
+            )
+            nodes = ((data.get("inventoryTransfers") or {}).get("nodes")) or []
+            wanted = normalized.casefold()
+            transfer = next(
+                (
+                    node
+                    for node in nodes
+                    if wanted
+                    in {
+                        str(node.get("name") or "").lstrip("#").casefold(),
+                        str(node.get("referenceName") or "").lstrip("#").casefold(),
+                        str(node.get("id") or "").rsplit("/", 1)[-1].casefold(),
+                    }
+                ),
+                nodes[0] if len(nodes) == 1 else None,
+            )
+    except HTTPException as exc:
+        detail = str(exc.detail)
+        if exc.status_code == 502 and (
+            "ACCESS_DENIED" in detail.upper()
+            or "ACCESS DENIED" in detail.upper()
+            or "INVENTORYTRANSFERS" in detail.upper()
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Reconnect this Shopify store to grant Inventory Helper access to inventory transfers.",
+            ) from exc
+        raise
 
-    if not order:
-        raise HTTPException(status_code=404, detail="No Shopify order found for that ID, order number, or PO number")
+    if not transfer:
+        raise HTTPException(
+            status_code=404,
+            detail="No linked inventory transfer found. Mark the purchase order as ordered, create its inventory transfer in Shopify, then paste the transfer name or PO reference.",
+        )
 
-    items = _line_items_from_shopify(order)
+    items = _line_items_from_shopify(transfer)
+    display_name = transfer.get("referenceName") or transfer.get("name") or ref
+    transfer_name = transfer.get("name")
     return {
         "store": store_key,
-        "shopify_order_gid": order.get("id"),
-        "order_number": order.get("name") or ref,
-        "po_number": order.get("poNumber"),
-        "shopify_created_at": order.get("createdAt"),
+        "shopify_order_gid": transfer.get("id"),
+        "order_number": display_name,
+        "po_number": transfer_name if transfer_name != display_name else None,
+        "shopify_created_at": transfer.get("dateCreated"),
         "line_items": items,
         "expected_items": sum(item["ordered_quantity"] for item in items),
     }
@@ -233,6 +278,9 @@ async def list_receipts(
     )
     if store:
         stmt = stmt.where(InventoryReceipt.store_key == _clean_store(store))
+    # Legacy rows imported from Shopify's customer Order API stay preserved in
+    # the database, but they are not purchase orders and must not appear here.
+    stmt = stmt.where(InventoryReceipt.shopify_order_gid.like("gid://shopify/InventoryTransfer/%"))
     rows = (await db.scalars(stmt)).all()
     return {"receipts": [_serialize(row) for row in rows]}
 
@@ -243,6 +291,8 @@ async def create_receipt(
     db: AsyncSession = Depends(get_session),
     admin: User = Depends(require_admin),
 ):
+    if not body.shopify_order_gid.startswith("gid://shopify/InventoryTransfer/"):
+        raise HTTPException(status_code=400, detail="Only Shopify inventory transfers can create purchase-order cards")
     existing = await db.scalar(
         select(InventoryReceipt).where(
             InventoryReceipt.store_key == _clean_store(body.store),
@@ -250,7 +300,7 @@ async def create_receipt(
         )
     )
     if existing:
-        raise HTTPException(status_code=409, detail="This Shopify order is already in Inventory Helper")
+        raise HTTPException(status_code=409, detail="This Shopify inventory transfer is already in Inventory Helper")
     items = [item.model_dump() for item in body.line_items]
     row = InventoryReceipt(
         store_key=_clean_store(body.store),

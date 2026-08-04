@@ -31,7 +31,7 @@ steps:
         '--max-instances','5',
         '--cpu-throttling',
         '--cpu-boost',
-        '--set-env-vars','BASE_URL=${_BASE_URL},SHOPIFY_CLIENT_ID=${_SHOPIFY_CLIENT_ID},SHOPIFY_CLIENT_SECRET=${_SHOPIFY_CLIENT_SECRET},SHOPIFY_CLIENT_ID_NEWSTORENAME=${_SHOPIFY_CLIENT_ID_NEWSTORENAME},SHOPIFY_CLIENT_SECRET_NEWSTORENAME=${_SHOPIFY_CLIENT_SECRET_NEWSTORENAME},SHOPIFY_STORE_KEYS=${_SHOPIFY_STORE_KEYS},SHOPIFY_OAUTH_SCOPES=${_SHOPIFY_OAUTH_SCOPES},SHOPIFY_API_VERSION=2025-01,API_KEY=${_API_KEY},PC_ID_1=${_PC_ID_1},PC_SECRET_1=${_PC_SECRET_1}'
+        '--set-env-vars','BASE_URL=${_BASE_URL},SHOPIFY_CLIENT_ID=${_SHOPIFY_CLIENT_ID},SHOPIFY_CLIENT_SECRET=${_SHOPIFY_CLIENT_SECRET},SHOPIFY_CLIENT_ID_NEWSTORENAME=${_SHOPIFY_CLIENT_ID_NEWSTORENAME},SHOPIFY_CLIENT_SECRET_NEWSTORENAME=${_SHOPIFY_CLIENT_SECRET_NEWSTORENAME},SHOPIFY_STORE_KEYS=${_SHOPIFY_STORE_KEYS},SHOPIFY_OAUTH_SCOPES=${_SHOPIFY_OAUTH_SCOPES},SHOPIFY_API_VERSION=2025-01,SHOPIFY_INVENTORY_API_VERSION=2026-07,API_KEY=${_API_KEY},PC_ID_1=${_PC_ID_1},PC_SECRET_1=${_PC_SECRET_1}'
       ]
 
 substitutions:
@@ -44,7 +44,7 @@ substitutions:
   _SHOPIFY_CLIENT_ID_NEWSTORENAME: ''
   _SHOPIFY_CLIENT_SECRET_NEWSTORENAME: ''
   _SHOPIFY_STORE_KEYS: '*'
-  _SHOPIFY_OAUTH_SCOPES: 'read_orders,write_orders,read_order_edits,write_order_edits,read_customers,read_products,write_products,read_content,write_content,read_inventory,write_inventory'
+  _SHOPIFY_OAUTH_SCOPES: 'read_orders,write_orders,read_order_edits,write_order_edits,read_customers,read_products,write_products,read_content,write_content,read_inventory,write_inventory,read_inventory_transfers'
   _VITE_PRINT_RELAY_URL: ''
   _VITE_PRINT_RELAY_API_KEY: ''
   _VITE_PRINT_RELAY_PC_ID: ''
