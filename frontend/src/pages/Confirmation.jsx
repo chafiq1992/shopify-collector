@@ -1078,6 +1078,9 @@ function AgentView({ me }) {
         me={me}
         rightSlot={
           <div className="flex items-center gap-2">
+            <button onClick={() => { try { history.pushState(null, "", "/inventory-helper"); window.dispatchEvent(new PopStateEvent("popstate")); } catch { location.href = "/inventory-helper"; } }} className={`text-xs px-3 py-1 rounded-full border border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 ${BTN_TAP}`}>
+              Inventory
+            </button>
             {syncCount > 0 && (
               <button
                 type="button"

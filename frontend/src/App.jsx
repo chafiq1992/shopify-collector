@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, Suspense } from "react";
-import { CheckCircle, PackageSearch, PackageCheck, XCircle, ChevronLeft, ChevronRight, Search, Settings, Boxes, Printer, LogOut } from "lucide-react";
+import { CheckCircle, PackageSearch, PackageCheck, XCircle, ChevronLeft, ChevronRight, Search, Settings, Boxes, Printer, LogOut, PackageOpen } from "lucide-react";
 import { authFetch, authHeaders, loadAuth, clearAuth } from "./lib/auth";
 import { printOrdersLocally } from "./lib/localPrintClient";
 import { enqueueOrdersToRelay, isRelayConfigured } from "./lib/printRelayClient";
@@ -836,6 +836,9 @@ export default function App(){
           <PackageSearch className="w-5 h-5" />
           <StorePicker value={store} onChange={(next)=>{ vibrate(10); setStore(next); }} className="ml-3" />
           <div className="ml-auto flex items-center gap-2">
+            <button aria-label="Open Inventory Helper" title="Inventory Helper" onClick={()=>{ vibrate(10); navigate('/inventory-helper'); }} className="p-1.5 rounded-full hover:bg-gray-100">
+              <PackageOpen className="w-4 h-4 text-indigo-600" />
+            </button>
             {auth?.user && (
               <div className="hidden sm:flex items-center gap-2 text-xs text-gray-700 border border-gray-200 rounded-lg px-2 py-1 bg-white">
                 <span className="font-semibold">{auth.user.email}</span>

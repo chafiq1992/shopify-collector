@@ -8,7 +8,9 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
+    Text,
     JSON,
     func,
 )
@@ -143,3 +145,53 @@ class ReturnScan(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
 
     user = relationship("User")
+
+
+class InventoryReceipt(Base):
+    """A Shopify purchase/order record checked by the inventory team."""
+
+    __tablename__ = "inventory_receipts"
+    __table_args__ = (
+        Index("ux_inventory_receipts_store_order", "store_key", "shopify_order_gid", unique=True),
+        Index("ix_inventory_receipts_status_created", "status", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    store_key = Column(String(63), nullable=False, index=True)
+    shopify_order_gid = Column(String(128), nullable=False)
+    order_number = Column(String(64), nullable=False, index=True)
+    po_number = Column(String(128), nullable=True, index=True)
+    shopify_created_at = Column(String(40), nullable=True)
+    line_items = Column(_json_type(), nullable=False, default=list)
+    ordered_crates = Column(Integer, nullable=False, default=0)
+    expected_items = Column(Integer, nullable=False, default=0)
+    actual_crates = Column(Integer, nullable=True)
+    actual_items = Column(Integer, nullable=True)
+    agent_note = Column(Text, nullable=True)
+    status = Column(String(24), nullable=False, default="waiting", index=True)
+    created_by_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    counted_by_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    counted_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    created_by = relationship("User", foreign_keys=[created_by_id])
+    counted_by = relationship("User", foreign_keys=[counted_by_id])
+    photos = relationship("InventoryReceiptPhoto", back_populates="receipt", cascade="all,delete-orphan")
+
+
+class InventoryReceiptPhoto(Base):
+    """Crate photo bytes stored with the receipt so they survive app restarts."""
+
+    __tablename__ = "inventory_receipt_photos"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    receipt_id = Column(Integer, ForeignKey("inventory_receipts.id", ondelete="CASCADE"), nullable=False, index=True)
+    filename = Column(String(255), nullable=False)
+    content_type = Column(String(64), nullable=False)
+    data = Column(LargeBinary, nullable=False)
+    uploaded_by_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    receipt = relationship("InventoryReceipt", back_populates="photos")
+    uploaded_by = relationship("User")

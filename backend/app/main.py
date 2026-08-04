@@ -37,6 +37,7 @@ try:
     from .settings_store import get_shopify_oauth_record, list_shopify_oauth_store_labels
     from .return_scan_routes import router as return_scan_router
     from .confirmation_routes import router as confirmation_router
+    from .inventory_helper_routes import router as inventory_helper_router
 except Exception:
     HAVE_AUTH_DB = False
     get_session = None  # type: ignore
@@ -222,6 +223,8 @@ if HAVE_AUTH_DB and "return_scan_router" in globals() and return_scan_router is 
     app.include_router(return_scan_router)  # type: ignore[arg-type]
 if HAVE_AUTH_DB and "confirmation_router" in globals() and confirmation_router is not None:  # type: ignore[name-defined]
     app.include_router(confirmation_router)  # type: ignore[arg-type]
+if HAVE_AUTH_DB and "inventory_helper_router" in globals() and inventory_helper_router is not None:  # type: ignore[name-defined]
+    app.include_router(inventory_helper_router)  # type: ignore[arg-type]
 if delivery_rate_router is not None:
     app.include_router(delivery_rate_router)
 

@@ -16,6 +16,7 @@ const ShopifyConnectPage = lazy(() => import('./pages/ShopifyConnect'))
 const VariantOrdersPage = lazy(() => import('./pages/VariantOrders'))
 const ReturnScannerPage = lazy(() => import('./pages/ReturnScanner'))
 const ConfirmationPage = lazy(() => import('./pages/Confirmation'))
+const InventoryHelperPage = lazy(() => import('./pages/InventoryHelper'))
 
 function PageFallback() {
   return (
@@ -63,9 +64,9 @@ function RouteShell() {
   const isAuthed = !!auth?.access_token
   const userRole = auth?.user?.role
 
-  // Agents are scoped to the confirmation page; redirect away from anything else (except /login).
+  // Agents can work in Confirmation and Inventory Helper; redirect away from admin-only pages.
   useEffect(() => {
-    if (isAuthed && userRole === 'agent' && currentPath !== '/confirmation' && currentPath !== '/login') {
+    if (isAuthed && userRole === 'agent' && !['/confirmation', '/inventory-helper', '/login'].includes(currentPath)) {
       try {
         history.replaceState(null, '', '/confirmation')
         window.dispatchEvent(new PopStateEvent('popstate'))
@@ -79,7 +80,7 @@ function RouteShell() {
   if (!isAuthed && currentPath !== '/login') {
     Page = LoginPage
     pageProps = { onSuccess: handleLoginSuccess }
-  } else if (isAuthed && userRole === 'agent' && currentPath !== '/confirmation') {
+  } else if (isAuthed && userRole === 'agent' && !['/confirmation', '/inventory-helper'].includes(currentPath)) {
     Page = ConfirmationPage
   } else {
     switch (currentPath) {
@@ -117,6 +118,9 @@ function RouteShell() {
         break
       case '/confirmation':
         Page = ConfirmationPage
+        break
+      case '/inventory-helper':
+        Page = InventoryHelperPage
         break
       case '/':
       default:
