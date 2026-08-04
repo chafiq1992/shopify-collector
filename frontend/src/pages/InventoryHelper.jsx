@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -51,9 +51,9 @@ function statusStyle(status) {
     icon: AlertTriangle,
   };
   return {
-    row: "border-slate-200 bg-white",
-    badge: "border-amber-200 bg-amber-50 text-amber-800",
-    label: "Waiting for count",
+    row: "border-emerald-200 bg-emerald-50/60",
+    badge: "border-emerald-200 bg-white text-emerald-800",
+    label: "Ready to count",
     icon: PackageOpen,
   };
 }
@@ -63,7 +63,8 @@ function differenceText(receipt) {
   if (receipt?.actual_crates == null || receipt?.actual_items == null) {
     return "The receiving count has not been submitted yet.";
   }
-  const crateDiff = Number(receipt.actual_crates) - Number(receipt.ordered_crates);
+  const hasCratePlan = Number(receipt.ordered_crates) > 0;
+  const crateDiff = hasCratePlan ? Number(receipt.actual_crates) - Number(receipt.ordered_crates) : 0;
   const itemDiff = Number(receipt.actual_items) - Number(receipt.expected_items);
   if (crateDiff === 0 && itemDiff === 0) return "Crates and items match the purchase order.";
   const parts = [];
@@ -82,6 +83,36 @@ function ProductThumb({ src, alt = "Product" }) {
     );
   }
   return <img src={src} alt={alt} className="h-12 w-12 shrink-0 rounded-xl border border-slate-200 bg-white object-cover" />;
+}
+
+
+function localISO(day = new Date()) {
+  const year = day.getFullYear();
+  const month = String(day.getMonth() + 1).padStart(2, "0");
+  const date = String(day.getDate()).padStart(2, "0");
+  return `${year}-${month}-${date}`;
+}
+
+
+function yesterdayISO() {
+  const day = new Date();
+  day.setDate(day.getDate() - 1);
+  return localISO(day);
+}
+
+
+function shortDate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ""));
+  return match ? `${match[3]}/${match[2]}` : "";
+}
+
+
+function orderedLabel(receipt) {
+  const date = String(receipt?.shopify_created_at || "").slice(0, 10);
+  if (!date) return "Shopify purchase order";
+  if (date === yesterdayISO()) return `Ordered yesterday ${shortDate(date)}`;
+  if (date === localISO()) return `Ordered today ${shortDate(date)}`;
+  return `Ordered ${shortDate(date)}`;
 }
 
 
@@ -164,6 +195,7 @@ export default function InventoryHelper() {
   const [store, setStore] = useState(() => readCurrentStore());
   const [receipts, setReceipts] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  const [viewMode, setViewMode] = useState("yesterday");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -174,7 +206,7 @@ export default function InventoryHelper() {
   const [draftCrates, setDraftCrates] = useState(0);
   const [savingDraft, setSavingDraft] = useState(false);
 
-  const selected = receipts.find((receipt) => receipt.id === selectedId) || receipts[0] || null;
+  const selected = receipts.find((receipt) => receipt.id === selectedId) || null;
   const [adminItems, setAdminItems] = useState([]);
   const [adminCrates, setAdminCrates] = useState(0);
   const [actualCrates, setActualCrates] = useState(0);
@@ -182,6 +214,7 @@ export default function InventoryHelper() {
   const [agentNote, setAgentNote] = useState("");
   const [countBusy, setCountBusy] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
+  const detailRef = useRef(null);
 
   const totals = useMemo(() => ({
     all: receipts.length,
@@ -192,7 +225,8 @@ export default function InventoryHelper() {
 
   useEffect(() => {
     persistStoreSelection(store);
-    loadReceipts();
+    if (viewMode === "yesterday") syncYesterday();
+    else loadReceipts();
   }, [store]);
 
   useEffect(() => {
@@ -213,12 +247,51 @@ export default function InventoryHelper() {
       });
       const list = data.receipts || [];
       setReceipts(list);
-      setSelectedId((current) => preferredId || (list.some((item) => item.id === current) ? current : list[0]?.id || null));
+      setSelectedId((current) => preferredId || (list.some((item) => item.id === current) ? current : null));
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
+  }
+
+  async function syncYesterday(preferredId) {
+    setLoading(true);
+    setError("");
+    try {
+      const day = yesterdayISO();
+      const data = await apiJson(`/api/inventory-helper/sync-day?store=${encodeURIComponent(store)}&date=${encodeURIComponent(day)}`, {
+        method: "POST",
+        headers: authHeaders({ Accept: "application/json" }),
+      });
+      const list = data.receipts || [];
+      setReceipts(list);
+      setSelectedId((current) => preferredId || (list.some((item) => item.id === current) ? current : null));
+      if (data.imported_count > 0) {
+        setNotice(`${data.imported_count} new purchase order${data.imported_count === 1 ? "" : "s"} loaded from Shopify.`);
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function changeView(next) {
+    setViewMode(next);
+    setSelectedId(null);
+    if (next === "yesterday") await syncYesterday();
+    else await loadReceipts();
+  }
+
+  function openReceipt(receiptId) {
+    setSelectedId(receiptId);
+    window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);
+  }
+
+  function refreshCurrent() {
+    if (viewMode === "yesterday") syncYesterday(selected?.id);
+    else loadReceipts(selected?.id);
   }
 
   function replaceReceipt(next) {
@@ -264,6 +337,7 @@ export default function InventoryHelper() {
       setDraft(null);
       setReference("");
       setNotice(`${saved.order_number} added to Inventory Helper.`);
+      setViewMode("all");
       await loadReceipts(saved.id);
     } catch (err) {
       setError(err.message);
@@ -362,7 +436,7 @@ export default function InventoryHelper() {
           </div>
           <div className="ml-auto flex items-center gap-2">
             <StorePicker value={store} onChange={setStore} allowCustom />
-            <button type="button" onClick={() => loadReceipts()} className="rounded-xl border border-slate-200 p-2.5 text-slate-600 hover:bg-slate-50" aria-label="Refresh"><RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} /></button>
+            <button type="button" onClick={refreshCurrent} className="rounded-xl border border-slate-200 p-2.5 text-slate-600 hover:bg-slate-50" aria-label="Refresh"><RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} /></button>
           </div>
         </div>
       </header>
@@ -373,6 +447,60 @@ export default function InventoryHelper() {
             {error || notice}
           </div>
         )}
+
+        <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 px-4 py-4 sm:px-6">
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wide text-indigo-600">Receiving queue</div>
+              <h2 className="text-lg font-black">
+                {viewMode === "yesterday" ? `Ordered yesterday ${shortDate(yesterdayISO())}` : "All purchase orders"}
+              </h2>
+              <p className="text-xs text-slate-500">
+                {viewMode === "yesterday" ? "Loaded automatically from Shopify when this page opens." : "Saved purchase orders from every date."}
+              </p>
+            </div>
+            <div className="ml-auto inline-flex rounded-xl border border-slate-200 bg-slate-100 p-1">
+              <button type="button" onClick={() => changeView("yesterday")} className={`rounded-lg px-3 py-1.5 text-xs font-bold ${viewMode === "yesterday" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}>Yesterday</button>
+              <button type="button" onClick={() => changeView("all")} className={`rounded-lg px-3 py-1.5 text-xs font-bold ${viewMode === "all" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}>All orders</button>
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="flex items-center justify-center gap-2 p-10 text-sm font-semibold text-slate-500"><Loader2 className="h-5 w-5 animate-spin" /> Loading Shopify purchase orders…</div>
+          ) : !receipts.length ? (
+            <div className="p-10 text-center"><ClipboardList className="mx-auto mb-3 h-9 w-9 text-slate-300" /><div className="font-black">No purchase orders found</div><p className="mt-1 text-sm text-slate-500">{viewMode === "yesterday" ? `Shopify has no orders dated ${shortDate(yesterdayISO())}.` : "No orders have been saved yet."}</p></div>
+          ) : (
+            <div className="grid grid-cols-2 gap-2.5 p-2.5 sm:grid-cols-3 sm:gap-4 sm:p-4 lg:grid-cols-4">
+              {receipts.map((receipt) => {
+                const tone = statusStyle(receipt.status);
+                const Icon = tone.icon;
+                const image = receipt.line_items?.find((item) => item.image_url)?.image_url;
+                const isCounted = receipt.actual_items != null && receipt.actual_crates != null;
+                return (
+                  <button key={receipt.id} type="button" onClick={() => openReceipt(receipt.id)} className={`min-w-0 overflow-hidden rounded-2xl border text-left shadow-sm transition active:scale-[0.98] ${tone.row} ${selected?.id === receipt.id ? "ring-2 ring-indigo-500 ring-offset-2" : "hover:shadow-md"}`}>
+                    <div className="relative aspect-[4/3] overflow-hidden bg-slate-100">
+                      {image ? <img src={image} alt={receipt.line_items?.[0]?.title || "Purchase order product"} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-slate-300"><Boxes className="h-9 w-9" /></div>}
+                      <span className={`absolute left-2 top-2 inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-black shadow-sm ${tone.badge}`}><Icon className="h-3 w-3" />{tone.label}</span>
+                    </div>
+                    <div className="space-y-2 p-2.5 sm:p-3">
+                      <div className="min-w-0"><div className="truncate text-sm font-black sm:text-base">{receipt.order_number}</div><div className="truncate text-[10px] font-semibold text-slate-500 sm:text-xs">{orderedLabel(receipt)}</div></div>
+                      <div className="rounded-xl border border-white/90 bg-white/80 p-2">
+                        <div className="text-[9px] font-bold uppercase tracking-wide text-slate-500 sm:text-[10px]">Quantity ordered</div>
+                        <div className="text-xl font-black leading-none sm:text-2xl">{receipt.expected_items}</div>
+                        <div className="mt-1 truncate text-[10px] text-slate-500">{receipt.line_items?.length || 0} variant{receipt.line_items?.length === 1 ? "" : "s"}</div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5 text-center">
+                        <div className="rounded-lg bg-white/70 px-1 py-1.5"><div className="text-[9px] text-slate-500">Crates</div><div className="text-xs font-black">{isCounted ? `${receipt.actual_crates}/${receipt.ordered_crates || "—"}` : (receipt.ordered_crates || "—")}</div></div>
+                        <div className="rounded-lg bg-white/70 px-1 py-1.5"><div className="text-[9px] text-slate-500">Counted</div><div className="text-xs font-black">{receipt.actual_items ?? "—"}</div></div>
+                      </div>
+                      {receipt.agent_note && <div className="rounded-xl border border-amber-300 bg-amber-100 px-2 py-2 text-[10px] font-bold leading-snug text-amber-950 sm:text-xs"><span className="block text-[9px] uppercase tracking-wide text-amber-700">Agent note</span><span className="block truncate">{receipt.agent_note}</span></div>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
 
         {isAdmin && (
           <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
@@ -421,40 +549,21 @@ export default function InventoryHelper() {
         )}
 
         <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[['Open POs', totals.all, 'text-slate-950'], ['Waiting', totals.waiting, 'text-amber-700'], ['Mismatch', totals.mismatch, 'text-rose-700'], ['Matched', totals.matched, 'text-emerald-700']].map(([label, value, tone]) => (
+          {[['Shown POs', totals.all, 'text-slate-950'], ['Ready', totals.waiting, 'text-emerald-700'], ['Mismatch', totals.mismatch, 'text-rose-700'], ['Matched', totals.matched, 'text-emerald-700']].map(([label, value, tone]) => (
             <div key={label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-xs font-semibold text-slate-500">{label}</div><div className={`mt-1 text-2xl font-black ${tone}`}>{value}</div></div>
           ))}
         </section>
 
-        <div className="grid items-start gap-5 lg:grid-cols-[360px_minmax(0,1fr)]">
-          <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
-            <div className="border-b border-slate-100 px-4 py-4"><h2 className="font-bold">Purchase orders</h2><p className="text-xs text-slate-500">Select one to review or count.</p></div>
-            <div className="max-h-[680px] space-y-2 overflow-y-auto p-2">
-              {loading && <div className="flex items-center justify-center gap-2 p-8 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> Loading orders</div>}
-              {!loading && !receipts.length && <div className="p-8 text-center"><ClipboardList className="mx-auto mb-3 h-8 w-8 text-slate-300" /><div className="font-bold">No purchase orders yet</div><p className="mt-1 text-sm text-slate-500">{isAdmin ? "Use the Shopify search above to add the first one." : "An admin needs to add a purchase order."}</p></div>}
-              {receipts.map((receipt) => {
-                const tone = statusStyle(receipt.status);
-                const Icon = tone.icon;
-                return (
-                  <button key={receipt.id} type="button" onClick={() => setSelectedId(receipt.id)} className={`w-full rounded-2xl border p-3 text-left transition ${tone.row} ${selected?.id === receipt.id ? "ring-2 ring-indigo-500 ring-offset-1" : "hover:border-slate-300"}`}>
-                    <div className="flex items-start gap-3">
-                      <ProductThumb src={receipt.line_items?.[0]?.image_url} alt={receipt.line_items?.[0]?.title} />
-                      <div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="font-black">{receipt.order_number}</span>{receipt.po_number && <span className="truncate text-xs text-slate-500">PO {receipt.po_number}</span>}</div><div className="mt-1 text-xs text-slate-500">{receipt.ordered_crates} crates · {receipt.expected_items} items</div><div className={`mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-bold ${tone.badge}`}><Icon className="h-3 w-3" />{tone.label}</div></div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-
+        <div ref={detailRef} className="scroll-mt-24">
           {selected ? (
-            <section className="space-y-5">
+            <section className="mx-auto max-w-4xl space-y-5">
               <div className={`rounded-3xl border p-4 shadow-sm sm:p-6 ${selectedTone.row}`}>
                 <div className="flex flex-wrap items-start gap-3">
                   <div className={`rounded-2xl border p-3 ${selectedTone.badge}`}><SelectedIcon className="h-6 w-6" /></div>
-                  <div><div className="text-xs font-bold uppercase tracking-wide text-slate-500">{selected.po_number ? `PO ${selected.po_number}` : "Shopify order"}</div><h2 className="text-2xl font-black tracking-tight">{selected.order_number}</h2><p className="mt-1 text-sm font-semibold text-slate-600">{differenceText(selected)}</p></div>
+                  <div><div className="text-xs font-bold uppercase tracking-wide text-slate-500">{selected.po_number ? `PO ${selected.po_number}` : orderedLabel(selected)}</div><h2 className="text-2xl font-black tracking-tight">{selected.order_number}</h2><p className="mt-1 text-sm font-semibold text-slate-600">{differenceText(selected)}</p></div>
                   <div className={`ml-auto rounded-full border px-3 py-1 text-xs font-bold ${selectedTone.badge}`}>{selectedTone.label}</div>
                 </div>
+                {selected.agent_note && <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-100 px-4 py-3 text-sm font-bold text-amber-950"><span className="mb-0.5 block text-[10px] uppercase tracking-wider text-amber-700">Agent note</span>{selected.agent_note}</div>}
               </div>
 
               <div className="rounded-3xl border border-slate-200 bg-white shadow-sm">
@@ -491,7 +600,7 @@ export default function InventoryHelper() {
                 <div className={`rounded-3xl border p-5 ${selectedTone.row}`}>
                   <div className="mb-4 flex items-center gap-2"><SelectedIcon className={`h-5 w-5 ${selected.status === "matched" ? "text-emerald-600" : "text-rose-600"}`} /><h3 className="font-black">Count summary</h3></div>
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    {[['Crates ordered', selected.ordered_crates], ['Crates received', selected.actual_crates], ['Items ordered', selected.expected_items], ['Items counted', selected.actual_items]].map(([label, value]) => <div key={label} className="rounded-2xl border border-white/80 bg-white/80 p-3"><div className="text-xs text-slate-500">{label}</div><div className="text-2xl font-black">{value}</div></div>)}
+                    {[['Crates ordered', selected.ordered_crates || '—'], ['Crates received', selected.actual_crates], ['Items ordered', selected.expected_items], ['Items counted', selected.actual_items]].map(([label, value]) => <div key={label} className="rounded-2xl border border-white/80 bg-white/80 p-3"><div className="text-xs text-slate-500">{label}</div><div className="text-2xl font-black">{value}</div></div>)}
                   </div>
                   <p className={`mt-4 text-sm font-bold ${selected.status === "matched" ? "text-emerald-800" : "text-rose-800"}`}>{differenceText(selected)}</p>
                   {selected.counted_by && <p className="mt-1 text-xs text-slate-500">Counted by {selected.counted_by.name || selected.counted_by.email}</p>}
@@ -499,7 +608,7 @@ export default function InventoryHelper() {
               )}
             </section>
           ) : (
-            <div className="flex min-h-80 items-center justify-center rounded-3xl border border-dashed border-slate-300 bg-white text-center text-slate-500"><div><PackageOpen className="mx-auto mb-3 h-9 w-9 text-slate-300" /><p className="font-bold">Select a purchase order to begin.</p></div></div>
+            receipts.length > 0 && <div className="flex min-h-44 items-center justify-center rounded-3xl border border-dashed border-slate-300 bg-white text-center text-slate-500"><div><PackageOpen className="mx-auto mb-3 h-9 w-9 text-slate-300" /><p className="font-bold">Tap a card to see all purchase-order details.</p></div></div>
           )}
         </div>
       </main>
