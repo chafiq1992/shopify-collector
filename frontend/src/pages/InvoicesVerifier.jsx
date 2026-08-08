@@ -122,16 +122,16 @@ export default function InvoicesVerifier() {
     return { total: rowsWithShopify.length, ok: ok.length, green: green.length, red: red.length, missing: missing.length };
   }, [rowsWithShopify]);
 
-  // Upload PDFs to backend for LLM-based parsing + Shopify lookup
+  // Upload invoice files for deterministic parsing (with an LLM fallback for unknown PDFs)
   async function parseSelectedFiles() {
     if (!fileList.length) return;
     if (fileList.length > MAX_PARSE_FILE_COUNT) {
-      setError(`Select up to ${MAX_PARSE_FILE_COUNT} PDFs at a time to keep parsing fast and cost-effective.`);
+      setError(`Select up to ${MAX_PARSE_FILE_COUNT} invoice files at a time.`);
       return;
     }
     const totalBytes = fileList.reduce((sum, file) => sum + Number(file?.size || 0), 0);
     if (totalBytes > MAX_PARSE_TOTAL_BYTES) {
-      setError(`Selected PDFs are too large (${(totalBytes / (1024 * 1024)).toFixed(1)} MB). Keep batches under ${(MAX_PARSE_TOTAL_BYTES / (1024 * 1024)).toFixed(0)} MB.`);
+      setError(`Selected invoice files are too large (${(totalBytes / (1024 * 1024)).toFixed(1)} MB). Keep batches under ${(MAX_PARSE_TOTAL_BYTES / (1024 * 1024)).toFixed(0)} MB.`);
       return;
     }
     setBusy(true);
@@ -143,7 +143,7 @@ export default function InvoicesVerifier() {
         formData.append("files", f);
       }
 
-      // Long timeout — LLM parsing can take 30-60s for large invoices (with retries, up to 5 min)
+      // Keep a long timeout for the unknown-layout LLM fallback.
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 300_000);
 
@@ -167,7 +167,7 @@ export default function InvoicesVerifier() {
         setError(`Warnings: ${errors.map(d => `${d.fileName}: ${d.error}`).join("; ")}`);
       }
     } catch (e) {
-      const msg = e?.name === "AbortError" ? "Request timed out — the PDF may be too large. Try a smaller invoice." : (e?.message || "Failed to parse PDFs");
+      const msg = e?.name === "AbortError" ? "Request timed out — try a smaller invoice batch." : (e?.message || "Failed to parse invoices");
       setError(msg);
       setParsed([]);
       setLookup({});
@@ -234,13 +234,13 @@ export default function InvoicesVerifier() {
           >Back</button>
           <div className="ml-2">
             <div className="text-sm font-semibold">Invoices Verifier</div>
-            <div className="text-[11px] text-gray-500">Upload delivery invoice PDF(s) — company auto-detected by AI</div>
+            <div className="text-[11px] text-gray-500">Upload delivery invoices — PDF and Livre24 XLS/CSV are supported</div>
           </div>
           <div className="ml-auto flex items-center gap-2">
             <input
               ref={inputRef}
               type="file"
-              accept="application/pdf"
+              accept=".pdf,.xls,.csv,.tsv,application/pdf,application/vnd.ms-excel,text/csv,text/tab-separated-values"
               multiple
               onChange={(e) => {
                 const list = Array.from(e.target.files || []);
@@ -263,7 +263,7 @@ export default function InvoicesVerifier() {
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
             </svg>
-            <span>Parsing PDF with AI… this may take 10-30 seconds</span>
+            <span>Parsing and verifying invoice rows…</span>
           </div>
         )}
         {!busy && error && <div className="text-red-600 mb-3">{error}</div>}
@@ -290,11 +290,12 @@ export default function InvoicesVerifier() {
                       {d.invoiceNumber ? <span> • {d.invoiceNumber}</span> : null}
                       {d.invoiceDate ? <span> • {d.invoiceDate}</span> : null}
                       <span> • rows: {(d.rows || []).length}</span>
-                      {(d.invoiceTotalBrut != null || d.invoiceTotalNet != null) ? (
+                      {(d.invoiceTotalBrut != null || d.invoiceTotalNet != null || d.invoiceAdditionalFeesTotal != null) ? (
                         <span>
-                          {" "}• PDF totals:
+                          {" "}• Invoice totals:
                           {d.invoiceTotalBrut != null ? <span> brut {Number(d.invoiceTotalBrut).toFixed(2)} DH</span> : null}
                           {d.invoiceFeesTotal != null ? <span> / frais {Number(d.invoiceFeesTotal).toFixed(2)} DH</span> : null}
+                          {d.invoiceAdditionalFeesTotal != null ? <span> / autres frais {Number(d.invoiceAdditionalFeesTotal).toFixed(2)} DH</span> : null}
                           {d.invoiceTotalNet != null ? <span> / net {Number(d.invoiceTotalNet).toFixed(2)} DH</span> : null}
                         </span>
                       ) : null}
@@ -305,22 +306,36 @@ export default function InvoicesVerifier() {
                 <div className="mt-3 border-t border-gray-200 pt-3 text-xs text-gray-700">
                   {(() => {
                     const rows = rowsWithShopify || [];
-                    const delivered = rows.filter(x => x.shopify?.found && !x.isRefused);
+                    const invoiceDelivered = rows.filter(x => !x.isRefused);
+                    const delivered = invoiceDelivered.filter(x => x.shopify?.found);
                     const refused = rows.filter(x => x.shopify?.found && x.isRefused);
                     const sumShop = delivered.reduce((acc, x) => acc + Number(x.shopTotal || 0), 0);
-                    const sumInvCrbt = delivered.reduce((acc, x) => acc + Number(x.crbt || 0), 0);
-                    const sumInvNet = delivered.reduce((acc, x) => {
+                    const sumInvCrbt = rows.reduce((acc, x) => acc + Number(x.crbt || 0), 0);
+                    const sumInvNet = rows.reduce((acc, x) => {
                       if (x.total != null) return acc + Number(x.total || 0);
                       if (x.crbt != null && x.fees != null) return acc + (Number(x.crbt || 0) - Number(x.fees || 0));
                       return acc;
                     }, 0);
-                    const doc = parsed[0] || {};
-                    const pdfBrut = doc.invoiceTotalBrut;
-                    const pdfNet = doc.invoiceTotalNet;
+                    const docsWithBrut = parsed.filter((doc) => doc.invoiceTotalBrut != null);
+                    const docsWithNet = parsed.filter((doc) => doc.invoiceTotalNet != null);
+                    const pdfBrut = docsWithBrut.length
+                      ? docsWithBrut.reduce((sum, doc) => sum + Number(doc.invoiceTotalBrut || 0), 0)
+                      : null;
+                    const pdfNet = docsWithNet.length
+                      ? docsWithNet.reduce((sum, doc) => sum + Number(doc.invoiceTotalNet || 0), 0)
+                      : null;
+                    const invoiceAdditionalFees = parsed.reduce(
+                      (sum, doc) => sum + Number(doc.invoiceAdditionalFeesTotal || 0),
+                      0,
+                    );
+                    const sumInvNetAfterAdjustments = sumInvNet - invoiceAdditionalFees;
                     return (
                       <div className="flex flex-wrap gap-2 items-center">
                         <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">
                           Delivered matched: {delivered.length}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">
+                          Delivered on invoices: {invoiceDelivered.length}
                         </span>
                         <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">
                           Refused matched (counted 0): {refused.length}
@@ -329,19 +344,24 @@ export default function InvoicesVerifier() {
                           Σ Shopify (delivered): {sumShop.toFixed(2)} DH
                         </span>
                         <span className="px-2 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-700">
-                          Σ Invoice CRBT (delivered): {sumInvCrbt.toFixed(2)} DH
+                          Σ Invoice CRBT (refused = 0): {sumInvCrbt.toFixed(2)} DH
                         </span>
                         <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700">
-                          Σ Invoice Net (delivered): {sumInvNet.toFixed(2)} DH
+                          Σ Invoice Net (after other fees): {sumInvNetAfterAdjustments.toFixed(2)} DH
                         </span>
+                        {invoiceAdditionalFees ? (
+                          <span className="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800">
+                            Other invoice fees: {invoiceAdditionalFees.toFixed(2)} DH
+                          </span>
+                        ) : null}
                         {pdfBrut != null ? (
                           <span className="px-2 py-0.5 rounded-full bg-purple-50 border border-purple-200 text-purple-700">
-                            PDF Total Brut: {Number(pdfBrut).toFixed(2)} DH (Δ { (sumShop - Number(pdfBrut)).toFixed(2) })
+                            Invoice Total Brut: {Number(pdfBrut).toFixed(2)} DH (Δ { (sumInvCrbt - Number(pdfBrut)).toFixed(2) })
                           </span>
                         ) : null}
                         {pdfNet != null ? (
                           <span className="px-2 py-0.5 rounded-full bg-purple-50 border border-purple-200 text-purple-700">
-                            PDF Total Net: {Number(pdfNet).toFixed(2)} DH (Δ { (sumInvNet - Number(pdfNet)).toFixed(2) })
+                            Invoice Total Net: {Number(pdfNet).toFixed(2)} DH (Δ { (sumInvNetAfterAdjustments - Number(pdfNet)).toFixed(2) })
                           </span>
                         ) : null}
                       </div>
@@ -376,15 +396,15 @@ export default function InvoicesVerifier() {
         {parsed.length === 0 && !busy && (
           <>
             {fileList.length === 0 ? (
-              <div className="text-gray-500">Choose one or more PDF invoices to start.</div>
+              <div className="text-gray-500">Choose one or more invoice files to start.</div>
             ) : (
               <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                <div className="text-sm font-semibold">PDFs to parse</div>
+                <div className="text-sm font-semibold">Invoice files to parse</div>
                 <div className="mt-2 space-y-2">
                   {fileList.map((f, idx) => (
                     <div key={`${f.name}-${idx}`} className="flex items-center gap-2">
                       <div className="flex-1 text-xs text-gray-800 truncate">{f.name}</div>
-                      <div className="text-[11px] text-gray-400">Company auto-detected by AI</div>
+                      <div className="text-[11px] text-gray-400">Company and layout auto-detected</div>
                     </div>
                   ))}
                 </div>
@@ -393,7 +413,7 @@ export default function InvoicesVerifier() {
                     onClick={parseSelectedFiles}
                     className="px-4 py-2 rounded-xl text-white text-sm font-semibold bg-blue-600 hover:bg-blue-700 active:scale-[.98]"
                   >
-                    Parse PDFs
+                    Parse invoices
                   </button>
                   <button
                     onClick={() => { setFileList([]); setParsed([]); setLookup({}); setError(null); }}
@@ -481,15 +501,16 @@ export default function InvoicesVerifier() {
                 <tfoot>
                   {(() => {
                     const rows = rowsWithShopify || [];
-                    const delivered = rows.filter(x => x.shopify?.found && !x.isRefused);
-                    const sumFees = delivered.reduce((acc, x) => acc + Number(x.fees || 0), 0);
-                    const sumCrbt = delivered.reduce((acc, x) => acc + Number(x.crbt || 0), 0);
-                    const sumShop = delivered.reduce((acc, x) => acc + Number(x.shopTotal || 0), 0);
-                    const sumDiff = delivered.reduce((acc, x) => acc + Number(x.diff || 0), 0);
+                    const invoiceDelivered = rows.filter(x => !x.isRefused);
+                    const matchedDelivered = invoiceDelivered.filter(x => x.shopify?.found);
+                    const sumFees = rows.reduce((acc, x) => acc + Number(x.fees || 0), 0);
+                    const sumCrbt = rows.reduce((acc, x) => acc + Number(x.crbt || 0), 0);
+                    const sumShop = matchedDelivered.reduce((acc, x) => acc + Number(x.shopTotal || 0), 0);
+                    const sumDiff = matchedDelivered.reduce((acc, x) => acc + Number(x.diff || 0), 0);
                     return (
                       <tr className="bg-gray-900 text-white">
                         <td className="px-3 py-2 font-extrabold">—</td>
-                        <td className="px-3 py-2 font-extrabold" colSpan={7}>TOTALS (delivered only)</td>
+                        <td className="px-3 py-2 font-extrabold" colSpan={7}>TOTALS (all invoice rows; Shopify/diff matched delivered only)</td>
                         <td className="px-3 py-2 text-right font-extrabold">{sumFees.toFixed(2)}</td>
                         <td className="px-3 py-2 text-right font-extrabold">{sumCrbt.toFixed(2)}</td>
                         <td className="px-3 py-2 text-right font-extrabold">{sumShop.toFixed(2)}</td>

@@ -3786,18 +3786,18 @@ async def get_fulfillment_orders(order_gid: str, store: Optional[str] = Query(No
     return {"ok": True, "fulfillmentOrders": out}
 
 
-# ---------- Invoice PDF parsing (LLM-based) ----------
-from .invoice_parser import extract_pages_text, parse_invoice_from_pages
+# ---------- Invoice file parsing ----------
+from .invoice_parser import extract_pages_text, parse_invoice_from_pages, parse_invoice_spreadsheet
 
 @app.post("/api/invoices/parse-pdf", response_model=Dict[str, Any])
 async def invoice_parse_pdf(
-    files: List[UploadFile] = File(..., description="One or more PDF invoice files"),
+    files: List[UploadFile] = File(..., description="One or more PDF, HTML/XLS, or CSV invoice files"),
     admin: User = Depends(require_admin),  # type: ignore
 ):
     """
-    Upload one or more delivery company invoice PDFs.
-    Each PDF is parsed using LLM (GPT-4o-mini) to extract structured shipment data.
-    Large PDFs are chunked by pages and processed in parallel.
+    Upload one or more delivery-company invoice files.
+    Known PDF layouts and spreadsheet exports are parsed deterministically;
+    unknown PDF layouts use the LLM fallback.
     Then all extracted order numbers are looked up in Shopify.
     Returns combined parse + lookup results.
     """
@@ -3813,22 +3813,20 @@ async def invoice_parse_pdf(
                 docs.append({"fileName": f.filename, "error": "Empty file", "rows": []})
                 continue
 
-            # 1) Extract text from each page
             try:
-                pages = extract_pages_text(raw_bytes)
+                suffix = os.path.splitext(f.filename)[1].lower()
+                is_pdf = suffix == ".pdf" or raw_bytes.startswith(b"%PDF")
+                if is_pdf:
+                    pages = extract_pages_text(raw_bytes)
+                    if not pages:
+                        raise ValueError("No text found in PDF")
+                    parsed = await parse_invoice_from_pages(pages)
+                elif suffix in {".xls", ".csv", ".tsv"}:
+                    parsed = parse_invoice_spreadsheet(raw_bytes, f.filename)
+                else:
+                    raise ValueError("Unsupported invoice file type; use PDF, HTML .xls, CSV, or TSV")
             except Exception as e:
-                docs.append({"fileName": f.filename, "error": f"PDF extraction failed: {e}", "rows": []})
-                continue
-
-            if not pages:
-                docs.append({"fileName": f.filename, "error": "No text found in PDF", "rows": []})
-                continue
-
-            # 2) Send to LLM for structured extraction (chunked + parallel for large PDFs)
-            try:
-                parsed = await parse_invoice_from_pages(pages)
-            except Exception as e:
-                docs.append({"fileName": f.filename, "error": f"LLM parsing failed: {e}", "rows": []})
+                docs.append({"fileName": f.filename, "error": f"Invoice parsing failed: {e}", "rows": []})
                 continue
 
             doc = {
@@ -3839,6 +3837,7 @@ async def invoice_parse_pdf(
                 "invoiceTotalBrut": parsed.get("totalBrut"),
                 "invoiceTotalNet": parsed.get("totalNet"),
                 "invoiceFeesTotal": parsed.get("totalFees"),
+                "invoiceAdditionalFeesTotal": parsed.get("totalAdditionalFees"),
                 "rows": parsed.get("rows", []),
             }
             docs.append(doc)
