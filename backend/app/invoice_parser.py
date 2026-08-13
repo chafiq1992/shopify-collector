@@ -167,6 +167,12 @@ def _extract_invoice_metadata(text: str, company: str) -> Dict[str, Any]:
     )
     parsed["invoiceNumber"] = m_invoice.group(1).strip() if m_invoice else None
     parsed["invoiceDate"] = m_date.group(1).strip() if m_date else None
+    m_merchant = re.search(
+        r"\bClient\s*:\s*(.+?)(?=\s+(?:Facture|Nom\s+de\s+client|T[ée]l[ée]phone|Date)\s*:|$)",
+        text,
+        re.IGNORECASE,
+    )
+    parsed["merchant"] = re.sub(r"\s+", " ", m_merchant.group(1)).strip() if m_merchant else None
     parsed["totalBrut"] = _extract_amount(text, "Total Brut")
     parsed["totalNet"] = _extract_amount(text, "Total Net")
     parsed["totalFees"] = _extract_amount(text, "Frais TTC")
@@ -197,6 +203,8 @@ def _detect_company(text: str) -> Optional[str]:
         ("yfd-", "YFD"),
         ("fast delivery", "Fast"),
         ("fast", "Fast"),
+        ("run speed delivery", "Casa"),
+        ("runspeed.ma", "Casa"),
     )
     for marker, company in candidates:
         if marker in key:
@@ -217,9 +225,9 @@ def _row_from_segment(
 
     after_status = segment[status_match.end():]
     first_amount_start: Optional[int] = None
-    if company == "Lionex":
+    if company in {"Lionex", "Casa"}:
         lionex_amounts = re.search(
-            r"(-?\d+(?:[.,]\d+)?)\s+(-?\d+(?:[.,]\d+)?)\s*DH\s+(-?\d+(?:[.,]\d+)?)\s*DH\b",
+            r"(-?\d+(?:[.,]\d+)?)(?:\s*DH)?\s+(-?\d+(?:[.,]\d+)?)\s*DH\s+(-?\d+(?:[.,]\d+)?)\s*DH\b",
             after_status,
             re.IGNORECASE,
         )
@@ -274,6 +282,7 @@ def _row_from_segment(
 def _base_invoice_result(company: str) -> Dict[str, Any]:
     return {
         "company": company,
+        "merchant": None,
         "invoiceNumber": None,
         "invoiceDate": None,
         "totalBrut": None,
@@ -333,7 +342,7 @@ def _parse_oscario_invoice(text: str) -> Optional[Dict[str, Any]]:
 
 def _parse_tcpdf_invoice(text: str) -> Optional[Dict[str, Any]]:
     company = _detect_company(text)
-    if company not in {"12Livery", "IBEX", "Lionex", "Pal Express", "Fast"}:
+    if company not in {"12Livery", "IBEX", "Lionex", "Pal Express", "Fast", "Casa"}:
         return None
 
     parsed = _extract_invoice_metadata(text, company)
@@ -500,6 +509,7 @@ def parse_invoice_spreadsheet(file_bytes: bytes, filename: str) -> Dict[str, Any
         invoice_date = f"{date_match.group(1)}/{date_match.group(2)}/{date_match.group(3)}"
     result = {
         "company": company,
+        "merchant": None,
         "invoiceNumber": stem or None,
         "invoiceDate": invoice_date,
         "totalBrut": totals["brut"],
@@ -519,6 +529,7 @@ _SYSTEM_PROMPT = """You are an expert at extracting structured data from deliver
 
 You will receive raw text extracted from part of a PDF invoice (possibly just a few pages). Your job is to:
 1. Auto-detect which delivery company issued the invoice (e.g. Lionex, 12Livery, Metalivraison, IBEX, Pal Express, YFD, Livré24, Oscario, or other).
+2. Extract the invoice merchant/client account shown beside labels such as "Client:".
 2. Extract invoice-level metadata IF visible in this chunk (invoice number, date, totals). Use null if not visible.
 3. Extract EVERY shipment row from the table in this chunk.
 
@@ -561,6 +572,7 @@ _USER_PROMPT_TEMPLATE = """Extract structured data from this chunk of a delivery
 Return JSON in exactly this format:
 {{
   "company": "<auto-detected company name or null if not visible>",
+  "merchant": "<invoice Client value or null>",
   "invoiceNumber": "<invoice number or null>",
   "invoiceDate": "<invoice date as string or null>",
   "totalBrut": <total brut/gross amount as number or null>,
@@ -780,6 +792,7 @@ def _merge_chunk_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Merge results from multiple chunk LLM calls into a single response."""
     merged = {
         "company": None,
+        "merchant": None,
         "invoiceNumber": None,
         "invoiceDate": None,
         "totalBrut": None,
@@ -804,6 +817,8 @@ def _merge_chunk_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         # Take metadata from the first chunk that has it
         if not merged["company"] and chunk_data.get("company"):
             merged["company"] = chunk_data["company"]
+        if not merged["merchant"] and chunk_data.get("merchant"):
+            merged["merchant"] = chunk_data["merchant"]
         if not merged["invoiceNumber"] and chunk_data.get("invoiceNumber"):
             merged["invoiceNumber"] = chunk_data["invoiceNumber"]
         if not merged["invoiceDate"] and chunk_data.get("invoiceDate"):
@@ -899,6 +914,7 @@ def _normalize_llm_response(data: Dict[str, Any]) -> Dict[str, Any]:
     """Ensure the LLM response has the expected shape and types."""
     result = {
         "company": str(data.get("company") or "Unknown"),
+        "merchant": str(data.get("merchant") or "").strip() or None,
         "invoiceNumber": data.get("invoiceNumber") or None,
         "invoiceDate": data.get("invoiceDate") or None,
         "totalBrut": _safe_float(data.get("totalBrut")),

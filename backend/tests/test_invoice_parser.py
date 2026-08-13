@@ -136,3 +136,20 @@ def test_livre24_html_xls_export_is_parsed_without_an_llm():
     assert parsed["rows"][0]["sendCode"] == "9-85226"
     assert parsed["rows"][0]["phone"] == "0664076076"
     assert (parsed["totalBrut"], parsed["totalFees"], parsed["totalAdditionalFees"], parsed["totalNet"]) == (170, 25, 5, 140)
+
+
+def test_casa_run_speed_parses_client_rows_and_totals_without_an_llm():
+    parsed = parse_text(
+        """
+        Run Speed delivery Client : irrakids Facture : FCT-100826-030940-30-319
+        Nom de client : chafik Date : 2026-08-10 23:18 Colis : 2
+        1 9-88547 2026-08-08 2026-08-08 0723130318 Livré Casablanca 188 15 DH 173 DH
+        2 7-160758 2026-08-07 2026-08-07 0645039401 Livré Casablanca 1 DH 15 DH -14 DH
+        Total Brut 189 DH Frais 30 DH Autres frais 0 DH Total Net 159 DH
+        """
+    )
+    assert parsed["company"] == "Casa"
+    assert parsed["merchant"] == "irrakids"
+    assert [row["sendCode"] for row in parsed["rows"]] == ["9-88547", "7-160758"]
+    assert [row["crbt"] for row in parsed["rows"]] == [188, 1]
+    assert (parsed["totalBrut"], parsed["totalFees"], parsed["totalNet"]) == (189, 30, 159)

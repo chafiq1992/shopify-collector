@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import AppSetting
+
+
+INVOICE_ROUTING_RULES_KEY = "invoice_routing_rules"
+REGISTERED_SHOPIFY_STORES_KEY = "registered_shopify_stores"
 
 
 async def get_setting(db: AsyncSession, key: str) -> Any:
@@ -65,5 +69,36 @@ async def set_shopify_oauth_record(
         "installed_at": now_iso(),
     }
     await set_setting(db, shopify_oauth_key(store_label), payload)
+
+
+async def get_invoice_routing_rules(db: AsyncSession) -> List[Dict[str, str]]:
+    from .invoice_routing import sanitize_rules
+
+    value = await get_setting(db, INVOICE_ROUTING_RULES_KEY)
+    return sanitize_rules(value if isinstance(value, list) else [])
+
+
+async def set_invoice_routing_rules(db: AsyncSession, rules: Iterable[Any]) -> List[Dict[str, str]]:
+    from .invoice_routing import sanitize_rules
+
+    cleaned = sanitize_rules(rules)
+    await set_setting(db, INVOICE_ROUTING_RULES_KEY, cleaned)
+    return cleaned
+
+
+async def list_registered_shopify_store_labels(db: AsyncSession) -> List[str]:
+    value = await get_setting(db, REGISTERED_SHOPIFY_STORES_KEY)
+    if not isinstance(value, list):
+        return []
+    labels = {str(item or "").strip().lower() for item in value if str(item or "").strip()}
+    return sorted(labels)
+
+
+async def register_shopify_store_label(db: AsyncSession, store_label: str) -> List[str]:
+    labels = set(await list_registered_shopify_store_labels(db))
+    labels.add(str(store_label or "").strip().lower())
+    cleaned = sorted(label for label in labels if label)
+    await set_setting(db, REGISTERED_SHOPIFY_STORES_KEY, cleaned)
+    return cleaned
 
 

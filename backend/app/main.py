@@ -15,7 +15,7 @@ import httpx
 import hmac, hashlib, base64
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import random
 from functools import lru_cache
 from contextlib import asynccontextmanager
@@ -34,7 +34,14 @@ try:
     from .auth_routes import router as auth_router, get_current_user, get_current_user_optional, require_admin, hash_password
     from .admin_bootstrap_routes import router as admin_bootstrap_router
     from .shopify_oauth_routes import router as shopify_oauth_router
-    from .settings_store import get_shopify_oauth_record, list_shopify_oauth_store_labels
+    from .settings_store import (
+        get_invoice_routing_rules,
+        get_shopify_oauth_record,
+        list_registered_shopify_store_labels,
+        list_shopify_oauth_store_labels,
+        register_shopify_store_label,
+        set_invoice_routing_rules,
+    )
     from .return_scan_routes import router as return_scan_router
     from .confirmation_routes import router as confirmation_router
     from .inventory_helper_routes import router as inventory_helper_router
@@ -180,6 +187,7 @@ async def known_store_labels() -> list[str]:
         try:
             async with SessionLocal() as db:  # type: ignore[misc]
                 labels.update(await list_shopify_oauth_store_labels(db))  # type: ignore[name-defined]
+                labels.update(await list_registered_shopify_store_labels(db))  # type: ignore[name-defined]
         except Exception:
             pass
     return sorted(labels)
@@ -197,7 +205,7 @@ async def resolve_store_settings_effective(store: Optional[str]) -> Tuple[str, s
 
     key = normalize_store_label(store)
 
-    if (_oauth_all_stores_enabled() or key in _oauth_enabled_stores()) and HAVE_AUTH_DB and SessionLocal is not None:
+    if HAVE_AUTH_DB and SessionLocal is not None:
         try:
             async with SessionLocal() as db:  # type: ignore[misc]
                 rec = await get_shopify_oauth_record(db, key)  # type: ignore[arg-type]
@@ -3788,6 +3796,7 @@ async def get_fulfillment_orders(order_gid: str, store: Optional[str] = Query(No
 
 # ---------- Invoice file parsing ----------
 from .invoice_parser import extract_pages_text, parse_invoice_from_pages, parse_invoice_spreadsheet
+from .invoice_routing import choose_shopify_candidate, merchant_code_prefix, resolve_row_store, sanitize_rules
 
 @app.post("/api/invoices/parse-pdf", response_model=Dict[str, Any])
 async def invoice_parse_pdf(
@@ -3802,7 +3811,6 @@ async def invoice_parse_pdf(
     Returns combined parse + lookup results.
     """
     docs: List[Dict[str, Any]] = []
-    all_order_numbers: List[str] = []
 
     for f in (files or []):
         if not f.filename:
@@ -3832,6 +3840,7 @@ async def invoice_parse_pdf(
             doc = {
                 "fileName": f.filename,
                 "company": parsed.get("company", "Unknown"),
+                "merchant": parsed.get("merchant"),
                 "invoiceNumber": parsed.get("invoiceNumber"),
                 "invoiceDate": parsed.get("invoiceDate"),
                 "invoiceTotalBrut": parsed.get("totalBrut"),
@@ -3842,66 +3851,62 @@ async def invoice_parse_pdf(
             }
             docs.append(doc)
 
-            # Collect order numbers for Shopify lookup
-            for row in (parsed.get("rows") or []):
-                on = str(row.get("orderNumber") or "").strip()
-                if on and on not in all_order_numbers:
-                    all_order_numbers.append(on)
-
         except Exception as e:
             docs.append({"fileName": f.filename or "unknown", "error": str(e), "rows": []})
 
-    # 3) Shopify lookup for all order numbers
     lookup: Dict[str, Any] = {}
-    if all_order_numbers:
+    if any(doc.get("rows") for doc in docs):
         try:
-            inferred = _infer_store_by_number_cluster(all_order_numbers)
-
-            async def _store_ready(store_key: str) -> bool:
-                try:
-                    domain, token, _ = await resolve_store_settings_effective(store_key)
-                    return bool(domain and token)
-                except Exception:
-                    return False
-
             all_store_keys = await known_store_labels()
-            store_ready = {store_key: await _store_ready(store_key) for store_key in all_store_keys}
+            store_ready = {store_key: await _invoice_store_ready(store_key) for store_key in all_store_keys}
+            rules: List[Dict[str, str]] = []
+            if HAVE_AUTH_DB and SessionLocal is not None:
+                try:
+                    async with SessionLocal() as db:  # type: ignore[misc]
+                        rules = await get_invoice_routing_rules(db)  # type: ignore[name-defined]
+                except Exception:
+                    rules = []
 
             sem = asyncio.Semaphore(8)
+            tasks = []
+            for doc_index, doc in enumerate(docs):
+                company = doc.get("company")
+                merchant = doc.get("merchant")
+                for row_index, row in enumerate(doc.get("rows") or []):
+                    order_number = str(row.get("orderNumber") or "").strip().lstrip("#")
+                    if not order_number:
+                        continue
+                    lookup_key = f"{doc_index}:{row_index}:{order_number}"
+                    row["lookupKey"] = lookup_key
+                    row["merchantCode"] = merchant_code_prefix(row.get("sendCode")) or None
+                    route = resolve_row_store(
+                        company=company,
+                        invoice_client=merchant,
+                        send_code=row.get("sendCode"),
+                        rules=rules,
+                        known_stores=all_store_keys,
+                    )
+                    row["routingStore"] = route.get("store")
+                    row["routingSource"] = route.get("source")
+                    tasks.append(
+                        _lookup_invoice_row(
+                            lookup_key=lookup_key,
+                            order_number=order_number,
+                            invoice_crbt=row.get("crbt"),
+                            is_refused=str(row.get("status") or "").lower().startswith("refus"),
+                            preferred_store=route.get("store"),
+                            routing_source=route.get("source"),
+                            route_error=route.get("error"),
+                            all_store_keys=all_store_keys,
+                            store_ready=store_ready,
+                            sem=sem,
+                        )
+                    )
 
-            async def _lookup_one(n: str) -> Dict[str, Any]:
-                async with sem:
-                    preferred = (inferred.get(n) or "").strip().lower() or None
-                    stores_to_try = []
-                    if preferred in all_store_keys:
-                        stores_to_try = [preferred] + [st for st in all_store_keys if st != preferred]
-                    else:
-                        stores_to_try = list(all_store_keys)
-                    last_err = None
-                    for st in stores_to_try:
-                        if not store_ready.get(st):
-                            last_err = f"Shopify store '{st}' not configured"
-                            continue
-                        try:
-                            found = await _shopify_find_order_by_number(n, store=st)
-                            if found:
-                                return {
-                                    "order_number": n,
-                                    "store": st,
-                                    "found": True,
-                                    "order_gid": found.get("id"),
-                                    "total_price": float(found.get("total_price") or 0),
-                                    "financial_status": found.get("financial_status"),
-                                }
-                        except Exception as e:
-                            last_err = str(getattr(e, "detail", None) or str(e))
-                            continue
-                    return {"order_number": n, "store": preferred, "found": False, "error": last_err or "Order not found"}
-
-            results = await asyncio.gather(*[_lookup_one(n) for n in all_order_numbers])
+            results = await asyncio.gather(*tasks)
             for r in results:
                 if r:
-                    lookup[str(r.get("order_number", "")).strip()] = r
+                    lookup[str(r.get("lookup_key") or "")] = r
         except Exception as e:
             # Non-fatal: parsing succeeded, lookup failed
             import traceback
@@ -3911,55 +3916,142 @@ async def invoice_parse_pdf(
 
 
 # ---------- Invoice verifier helpers ----------
-class InvoiceLookupRequest(BaseModel):
-    order_numbers: List[str]
-    # If the max-min spread across order numbers is >= gap_threshold, we split stores by midpoint:
-    # larger numbers => irrakids, smaller => irranova.
-    gap_threshold: int = 30000
+async def _invoice_store_ready(store_key: str) -> bool:
+    try:
+        domain, token, _ = await resolve_store_settings_effective(store_key)
+        return bool(domain and token)
+    except Exception:
+        return False
 
 
-class InvoiceLookupRow(BaseModel):
+async def _lookup_invoice_row(
+    *,
+    lookup_key: str,
+    order_number: str,
+    invoice_crbt: Optional[float],
+    is_refused: bool,
+    preferred_store: Optional[str],
+    routing_source: Optional[str],
+    route_error: Optional[str],
+    all_store_keys: List[str],
+    store_ready: Dict[str, bool],
+    sem: asyncio.Semaphore,
+) -> Dict[str, Any]:
+    base = {"lookup_key": lookup_key, "order_number": order_number}
+    if route_error:
+        return {**base, "found": False, "ambiguous": True, "error": route_error}
+
+    preferred = str(preferred_store or "").strip().lower() or None
+    if preferred and preferred not in all_store_keys:
+        return {**base, "store": preferred, "found": False, "error": f"Mapped Shopify store '{preferred}' is not registered"}
+    if preferred and not store_ready.get(preferred):
+        return {**base, "store": preferred, "found": False, "error": f"Mapped Shopify store '{preferred}' is not connected"}
+
+    stores_to_try = [preferred] if preferred else [store for store in all_store_keys if store_ready.get(store)]
+    async def _find_in_store(store: str) -> Dict[str, Any]:
+        async with sem:
+            try:
+                found = await _shopify_find_order_by_number(order_number, store=store)
+                if found:
+                    return {
+                        "match": {
+                            "store": store,
+                            "order_gid": found.get("id"),
+                            "total_price": float(found.get("total_price") or 0),
+                            "financial_status": found.get("financial_status"),
+                        }
+                    }
+            except Exception as exc:
+                return {"error": f"{store}: {str(getattr(exc, 'detail', None) or str(exc))}"}
+        return {}
+
+    store_results = await asyncio.gather(*[_find_in_store(store) for store in stores_to_try if store])
+    matches = [result["match"] for result in store_results if result.get("match")]
+    errors = [str(result["error"]) for result in store_results if result.get("error")]
+
+    if preferred:
+        if not matches:
+            error = f"Order not found in mapped Shopify store '{preferred}'"
+            if errors:
+                error = errors[-1]
+            return {**base, "store": preferred, "found": False, "routing_source": routing_source, "error": error}
+        return {**base, **matches[0], "found": True, "routing_source": routing_source or "merchant_rule"}
+
+    selected = choose_shopify_candidate(
+        matches,
+        invoice_crbt=invoice_crbt,
+        is_refused=is_refused,
+    )
+    return {**base, **selected}
+
+
+class InvoiceLookupItem(BaseModel):
+    lookup_key: Optional[str] = None
     order_number: str
     store: Optional[str] = None
-    found: bool = False
-    order_gid: Optional[str] = None
-    total_price: Optional[float] = None
-    financial_status: Optional[str] = None
-    error: Optional[str] = None
+    crbt: Optional[float] = None
+    is_refused: bool = False
 
 
-def _infer_store_by_number_cluster(order_numbers: List[str], *, gap_threshold: int = 30000) -> Dict[str, Optional[str]]:
-    """
-    Returns mapping order_number -> inferred store (irrakids|irranova|None).
-    If we can't confidently split, values will be None (caller can try both stores).
-    """
-    nums: List[Tuple[str, int]] = []
-    for s in (order_numbers or []):
-        try:
-            raw = (s or "").strip().lstrip("#")
-            if not raw:
-                continue
-            # keep digits only (defensive)
-            import re
-            m = re.search(r"(\d+)", raw)
-            if not m:
-                continue
-            nums.append((raw, int(m.group(1))))
-        except Exception:
-            continue
-    if not nums:
-        return {str(s or "").strip().lstrip("#"): None for s in (order_numbers or []) if str(s or "").strip()}
-    values = [n for _, n in nums]
-    mn = min(values)
-    mx = max(values)
-    if (mx - mn) < int(gap_threshold or 30000):
-        # ambiguous; do not guess
-        return {k: None for k, _ in nums}
-    mid = (mx + mn) / 2.0
-    out: Dict[str, Optional[str]] = {}
-    for k, n in nums:
-        out[k] = "irrakids" if n > mid else "irranova"
-    return out
+class InvoiceLookupRequest(BaseModel):
+    order_numbers: List[str] = Field(default_factory=list)
+    items: List[InvoiceLookupItem] = Field(default_factory=list)
+
+
+class InvoiceRoutingRuleModel(BaseModel):
+    match_type: str
+    value: str
+    store: str
+    carrier: str = ""
+
+
+class InvoiceSettingsUpdate(BaseModel):
+    rules: List[InvoiceRoutingRuleModel] = Field(default_factory=list)
+
+
+class InvoiceStoreRegisterRequest(BaseModel):
+    store_key: str
+
+
+@app.get("/api/invoices/settings", response_model=Dict[str, Any])
+async def invoice_settings_get(
+    admin: User = Depends(require_admin),  # type: ignore
+    session: AsyncSession = Depends(get_session),  # type: ignore
+):
+    rules = await get_invoice_routing_rules(session)  # type: ignore[name-defined]
+    stores = []
+    for store_key in await known_store_labels():
+        stores.append({"key": store_key, "connected": await _invoice_store_ready(store_key)})
+    return {"ok": True, "rules": rules, "stores": stores}
+
+
+@app.put("/api/invoices/settings", response_model=Dict[str, Any])
+async def invoice_settings_update(
+    body: InvoiceSettingsUpdate,
+    admin: User = Depends(require_admin),  # type: ignore
+    session: AsyncSession = Depends(get_session),  # type: ignore
+):
+    known = set(await known_store_labels())
+    payload = sanitize_rules([rule.dict() for rule in body.rules])
+    unknown = sorted({str(rule.get("store") or "").strip().lower() for rule in payload} - known)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Register these Shopify stores first: {', '.join(unknown)}")
+    rules = await set_invoice_routing_rules(session, payload)  # type: ignore[name-defined]
+    return {"ok": True, "rules": rules}
+
+
+@app.post("/api/invoices/stores/register", response_model=Dict[str, Any])
+async def invoice_store_register(
+    body: InvoiceStoreRegisterRequest,
+    admin: User = Depends(require_admin),  # type: ignore
+    session: AsyncSession = Depends(get_session),  # type: ignore
+):
+    raw_store_key = str(body.store_key or "").strip().lower()
+    if not raw_store_key:
+        raise HTTPException(status_code=400, detail="store key is required")
+    store_key = normalize_store_label(raw_store_key)
+    await register_shopify_store_label(session, store_key)  # type: ignore[name-defined]
+    return {"ok": True, "store": store_key, "connected": await _invoice_store_ready(store_key)}
 
 
 async def _shopify_find_order_by_number(order_number: str, *, store: str) -> Optional[Dict[str, Any]]:
@@ -3983,11 +4075,17 @@ async def _shopify_find_order_by_number(order_number: str, *, store: str) -> Opt
       }
     }
     """
-    data = await shopify_graphql(query, {"first": 1, "query": q}, store=store)
+    data = await shopify_graphql(query, {"first": 5, "query": q}, store=store)
     edges = ((data.get("orders") or {}).get("edges")) or []
     if not edges:
         return None
-    node = (edges[0] or {}).get("node") or {}
+    node: Dict[str, Any] = {}
+    for edge in edges:
+        candidate = (edge or {}).get("node") or {}
+        candidate_number = str(candidate.get("name") or "").strip().lstrip("#")
+        if candidate_number == n:
+            node = candidate
+            break
     if not node:
         return None
     # Price logic mirrors map_order_node()
@@ -4009,67 +4107,39 @@ async def _shopify_find_order_by_number(order_number: str, *, store: str) -> Opt
 
 @app.post("/api/invoices/lookup-orders", response_model=Dict[str, Any])
 async def invoice_lookup_orders(body: InvoiceLookupRequest, admin: User = Depends(require_admin)):  # type: ignore
-    # Normalize + dedupe while preserving order
-    nums: List[str] = []
-    seen = set()
-    for x in (body.order_numbers or []):
-        k = (str(x or "").strip().lstrip("#"))
-        if not k:
-            continue
-        if k in seen:
-            continue
-        seen.add(k)
-        nums.append(k)
-
-    inferred = _infer_store_by_number_cluster(nums, gap_threshold=int(body.gap_threshold or 30000))
-    rows: List[InvoiceLookupRow] = []
-
-    # Quick env sanity check per store (so we can return friendly errors)
-    async def _store_ready(store_key: str) -> bool:
-        try:
-            domain, token, _ = await resolve_store_settings_effective(store_key)
-            return bool(domain and token)
-        except Exception:
-            return False
+    items: List[InvoiceLookupItem] = list(body.items or [])
+    if not items:
+        seen = set()
+        for raw in body.order_numbers or []:
+            number = str(raw or "").strip().lstrip("#")
+            if not number or number in seen:
+                continue
+            seen.add(number)
+            items.append(InvoiceLookupItem(order_number=number, lookup_key=number))
 
     all_store_keys = await known_store_labels()
-    store_ready = {store_key: await _store_ready(store_key) for store_key in all_store_keys}
-
+    store_ready = {store_key: await _invoice_store_ready(store_key) for store_key in all_store_keys}
     sem = asyncio.Semaphore(8)
-
-    async def _lookup_one(n: str) -> InvoiceLookupRow:
-        async with sem:
-            preferred = (inferred.get(n) or "").strip().lower() or None
-            stores_to_try = []
-            if preferred in all_store_keys:
-                stores_to_try = [preferred] + [st for st in all_store_keys if st != preferred]
-            else:
-                stores_to_try = list(all_store_keys)
-
-            last_err = None
-            for st in stores_to_try:
-                if not store_ready.get(st):
-                    last_err = f"Shopify store '{st}' not configured"
-                    continue
-                try:
-                    found = await _shopify_find_order_by_number(n, store=st)
-                    if found:
-                        return InvoiceLookupRow(
-                            order_number=n,
-                            store=st,
-                            found=True,
-                            order_gid=found.get("id"),
-                            total_price=float(found.get("total_price") or 0),
-                            financial_status=found.get("financial_status"),
-                        )
-                except Exception as e:
-                    last_err = str(getattr(e, "detail", None) or getattr(e, "message", None) or str(e))
-                    continue
-            return InvoiceLookupRow(order_number=n, store=preferred, found=False, error=last_err or "Order not found")
-
-    results = await asyncio.gather(*[_lookup_one(n) for n in nums])
-    rows = [r for r in results if r]
-    return {"ok": True, "rows": [json.loads(r.json()) for r in rows]}
+    tasks = []
+    for index, item in enumerate(items):
+        number = str(item.order_number or "").strip().lstrip("#")
+        if not number:
+            continue
+        tasks.append(
+            _lookup_invoice_row(
+                lookup_key=str(item.lookup_key or f"refresh:{index}:{number}"),
+                order_number=number,
+                invoice_crbt=item.crbt,
+                is_refused=bool(item.is_refused),
+                preferred_store=item.store,
+                routing_source="existing_store_selection" if item.store else None,
+                route_error=None,
+                all_store_keys=all_store_keys,
+                store_ready=store_ready,
+                sem=sem,
+            )
+        )
+    return {"ok": True, "rows": await asyncio.gather(*tasks)}
 
 
 class InvoiceMarkPaidOrder(BaseModel):
@@ -4084,14 +4154,19 @@ class InvoiceMarkPaidRequest(BaseModel):
 @app.post("/api/invoices/mark-paid", response_model=Dict[str, Any])
 async def invoice_mark_paid(body: InvoiceMarkPaidRequest, admin: User = Depends(require_admin)):  # type: ignore
     items = body.orders or []
+    known_stores = set(await known_store_labels())
+    ready_stores = {store for store in known_stores if await _invoice_store_ready(store)}
     # Defensive dedupe
     dedup: List[InvoiceMarkPaidOrder] = []
     seen = set()
     for it in items:
         try:
             gid = (it.order_gid or "").strip()
-            st = (it.store or "").strip().lower()
-            if not gid or st not in ("irrakids", "irranova"):
+            raw_store = str(it.store or "").strip().lower()
+            if not raw_store:
+                continue
+            st = normalize_store_label(raw_store)
+            if not gid or st not in ready_stores:
                 continue
             key = f"{st}|{gid}"
             if key in seen:

@@ -30,12 +30,21 @@ const MAX_PARSE_TOTAL_BYTES = 25 * 1024 * 1024;
 export default function InvoicesVerifier() {
   const [fileList, setFileList] = useState([]);       // File[]
   const [parsed, setParsed] = useState([]);            // [{fileName, company, invoiceNumber, invoiceDate, rows:[]}]
-  const [lookup, setLookup] = useState({});            // orderNumber -> {found, store, order_gid, total_price, financial_status}
+  const [lookup, setLookup] = useState({});            // row lookupKey -> Shopify lookup result
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [paidBusy, setPaidBusy] = useState(false);
   const [paidMsg, setPaidMsg] = useState(null);
   const [selectedRows, setSelectedRows] = useState({});
+  const [settingsOpen, setSettingsOpen] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get("settings") === "1"; } catch { return false; }
+  });
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsError, setSettingsError] = useState(null);
+  const [settingsMsg, setSettingsMsg] = useState(null);
+  const [routingRules, setRoutingRules] = useState([]);
+  const [shopifyStores, setShopifyStores] = useState([]);
+  const [newStore, setNewStore] = useState({ key: "", shop: "" });
   const inputRef = useRef(null);
 
   // Flatten all rows across all documents
@@ -60,7 +69,7 @@ export default function InvoicesVerifier() {
   // Enrich rows with Shopify lookup data + compute diff
   const rowsWithShopify = useMemo(() => {
     return flatRows.map((r, index) => {
-      const info = lookup[String(r.orderNumber || "").trim()] || null;
+      const info = lookup[String(r.lookupKey || r.orderNumber || "").trim()] || null;
       const shopTotal = info && info.found ? Number(info.total_price || 0) : null;
       const isRefused = String(r.status || "").trim().toLowerCase().startsWith("refus");
       const inv = (r.crbt != null ? Number(r.crbt) : null);
@@ -121,6 +130,76 @@ export default function InvoicesVerifier() {
     const missing = rowsWithShopify.filter((r) => !r.shopify?.found);
     return { total: rowsWithShopify.length, ok: ok.length, green: green.length, red: red.length, missing: missing.length };
   }, [rowsWithShopify]);
+
+  async function loadSettings() {
+    setSettingsBusy(true);
+    setSettingsError(null);
+    try {
+      const res = await authFetch("/api/invoices/settings", { headers: authHeaders({ "Accept": "application/json" }) });
+      const js = await res.json().catch(() => ({}));
+      if (!res.ok || js.ok !== true) throw new Error(js?.detail || "Could not load invoice settings");
+      setRoutingRules(Array.isArray(js.rules) ? js.rules : []);
+      setShopifyStores(Array.isArray(js.stores) ? js.stores : []);
+    } catch (e) {
+      setSettingsError(e?.message || "Could not load invoice settings");
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (settingsOpen) loadSettings();
+  }, [settingsOpen]);
+
+  function updateRule(index, field, value) {
+    setRoutingRules((current) => current.map((rule, i) => (i === index ? { ...rule, [field]: value } : rule)));
+  }
+
+  async function saveSettings() {
+    setSettingsBusy(true);
+    setSettingsError(null);
+    setSettingsMsg(null);
+    try {
+      const res = await authFetch("/api/invoices/settings", {
+        method: "PUT",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ rules: routingRules }),
+      });
+      const js = await res.json().catch(() => ({}));
+      if (!res.ok || js.ok !== true) throw new Error(js?.detail || "Could not save merchant routing");
+      setRoutingRules(Array.isArray(js.rules) ? js.rules : []);
+      setSettingsMsg("Merchant routing saved. Reparse the invoice to apply it.");
+    } catch (e) {
+      setSettingsError(e?.message || "Could not save merchant routing");
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
+  async function registerAndConnectStore() {
+    const storeKey = String(newStore.key || "").trim().toLowerCase();
+    const shop = String(newStore.shop || "").trim().toLowerCase();
+    if (!storeKey || !shop) {
+      setSettingsError("Enter both a store key and its .myshopify.com domain.");
+      return;
+    }
+    setSettingsBusy(true);
+    setSettingsError(null);
+    try {
+      const res = await authFetch("/api/invoices/stores/register", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ store_key: storeKey }),
+      });
+      const js = await res.json().catch(() => ({}));
+      if (!res.ok || js.ok !== true) throw new Error(js?.detail || "Could not register Shopify store");
+      const returnTo = "/invoices-verifier?settings=1";
+      window.location.href = `/api/shopify/oauth/start?store=${encodeURIComponent(storeKey)}&shop=${encodeURIComponent(shop)}&return_to=${encodeURIComponent(returnTo)}`;
+    } catch (e) {
+      setSettingsError(e?.message || "Could not register Shopify store");
+      setSettingsBusy(false);
+    }
+  }
 
   // Upload invoice files for deterministic parsing (with an LLM fallback for unknown PDFs)
   async function parseSelectedFiles() {
@@ -204,16 +283,24 @@ export default function InvoicesVerifier() {
       setPaidMsg(`Marked paid: ${js.updated || 0}/${toPay.length}`);
       // Refresh lookup to show new financial status
       try {
-        const orderNumbers = Array.from(new Set(rowsWithShopify.map((r) => String(r.orderNumber || "").trim()).filter(Boolean)));
+        const items = rowsWithShopify
+          .filter((row) => String(row.orderNumber || "").trim())
+          .map((row) => ({
+            lookup_key: row.lookupKey,
+            order_number: String(row.orderNumber).trim(),
+            store: row.shopify?.store || row.routingStore || null,
+            crbt: row.crbt,
+            is_refused: row.isRefused,
+          }));
         const r2 = await authFetch("/api/invoices/lookup-orders", {
           method: "POST",
           headers: authHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ order_numbers: orderNumbers }),
+          body: JSON.stringify({ items }),
         });
         const js2 = await r2.json().catch(() => ({}));
         if (r2.ok && js2.ok === true) {
           const map = {};
-          for (const row of (js2.rows || [])) map[String(row.order_number || "").trim()] = row;
+          for (const row of (js2.rows || [])) map[String(row.lookup_key || row.order_number || "").trim()] = row;
           setLookup(map);
         }
       } catch {}
@@ -237,6 +324,13 @@ export default function InvoicesVerifier() {
             <div className="text-[11px] text-gray-500">Upload delivery invoices — PDF and Livre24 XLS/CSV are supported</div>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setSettingsOpen((open) => !open)}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-indigo-200 text-indigo-700 bg-indigo-50 hover:bg-indigo-100"
+            >
+              Merchant &amp; store settings
+            </button>
             <input
               ref={inputRef}
               type="file"
@@ -257,6 +351,90 @@ export default function InvoicesVerifier() {
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-4 pb-28">
+        {settingsOpen && (
+          <section className="mb-4 rounded-2xl border border-indigo-200 bg-white p-4 shadow-sm">
+            <div className="flex items-start gap-3">
+              <div className="flex-1">
+                <h2 className="text-sm font-bold text-gray-900">Merchant routing</h2>
+                <p className="mt-1 text-xs text-gray-600">
+                  Map the merchant identifier before the dash (for example <span className="font-mono">7</span> in <span className="font-mono">7-160885</span>) or the invoice Client value to its Shopify store. Code-prefix rules take priority over invoice-client matching.
+                </p>
+              </div>
+              <button type="button" onClick={() => setSettingsOpen(false)} className="text-xs text-gray-500 hover:text-gray-900">Close</button>
+            </div>
+
+            {settingsError && <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{settingsError}</div>}
+            {settingsMsg && <div className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-700">{settingsMsg}</div>}
+
+            <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+              {shopifyStores.map((store) => (
+                <span key={store.key} className={`rounded-full border px-2 py-1 ${store.connected ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
+                  {store.key}: {store.connected ? "connected" : "not connected"}
+                </span>
+              ))}
+            </div>
+
+            <div className="mt-4 space-y-2">
+              {routingRules.length === 0 && !settingsBusy && (
+                <div className="rounded-lg border border-dashed border-gray-300 p-3 text-xs text-gray-500">No explicit rules yet. Exact invoice-client/store names still route automatically; duplicate order numbers remain safely marked ambiguous.</div>
+              )}
+              {routingRules.map((rule, index) => (
+                <div key={index} className="grid grid-cols-1 gap-2 rounded-xl border border-gray-200 p-3 md:grid-cols-[1fr_1.2fr_1.2fr_1fr_auto]">
+                  <input
+                    value={rule.carrier || ""}
+                    onChange={(e) => updateRule(index, "carrier", e.target.value)}
+                    placeholder="Carrier (optional)"
+                    className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs"
+                  />
+                  <select
+                    value={rule.match_type || "code_prefix"}
+                    onChange={(e) => updateRule(index, "match_type", e.target.value)}
+                    className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs"
+                  >
+                    <option value="code_prefix">Merchant code prefix</option>
+                    <option value="invoice_client">Invoice Client value</option>
+                  </select>
+                  <input
+                    value={rule.value || ""}
+                    onChange={(e) => updateRule(index, "value", e.target.value)}
+                    placeholder={rule.match_type === "invoice_client" ? "e.g. 5716-irrakids" : "e.g. 7"}
+                    className="rounded-lg border border-gray-300 px-2 py-1.5 font-mono text-xs"
+                  />
+                  <select
+                    value={rule.store || ""}
+                    onChange={(e) => updateRule(index, "store", e.target.value)}
+                    className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs"
+                  >
+                    <option value="">Choose Shopify store</option>
+                    {shopifyStores.map((store) => <option key={store.key} value={store.key}>{store.key}{store.connected ? "" : " (not connected)"}</option>)}
+                  </select>
+                  <button type="button" onClick={() => setRoutingRules((current) => current.filter((_, i) => i !== index))} className="rounded-lg border border-red-200 px-2 py-1.5 text-xs text-red-700 hover:bg-red-50">Remove</button>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setRoutingRules((current) => [...current, { match_type: "code_prefix", value: "", store: shopifyStores.find((store) => store.connected)?.key || "", carrier: "" }])}
+                className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-gray-50"
+              >Add merchant rule</button>
+              <button type="button" disabled={settingsBusy} onClick={saveSettings} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-50">Save routing</button>
+              {settingsBusy && <span className="self-center text-xs text-gray-500">Working…</span>}
+            </div>
+
+            <div className="mt-5 border-t border-gray-200 pt-4">
+              <h3 className="text-xs font-bold text-gray-900">Connect another Shopify store</h3>
+              <p className="mt-1 text-[11px] text-gray-500">Register the store here, authorize it in Shopify, then return to add its merchant rule.</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <input value={newStore.key} onChange={(e) => setNewStore((current) => ({ ...current, key: e.target.value }))} placeholder="store key, e.g. beitii" className="min-w-[180px] rounded-lg border border-gray-300 px-2 py-1.5 text-xs" />
+                <input value={newStore.shop} onChange={(e) => setNewStore((current) => ({ ...current, shop: e.target.value }))} placeholder="store.myshopify.com" className="min-w-[240px] rounded-lg border border-gray-300 px-2 py-1.5 text-xs" />
+                <button type="button" disabled={settingsBusy} onClick={registerAndConnectStore} className="rounded-lg border border-indigo-300 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50">Register &amp; connect</button>
+              </div>
+            </div>
+          </section>
+        )}
+
         {busy && (
           <div className="text-gray-600 flex items-center gap-2">
             <svg className="animate-spin h-4 w-4 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -287,6 +465,7 @@ export default function InvoicesVerifier() {
                     <div key={d.fileName}>
                       <span className="font-medium">{d.fileName}</span>
                       {d.company ? <span> • <span className="text-indigo-600 font-medium">{d.company}</span> (auto-detected)</span> : null}
+                      {d.merchant ? <span> • Client: <span className="font-medium">{d.merchant}</span></span> : null}
                       {d.invoiceNumber ? <span> • {d.invoiceNumber}</span> : null}
                       {d.invoiceDate ? <span> • {d.invoiceDate}</span> : null}
                       <span> • rows: {(d.rows || []).length}</span>
@@ -482,7 +661,12 @@ export default function InvoicesVerifier() {
                         </td>
                         <td className="px-3 py-2 font-mono">{r.sendCode}</td>
                         <td className="px-3 py-2 font-mono">{r.orderNumber || "—"}</td>
-                        <td className="px-3 py-2">{r.shopify?.store || "—"}</td>
+                        <td className="px-3 py-2">
+                          <div>{r.shopify?.store || r.routingStore || "—"}</div>
+                          {r.merchantCode ? <div className="text-[10px] text-gray-500">merchant {r.merchantCode}</div> : null}
+                          {r.shopify?.ambiguous ? <div className="text-[10px] font-semibold text-amber-700">Ambiguous: {(r.shopify.candidate_stores || []).join(", ")}</div> : null}
+                          {!r.shopify?.found && r.shopify?.error ? <div className="max-w-[220px] text-[10px] text-red-600">{r.shopify.error}</div> : null}
+                        </td>
                         <td className="px-3 py-2">{r.status || "—"}</td>
                         <td className="px-3 py-2">{r.city || "—"}</td>
                         <td className="px-3 py-2 text-right font-semibold">{r.fees != null ? Number(r.fees).toFixed(2) : "—"}</td>

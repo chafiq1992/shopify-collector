@@ -15,7 +15,12 @@ from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_session
-from .settings_store import get_shopify_oauth_record, list_shopify_oauth_store_labels, set_shopify_oauth_record
+from .settings_store import (
+    get_shopify_oauth_record,
+    list_registered_shopify_store_labels,
+    list_shopify_oauth_store_labels,
+    set_shopify_oauth_record,
+)
 
 router = APIRouter()
 
@@ -112,9 +117,10 @@ def _env_store_configured(store_key: str) -> bool:
     return bool(domain and token)
 
 
-def _require_oauth_enabled_store(store_label: str) -> str:
+async def _require_oauth_enabled_store(store_label: str, db: AsyncSession) -> str:
     s = normalize_store_label(store_label)
-    if (not _oauth_all_stores_enabled()) and s not in _oauth_enabled_stores():
+    registered = set(await list_registered_shopify_store_labels(db))
+    if (not _oauth_all_stores_enabled()) and s not in _oauth_enabled_stores() and s not in registered:
         raise HTTPException(status_code=400, detail="oauth not enabled for this store")
     return s
 
@@ -271,6 +277,8 @@ async def oauth_status(
 async def shopify_stores(db: AsyncSession = Depends(get_session)):
     labels = {"irrakids", "irranova"}
     labels.update(await list_shopify_oauth_store_labels(db))
+    registered = set(await list_registered_shopify_store_labels(db))
+    labels.update(registered)
     labels.update(_env_store_labels())
     enabled = _oauth_enabled_stores()
     if not _oauth_all_stores_enabled():
@@ -286,7 +294,7 @@ async def shopify_stores(db: AsyncSession = Depends(get_session)):
             {
                 "key": label,
                 "label": label,
-                "oauth_enabled": _oauth_all_stores_enabled() or label in enabled,
+                "oauth_enabled": _oauth_all_stores_enabled() or label in enabled or label in registered,
                 "connected": _env_store_configured(label) or bool(isinstance(rec, dict) and (rec.get("shop") or "").strip() and (rec.get("access_token") or "").strip()),
                 "shop": (rec or {}).get("shop") if isinstance(rec, dict) else None,
                 "scopes": (rec or {}).get("scopes") if isinstance(rec, dict) else None,
@@ -299,9 +307,12 @@ async def shopify_stores(db: AsyncSession = Depends(get_session)):
 async def oauth_start(
     store: str = Query(..., description="Store label, e.g. irranova"),
     shop: str = Query(..., description="Shop domain, e.g. irranova.myshopify.com"),
+    return_to: str = Query("/shopify-connect"),
+    db: AsyncSession = Depends(get_session),
 ):
-    store_key = _require_oauth_enabled_store(store)
+    store_key = await _require_oauth_enabled_store(store, db)
     shop_norm = normalize_shop_domain(shop)
+    return_path = return_to if return_to.startswith("/") and not return_to.startswith("//") else "/shopify-connect"
 
     cid, _, cred_source = _client_creds(store_key)
     redirect_uri = f"{_base_url()}/api/shopify/oauth/callback"
@@ -312,6 +323,7 @@ async def oauth_start(
             "shop": shop_norm,
             "nonce": os.urandom(16).hex(),
             "cred_source": cred_source,
+            "return_to": return_path,
             "iat": now,
             "exp": now + 10 * 60,
         }
@@ -341,7 +353,7 @@ async def oauth_callback(
     store_key = None
     shop_norm = normalize_shop_domain(shop)
     st = verify_state(state)
-    store_key = _require_oauth_enabled_store(str(st.get("store") or ""))
+    store_key = await _require_oauth_enabled_store(str(st.get("store") or ""), db)
     shop_in_state = normalize_shop_domain(str(st.get("shop") or ""))
     if not hmac.compare_digest(shop_in_state, shop_norm):
         raise HTTPException(status_code=400, detail="state/shop mismatch")
@@ -389,6 +401,13 @@ async def oauth_callback(
     await set_shopify_oauth_record(db, store_key, shop=shop_norm, access_token=access_token, scopes=scopes)
 
     # Back to internal UI
-    return RedirectResponse(url=f"/shopify-connect?store={urllib.parse.quote(store_key)}&connected=1", status_code=302)
+    return_path = str(st.get("return_to") or "/shopify-connect")
+    if not return_path.startswith("/") or return_path.startswith("//"):
+        return_path = "/shopify-connect"
+    separator = "&" if "?" in return_path else "?"
+    return RedirectResponse(
+        url=f"{return_path}{separator}store={urllib.parse.quote(store_key)}&connected=1",
+        status_code=302,
+    )
 
 
