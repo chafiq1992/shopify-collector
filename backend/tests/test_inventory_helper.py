@@ -10,6 +10,7 @@ from backend.app.inventory_helper_routes import (
     _build_inventory_sync_plan,
     _date_search_query,
     _line_items_from_shopify,
+    _shopify_transfer_payload,
     _status,
 )
 
@@ -87,6 +88,29 @@ def test_date_query_uses_casablanca_day_boundaries():
     query = _date_search_query(date(2026, 8, 18))
     assert "created_at:>=2026-08-17T23:00:00Z" in query
     assert "created_at:<2026-08-18T23:00:00Z" in query
+
+
+def test_date_card_uses_transfer_total_when_only_preview_line_is_loaded():
+    transfer = {
+        "id": "gid://shopify/InventoryTransfer/1",
+        "name": "ST0001",
+        "totalQuantity": 24,
+        "lineItems": {
+            "nodes": [
+                {
+                    "id": "line-1",
+                    "title": "Preview item",
+                    "totalQuantity": 2,
+                    "inventoryItem": {"id": "inventory-1", "variant": None},
+                }
+            ]
+        },
+    }
+
+    payload = _shopify_transfer_payload(transfer, "irranova")
+
+    assert payload["expected_items"] == 24
+    assert len(payload["line_items"]) == 1
 
 
 def test_sync_plan_receives_available_units_and_adjusts_only_remainder():

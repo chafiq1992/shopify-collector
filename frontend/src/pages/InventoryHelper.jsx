@@ -200,6 +200,7 @@ export default function InventoryHelper() {
   const [browseDate, setBrowseDate] = useState(localDateInput);
   const [availableTransfers, setAvailableTransfers] = useState([]);
   const [browseBusy, setBrowseBusy] = useState(false);
+  const [choosingTransferId, setChoosingTransferId] = useState(null);
   const [draft, setDraft] = useState(null);
   const [draftCrates, setDraftCrates] = useState(0);
   const [savingDraft, setSavingDraft] = useState(false);
@@ -265,7 +266,7 @@ export default function InventoryHelper() {
   }
 
   function closeCreate() {
-    if (savingDraft || lookupBusy || browseBusy) return;
+    if (savingDraft || lookupBusy || browseBusy || choosingTransferId) return;
     setShowCreate(false);
     setDraft(null);
     setReference("");
@@ -304,6 +305,7 @@ export default function InventoryHelper() {
     if (!browseDate) return;
     setBrowseBusy(true);
     setError("");
+    setNotice("");
     setDraft(null);
     try {
       const data = await apiJson(`/api/inventory-helper/available?store=${encodeURIComponent(store)}&purchase_date=${encodeURIComponent(browseDate)}`, {
@@ -320,11 +322,22 @@ export default function InventoryHelper() {
     }
   }
 
-  function chooseTransfer(transfer) {
-    if (transfer.already_added) return;
-    setDraft({ ...transfer, line_items: (transfer.line_items || []).map((item) => ({ ...item })) });
-    setDraftCrates(0);
+  async function chooseTransfer(transfer) {
+    if (transfer.already_added || choosingTransferId) return;
+    setChoosingTransferId(transfer.shopify_order_gid);
     setError("");
+    setNotice("");
+    try {
+      const data = await apiJson(`/api/inventory-helper/lookup?store=${encodeURIComponent(store)}&reference=${encodeURIComponent(transfer.shopify_order_gid)}`, {
+        headers: authHeaders({ Accept: "application/json" }),
+      });
+      setDraft({ ...data, line_items: (data.line_items || []).map((item) => ({ ...item })) });
+      setDraftCrates(0);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setChoosingTransferId(null);
+    }
   }
 
   function changeDraftQuantity(index, value) {
@@ -559,10 +572,11 @@ export default function InventoryHelper() {
                 <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
                   {availableTransfers.map((transfer) => {
                     const image = transfer.line_items?.find((item) => item.image_url)?.image_url;
+                    const isChoosing = choosingTransferId === transfer.shopify_order_gid;
                     return (
-                      <button key={transfer.shopify_order_gid} type="button" disabled={transfer.already_added} onClick={() => chooseTransfer(transfer)} className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-white text-left shadow-sm transition active:scale-[0.98] disabled:opacity-55">
+                      <button key={transfer.shopify_order_gid} type="button" disabled={transfer.already_added || Boolean(choosingTransferId)} onClick={() => chooseTransfer(transfer)} className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-white text-left shadow-sm transition active:scale-[0.98] disabled:opacity-55">
                         <div className="aspect-[4/3] bg-slate-100">{image ? <img src={image} alt={transfer.line_items?.[0]?.title || "Transfer product"} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-slate-300"><Boxes className="h-8 w-8" /></div>}</div>
-                        <div className="space-y-1.5 p-2.5"><div className="truncate text-sm font-black">{transfer.order_number}</div><div className="text-lg font-black">{transfer.expected_items} <span className="text-[10px] font-bold text-slate-500">items</span></div><div className="flex items-center gap-1 truncate text-[10px] text-slate-500"><MapPin className="h-3 w-3 shrink-0" />{transfer.destination_name || "Shopify location"}</div><div className={`text-[10px] font-black ${transfer.already_added ? "text-emerald-700" : "text-indigo-700"}`}>{transfer.already_added ? "Already added" : "Review variants"}</div></div>
+                        <div className="space-y-1.5 p-2.5"><div className="truncate text-sm font-black">{transfer.order_number}</div><div className="text-lg font-black">{transfer.expected_items} <span className="text-[10px] font-bold text-slate-500">items</span></div><div className="flex items-center gap-1 truncate text-[10px] text-slate-500"><MapPin className="h-3 w-3 shrink-0" />{transfer.destination_name || "Shopify location"}</div><div className={`flex items-center gap-1 text-[10px] font-black ${transfer.already_added ? "text-emerald-700" : "text-indigo-700"}`}>{isChoosing && <Loader2 className="h-3 w-3 animate-spin" />}{transfer.already_added ? "Already added" : isChoosing ? "Loading variants" : "Review variants"}</div></div>
                       </button>
                     );
                   })}

@@ -61,6 +61,40 @@ _TRANSFER_CORE_FIELDS = """
   }
 """
 
+_TRANSFER_CARD_FIELDS = """
+  id
+  name
+  referenceName
+  dateCreated
+  status
+  note
+  totalQuantity
+  destination {
+    name
+    location { id name }
+  }
+  lineItems(first: 1) {
+    nodes {
+      id
+      title
+      totalQuantity
+      inventoryItem {
+        id
+        sku
+        variant {
+          id
+          title
+          image { url altText }
+          product {
+            title
+            featuredMedia { preview { image { url altText } } }
+          }
+        }
+      }
+    }
+  }
+"""
+
 _TRANSFER_DETAIL_FIELDS = _TRANSFER_CORE_FIELDS + """
   shipments(first: 50) {
     nodes {
@@ -327,7 +361,14 @@ def _shopify_transfer_payload(transfer: dict[str, Any], store_key: str) -> dict[
         "transfer_status": transfer.get("status"),
         "destination_name": location.get("name") or destination.get("name"),
         "line_items": items,
-        "expected_items": sum(item["ordered_quantity"] for item in items),
+        "expected_items": max(
+            0,
+            int(
+                transfer.get("totalQuantity")
+                if transfer.get("totalQuantity") is not None
+                else sum(item["ordered_quantity"] for item in items)
+            ),
+        ),
     }
 
 
@@ -653,10 +694,10 @@ async def lookup_shopify_order(
 
     try:
         if ref.startswith("gid://shopify/InventoryTransfer/"):
-            transfer = await _shopify_transfer_by_id(store_key, ref, detailed=True)
+            transfer = await _shopify_transfer_by_id(store_key, ref, detailed=False)
         else:
             normalized = ref.lstrip("#").replace('"', "").strip()
-            query = f"query InventoryHelperTransfer($query: String!) {{ inventoryTransfers(first: 50, query: $query, sortKey: CREATED_AT, reverse: true) {{ nodes {{ {_TRANSFER_DETAIL_FIELDS} }} }} }}"
+            query = f"query InventoryHelperTransfer($query: String!) {{ inventoryTransfers(first: 20, query: $query, sortKey: CREATED_AT, reverse: true) {{ nodes {{ {_TRANSFER_CARD_FIELDS} }} }} }}"
             data = await shopify_graphql(
                 query,
                 {"query": normalized},
@@ -665,7 +706,7 @@ async def lookup_shopify_order(
             )
             nodes = ((data.get("inventoryTransfers") or {}).get("nodes")) or []
             wanted = normalized.casefold()
-            transfer = next(
+            candidate = next(
                 (
                     node
                     for node in nodes
@@ -677,6 +718,15 @@ async def lookup_shopify_order(
                     }
                 ),
                 nodes[0] if len(nodes) == 1 else None,
+            )
+            transfer = (
+                await _shopify_transfer_by_id(
+                    store_key,
+                    str(candidate.get("id")),
+                    detailed=False,
+                )
+                if candidate and candidate.get("id")
+                else None
             )
     except HTTPException as exc:
         _translate_shopify_access_error(exc)
@@ -701,18 +751,26 @@ async def available_shopify_transfers(
     from .main import shopify_graphql
 
     store_key = _clean_store(store)
-    query = f"query InventoryHelperTransfersByDate($query: String!) {{ inventoryTransfers(first: 100, query: $query, sortKey: CREATED_AT, reverse: true) {{ nodes {{ {_TRANSFER_DETAIL_FIELDS} }} }} }}"
+    query = f"query InventoryHelperTransfersByDate($query: String!, $after: String) {{ inventoryTransfers(first: 50, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {{ nodes {{ {_TRANSFER_CARD_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }} }}"
+    transfers: list[dict[str, Any]] = []
+    after: Optional[str] = None
     try:
-        data = await shopify_graphql(
-            query,
-            {"query": _date_search_query(purchase_date)},
-            store=store_key,
-            api_version=_TRANSFER_API_VERSION,
-        )
+        while True:
+            data = await shopify_graphql(
+                query,
+                {"query": _date_search_query(purchase_date), "after": after},
+                store=store_key,
+                api_version=_TRANSFER_API_VERSION,
+            )
+            connection = data.get("inventoryTransfers") or {}
+            transfers.extend(connection.get("nodes") or [])
+            page_info = connection.get("pageInfo") or {}
+            after = page_info.get("endCursor")
+            if not page_info.get("hasNextPage") or not after:
+                break
     except HTTPException as exc:
         _translate_shopify_access_error(exc)
 
-    transfers = ((data.get("inventoryTransfers") or {}).get("nodes")) or []
     transfer_ids = [str(item.get("id")) for item in transfers if item.get("id")]
     existing_ids: set[str] = set()
     if transfer_ids:
