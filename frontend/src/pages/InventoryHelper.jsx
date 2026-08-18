@@ -25,7 +25,12 @@ import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 async function apiJson(url, options = {}) {
   const response = await authFetch(url, options);
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body?.detail || "Something went wrong");
+  if (!response.ok) {
+    const error = new Error(body?.detail || "Something went wrong");
+    error.status = response.status;
+    error.payload = body;
+    throw error;
+  }
   return body;
 }
 
@@ -193,6 +198,7 @@ export default function InventoryHelper() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [needsShopifyReconnect, setNeedsShopifyReconnect] = useState(false);
 
   const [reference, setReference] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -218,6 +224,15 @@ export default function InventoryHelper() {
     () => agentItems.reduce((sum, item) => sum + Number(item.actual_quantity || 0), 0),
     [agentItems],
   );
+  const reconnectUrl = `/api/shopify/oauth/start?store=${encodeURIComponent(store)}&return_to=${encodeURIComponent(`/inventory-helper?store=${store}`)}`;
+
+  function showApiError(err) {
+    const message = err?.message || "Something went wrong";
+    setError(message);
+    if (err?.status === 403 && /reconnect this shopify store/i.test(message)) {
+      setNeedsShopifyReconnect(true);
+    }
+  }
 
   const totals = useMemo(() => ({
     all: receipts.length,
@@ -228,6 +243,7 @@ export default function InventoryHelper() {
 
   useEffect(() => {
     persistStoreSelection(store);
+    setNeedsShopifyReconnect(false);
     loadReceipts();
   }, [store]);
 
@@ -254,7 +270,7 @@ export default function InventoryHelper() {
       setReceipts(list);
       setSelectedId((current) => preferredId || (list.some((item) => item.id === current) ? current : null));
     } catch (err) {
-      setError(err.message);
+      showApiError(err);
     } finally {
       setLoading(false);
     }
@@ -294,7 +310,7 @@ export default function InventoryHelper() {
       setDraft({ ...data, line_items: (data.line_items || []).map((item) => ({ ...item })) });
       setDraftCrates(0);
     } catch (err) {
-      setError(err.message);
+      showApiError(err);
     } finally {
       setLookupBusy(false);
     }
@@ -316,7 +332,7 @@ export default function InventoryHelper() {
         setNotice(`No linked inventory transfers were created on ${browseDate}.`);
       }
     } catch (err) {
-      setError(err.message);
+      showApiError(err);
     } finally {
       setBrowseBusy(false);
     }
@@ -334,7 +350,7 @@ export default function InventoryHelper() {
       setDraft({ ...data, line_items: (data.line_items || []).map((item) => ({ ...item })) });
       setDraftCrates(0);
     } catch (err) {
-      setError(err.message);
+      showApiError(err);
     } finally {
       setChoosingTransferId(null);
     }
@@ -365,7 +381,7 @@ export default function InventoryHelper() {
       await loadReceipts(saved.id);
       window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);
     } catch (err) {
-      setError(err.message);
+      showApiError(err);
     } finally {
       setSavingDraft(false);
     }
@@ -384,7 +400,7 @@ export default function InventoryHelper() {
       replaceReceipt(saved);
       setNotice("Purchase order plan updated.");
     } catch (err) {
-      setError(err.message);
+      showApiError(err);
     } finally {
       setCountBusy(false);
     }
@@ -414,7 +430,7 @@ export default function InventoryHelper() {
           : `${saved.status === "matched" ? "Count saved — everything matches." : "Count saved — mismatch highlighted for review."} No Shopify quantity change was needed.`,
       );
     } catch (err) {
-      setError(err.message);
+      showApiError(err);
     } finally {
       setCountBusy(false);
     }
@@ -437,7 +453,7 @@ export default function InventoryHelper() {
       replaceReceipt(saved);
       setNotice("Crate photo added.");
     } catch (err) {
-      setError(err.message);
+      showApiError(err);
     } finally {
       setPhotoBusy(false);
     }
@@ -450,7 +466,7 @@ export default function InventoryHelper() {
       if (!response.ok) throw new Error((await response.json().catch(() => ({})))?.detail || "Could not remove photo");
       replaceReceipt({ ...selected, photos: selected.photos.filter((photo) => photo.id !== photoId) });
     } catch (err) {
-      setError(err.message);
+      showApiError(err);
     }
   }
 
@@ -480,10 +496,10 @@ export default function InventoryHelper() {
         {(error || notice) && (
           <div className={`flex flex-wrap items-center gap-3 rounded-2xl border px-4 py-3 text-sm font-medium ${error ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
             <span>{error || notice}</span>
-            {isAdmin && error.includes("Reconnect this Shopify store") && (
-              <button type="button" onClick={() => go(`/shopify-connect?store=${encodeURIComponent(store)}`)} className="ml-auto rounded-xl bg-rose-800 px-3 py-2 text-xs font-black text-white">
+            {isAdmin && needsShopifyReconnect && (
+              <a href={reconnectUrl} className="ml-auto rounded-xl bg-rose-800 px-3 py-2 text-xs font-black text-white">
                 Reconnect Shopify
-              </button>
+              </a>
             )}
           </div>
         )}
@@ -544,7 +560,12 @@ export default function InventoryHelper() {
                 <div><h2 className="font-bold">Add purchase order</h2><p className="text-sm text-slate-500">Browse linked Shopify transfers by date or search a transfer reference.</p></div>
                 <button type="button" onClick={closeCreate} className="ml-auto rounded-xl border border-slate-200 p-2 text-slate-500 hover:bg-slate-50" aria-label="Close"><X className="h-4 w-4" /></button>
               </div>
-              {error && <div className="mb-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-800">{error}</div>}
+              {error && (
+                <div className="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-800">
+                  <span>{error}</span>
+                  {needsShopifyReconnect && <a href={reconnectUrl} className="ml-auto rounded-lg bg-rose-800 px-3 py-2 text-xs font-black text-white">Reconnect Shopify</a>}
+                </div>
+              )}
               <form onSubmit={loadAvailable} className="mb-4 rounded-2xl border border-indigo-100 bg-indigo-50/70 p-3">
                 <div className="mb-2 flex items-center gap-2 text-xs font-black uppercase tracking-wide text-indigo-700"><CalendarDays className="h-4 w-4" /> Browse by transfer date</div>
                 <div className="flex flex-col gap-2 sm:flex-row">

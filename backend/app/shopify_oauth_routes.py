@@ -306,12 +306,24 @@ async def shopify_stores(db: AsyncSession = Depends(get_session)):
 @router.get("/api/shopify/oauth/start")
 async def oauth_start(
     store: str = Query(..., description="Store label, e.g. irranova"),
-    shop: str = Query(..., description="Shop domain, e.g. irranova.myshopify.com"),
+    shop: Optional[str] = Query(
+        default=None,
+        description="Shop domain, e.g. irranova.myshopify.com. Existing connections can omit it.",
+    ),
     return_to: str = Query("/shopify-connect"),
     db: AsyncSession = Depends(get_session),
 ):
     store_key = await _require_oauth_enabled_store(store, db)
-    shop_norm = normalize_shop_domain(shop)
+    shop_value = (shop or "").strip()
+    if not shop_value:
+        existing = await get_shopify_oauth_record(db, store_key)
+        shop_value = str((existing or {}).get("shop") or "").strip()
+    if not shop_value:
+        raise HTTPException(
+            status_code=400,
+            detail="Enter the Shopify store domain before connecting this store.",
+        )
+    shop_norm = normalize_shop_domain(shop_value)
     return_path = return_to if return_to.startswith("/") and not return_to.startswith("//") else "/shopify-connect"
 
     cid, _, cred_source = _client_creds(store_key)
