@@ -212,6 +212,7 @@ class InventoryCountLineItemInput(BaseModel):
 
 class InventoryCountUpdate(BaseModel):
     actual_crates: int = Field(ge=0)
+    total_items_received: int = Field(ge=0)
     line_items: list[InventoryCountLineItemInput] = Field(default_factory=list)
     sync_inventory: bool = True
     agent_note: Optional[str] = Field(default=None, max_length=2000)
@@ -230,6 +231,7 @@ def _status(
     actual_crates: Optional[int],
     actual_items: Optional[int],
     line_items: Optional[list[dict[str, Any]]] = None,
+    reported_items_received: Optional[int] = None,
 ) -> str:
     if actual_crates is None or actual_items is None:
         return "waiting"
@@ -244,7 +246,11 @@ def _status(
             for item in counted_variants
         )
     )
-    if crates_match and actual_items == expected_items and variants_match:
+    reported_match = (
+        reported_items_received is None
+        or reported_items_received == actual_items
+    )
+    if crates_match and actual_items == expected_items and variants_match and reported_match:
         return "matched"
     return "mismatch"
 
@@ -268,8 +274,17 @@ def _serialize(row: InventoryReceipt) -> dict[str, Any]:
         "expected_items": row.expected_items,
         "actual_crates": row.actual_crates,
         "actual_items": row.actual_items,
+        "reported_items_received": row.reported_items_received,
         "agent_note": row.agent_note or "",
         "status": row.status,
+        "count_result": _status(
+            row.ordered_crates,
+            row.expected_items,
+            row.actual_crates,
+            row.actual_items,
+            list(row.line_items or []),
+            row.reported_items_received,
+        ),
         "created_by": _person(row.created_by),
         "counted_by": _person(row.counted_by),
         "counted_at": row.counted_at.isoformat() if row.counted_at else None,
@@ -432,6 +447,19 @@ def _date_search_query(selected_date: date) -> str:
 def _stored_receipt_date_prefixes(selected_date: date) -> tuple[str, str]:
     """Return both date encodings found in existing transfer cards."""
     return selected_date.isoformat(), selected_date.strftime("%m/%d/%Y")
+
+
+def _stored_receipt_range_prefixes(start_date: date, end_date: date) -> list[str]:
+    if end_date < start_date:
+        raise ValueError("The end date must be on or after the start date")
+    if (end_date - start_date).days > 366:
+        raise ValueError("Choose a period of 367 days or less")
+    prefixes: list[str] = []
+    current = start_date
+    while current <= end_date:
+        prefixes.extend(_stored_receipt_date_prefixes(current))
+        current += timedelta(days=1)
+    return prefixes
 
 
 def _stable_key(*parts: Any) -> str:
@@ -891,6 +919,8 @@ async def available_shopify_transfers(
 async def list_receipts(
     store: Optional[str] = Query(default=None),
     purchase_date: Optional[date] = Query(default=None),
+    date_from: Optional[date] = Query(default=None),
+    date_to: Optional[date] = Query(default=None),
     db: AsyncSession = Depends(get_session),
     _: User = Depends(get_current_user),
 ):
@@ -906,22 +936,33 @@ async def list_receipts(
     )
     if store:
         stmt = stmt.where(InventoryReceipt.store_key == _clean_store(store))
-    if purchase_date:
+    selected_from = date_from or purchase_date
+    selected_to = date_to or selected_from
+    if date_to and not selected_from:
+        raise HTTPException(status_code=400, detail="Choose a start date before the end date")
+    if selected_from and selected_to:
         # New transfers normally use ISO-8601, while older Shopify Date scalar
         # values in production were saved as MM/DD/YYYY. Keep both searchable
-        # so the date selector works for every existing purchase-order card.
-        iso_prefix, shopify_prefix = _stored_receipt_date_prefixes(purchase_date)
+        # across either one selected day or a selected period.
+        try:
+            prefixes = _stored_receipt_range_prefixes(selected_from, selected_to)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         stmt = stmt.where(
-            or_(
-                InventoryReceipt.shopify_created_at.like(f"{iso_prefix}%"),
-                InventoryReceipt.shopify_created_at.like(f"{shopify_prefix}%"),
-            )
+            or_(*[
+                InventoryReceipt.shopify_created_at.like(f"{prefix}%")
+                for prefix in prefixes
+            ])
         )
     # Legacy rows imported from Shopify's customer Order API stay preserved in
     # the database, but they are not purchase orders and must not appear here.
     stmt = stmt.where(InventoryReceipt.shopify_order_gid.like("gid://shopify/InventoryTransfer/%"))
     rows = (await db.scalars(stmt)).all()
-    return {"receipts": [_serialize(row) for row in rows]}
+    return {
+        "date_from": selected_from.isoformat() if selected_from else None,
+        "date_to": selected_to.isoformat() if selected_to else None,
+        "receipts": [_serialize(row) for row in rows],
+    }
 
 
 @router.post("/receipts", status_code=201)
@@ -950,7 +991,7 @@ async def create_receipt(
         line_items=items,
         ordered_crates=body.ordered_crates,
         expected_items=sum(item["ordered_quantity"] for item in items),
-        status="waiting",
+        status="new",
         created_by_id=admin.id,
     )
     db.add(row)
@@ -970,13 +1011,8 @@ async def update_receipt_admin(
     row.line_items = items
     row.ordered_crates = body.ordered_crates
     row.expected_items = sum(item["ordered_quantity"] for item in items)
-    row.status = _status(
-        row.ordered_crates,
-        row.expected_items,
-        row.actual_crates,
-        row.actual_items,
-        items,
-    )
+    if row.actual_items is not None:
+        row.status = "pending"
     await db.commit()
     return _serialize(await _loaded_receipt(db, row.id))
 
@@ -1058,20 +1094,35 @@ async def update_receipt_count(
     row.line_items = merged_items
     row.actual_crates = body.actual_crates
     row.actual_items = actual_items
+    row.reported_items_received = body.total_items_received
     row.agent_note = (body.agent_note or "").strip() or None
     row.counted_by_id = user.id
     row.counted_at = datetime.now(timezone.utc)
-    row.status = _status(
-        row.ordered_crates,
-        row.expected_items,
-        row.actual_crates,
-        row.actual_items,
-        merged_items,
-    )
+    # Saving or editing never completes a card. This prevents an agent from
+    # accidentally turning a purchase order green before the final review.
+    row.status = "pending"
     await db.commit()
     result = _serialize(await _loaded_receipt(db, row.id))
     result["inventory_operations"] = operations
     return result
+
+
+@router.patch("/receipts/{receipt_id}/complete")
+async def complete_receipt(
+    receipt_id: int,
+    db: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
+):
+    row = await _loaded_receipt(db, receipt_id)
+    if row.actual_items is None or row.actual_crates is None:
+        raise HTTPException(status_code=409, detail="Save the receiving count before marking this purchase order complete")
+    if row.reported_items_received is None:
+        raise HTTPException(status_code=409, detail="Enter the total items received before marking this purchase order complete")
+    row.status = "complete"
+    row.counted_by_id = user.id
+    row.counted_at = datetime.now(timezone.utc)
+    await db.commit()
+    return _serialize(await _loaded_receipt(db, row.id))
 
 
 @router.post("/receipts/{receipt_id}/photos", status_code=201)
@@ -1100,6 +1151,7 @@ async def upload_receipt_photo(
         uploaded_by_id=user.id,
     )
     db.add(saved)
+    row.status = "pending"
     await db.commit()
     return _serialize(await _loaded_receipt(db, row.id))
 
@@ -1131,6 +1183,8 @@ async def delete_receipt_photo(
         raise HTTPException(status_code=404, detail="photo not found")
     if user.role != "admin" and photo.uploaded_by_id != user.id:
         raise HTTPException(status_code=403, detail="Only the uploader or an admin can remove this photo")
+    row = await _loaded_receipt(db, photo.receipt_id)
     await db.delete(photo)
+    row.status = "pending"
     await db.commit()
     return Response(status_code=204)

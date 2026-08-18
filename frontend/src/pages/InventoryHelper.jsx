@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import StorePicker from "../components/StorePicker.jsx";
 import { authFetch, authHeaders, loadAuth } from "../lib/auth";
-import { formatInventoryOperation, groupInventoryItems, inventoryReview } from "../lib/inventoryHelper";
+import { formatInventoryOperation, groupInventoryColors, groupInventoryItems, inventoryReview } from "../lib/inventoryHelper";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 
 
@@ -51,22 +51,22 @@ function go(path) {
 
 
 function statusStyle(status) {
-  if (status === "matched") return {
+  if (status === "complete" || status === "matched") return {
     row: "border-emerald-200 bg-emerald-50/70",
     badge: "border-emerald-200 bg-emerald-100 text-emerald-800",
-    label: "Matched",
+    label: "Complete",
     icon: CheckCircle2,
   };
-  if (status === "mismatch") return {
-    row: "border-rose-200 bg-rose-50/80",
-    badge: "border-rose-200 bg-rose-100 text-rose-800",
-    label: "Mismatch",
+  if (status === "pending" || status === "mismatch") return {
+    row: "border-amber-200 bg-amber-50/80",
+    badge: "border-amber-200 bg-amber-100 text-amber-900",
+    label: "Pending",
     icon: AlertTriangle,
   };
   return {
-    row: "border-emerald-200 bg-emerald-50/60",
-    badge: "border-emerald-200 bg-white text-emerald-800",
-    label: "Ready to count",
+    row: "border-slate-200 bg-white",
+    badge: "border-slate-200 bg-white text-slate-700",
+    label: "New",
     icon: PackageOpen,
   };
 }
@@ -79,12 +79,14 @@ function differenceText(receipt) {
   const hasCratePlan = Number(receipt.ordered_crates) > 0;
   const crateDiff = hasCratePlan ? Number(receipt.actual_crates) - Number(receipt.ordered_crates) : 0;
   const itemDiff = Number(receipt.actual_items) - Number(receipt.expected_items);
+  const reportedDiff = receipt.reported_items_received == null ? 0 : Number(receipt.reported_items_received) - Number(receipt.actual_items);
   const variantDiffs = (receipt.line_items || []).filter((item) => item.actual_quantity != null && Number(item.actual_quantity) !== Number(item.ordered_quantity));
-  if (crateDiff === 0 && itemDiff === 0 && variantDiffs.length === 0) return "Crates and every variant match the purchase order.";
+  if (crateDiff === 0 && itemDiff === 0 && variantDiffs.length === 0 && reportedDiff === 0) return "Crates, entered total, and every variant match the purchase order.";
   const parts = [];
   if (crateDiff) parts.push(`${Math.abs(crateDiff)} ${crateDiff > 0 ? "more" : "fewer"} crate${Math.abs(crateDiff) === 1 ? "" : "s"}`);
   if (itemDiff) parts.push(`${Math.abs(itemDiff)} ${itemDiff > 0 ? "more" : "fewer"} item${Math.abs(itemDiff) === 1 ? "" : "s"}`);
   if (variantDiffs.length) parts.push(`${variantDiffs.length} variant${variantDiffs.length === 1 ? "" : "s"} differ`);
+  if (reportedDiff) parts.push(`entered total is ${Math.abs(reportedDiff)} ${reportedDiff > 0 ? "higher" : "lower"} than the variant sum`);
   return parts.join(" · ");
 }
 
@@ -184,7 +186,7 @@ function QuantityEditSheet({ editor, onChange, onClose, onConfirm }) {
 }
 
 
-function CountReviewSheet({ open, receipt, items, actualCrates, busy, onClose, onConfirm }) {
+function CountReviewSheet({ open, receipt, items, actualCrates, totalItemsReceived, busy, onClose, onConfirm }) {
   if (!open || !receipt) return null;
   const changes = inventoryReview(items);
   const shortages = items.filter((item) => Number(item.actual_quantity || 0) !== Number(item.ordered_quantity || 0));
@@ -204,7 +206,7 @@ function CountReviewSheet({ open, receipt, items, actualCrates, busy, onClose, o
 
         <div className="mt-4 grid grid-cols-3 gap-2 text-center">
           <div className="rounded-xl bg-slate-50 p-2"><div className="text-[9px] font-bold uppercase text-slate-500">Crates</div><div className="text-xl font-black">{actualCrates}</div></div>
-          <div className="rounded-xl bg-slate-50 p-2"><div className="text-[9px] font-bold uppercase text-slate-500">Found</div><div className="text-xl font-black">{items.reduce((sum, item) => sum + Number(item.actual_quantity || 0), 0)}</div></div>
+          <div className="rounded-xl bg-indigo-50 p-2 text-indigo-950"><div className="text-[9px] font-bold uppercase text-indigo-600">Total entered</div><div className="text-xl font-black">{totalItemsReceived}</div></div>
           <div className={`rounded-xl p-2 ${shortages.length ? "bg-rose-50 text-rose-900" : "bg-emerald-50 text-emerald-900"}`}><div className="text-[9px] font-bold uppercase opacity-70">Different</div><div className="text-xl font-black">{shortages.length}</div></div>
         </div>
 
@@ -263,6 +265,12 @@ function localDateInput() {
   const now = new Date();
   const offset = now.getTimezoneOffset() * 60000;
   return new Date(now.getTime() - offset).toISOString().slice(0, 10);
+}
+
+
+function selectedPeriodLabel(dateFrom, dateTo) {
+  if (!dateTo || dateTo === dateFrom) return shortDate(dateFrom);
+  return `${shortDate(dateFrom)}–${shortDate(dateTo)}`;
 }
 
 
@@ -345,7 +353,8 @@ export default function InventoryHelper() {
   const [store, setStore] = useState(() => readCurrentStore());
   const [receipts, setReceipts] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
-  const [viewDate, setViewDate] = useState(localDateInput);
+  const [viewDateFrom, setViewDateFrom] = useState(localDateInput);
+  const [viewDateTo, setViewDateTo] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -367,6 +376,7 @@ export default function InventoryHelper() {
   const [agentItems, setAgentItems] = useState([]);
   const [adminCrates, setAdminCrates] = useState(0);
   const [actualCrates, setActualCrates] = useState(0);
+  const [agentTotalItems, setAgentTotalItems] = useState("");
   const [agentNote, setAgentNote] = useState("");
   const [countBusy, setCountBusy] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
@@ -378,7 +388,10 @@ export default function InventoryHelper() {
     () => agentItems.reduce((sum, item) => sum + Number(item.actual_quantity || 0), 0),
     [agentItems],
   );
-  const groupedAgentItems = useMemo(() => groupInventoryItems(agentItems), [agentItems]);
+  const groupedAgentItems = useMemo(
+    () => groupInventoryItems(agentItems).map((group) => ({ ...group, colors: groupInventoryColors(group.items) })),
+    [agentItems],
+  );
   const countHasChanges = useMemo(() => {
     if (!selected) return false;
     if (selected.actual_items == null || selected.actual_crates == null) return true;
@@ -386,8 +399,9 @@ export default function InventoryHelper() {
     const itemChanged = agentItems.some((item) => Number(item.actual_quantity || 0) !== Number(savedById.get(String(item.id))?.actual_quantity || 0));
     return itemChanged
       || Number(actualCrates || 0) !== Number(selected.actual_crates || 0)
+      || String(agentTotalItems) !== String(selected.reported_items_received ?? "")
       || agentNote.trim() !== String(selected.agent_note || "").trim();
-  }, [selected, agentItems, actualCrates, agentNote]);
+  }, [selected, agentItems, actualCrates, agentTotalItems, agentNote]);
   const reconnectUrl = `/api/shopify/oauth/start?store=${encodeURIComponent(store)}&return_to=${encodeURIComponent(`/inventory-helper?store=${store}`)}`;
 
   function showApiError(err) {
@@ -400,9 +414,9 @@ export default function InventoryHelper() {
 
   const totals = useMemo(() => ({
     all: receipts.length,
-    waiting: receipts.filter((item) => item.status === "waiting").length,
-    mismatch: receipts.filter((item) => item.status === "mismatch").length,
-    matched: receipts.filter((item) => item.status === "matched").length,
+    new: receipts.filter((item) => item.status === "new" || item.status === "waiting").length,
+    pending: receipts.filter((item) => item.status === "pending" || item.status === "mismatch").length,
+    complete: receipts.filter((item) => item.status === "complete" || item.status === "matched").length,
   }), [receipts]);
 
   useEffect(() => {
@@ -410,8 +424,8 @@ export default function InventoryHelper() {
     setNeedsShopifyReconnect(false);
     setSelectedId(null);
     setLastSyncOperations([]);
-    loadReceipts(null, viewDate);
-  }, [store, viewDate]);
+    loadReceipts(null, viewDateFrom, viewDateTo);
+  }, [store, viewDateFrom, viewDateTo]);
 
   useEffect(() => {
     if (!selected) return;
@@ -424,14 +438,24 @@ export default function InventoryHelper() {
     })));
     setAdminCrates(Number(selected.ordered_crates || 0));
     setActualCrates(selected.actual_crates ?? selected.ordered_crates ?? 0);
+    setAgentTotalItems(selected.reported_items_received == null ? "" : String(selected.reported_items_received));
     setAgentNote(selected.agent_note || "");
   }, [selected?.id, selected?.updated_at]);
 
-  async function loadReceipts(preferredId, selectedDate = viewDate) {
+  async function loadReceipts(preferredId, selectedFrom = viewDateFrom, selectedTo = viewDateTo) {
+    if (!selectedFrom) return;
+    if (selectedTo && selectedTo < selectedFrom) {
+      setError("The end date must be on or after the start date.");
+      setReceipts([]);
+      setSelectedId(null);
+      return;
+    }
     setLoading(true);
     setError("");
     try {
-      const data = await apiJson(`/api/inventory-helper/receipts?store=${encodeURIComponent(store)}&purchase_date=${encodeURIComponent(selectedDate)}`, {
+      const params = new URLSearchParams({ store, date_from: selectedFrom });
+      if (selectedTo) params.set("date_to", selectedTo);
+      const data = await apiJson(`/api/inventory-helper/receipts?${params.toString()}`, {
         headers: authHeaders({ Accept: "application/json" }),
       });
       const list = data.receipts || [];
@@ -460,7 +484,7 @@ export default function InventoryHelper() {
   }
 
   function refreshCurrent() {
-    loadReceipts(selected?.id, viewDate);
+    loadReceipts(selected?.id, viewDateFrom, viewDateTo);
   }
 
   function replaceReceipt(next) {
@@ -561,9 +585,10 @@ export default function InventoryHelper() {
       setAvailableTransfers((current) => current.map((item) => item.shopify_order_gid === saved.shopify_order_gid ? { ...item, already_added: true } : item));
       setNotice(`${saved.order_number} added to Inventory Helper.`);
       setShowCreate(false);
-      const savedDate = receiptDateInput(saved.shopify_created_at) || viewDate;
-      setViewDate(savedDate);
-      await loadReceipts(saved.id, savedDate);
+      const savedDate = receiptDateInput(saved.shopify_created_at) || viewDateFrom;
+      setViewDateFrom(savedDate);
+      setViewDateTo("");
+      await loadReceipts(saved.id, savedDate, "");
       window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);
     } catch (err) {
       showApiError(err);
@@ -594,6 +619,10 @@ export default function InventoryHelper() {
   function reviewCount(event) {
     event.preventDefault();
     if (!selected || !agentItems.length || !countHasChanges) return;
+    if (agentTotalItems === "") {
+      setError("Enter the total items received before reviewing the count.");
+      return;
+    }
     setError("");
     setNotice("");
     setShowCountReview(true);
@@ -609,6 +638,7 @@ export default function InventoryHelper() {
         headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           actual_crates: actualCrates,
+          total_items_received: Number(agentTotalItems),
           agent_note: agentNote,
           sync_inventory: true,
           line_items: agentItems.map((item) => ({ id: item.id, actual_quantity: Number(item.actual_quantity || 0) })),
@@ -621,9 +651,27 @@ export default function InventoryHelper() {
       const operationText = operations.map(formatInventoryOperation);
       setNotice(
         operations.length
-          ? `${saved.status === "matched" ? "Count matches." : "Mismatch saved."} ${operationText.join("; ")}.`
-          : `${saved.status === "matched" ? "Count saved — everything matches." : "Count saved — mismatch highlighted for review."} No Shopify quantity change was needed.`,
+          ? `Count saved as pending. ${operationText.join("; ")}.`
+          : "Count saved as pending. No Shopify quantity change was needed.",
       );
+    } catch (err) {
+      showApiError(err);
+    } finally {
+      setCountBusy(false);
+    }
+  }
+
+  async function markComplete() {
+    if (!selected || selected.actual_items == null || countHasChanges) return;
+    setCountBusy(true);
+    setError("");
+    try {
+      const saved = await apiJson(`/api/inventory-helper/receipts/${selected.id}/complete`, {
+        method: "PATCH",
+        headers: authHeaders({ Accept: "application/json" }),
+      });
+      replaceReceipt(saved);
+      setNotice(`${saved.order_number} marked complete.`);
     } catch (err) {
       showApiError(err);
     } finally {
@@ -659,13 +707,13 @@ export default function InventoryHelper() {
     try {
       const response = await authFetch(`/api/inventory-helper/photos/${photoId}`, { method: "DELETE", headers: authHeaders() });
       if (!response.ok) throw new Error((await response.json().catch(() => ({})))?.detail || "Could not remove photo");
-      replaceReceipt({ ...selected, photos: selected.photos.filter((photo) => photo.id !== photoId) });
+      replaceReceipt({ ...selected, status: "pending", photos: selected.photos.filter((photo) => photo.id !== photoId) });
     } catch (err) {
       showApiError(err);
     }
   }
 
-  const selectedTone = statusStyle(selected?.status);
+  const selectedTone = statusStyle(selected?.status === "complete" && countHasChanges ? "pending" : selected?.status);
   const SelectedIcon = selectedTone.icon;
 
   return (
@@ -705,20 +753,23 @@ export default function InventoryHelper() {
               <div>
               <div className="text-xs font-bold uppercase tracking-wide text-indigo-600">Receiving queue</div>
               <h2 className="text-lg font-black">Purchase orders</h2>
-                <p className="text-xs text-slate-500">Choose a date to see purchase orders already added to this app.</p>
+                <p className="text-xs text-slate-500">Choose one day or add an end date for a period. Results load automatically.</p>
               </div>
               {isAdmin && <button type="button" onClick={() => { setShowCreate(true); setError(""); setNotice(""); }} className="ml-auto inline-flex h-10 items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 text-xs font-black text-indigo-700 shadow-sm"><Plus className="h-4 w-4" /> Import</button>}
             </div>
-            <label className="mt-4 block rounded-2xl border border-indigo-100 bg-indigo-50/70 p-3 sm:flex sm:items-center sm:gap-3">
-              <span className="mb-2 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-indigo-700 sm:mb-0"><CalendarDays className="h-4 w-4" /> Purchase-order date</span>
-              <input type="date" value={viewDate} onChange={(event) => setViewDate(event.target.value)} className="h-12 w-full rounded-xl border border-indigo-200 bg-white px-3 text-base font-black text-slate-950 outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 sm:ml-auto sm:w-52" aria-label="Purchase-order date" />
-            </label>
+            <div className="mt-4 rounded-2xl border border-indigo-100 bg-indigo-50/70 p-3">
+              <div className="mb-2 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-indigo-700"><CalendarDays className="h-4 w-4" /> Purchase-order date or period</div>
+              <div className="grid grid-cols-2 gap-2">
+                <label><span className="mb-1 block text-[9px] font-black uppercase text-slate-500">From</span><input type="date" value={viewDateFrom} onChange={(event) => setViewDateFrom(event.target.value)} className="h-12 w-full min-w-0 rounded-xl border border-indigo-200 bg-white px-2 text-sm font-black text-slate-950 outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" aria-label="Purchase orders from date" /></label>
+                <label><span className="mb-1 block text-[9px] font-black uppercase text-slate-500">To · optional</span><input type="date" min={viewDateFrom} value={viewDateTo} onChange={(event) => setViewDateTo(event.target.value)} className="h-12 w-full min-w-0 rounded-xl border border-indigo-200 bg-white px-2 text-sm font-black text-slate-950 outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" aria-label="Purchase orders to date" /></label>
+              </div>
+            </div>
           </div>
 
           {loading ? (
             <div className="flex items-center justify-center gap-2 p-10 text-sm font-semibold text-slate-500"><Loader2 className="h-5 w-5 animate-spin" /> Loading purchase orders…</div>
           ) : !receipts.length ? (
-            <div className="p-10 text-center"><ClipboardList className="mx-auto mb-3 h-9 w-9 text-slate-300" /><div className="font-black">No purchase orders for {shortDate(viewDate)}</div><p className="mx-auto mt-1 max-w-lg text-sm text-slate-500">{isAdmin ? "Use Import to add a linked Shopify transfer, or choose another date." : "Choose another date, or ask an admin to import the purchase order."}</p></div>
+            <div className="p-10 text-center"><ClipboardList className="mx-auto mb-3 h-9 w-9 text-slate-300" /><div className="font-black">No purchase orders for {selectedPeriodLabel(viewDateFrom, viewDateTo)}</div><p className="mx-auto mt-1 max-w-lg text-sm text-slate-500">{isAdmin ? "Use Import to add a linked Shopify transfer, or choose another period." : "Choose another date or period, or ask an admin to import the purchase order."}</p></div>
           ) : (
             <div className="grid grid-cols-2 gap-2.5 p-2.5 sm:grid-cols-3 sm:gap-4 sm:p-4 lg:grid-cols-4">
               {receipts.map((receipt) => {
@@ -728,21 +779,17 @@ export default function InventoryHelper() {
                 const isCounted = receipt.actual_items != null && receipt.actual_crates != null;
                 return (
                   <button key={receipt.id} type="button" onClick={() => openReceipt(receipt.id)} className={`min-w-0 overflow-hidden rounded-2xl border text-left shadow-sm transition active:scale-[0.98] ${tone.row} ${selected?.id === receipt.id ? "ring-2 ring-indigo-500 ring-offset-2" : "hover:shadow-md"}`}>
-                    <div className="relative aspect-[4/3] overflow-hidden bg-slate-100">
-                      {image ? <img src={image} alt={receipt.line_items?.[0]?.title || "Purchase order product"} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-slate-300"><Boxes className="h-9 w-9" /></div>}
-                      <span className={`absolute left-2 top-2 inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-black shadow-sm ${tone.badge}`}><Icon className="h-3 w-3" />{tone.label}</span>
-                    </div>
                     <div className="space-y-2 p-2.5 sm:p-3">
-                      <div className="min-w-0"><div className="truncate text-sm font-black sm:text-base">{receipt.order_number}</div><div className="truncate text-[10px] font-semibold text-slate-500 sm:text-xs">{orderedLabel(receipt)}</div></div>
-                      <div className="rounded-xl border border-white/90 bg-white/80 p-2">
-                        <div className="text-[9px] font-bold uppercase tracking-wide text-slate-500 sm:text-[10px]">Quantity ordered</div>
-                        <div className="text-xl font-black leading-none sm:text-2xl">{receipt.expected_items}</div>
-                        <div className="mt-1 truncate text-[10px] text-slate-500">{receipt.line_items?.length || 0} variant{receipt.line_items?.length === 1 ? "" : "s"}</div>
+                      <div className="flex min-w-0 items-start gap-2">
+                        {image ? <img src={image} alt={receipt.line_items?.[0]?.title || "Purchase order product"} className="h-10 w-10 shrink-0 rounded-xl border border-slate-200 object-cover" /> : <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-400"><Boxes className="h-5 w-5" /></div>}
+                        <div className="min-w-0 flex-1"><div className="truncate text-sm font-black sm:text-base">{receipt.order_number}</div><div className="truncate text-[10px] font-semibold text-slate-500 sm:text-xs">{orderedLabel(receipt)}</div></div>
                       </div>
+                      <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-black ${tone.badge}`}><Icon className="h-3 w-3" />{tone.label}</span>
                       <div className="grid grid-cols-2 gap-1.5 text-center">
-                        <div className="rounded-lg bg-white/70 px-1 py-1.5"><div className="text-[9px] text-slate-500">Crates</div><div className="text-xs font-black">{isCounted ? `${receipt.actual_crates}/${receipt.ordered_crates || "—"}` : (receipt.ordered_crates || "—")}</div></div>
-                        <div className="rounded-lg bg-white/70 px-1 py-1.5"><div className="text-[9px] text-slate-500">Counted</div><div className="text-xs font-black">{receipt.actual_items ?? "—"}</div></div>
+                        <div className="rounded-lg border border-slate-200 bg-white/80 px-1 py-1.5"><div className="text-[9px] text-slate-500">Ordered</div><div className="text-sm font-black">{receipt.expected_items}</div></div>
+                        <div className="rounded-lg border border-slate-200 bg-white/80 px-1 py-1.5"><div className="text-[9px] text-slate-500">Crates</div><div className="text-sm font-black">{isCounted ? receipt.actual_crates : (receipt.ordered_crates || "—")}</div></div>
                       </div>
+                      <div className="rounded-xl border-2 border-indigo-300 bg-indigo-50 px-2 py-2 text-center text-indigo-950"><div className="text-[9px] font-black uppercase tracking-wide text-indigo-600">Agent total received</div><div className="text-xl font-black leading-none">{receipt.reported_items_received ?? "—"}</div></div>
                       {receipt.agent_note && <div className="rounded-xl border border-amber-300 bg-amber-100 px-2 py-2 text-[10px] font-bold leading-snug text-amber-950 sm:text-xs"><span className="block text-[9px] uppercase tracking-wide text-amber-700">Agent note</span><span className="block truncate">{receipt.agent_note}</span></div>}
                     </div>
                   </button>
@@ -841,7 +888,7 @@ export default function InventoryHelper() {
         )}
 
         <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[[`POs ${shortDate(viewDate)}`, totals.all, 'text-slate-950'], ['Ready', totals.waiting, 'text-emerald-700'], ['Mismatch', totals.mismatch, 'text-rose-700'], ['Matched', totals.matched, 'text-emerald-700']].map(([label, value, tone]) => (
+          {[[`POs ${selectedPeriodLabel(viewDateFrom, viewDateTo)}`, totals.all, 'text-slate-950'], ['New', totals.new, 'text-slate-700'], ['Pending', totals.pending, 'text-amber-700'], ['Complete', totals.complete, 'text-emerald-700']].map(([label, value, tone]) => (
             <div key={label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-xs font-semibold text-slate-500">{label}</div><div className={`mt-1 text-2xl font-black ${tone}`}>{value}</div></div>
           ))}
         </section>
@@ -858,7 +905,7 @@ export default function InventoryHelper() {
                     <button type="button" onClick={() => setSelectedId(null)} className="rounded-xl border border-slate-300 bg-white/90 p-2.5 text-slate-600" aria-label="Close purchase order"><X className="h-5 w-5" /></button>
                   </div>
                   <div className="mt-3 grid grid-cols-4 gap-1.5 text-center">
-                    {[['Crates', selected.ordered_crates || '—'], ['Received', selected.actual_crates ?? '—'], ['Ordered', selected.expected_items], ['Counted', selected.actual_items ?? '—']].map(([label, value]) => <div key={label} className="rounded-xl bg-white/80 px-1 py-2"><div className="text-[9px] font-bold uppercase text-slate-500">{label}</div><div className="text-lg font-black leading-none">{value}</div></div>)}
+                    {[['Crates', selected.ordered_crates || '—'], ['Received', selected.actual_crates ?? '—'], ['Ordered', selected.expected_items], ['Agent total', selected.reported_items_received ?? '—']].map(([label, value]) => <div key={label} className={`rounded-xl px-1 py-2 ${label === 'Agent total' ? 'border border-indigo-300 bg-indigo-50 text-indigo-950' : 'bg-white/80'}`}><div className={`text-[9px] font-bold uppercase ${label === 'Agent total' ? 'text-indigo-600' : 'text-slate-500'}`}>{label}</div><div className="text-lg font-black leading-none">{value}</div></div>)}
                   </div>
                   {selected.agent_note && <div className="mt-3 rounded-xl border border-amber-300 bg-amber-100 px-3 py-2 text-xs font-bold text-amber-950"><span className="mr-1 text-[9px] uppercase tracking-wider text-amber-700">Agent note</span>{selected.agent_note}</div>}
                 </div>
@@ -880,21 +927,36 @@ export default function InventoryHelper() {
                 <div className="rounded-2xl border border-slate-200 bg-white shadow-sm sm:rounded-3xl">
                   <div className="flex items-center gap-3 border-b border-slate-100 p-4"><div className="rounded-xl bg-indigo-50 p-2 text-indigo-600"><PackageOpen className="h-5 w-5" /></div><div className="min-w-0"><h3 className="font-bold">Receiving count</h3><p className="text-xs text-slate-500">Tap Found to edit a color and size.</p></div><div className="ml-auto rounded-xl bg-indigo-50 px-3 py-2 text-right"><div className="text-[9px] font-bold uppercase text-indigo-600">Found</div><div className="text-xl font-black leading-none text-indigo-950">{actualItems}</div></div></div>
                   <form onSubmit={reviewCount} className="space-y-4 p-3 sm:p-5">
+                    <label className="block rounded-2xl border-2 border-indigo-300 bg-indigo-50 p-3 text-indigo-950 shadow-sm">
+                      <span className="block text-[10px] font-black uppercase tracking-widest text-indigo-700">Total items received · enter manually</span>
+                      <input type="number" inputMode="numeric" min="0" required value={agentTotalItems} onChange={(event) => setAgentTotalItems(event.target.value === "" ? "" : String(Math.max(0, Number(event.target.value))))} placeholder="0" className="mt-2 h-14 w-full rounded-xl border border-indigo-300 bg-white px-3 text-center text-3xl font-black outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-100" />
+                      <span className="mt-1 block text-center text-[10px] font-semibold text-indigo-700">Variant sum: {actualItems}</span>
+                    </label>
                     <div className="space-y-3">
                       {groupedAgentItems.map((group) => (
                         <div key={group.key} className="overflow-hidden rounded-2xl border border-slate-200">
                           <div className="border-b border-slate-200 bg-slate-50 p-3"><ProductIdentity item={{ title: group.title, image_url: group.image_url, image_alt: group.image_alt, sku: `${group.items.length} variant${group.items.length === 1 ? "" : "s"}` }} /></div>
-                          <div className="grid grid-cols-[minmax(70px,1fr)_minmax(54px,.7fr)_48px_72px] gap-1.5 bg-slate-100 px-2 py-2 text-[9px] font-black uppercase tracking-wide text-slate-500 sm:grid-cols-[minmax(120px,1fr)_120px_70px_110px] sm:px-3"><span className="text-violet-700">Color</span><span className="text-sky-700">Size</span><span className="text-center">Order</span><span className="text-center">Found</span></div>
-                          {group.items.map((item) => {
-                            const differs = Number(item.actual_quantity || 0) !== Number(item.ordered_quantity || 0);
-                            const dimensions = variantDimensions(item);
+                          {group.colors.map((colorGroup) => {
+                            const orderedColor = colorGroup.items.reduce((sum, item) => sum + Number(item.ordered_quantity || 0), 0);
+                            const foundColor = colorGroup.items.reduce((sum, item) => sum + Number(item.actual_quantity || 0), 0);
+                            const colorDiffers = orderedColor !== foundColor;
                             return (
-                              <div key={item.id} className={`grid grid-cols-[minmax(70px,1fr)_minmax(54px,.7fr)_48px_72px] items-center gap-1.5 border-t border-slate-100 px-2 py-2 sm:grid-cols-[minmax(120px,1fr)_120px_70px_110px] sm:px-3 ${differs ? "bg-rose-50/80" : "bg-white"}`}>
-                                <div className="min-w-0 rounded-lg bg-violet-50 px-2 py-2 text-xs font-black text-violet-950"><span className="block whitespace-normal break-words leading-tight">{dimensions.color}</span></div>
-                                <div className="min-w-0 rounded-lg bg-sky-50 px-2 py-2 text-xs font-black text-sky-950"><span className="block whitespace-normal break-words leading-tight">{dimensions.size}</span></div>
-                                <div className="text-center text-sm font-black text-slate-700">{item.ordered_quantity}</div>
-                                <button type="button" onClick={() => openQuantityEditor("agent", item)} className={`flex min-h-10 items-center justify-center gap-1 rounded-xl border px-1 text-base font-black shadow-sm active:scale-[0.98] ${differs ? "border-rose-300 bg-rose-100 text-rose-950" : "border-indigo-200 bg-indigo-50 text-indigo-950"}`}><span>{item.actual_quantity}</span><Pencil className="h-3 w-3" /></button>
-                              </div>
+                              <details key={colorGroup.color} className="border-t border-slate-200 bg-white">
+                                <summary className={`flex cursor-pointer list-none items-center gap-2 p-3 ${colorDiffers ? "bg-rose-50 text-rose-950" : "bg-white"}`}>
+                                  <div className="rounded-lg bg-violet-100 p-2 text-violet-700"><Palette className="h-4 w-4" /></div>
+                                  <div className="min-w-0 flex-1"><div className="whitespace-normal break-words text-sm font-black">{colorGroup.color}</div><div className="text-[10px] text-slate-500">{colorGroup.items.length} size{colorGroup.items.length === 1 ? "" : "s"}</div></div>
+                                  <div className="text-right"><div className="text-[9px] font-bold uppercase text-slate-400">Found / ordered</div><div className={`text-sm font-black ${colorDiffers ? "text-rose-700" : "text-slate-800"}`}>{foundColor} / {orderedColor}</div></div>
+                                  <Plus className="h-4 w-4 shrink-0 text-slate-400" />
+                                </summary>
+                                <div className="border-t border-slate-100 bg-slate-50/50">
+                                  <div className="grid grid-cols-[minmax(70px,1fr)_60px_82px] gap-2 px-3 py-2 text-[9px] font-black uppercase tracking-wide text-slate-500"><span className="text-sky-700">Size</span><span className="text-center">Ordered</span><span className="text-center">Found</span></div>
+                                  {colorGroup.items.map((item) => {
+                                    const differs = Number(item.actual_quantity || 0) !== Number(item.ordered_quantity || 0);
+                                    const dimensions = variantDimensions(item);
+                                    return <div key={item.id} className={`grid grid-cols-[minmax(70px,1fr)_60px_82px] items-center gap-2 border-t border-slate-100 px-3 py-2 ${differs ? "bg-rose-50/80" : "bg-white"}`}><div className="rounded-lg bg-sky-50 px-2 py-2 text-xs font-black text-sky-950">{dimensions.size}</div><div className="text-center text-sm font-black text-slate-700">{item.ordered_quantity}</div><button type="button" onClick={() => openQuantityEditor("agent", item)} className={`flex min-h-10 items-center justify-center gap-1 rounded-xl border px-1 text-base font-black shadow-sm active:scale-[0.98] ${differs ? "border-rose-300 bg-rose-100 text-rose-950" : "border-indigo-200 bg-indigo-50 text-indigo-950"}`}><span>{item.actual_quantity}</span><Pencil className="h-3 w-3" /></button></div>;
+                                  })}
+                                </div>
+                              </details>
                             );
                           })}
                         </div>
@@ -914,7 +976,9 @@ export default function InventoryHelper() {
 
                     {!!lastSyncOperations.length && <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3"><div className="text-xs font-black uppercase tracking-wide text-emerald-800">Verified Shopify result</div>{lastSyncOperations.map((operation, index) => <div key={index} className="mt-1 text-xs font-bold text-emerald-950">{formatInventoryOperation(operation)}</div>)}</div>}
                     <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">You will review every inventory reduction before it is applied to Shopify.</div>
-                    <button disabled={countBusy || !agentItems.length || !countHasChanges} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-black text-white shadow-sm disabled:bg-slate-300 disabled:text-slate-600"><Check className="h-4 w-4" />{countHasChanges ? "Review & update Shopify" : "Saved — no changes"}</button>
+                    <button disabled={countBusy || !agentItems.length || !countHasChanges || agentTotalItems === ""} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-black text-white shadow-sm disabled:bg-slate-300 disabled:text-slate-600"><Check className="h-4 w-4" />{countHasChanges ? (selected.status === "complete" ? "Review changes & return to pending" : "Review & save as pending") : (selected.status === "complete" ? "Complete — no changes" : "Saved as pending")}</button>
+                    {selected.actual_items != null && selected.status !== "complete" && <button type="button" onClick={markComplete} disabled={countBusy || countHasChanges} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 text-sm font-black text-white shadow-sm disabled:bg-slate-300 disabled:text-slate-600"><CheckCircle2 className="h-5 w-5" />{countHasChanges ? "Save changes before completing" : "Mark purchase order complete"}</button>}
+                    {selected.status === "complete" && !countHasChanges && <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-center text-sm font-black text-emerald-800"><CheckCircle2 className="mr-1 inline h-5 w-5" /> Purchase order complete</div>}
                   </form>
                 </div>
               </section>
@@ -933,6 +997,7 @@ export default function InventoryHelper() {
         receipt={selected}
         items={agentItems}
         actualCrates={actualCrates}
+        totalItemsReceived={agentTotalItems}
         busy={countBusy}
         onClose={() => setShowCountReview(false)}
         onConfirm={saveCount}

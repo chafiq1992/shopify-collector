@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   formatInventoryOperation,
+  groupInventoryColors,
   groupInventoryItems,
   inventoryReview,
 } from "../src/lib/inventoryHelper.js";
@@ -32,6 +33,18 @@ test("product variants are grouped under one compact product heading", () => {
 
   assert.equal(groups.length, 2);
   assert.deepEqual(groups[0].items.map((item) => item.id), ["red-21", "red-22"]);
+});
+
+
+test("sizes are collapsed under their color group", () => {
+  const colors = groupInventoryColors([
+    { id: "red-21", variant_color: "Red", variant_size: "21" },
+    { id: "red-22", variant_color: "Red", variant_size: "22" },
+    { id: "blue-21", variant_color: "Blue", variant_size: "21" },
+  ]);
+
+  assert.equal(colors.length, 2);
+  assert.deepEqual(colors[0].items.map((item) => item.id), ["red-21", "red-22"]);
 });
 
 

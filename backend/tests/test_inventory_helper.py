@@ -15,6 +15,7 @@ from backend.app.inventory_helper_routes import (
     _line_items_from_shopify,
     _shopify_transfer_payload,
     _stored_receipt_date_prefixes,
+    _stored_receipt_range_prefixes,
     _status,
 )
 
@@ -109,6 +110,22 @@ def test_saved_receipt_date_filter_supports_iso_and_shopify_formats():
         "2026-08-16",
         "08/16/2026",
     )
+
+
+def test_saved_receipt_period_expands_every_day_in_both_formats():
+    assert _stored_receipt_range_prefixes(date(2026, 8, 16), date(2026, 8, 18)) == [
+        "2026-08-16",
+        "08/16/2026",
+        "2026-08-17",
+        "08/17/2026",
+        "2026-08-18",
+        "08/18/2026",
+    ]
+
+
+def test_manual_total_must_match_variant_sum_for_a_matching_count():
+    assert _status(1, 2, 1, 2, [{"ordered_quantity": 2, "actual_quantity": 2}], 2) == "matched"
+    assert _status(1, 2, 1, 2, [{"ordered_quantity": 2, "actual_quantity": 2}], 1) == "mismatch"
 
 
 def test_date_card_uses_transfer_total_when_only_preview_line_is_loaded():

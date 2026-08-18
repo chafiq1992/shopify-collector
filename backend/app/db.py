@@ -103,3 +103,29 @@ async def init_db():
                 # Column already exists (safe to ignore on repeat starts).
                 pass
 
+        # Inventory Helper lifecycle: a count remains pending until the agent
+        # explicitly marks it complete. The reported total is intentionally
+        # separate from the sum of variant quantities so discrepancies remain
+        # visible instead of being silently overwritten.
+        try:
+            if is_sqlite_engine:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE inventory_receipts ADD COLUMN reported_items_received INTEGER"
+                )
+            else:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE inventory_receipts ADD COLUMN IF NOT EXISTS reported_items_received INTEGER"
+                )
+        except Exception:
+            # Column already exists.
+            pass
+        try:
+            await conn.exec_driver_sql(
+                "UPDATE inventory_receipts "
+                "SET status = CASE WHEN actual_items IS NULL THEN 'new' ELSE 'pending' END "
+                "WHERE status IN ('waiting', 'matched', 'mismatch')"
+            )
+        except Exception:
+            # The Inventory Helper table may not exist in partial test schemas.
+            pass
+

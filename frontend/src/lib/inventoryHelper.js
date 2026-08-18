@@ -17,6 +17,24 @@ export function groupInventoryItems(items = []) {
 }
 
 
+export function groupInventoryColors(items = []) {
+  const colors = new Map();
+  for (const item of items) {
+    let color = String(item?.variant_color || "").trim();
+    if (!color) {
+      const colorOption = (item?.selected_options || []).find((option) =>
+        ["color", "colour", "couleur", "colore", "farbe", "لون"].includes(String(option?.name || "").trim().toLowerCase()),
+      );
+      color = String(colorOption?.value || "").trim();
+    }
+    if (!color) color = String(item?.variant_title || "").split("/")[0]?.trim() || "No color";
+    if (!colors.has(color)) colors.set(color, { color, items: [] });
+    colors.get(color).items.push(item);
+  }
+  return [...colors.values()];
+}
+
+
 export function inventoryReview(items = []) {
   return items.map((item) => {
     const found = Math.max(0, Number(item?.actual_quantity || 0));
