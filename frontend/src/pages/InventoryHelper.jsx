@@ -3,11 +3,13 @@ import {
   AlertTriangle,
   ArrowLeft,
   Boxes,
+  CalendarDays,
   Camera,
   Check,
   CheckCircle2,
   ClipboardList,
   Loader2,
+  MapPin,
   PackageOpen,
   Plus,
   RefreshCw,
@@ -67,10 +69,12 @@ function differenceText(receipt) {
   const hasCratePlan = Number(receipt.ordered_crates) > 0;
   const crateDiff = hasCratePlan ? Number(receipt.actual_crates) - Number(receipt.ordered_crates) : 0;
   const itemDiff = Number(receipt.actual_items) - Number(receipt.expected_items);
-  if (crateDiff === 0 && itemDiff === 0) return "Crates and items match the purchase order.";
+  const variantDiffs = (receipt.line_items || []).filter((item) => item.actual_quantity != null && Number(item.actual_quantity) !== Number(item.ordered_quantity));
+  if (crateDiff === 0 && itemDiff === 0 && variantDiffs.length === 0) return "Crates and every variant match the purchase order.";
   const parts = [];
   if (crateDiff) parts.push(`${Math.abs(crateDiff)} ${crateDiff > 0 ? "more" : "fewer"} crate${Math.abs(crateDiff) === 1 ? "" : "s"}`);
   if (itemDiff) parts.push(`${Math.abs(itemDiff)} ${itemDiff > 0 ? "more" : "fewer"} item${Math.abs(itemDiff) === 1 ? "" : "s"}`);
+  if (variantDiffs.length) parts.push(`${variantDiffs.length} variant${variantDiffs.length === 1 ? "" : "s"} differ`);
   return parts.join(" · ");
 }
 
@@ -97,6 +101,13 @@ function orderedLabel(receipt) {
   const date = String(receipt?.shopify_created_at || "").slice(0, 10);
   if (!date) return "Linked Shopify transfer";
   return `Transfer created ${shortDate(date)}`;
+}
+
+
+function localDateInput() {
+  const now = new Date();
+  const offset = now.getTimezoneOffset() * 60000;
+  return new Date(now.getTime() - offset).toISOString().slice(0, 10);
 }
 
 
@@ -186,19 +197,26 @@ export default function InventoryHelper() {
   const [reference, setReference] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [lookupBusy, setLookupBusy] = useState(false);
+  const [browseDate, setBrowseDate] = useState(localDateInput);
+  const [availableTransfers, setAvailableTransfers] = useState([]);
+  const [browseBusy, setBrowseBusy] = useState(false);
   const [draft, setDraft] = useState(null);
   const [draftCrates, setDraftCrates] = useState(0);
   const [savingDraft, setSavingDraft] = useState(false);
 
   const selected = receipts.find((receipt) => receipt.id === selectedId) || null;
   const [adminItems, setAdminItems] = useState([]);
+  const [agentItems, setAgentItems] = useState([]);
   const [adminCrates, setAdminCrates] = useState(0);
   const [actualCrates, setActualCrates] = useState(0);
-  const [actualItems, setActualItems] = useState(0);
   const [agentNote, setAgentNote] = useState("");
   const [countBusy, setCountBusy] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
   const detailRef = useRef(null);
+  const actualItems = useMemo(
+    () => agentItems.reduce((sum, item) => sum + Number(item.actual_quantity || 0), 0),
+    [agentItems],
+  );
 
   const totals = useMemo(() => ({
     all: receipts.length,
@@ -215,9 +233,12 @@ export default function InventoryHelper() {
   useEffect(() => {
     if (!selected) return;
     setAdminItems((selected.line_items || []).map((item) => ({ ...item })));
+    setAgentItems((selected.line_items || []).map((item) => ({
+      ...item,
+      actual_quantity: item.actual_quantity ?? (Number(item.shopify_received_quantity || 0) > 0 ? item.shopify_received_quantity : item.ordered_quantity),
+    })));
     setAdminCrates(Number(selected.ordered_crates || 0));
     setActualCrates(selected.actual_crates ?? selected.ordered_crates ?? 0);
-    setActualItems(selected.actual_items ?? selected.expected_items ?? 0);
     setAgentNote(selected.agent_note || "");
   }, [selected?.id, selected?.updated_at]);
 
@@ -244,10 +265,11 @@ export default function InventoryHelper() {
   }
 
   function closeCreate() {
-    if (savingDraft || lookupBusy) return;
+    if (savingDraft || lookupBusy || browseBusy) return;
     setShowCreate(false);
     setDraft(null);
     setReference("");
+    setAvailableTransfers([]);
   }
 
   function refreshCurrent() {
@@ -277,6 +299,34 @@ export default function InventoryHelper() {
     }
   }
 
+  async function loadAvailable(event) {
+    event?.preventDefault();
+    if (!browseDate) return;
+    setBrowseBusy(true);
+    setError("");
+    setDraft(null);
+    try {
+      const data = await apiJson(`/api/inventory-helper/available?store=${encodeURIComponent(store)}&purchase_date=${encodeURIComponent(browseDate)}`, {
+        headers: authHeaders({ Accept: "application/json" }),
+      });
+      setAvailableTransfers(data.transfers || []);
+      if (!(data.transfers || []).length) {
+        setNotice(`No linked inventory transfers were created on ${browseDate}.`);
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBrowseBusy(false);
+    }
+  }
+
+  function chooseTransfer(transfer) {
+    if (transfer.already_added) return;
+    setDraft({ ...transfer, line_items: (transfer.line_items || []).map((item) => ({ ...item })) });
+    setDraftCrates(0);
+    setError("");
+  }
+
   function changeDraftQuantity(index, value) {
     setDraft((current) => ({
       ...current,
@@ -296,6 +346,7 @@ export default function InventoryHelper() {
       });
       setDraft(null);
       setReference("");
+      setAvailableTransfers((current) => current.map((item) => item.shopify_order_gid === saved.shopify_order_gid ? { ...item, already_added: true } : item));
       setNotice(`${saved.order_number} added to Inventory Helper.`);
       setShowCreate(false);
       await loadReceipts(saved.id);
@@ -335,10 +386,20 @@ export default function InventoryHelper() {
       const saved = await apiJson(`/api/inventory-helper/receipts/${selected.id}/count`, {
         method: "PATCH",
         headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ actual_crates: actualCrates, actual_items: actualItems, agent_note: agentNote }),
+        body: JSON.stringify({
+          actual_crates: actualCrates,
+          agent_note: agentNote,
+          sync_inventory: true,
+          line_items: agentItems.map((item) => ({ id: item.id, actual_quantity: Number(item.actual_quantity || 0) })),
+        }),
       });
       replaceReceipt(saved);
-      setNotice(saved.status === "matched" ? "Count saved — everything matches." : "Count saved — mismatch highlighted for review.");
+      const operations = saved.inventory_operations || [];
+      setNotice(
+        operations.length
+          ? `${saved.status === "matched" ? "Count matches." : "Mismatch saved."} Shopify inventory updated: ${operations.join("; ")}.`
+          : `${saved.status === "matched" ? "Count saved — everything matches." : "Count saved — mismatch highlighted for review."} No Shopify quantity change was needed.`,
+      );
     } catch (err) {
       setError(err.message);
     } finally {
@@ -421,7 +482,7 @@ export default function InventoryHelper() {
               <h2 className="text-lg font-black">Purchase orders</h2>
               <p className="text-xs text-slate-500">Newest first · scroll down for older purchase orders.</p>
             </div>
-            {isAdmin && <button type="button" onClick={() => { setShowCreate(true); setError(""); setNotice(""); }} className="ml-auto inline-flex h-10 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-xs font-black text-white shadow-sm"><Plus className="h-4 w-4" /> Create new purchase order</button>}
+            {isAdmin && <button type="button" onClick={() => { setShowCreate(true); setError(""); setNotice(""); }} className="ml-auto inline-flex h-10 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-xs font-black text-white shadow-sm"><Plus className="h-4 w-4" /> Add from Shopify</button>}
           </div>
 
           {loading ? (
@@ -467,10 +528,20 @@ export default function InventoryHelper() {
             <div className="border-b border-slate-100 p-4 sm:p-6">
               <div className="mb-4 flex items-start gap-3">
                 <div className="rounded-xl bg-indigo-50 p-2 text-indigo-600"><Plus className="h-5 w-5" /></div>
-                <div><h2 className="font-bold">Create new purchase order</h2><p className="text-sm text-slate-500">Paste the linked inventory transfer name or the PO reference from Shopify.</p></div>
+                <div><h2 className="font-bold">Add purchase order</h2><p className="text-sm text-slate-500">Browse linked Shopify transfers by date or search a transfer reference.</p></div>
                 <button type="button" onClick={closeCreate} className="ml-auto rounded-xl border border-slate-200 p-2 text-slate-500 hover:bg-slate-50" aria-label="Close"><X className="h-4 w-4" /></button>
               </div>
               {error && <div className="mb-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-800">{error}</div>}
+              <form onSubmit={loadAvailable} className="mb-4 rounded-2xl border border-indigo-100 bg-indigo-50/70 p-3">
+                <div className="mb-2 flex items-center gap-2 text-xs font-black uppercase tracking-wide text-indigo-700"><CalendarDays className="h-4 w-4" /> Browse by transfer date</div>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <input type="date" value={browseDate} onChange={(event) => setBrowseDate(event.target.value)} className="h-11 flex-1 rounded-xl border border-indigo-200 bg-white px-3 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" />
+                  <button disabled={browseBusy || !browseDate} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-bold text-white disabled:opacity-50">
+                    {browseBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarDays className="h-4 w-4" />} Load date
+                  </button>
+                </div>
+              </form>
+              <div className="mb-2 text-[10px] font-black uppercase tracking-widest text-slate-400">Or search one linked transfer</div>
               <form onSubmit={lookup} className="flex flex-col gap-2 sm:flex-row">
                 <label className="relative flex-1">
                   <Search className="absolute left-3 top-3.5 h-4 w-4 text-slate-400" />
@@ -482,10 +553,27 @@ export default function InventoryHelper() {
               </form>
             </div>
 
+            {!draft && availableTransfers.length > 0 && (
+              <div className="border-b border-slate-100 bg-slate-50/70 p-3 sm:p-5">
+                <div className="mb-3 flex items-center justify-between"><div><div className="font-black">Transfers created {shortDate(browseDate)}</div><div className="text-xs text-slate-500">Tap a card to review every variant before adding it.</div></div><span className="rounded-full bg-white px-3 py-1 text-xs font-black text-slate-600">{availableTransfers.length}</span></div>
+                <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+                  {availableTransfers.map((transfer) => {
+                    const image = transfer.line_items?.find((item) => item.image_url)?.image_url;
+                    return (
+                      <button key={transfer.shopify_order_gid} type="button" disabled={transfer.already_added} onClick={() => chooseTransfer(transfer)} className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-white text-left shadow-sm transition active:scale-[0.98] disabled:opacity-55">
+                        <div className="aspect-[4/3] bg-slate-100">{image ? <img src={image} alt={transfer.line_items?.[0]?.title || "Transfer product"} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-slate-300"><Boxes className="h-8 w-8" /></div>}</div>
+                        <div className="space-y-1.5 p-2.5"><div className="truncate text-sm font-black">{transfer.order_number}</div><div className="text-lg font-black">{transfer.expected_items} <span className="text-[10px] font-bold text-slate-500">items</span></div><div className="flex items-center gap-1 truncate text-[10px] text-slate-500"><MapPin className="h-3 w-3 shrink-0" />{transfer.destination_name || "Shopify location"}</div><div className={`text-[10px] font-black ${transfer.already_added ? "text-emerald-700" : "text-indigo-700"}`}>{transfer.already_added ? "Already added" : "Review variants"}</div></div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {draft && (
               <div className="bg-slate-50/70 p-4 sm:p-6">
                 <div className="mb-5 flex flex-wrap items-center gap-3">
-                  <div><div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Linked Shopify transfer</div><div className="text-xl font-black">{draft.order_number}</div></div>
+                  <div><div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Linked Shopify transfer</div><div className="text-xl font-black">{draft.order_number}</div>{draft.destination_name && <div className="mt-1 flex items-center gap-1 text-xs text-slate-500"><MapPin className="h-3 w-3" />{draft.destination_name}</div>}</div>
                   {draft.po_number && <span className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-bold text-indigo-700">PO {draft.po_number}</span>}
                   <div className="ml-auto w-full sm:w-40"><QuantityField label="Crates ordered" value={draftCrates} onChange={setDraftCrates} /></div>
                 </div>
@@ -546,16 +634,31 @@ export default function InventoryHelper() {
               </div>
 
               <div className="rounded-3xl border border-slate-200 bg-white shadow-sm">
-                <div className="flex items-center gap-3 border-b border-slate-100 p-4 sm:p-6"><div className="rounded-xl bg-indigo-50 p-2 text-indigo-600"><PackageOpen className="h-5 w-5" /></div><div><h3 className="font-bold">Agent receiving check</h3><p className="text-sm text-slate-500">Open the crates, photograph them, then enter the totals.</p></div></div>
+                <div className="flex items-center gap-3 border-b border-slate-100 p-4 sm:p-6"><div className="rounded-xl bg-indigo-50 p-2 text-indigo-600"><PackageOpen className="h-5 w-5" /></div><div><h3 className="font-bold">Agent receiving check</h3><p className="text-sm text-slate-500">Photograph the crates and enter the quantity actually found for every variant.</p></div></div>
                 <form onSubmit={saveCount} className="space-y-5 p-4 sm:p-6">
                   <div>
                     <div className="mb-2 flex items-center justify-between"><div><div className="text-sm font-bold">Crate photos</div><div className="text-xs text-slate-500">JPG, PNG, or WebP · up to 4 photos</div></div><label className={`inline-flex h-10 cursor-pointer items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 text-sm font-bold text-indigo-700 ${photoBusy || selected.photos?.length >= 4 ? "pointer-events-none opacity-50" : ""}`}><input type="file" accept="image/jpeg,image/png,image/webp" capture="environment" onChange={uploadPhoto} className="sr-only" />{photoBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />} Add photo</label></div>
                     {!!selected.photos?.length && <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{selected.photos.map((photo) => <PrivatePhoto key={photo.id} photo={photo} onDelete={deletePhoto} canDelete={isAdmin || photo.uploaded_by_id === auth?.user?.id} />)}</div>}
                     {!selected.photos?.length && <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 text-center text-slate-500"><input type="file" accept="image/jpeg,image/png,image/webp" capture="environment" onChange={uploadPhoto} className="sr-only" /><Camera className="mb-2 h-6 w-6" /><span className="text-sm font-bold">Take or choose a crate photo</span></label>}
                   </div>
-                  <div className="grid grid-cols-2 gap-3"><QuantityField label="Crates received" value={actualCrates} onChange={setActualCrates} /><QuantityField label="Items counted" value={actualItems} onChange={setActualItems} /></div>
+                  <div>
+                    <div className="mb-2 flex items-end justify-between"><div><div className="text-sm font-black">Variant quantities</div><div className="text-xs text-slate-500">Changing a saved value applies only the difference to Shopify inventory.</div></div><div className="rounded-xl bg-indigo-50 px-3 py-2 text-right"><div className="text-[10px] font-bold uppercase text-indigo-600">Counted</div><div className="text-xl font-black text-indigo-950">{actualItems}</div></div></div>
+                    <div className="overflow-hidden rounded-2xl border border-slate-200">
+                      {agentItems.map((item, index) => {
+                        const differs = Number(item.actual_quantity || 0) !== Number(item.ordered_quantity || 0);
+                        return (
+                          <div key={item.id} className={`grid grid-cols-[minmax(0,1fr)_88px] items-center gap-3 border-b border-slate-100 p-3 last:border-0 sm:grid-cols-[minmax(0,1fr)_120px] sm:px-4 ${differs ? "bg-rose-50/60" : "bg-white"}`}>
+                            <div className="flex min-w-0 items-center gap-3"><ProductThumb src={item.image_url} alt={item.title} /><div className="min-w-0"><div className="truncate text-sm font-bold">{item.title}</div><div className="truncate text-xs text-slate-500">{item.sku || item.variant_title || "Variant"} · ordered {item.ordered_quantity}</div>{item.inventory_synced_at && <div className="text-[10px] font-bold text-emerald-700">Shopify inventory previously synced</div>}</div></div>
+                            <QuantityField label="Found" value={item.actual_quantity} onChange={(value) => setAgentItems((current) => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, actual_quantity: value } : entry))} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3"><QuantityField label="Crates received" value={actualCrates} onChange={setActualCrates} /><div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Items found</div><div className="mt-1 text-2xl font-black">{actualItems}</div></div></div>
                   <label className="block"><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Agent note · optional</span><textarea value={agentNote} onChange={(event) => setAgentNote(event.target.value)} rows="3" placeholder="Damaged box, opened crate, or anything the admin should know…" className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" /></label>
-                  <button disabled={countBusy} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-black text-white shadow-sm disabled:opacity-50 sm:w-auto">{countBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save receiving count</button>
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-900">Saving receives new quantities into the transfer destination. If you correct an earlier count, Shopify inventory changes only by the difference.</div>
+                  <button disabled={countBusy || !agentItems.length} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-black text-white shadow-sm disabled:opacity-50 sm:w-auto">{countBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save & update Shopify inventory</button>
                 </form>
               </div>
 

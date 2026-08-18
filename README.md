@@ -104,7 +104,7 @@ pip install -r requirements.txt
 # setx SHOPIFY_CLIENT_ID_newstorename "that_store_public_app_client_id"
 # setx SHOPIFY_CLIENT_SECRET_newstorename "shpss_..."
 # setx SHOPIFY_STORE_KEYS "*"
-# setx SHOPIFY_OAUTH_SCOPES "read_orders,write_orders,read_order_edits,write_order_edits,read_customers,read_products,write_products,read_content,write_content,read_inventory,write_inventory,read_inventory_transfers"
+# setx SHOPIFY_OAUTH_SCOPES "read_orders,write_orders,read_order_edits,write_order_edits,read_customers,read_products,write_products,read_content,write_content,read_inventory,write_inventory,read_inventory_transfers,read_inventory_shipments,write_inventory_shipments,write_inventory_shipments_received_items"
 # setx SHOPIFY_API_VERSION "2025-01"
 # Then restart terminal to load env vars
 uvicorn backend.app.main:app --reload
@@ -171,7 +171,7 @@ docker run -p 8080:8080 \
   -e SHOPIFY_CLIENT_ID=your_public_app_client_id \
   -e SHOPIFY_CLIENT_SECRET=shpss_... \
   -e SHOPIFY_STORE_KEYS=* \
-  -e SHOPIFY_OAUTH_SCOPES=read_orders,write_orders,read_order_edits,write_order_edits,read_customers,read_products,write_products,read_content,write_content,read_inventory,write_inventory,read_inventory_transfers \
+  -e SHOPIFY_OAUTH_SCOPES=read_orders,write_orders,read_order_edits,write_order_edits,read_customers,read_products,write_products,read_content,write_content,read_inventory,write_inventory,read_inventory_transfers,read_inventory_shipments,write_inventory_shipments,write_inventory_shipments_received_items \
   -e SHOPIFY_API_VERSION=2025-01 \
   order-collector:local
 # Open http://localhost:8080
@@ -188,7 +188,7 @@ gcloud run deploy order-collector \
   --region europe-west1 \
   --port 8080 \
   --allow-unauthenticated \
-  --set-env-vars BASE_URL=https://your-cloud-run-url.a.run.app,SHOPIFY_CLIENT_ID=your_public_app_client_id,SHOPIFY_CLIENT_SECRET=shpss_...,SHOPIFY_STORE_KEYS=*,SHOPIFY_OAUTH_SCOPES=read_orders,write_orders,read_order_edits,write_order_edits,read_customers,read_products,write_products,read_content,write_content,read_inventory,write_inventory,read_inventory_transfers,SHOPIFY_API_VERSION=2025-01,SHOPIFY_INVENTORY_API_VERSION=2026-07
+  --set-env-vars BASE_URL=https://your-cloud-run-url.a.run.app,SHOPIFY_CLIENT_ID=your_public_app_client_id,SHOPIFY_CLIENT_SECRET=shpss_...,SHOPIFY_STORE_KEYS=*,SHOPIFY_OAUTH_SCOPES=read_orders,write_orders,read_order_edits,write_order_edits,read_customers,read_products,write_products,read_content,write_content,read_inventory,write_inventory,read_inventory_transfers,read_inventory_shipments,write_inventory_shipments,write_inventory_shipments_received_items,SHOPIFY_API_VERSION=2025-01,SHOPIFY_INVENTORY_API_VERSION=2026-07
 ```
 
 > Cloud Run supports **WebSockets** out of the box. For multi-instance fan-out, back WebSocket events with Pub/Sub or Redis instead of in-memory list.
