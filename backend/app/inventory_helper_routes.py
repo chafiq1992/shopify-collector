@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -427,6 +427,11 @@ def _date_search_query(selected_date: date) -> str:
     start_utc = start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     end_utc = end_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"created_at:>={start_utc} created_at:<{end_utc}"
+
+
+def _stored_receipt_date_prefixes(selected_date: date) -> tuple[str, str]:
+    """Return both date encodings found in existing transfer cards."""
+    return selected_date.isoformat(), selected_date.strftime("%m/%d/%Y")
 
 
 def _stable_key(*parts: Any) -> str:
@@ -902,11 +907,15 @@ async def list_receipts(
     if store:
         stmt = stmt.where(InventoryReceipt.store_key == _clean_store(store))
     if purchase_date:
-        # Shopify transfer timestamps are stored as ISO-8601 strings. Their
-        # leading date is also what the cards display, so the date selector and
-        # the visible purchase-order date always describe the same queue.
+        # New transfers normally use ISO-8601, while older Shopify Date scalar
+        # values in production were saved as MM/DD/YYYY. Keep both searchable
+        # so the date selector works for every existing purchase-order card.
+        iso_prefix, shopify_prefix = _stored_receipt_date_prefixes(purchase_date)
         stmt = stmt.where(
-            InventoryReceipt.shopify_created_at.like(f"{purchase_date.isoformat()}%")
+            or_(
+                InventoryReceipt.shopify_created_at.like(f"{iso_prefix}%"),
+                InventoryReceipt.shopify_created_at.like(f"{shopify_prefix}%"),
+            )
         )
     # Legacy rows imported from Shopify's customer Order API stay preserved in
     # the database, but they are not purchase orders and must not appear here.

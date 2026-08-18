@@ -236,13 +236,24 @@ function CountReviewSheet({ open, receipt, items, actualCrates, busy, onClose, o
 
 
 function shortDate(value) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ""));
+  const normalized = receiptDateInput(value);
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(normalized);
   return match ? `${match[3]}/${match[2]}` : "";
 }
 
 
+function receiptDateInput(value) {
+  const text = String(value || "").trim();
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const shopify = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(text);
+  if (shopify) return `${shopify[3]}-${shopify[1]}-${shopify[2]}`;
+  return "";
+}
+
+
 function orderedLabel(receipt) {
-  const date = String(receipt?.shopify_created_at || "").slice(0, 10);
+  const date = receiptDateInput(receipt?.shopify_created_at);
   if (!date) return "Linked Shopify transfer";
   return `Transfer created ${shortDate(date)}`;
 }
@@ -550,7 +561,7 @@ export default function InventoryHelper() {
       setAvailableTransfers((current) => current.map((item) => item.shopify_order_gid === saved.shopify_order_gid ? { ...item, already_added: true } : item));
       setNotice(`${saved.order_number} added to Inventory Helper.`);
       setShowCreate(false);
-      const savedDate = String(saved.shopify_created_at || "").slice(0, 10) || viewDate;
+      const savedDate = receiptDateInput(saved.shopify_created_at) || viewDate;
       setViewDate(savedDate);
       await loadReceipts(saved.id, savedDate);
       window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);

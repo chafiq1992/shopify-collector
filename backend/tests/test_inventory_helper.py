@@ -14,6 +14,7 @@ from backend.app.inventory_helper_routes import (
     _date_search_query,
     _line_items_from_shopify,
     _shopify_transfer_payload,
+    _stored_receipt_date_prefixes,
     _status,
 )
 
@@ -101,6 +102,13 @@ def test_date_query_uses_casablanca_day_boundaries():
     query = _date_search_query(date(2026, 8, 18))
     assert "created_at:>=2026-08-17T23:00:00Z" in query
     assert "created_at:<2026-08-18T23:00:00Z" in query
+
+
+def test_saved_receipt_date_filter_supports_iso_and_shopify_formats():
+    assert _stored_receipt_date_prefixes(date(2026, 8, 16)) == (
+        "2026-08-16",
+        "08/16/2026",
+    )
 
 
 def test_date_card_uses_transfer_total_when_only_preview_line_is_loaded():
