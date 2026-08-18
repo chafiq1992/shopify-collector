@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import StorePicker from "../components/StorePicker.jsx";
 import { authFetch, authHeaders, loadAuth } from "../lib/auth";
+import { formatInventoryOperation, groupInventoryItems, inventoryReview } from "../lib/inventoryHelper";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 
 
@@ -183,6 +184,57 @@ function QuantityEditSheet({ editor, onChange, onClose, onConfirm }) {
 }
 
 
+function CountReviewSheet({ open, receipt, items, actualCrates, busy, onClose, onConfirm }) {
+  if (!open || !receipt) return null;
+  const changes = inventoryReview(items);
+  const shortages = items.filter((item) => Number(item.actual_quantity || 0) !== Number(item.ordered_quantity || 0));
+  const reduceTotal = changes.filter((entry) => entry.delta < 0).reduce((sum, entry) => sum + Math.abs(entry.delta), 0);
+  const receiveTotal = changes.filter((entry) => entry.delta > 0).reduce((sum, entry) => sum + entry.delta, 0);
+  const attention = changes.filter((entry) => entry.delta < 0 || Number(entry.item.actual_quantity || 0) !== Number(entry.item.ordered_quantity || 0));
+
+  return (
+    <div className="fixed inset-0 z-[90] flex items-end justify-center bg-slate-950/65 backdrop-blur-sm sm:items-center sm:p-5" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <div className="max-h-[100dvh] w-full overflow-y-auto rounded-t-3xl bg-white px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 shadow-2xl sm:max-w-xl sm:rounded-3xl sm:p-6">
+        <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-slate-300 sm:hidden" />
+        <div className="flex items-start gap-3">
+          <div className="rounded-xl bg-indigo-50 p-2.5 text-indigo-700"><Check className="h-5 w-5" /></div>
+          <div className="min-w-0 flex-1"><div className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Final check</div><h3 className="break-words text-xl font-black">Apply {receipt.order_number} to Shopify?</h3><p className="mt-1 text-sm text-slate-500">Review the count once. This action changes live inventory.</p></div>
+          <button type="button" disabled={busy} onClick={onClose} className="rounded-xl border border-slate-200 p-2.5 text-slate-500 disabled:opacity-50" aria-label="Close review"><X className="h-5 w-5" /></button>
+        </div>
+
+        <div className="mt-4 grid grid-cols-3 gap-2 text-center">
+          <div className="rounded-xl bg-slate-50 p-2"><div className="text-[9px] font-bold uppercase text-slate-500">Crates</div><div className="text-xl font-black">{actualCrates}</div></div>
+          <div className="rounded-xl bg-slate-50 p-2"><div className="text-[9px] font-bold uppercase text-slate-500">Found</div><div className="text-xl font-black">{items.reduce((sum, item) => sum + Number(item.actual_quantity || 0), 0)}</div></div>
+          <div className={`rounded-xl p-2 ${shortages.length ? "bg-rose-50 text-rose-900" : "bg-emerald-50 text-emerald-900"}`}><div className="text-[9px] font-bold uppercase opacity-70">Different</div><div className="text-xl font-black">{shortages.length}</div></div>
+        </div>
+
+        {(reduceTotal > 0 || receiveTotal > 0) ? (
+          <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3">
+            <div className="text-xs font-black uppercase tracking-wide text-amber-800">Planned Shopify inventory change</div>
+            <div className="mt-1 flex flex-wrap gap-2 text-sm font-black">
+              {reduceTotal > 0 && <span className="rounded-lg bg-rose-100 px-2 py-1 text-rose-800">Reduce {reduceTotal}</span>}
+              {receiveTotal > 0 && <span className="rounded-lg bg-emerald-100 px-2 py-1 text-emerald-800">Receive {receiveTotal}</span>}
+            </div>
+          </div>
+        ) : <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm font-semibold text-slate-600">No Shopify quantity change is needed. The count details will still be saved.</div>}
+
+        {attention.length > 0 && (
+          <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200">
+            <div className="grid grid-cols-[minmax(0,1fr)_48px_48px_56px] gap-2 bg-slate-100 px-3 py-2 text-[9px] font-black uppercase text-slate-500"><span>Variant</span><span>Was</span><span>Now</span><span>Stock</span></div>
+            {attention.map(({ item, applied, found, delta }) => {
+              const dimensions = variantDimensions(item);
+              return <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_48px_48px_56px] items-center gap-2 border-t border-slate-100 px-3 py-2 text-sm"><div className="min-w-0"><div className="truncate font-bold">{dimensions.color} · {dimensions.size}</div><div className="truncate text-[10px] text-slate-500">{item.title}</div></div><span className="font-black">{applied}</span><span className="font-black">{found}</span><span className={`font-black ${delta < 0 ? "text-rose-700" : "text-emerald-700"}`}>{delta > 0 ? "+" : ""}{delta}</span></div>;
+            })}
+          </div>
+        )}
+
+        <div className="mt-5 grid grid-cols-2 gap-2"><button type="button" disabled={busy} onClick={onClose} className="h-12 rounded-xl border border-slate-300 text-sm font-black disabled:opacity-50">Go back</button><button type="button" disabled={busy} onClick={onConfirm} className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-3 text-sm font-black text-white disabled:opacity-50">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Apply to Shopify</button></div>
+      </div>
+    </div>
+  );
+}
+
+
 function shortDate(value) {
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ""));
   return match ? `${match[3]}/${match[2]}` : "";
@@ -282,6 +334,7 @@ export default function InventoryHelper() {
   const [store, setStore] = useState(() => readCurrentStore());
   const [receipts, setReceipts] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  const [viewDate, setViewDate] = useState(localDateInput);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -307,11 +360,23 @@ export default function InventoryHelper() {
   const [countBusy, setCountBusy] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [quantityEditor, setQuantityEditor] = useState(null);
+  const [showCountReview, setShowCountReview] = useState(false);
+  const [lastSyncOperations, setLastSyncOperations] = useState([]);
   const detailRef = useRef(null);
   const actualItems = useMemo(
     () => agentItems.reduce((sum, item) => sum + Number(item.actual_quantity || 0), 0),
     [agentItems],
   );
+  const groupedAgentItems = useMemo(() => groupInventoryItems(agentItems), [agentItems]);
+  const countHasChanges = useMemo(() => {
+    if (!selected) return false;
+    if (selected.actual_items == null || selected.actual_crates == null) return true;
+    const savedById = new Map((selected.line_items || []).map((item) => [String(item.id), item]));
+    const itemChanged = agentItems.some((item) => Number(item.actual_quantity || 0) !== Number(savedById.get(String(item.id))?.actual_quantity || 0));
+    return itemChanged
+      || Number(actualCrates || 0) !== Number(selected.actual_crates || 0)
+      || agentNote.trim() !== String(selected.agent_note || "").trim();
+  }, [selected, agentItems, actualCrates, agentNote]);
   const reconnectUrl = `/api/shopify/oauth/start?store=${encodeURIComponent(store)}&return_to=${encodeURIComponent(`/inventory-helper?store=${store}`)}`;
 
   function showApiError(err) {
@@ -332,12 +397,15 @@ export default function InventoryHelper() {
   useEffect(() => {
     persistStoreSelection(store);
     setNeedsShopifyReconnect(false);
-    loadReceipts();
-  }, [store]);
+    setSelectedId(null);
+    setLastSyncOperations([]);
+    loadReceipts(null, viewDate);
+  }, [store, viewDate]);
 
   useEffect(() => {
     if (!selected) return;
     setQuantityEditor(null);
+    setShowCountReview(false);
     setAdminItems((selected.line_items || []).map((item) => ({ ...item })));
     setAgentItems((selected.line_items || []).map((item) => ({
       ...item,
@@ -348,11 +416,11 @@ export default function InventoryHelper() {
     setAgentNote(selected.agent_note || "");
   }, [selected?.id, selected?.updated_at]);
 
-  async function loadReceipts(preferredId) {
+  async function loadReceipts(preferredId, selectedDate = viewDate) {
     setLoading(true);
     setError("");
     try {
-      const data = await apiJson(`/api/inventory-helper/receipts?store=${encodeURIComponent(store)}`, {
+      const data = await apiJson(`/api/inventory-helper/receipts?store=${encodeURIComponent(store)}&purchase_date=${encodeURIComponent(selectedDate)}`, {
         headers: authHeaders({ Accept: "application/json" }),
       });
       const list = data.receipts || [];
@@ -367,6 +435,7 @@ export default function InventoryHelper() {
 
   function openReceipt(receiptId) {
     setSelectedId(receiptId);
+    setLastSyncOperations([]);
     window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);
   }
 
@@ -380,7 +449,7 @@ export default function InventoryHelper() {
   }
 
   function refreshCurrent() {
-    loadReceipts(selected?.id);
+    loadReceipts(selected?.id, viewDate);
   }
 
   function replaceReceipt(next) {
@@ -481,7 +550,9 @@ export default function InventoryHelper() {
       setAvailableTransfers((current) => current.map((item) => item.shopify_order_gid === saved.shopify_order_gid ? { ...item, already_added: true } : item));
       setNotice(`${saved.order_number} added to Inventory Helper.`);
       setShowCreate(false);
-      await loadReceipts(saved.id);
+      const savedDate = String(saved.shopify_created_at || "").slice(0, 10) || viewDate;
+      setViewDate(savedDate);
+      await loadReceipts(saved.id, savedDate);
       window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);
     } catch (err) {
       showApiError(err);
@@ -509,8 +580,15 @@ export default function InventoryHelper() {
     }
   }
 
-  async function saveCount(event) {
+  function reviewCount(event) {
     event.preventDefault();
+    if (!selected || !agentItems.length || !countHasChanges) return;
+    setError("");
+    setNotice("");
+    setShowCountReview(true);
+  }
+
+  async function saveCount() {
     if (!selected) return;
     setCountBusy(true);
     setError("");
@@ -527,9 +605,12 @@ export default function InventoryHelper() {
       });
       replaceReceipt(saved);
       const operations = saved.inventory_operations || [];
+      setLastSyncOperations(operations);
+      setShowCountReview(false);
+      const operationText = operations.map(formatInventoryOperation);
       setNotice(
         operations.length
-          ? `${saved.status === "matched" ? "Count matches." : "Mismatch saved."} Shopify inventory updated: ${operations.join("; ")}.`
+          ? `${saved.status === "matched" ? "Count matches." : "Mismatch saved."} ${operationText.join("; ")}.`
           : `${saved.status === "matched" ? "Count saved — everything matches." : "Count saved — mismatch highlighted for review."} No Shopify quantity change was needed.`,
       );
     } catch (err) {
@@ -608,19 +689,25 @@ export default function InventoryHelper() {
         )}
 
         <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
-          <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 px-4 py-4 sm:px-6">
-            <div>
+          <div className="border-b border-slate-100 px-4 py-4 sm:px-6">
+            <div className="flex flex-wrap items-start gap-3">
+              <div>
               <div className="text-xs font-bold uppercase tracking-wide text-indigo-600">Receiving queue</div>
               <h2 className="text-lg font-black">Purchase orders</h2>
-              <p className="text-xs text-slate-500">Newest first · scroll down for older purchase orders.</p>
+                <p className="text-xs text-slate-500">Choose a date to see purchase orders already added to this app.</p>
+              </div>
+              {isAdmin && <button type="button" onClick={() => { setShowCreate(true); setError(""); setNotice(""); }} className="ml-auto inline-flex h-10 items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 text-xs font-black text-indigo-700 shadow-sm"><Plus className="h-4 w-4" /> Import</button>}
             </div>
-            {isAdmin && <button type="button" onClick={() => { setShowCreate(true); setError(""); setNotice(""); }} className="ml-auto inline-flex h-10 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-xs font-black text-white shadow-sm"><Plus className="h-4 w-4" /> Add from Shopify</button>}
+            <label className="mt-4 block rounded-2xl border border-indigo-100 bg-indigo-50/70 p-3 sm:flex sm:items-center sm:gap-3">
+              <span className="mb-2 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-indigo-700 sm:mb-0"><CalendarDays className="h-4 w-4" /> Purchase-order date</span>
+              <input type="date" value={viewDate} onChange={(event) => setViewDate(event.target.value)} className="h-12 w-full rounded-xl border border-indigo-200 bg-white px-3 text-base font-black text-slate-950 outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 sm:ml-auto sm:w-52" aria-label="Purchase-order date" />
+            </label>
           </div>
 
           {loading ? (
             <div className="flex items-center justify-center gap-2 p-10 text-sm font-semibold text-slate-500"><Loader2 className="h-5 w-5 animate-spin" /> Loading purchase orders…</div>
           ) : !receipts.length ? (
-            <div className="p-10 text-center"><ClipboardList className="mx-auto mb-3 h-9 w-9 text-slate-300" /><div className="font-black">No purchase orders added yet</div><p className="mx-auto mt-1 max-w-lg text-sm text-slate-500">{isAdmin ? "In Shopify, mark the purchase order as ordered and create its linked inventory transfer. Then paste the transfer name or PO reference here." : "An admin has not added a purchase order yet."}</p></div>
+            <div className="p-10 text-center"><ClipboardList className="mx-auto mb-3 h-9 w-9 text-slate-300" /><div className="font-black">No purchase orders for {shortDate(viewDate)}</div><p className="mx-auto mt-1 max-w-lg text-sm text-slate-500">{isAdmin ? "Use Import to add a linked Shopify transfer, or choose another date." : "Choose another date, or ask an admin to import the purchase order."}</p></div>
           ) : (
             <div className="grid grid-cols-2 gap-2.5 p-2.5 sm:grid-cols-3 sm:gap-4 sm:p-4 lg:grid-cols-4">
               {receipts.map((receipt) => {
@@ -743,97 +830,84 @@ export default function InventoryHelper() {
         )}
 
         <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[['Total POs', totals.all, 'text-slate-950'], ['Ready', totals.waiting, 'text-emerald-700'], ['Mismatch', totals.mismatch, 'text-rose-700'], ['Matched', totals.matched, 'text-emerald-700']].map(([label, value, tone]) => (
+          {[[`POs ${shortDate(viewDate)}`, totals.all, 'text-slate-950'], ['Ready', totals.waiting, 'text-emerald-700'], ['Mismatch', totals.mismatch, 'text-rose-700'], ['Matched', totals.matched, 'text-emerald-700']].map(([label, value, tone]) => (
             <div key={label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-xs font-semibold text-slate-500">{label}</div><div className={`mt-1 text-2xl font-black ${tone}`}>{value}</div></div>
           ))}
         </section>
 
         <div ref={detailRef} className="scroll-mt-24">
-          {selected ? (
-            <section className="mx-auto max-w-4xl space-y-5">
-              <div className={`rounded-3xl border p-4 shadow-sm sm:p-6 ${selectedTone.row}`}>
-                <div className="flex flex-wrap items-start gap-3">
-                  <div className={`rounded-2xl border p-3 ${selectedTone.badge}`}><SelectedIcon className="h-6 w-6" /></div>
-                  <div><div className="text-xs font-bold uppercase tracking-wide text-slate-500">{selected.po_number ? `PO ${selected.po_number}` : orderedLabel(selected)}</div><h2 className="text-2xl font-black tracking-tight">{selected.order_number}</h2><p className="mt-1 text-sm font-semibold text-slate-600">{differenceText(selected)}</p></div>
-                  <div className={`ml-auto rounded-full border px-3 py-1 text-xs font-bold ${selectedTone.badge}`}>{selectedTone.label}</div>
-                </div>
-                {selected.agent_note && <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-100 px-4 py-3 text-sm font-bold text-amber-950"><span className="mb-0.5 block text-[10px] uppercase tracking-wider text-amber-700">Agent note</span>{selected.agent_note}</div>}
-              </div>
-
-              <div className="rounded-3xl border border-slate-200 bg-white shadow-sm">
-                <div className="flex items-center gap-3 border-b border-slate-100 p-4 sm:p-6"><div className="rounded-xl bg-slate-100 p-2 text-slate-700"><ClipboardList className="h-5 w-5" /></div><div><h3 className="font-bold">Admin order plan</h3><p className="text-sm text-slate-500">Expected crates and item quantities.</p></div></div>
-                <div className="p-4 sm:p-6">
-                  <div className="mb-4 grid grid-cols-2 gap-3 sm:max-w-sm"><div className="rounded-2xl bg-slate-50 p-3"><div className="text-xs text-slate-500">Expected items</div><div className="text-xl font-black">{adminItems.reduce((sum, item) => sum + Number(item.ordered_quantity || 0), 0)}</div></div><QuantityField label="Crates ordered" value={adminCrates} onChange={setAdminCrates} disabled={!isAdmin} /></div>
-                  <div className="overflow-hidden rounded-2xl border border-slate-200">
-                    <div className="hidden grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] items-center gap-2 border-b border-slate-200 bg-slate-100 px-4 py-2 text-[10px] font-black uppercase tracking-wide text-slate-600 sm:grid">
-                      <span>Product</span><span className="text-violet-700">Color</span><span className="text-sky-700">Size</span><span>Shopify</span><span>Ordered</span>
-                    </div>
-                    {adminItems.map((item) => {
-                      const dimensions = variantDimensions(item);
-                      return (
-                        <div key={item.id} className="border-b border-slate-100 p-3 last:border-0 sm:grid sm:grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] sm:items-center sm:gap-2 sm:px-4">
-                          <ProductIdentity item={item} />
-                          <div className="mt-3 grid grid-cols-2 gap-2 sm:mt-0 sm:block"><DimensionBadge type="color" value={dimensions.color} compact /><div className="sm:hidden"><DimensionBadge type="size" value={dimensions.size} compact /></div></div>
-                          <div className="hidden sm:block"><DimensionBadge type="size" value={dimensions.size} compact /></div>
-                          <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm font-black text-slate-700 sm:mt-0 sm:bg-transparent sm:px-0 sm:py-0">Shopify <span className="float-right sm:float-none">{item.shopify_quantity}</span></div>
-                          <div className="mt-2 sm:mt-0"><QuantityEditButton label="Qty ordered" value={item.ordered_quantity} disabled={!isAdmin} onClick={() => openQuantityEditor("admin", item)} /></div>
-                        </div>
-                      );
-                    })}
+          {selected && (
+            <div className="fixed inset-0 z-40 overflow-y-auto bg-[#f6f7f9] pt-[env(safe-area-inset-top)] sm:static sm:z-auto sm:overflow-visible sm:bg-transparent sm:pt-0">
+              <section className="mx-auto max-w-5xl space-y-3 p-3 pb-[calc(1rem+env(safe-area-inset-bottom))] sm:p-0">
+                <div className={`sticky top-0 z-10 rounded-2xl border p-3 shadow-sm sm:static sm:rounded-3xl sm:p-5 ${selectedTone.row}`}>
+                  <div className="flex items-start gap-2.5">
+                    <div className={`rounded-xl border p-2 ${selectedTone.badge}`}><SelectedIcon className="h-5 w-5" /></div>
+                    <div className="min-w-0 flex-1"><div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">{selected.po_number ? `PO ${selected.po_number}` : orderedLabel(selected)}</div><h2 className="break-words text-xl font-black leading-tight sm:text-2xl">{selected.order_number}</h2><p className="mt-1 text-xs font-semibold text-slate-600 sm:text-sm">{differenceText(selected)}</p></div>
+                    <span className={`hidden rounded-full border px-3 py-1 text-xs font-bold sm:block ${selectedTone.badge}`}>{selectedTone.label}</span>
+                    <button type="button" onClick={() => setSelectedId(null)} className="rounded-xl border border-slate-300 bg-white/90 p-2.5 text-slate-600" aria-label="Close purchase order"><X className="h-5 w-5" /></button>
                   </div>
-                  {isAdmin && <div className="mt-4 flex justify-end"><button type="button" onClick={saveAdminPlan} disabled={countBusy} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 text-sm font-bold text-white disabled:opacity-50">{countBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save plan</button></div>}
-                </div>
-              </div>
-
-              <div className="rounded-3xl border border-slate-200 bg-white shadow-sm">
-                <div className="flex items-center gap-3 border-b border-slate-100 p-4 sm:p-6"><div className="rounded-xl bg-indigo-50 p-2 text-indigo-600"><PackageOpen className="h-5 w-5" /></div><div><h3 className="font-bold">Agent receiving check</h3><p className="text-sm text-slate-500">Photograph the crates and enter the quantity actually found for every variant.</p></div></div>
-                <form onSubmit={saveCount} className="space-y-5 p-4 sm:p-6">
-                  <div>
-                    <div className="mb-2 flex items-center justify-between"><div><div className="text-sm font-bold">Crate photos</div><div className="text-xs text-slate-500">JPG, PNG, or WebP · up to 4 photos</div></div><label className={`inline-flex h-10 cursor-pointer items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 text-sm font-bold text-indigo-700 ${photoBusy || selected.photos?.length >= 4 ? "pointer-events-none opacity-50" : ""}`}><input type="file" accept="image/jpeg,image/png,image/webp" capture="environment" onChange={uploadPhoto} className="sr-only" />{photoBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />} Add photo</label></div>
-                    {!!selected.photos?.length && <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{selected.photos.map((photo) => <PrivatePhoto key={photo.id} photo={photo} onDelete={deletePhoto} canDelete={isAdmin || photo.uploaded_by_id === auth?.user?.id} />)}</div>}
-                    {!selected.photos?.length && <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 text-center text-slate-500"><input type="file" accept="image/jpeg,image/png,image/webp" capture="environment" onChange={uploadPhoto} className="sr-only" /><Camera className="mb-2 h-6 w-6" /><span className="text-sm font-bold">Take or choose a crate photo</span></label>}
+                  <div className="mt-3 grid grid-cols-4 gap-1.5 text-center">
+                    {[['Crates', selected.ordered_crates || '—'], ['Received', selected.actual_crates ?? '—'], ['Ordered', selected.expected_items], ['Counted', selected.actual_items ?? '—']].map(([label, value]) => <div key={label} className="rounded-xl bg-white/80 px-1 py-2"><div className="text-[9px] font-bold uppercase text-slate-500">{label}</div><div className="text-lg font-black leading-none">{value}</div></div>)}
                   </div>
-                  <div>
-                    <div className="mb-2 flex items-end justify-between"><div><div className="text-sm font-black">Variant quantities</div><div className="text-xs text-slate-500">Changing a saved value applies only the difference to Shopify inventory.</div></div><div className="rounded-xl bg-indigo-50 px-3 py-2 text-right"><div className="text-[10px] font-bold uppercase text-indigo-600">Counted</div><div className="text-xl font-black text-indigo-950">{actualItems}</div></div></div>
-                    <div className="overflow-hidden rounded-2xl border border-slate-200">
-                      <div className="hidden grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] items-center gap-2 border-b border-slate-200 bg-slate-100 px-4 py-2 text-[10px] font-black uppercase tracking-wide text-slate-600 sm:grid">
-                        <span>Product</span><span className="text-violet-700">Color</span><span className="text-sky-700">Size</span><span>Ordered</span><span>Found</span>
+                  {selected.agent_note && <div className="mt-3 rounded-xl border border-amber-300 bg-amber-100 px-3 py-2 text-xs font-bold text-amber-950"><span className="mr-1 text-[9px] uppercase tracking-wider text-amber-700">Agent note</span>{selected.agent_note}</div>}
+                </div>
+
+                {isAdmin && (
+                  <details className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+                    <summary className="flex cursor-pointer list-none items-center gap-3 p-4"><div className="rounded-xl bg-slate-100 p-2 text-slate-700"><ClipboardList className="h-5 w-5" /></div><div><h3 className="font-bold">Admin order plan</h3><p className="text-xs text-slate-500">Open to edit ordered crates or quantities.</p></div><Pencil className="ml-auto h-4 w-4 text-slate-400" /></summary>
+                    <div className="border-t border-slate-100 p-4">
+                      <div className="mb-4 grid grid-cols-2 gap-3 sm:max-w-sm"><div className="rounded-2xl bg-slate-50 p-3"><div className="text-xs text-slate-500">Expected items</div><div className="text-xl font-black">{adminItems.reduce((sum, item) => sum + Number(item.ordered_quantity || 0), 0)}</div></div><QuantityField label="Crates ordered" value={adminCrates} onChange={setAdminCrates} /></div>
+                      <div className="overflow-hidden rounded-2xl border border-slate-200">
+                        <div className="hidden grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] items-center gap-2 border-b border-slate-200 bg-slate-100 px-4 py-2 text-[10px] font-black uppercase tracking-wide text-slate-600 sm:grid"><span>Product</span><span className="text-violet-700">Color</span><span className="text-sky-700">Size</span><span>Shopify</span><span>Ordered</span></div>
+                        {adminItems.map((item) => { const dimensions = variantDimensions(item); return <div key={item.id} className="border-b border-slate-100 p-3 last:border-0 sm:grid sm:grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] sm:items-center sm:gap-2 sm:px-4"><ProductIdentity item={item} /><div className="mt-3 grid grid-cols-2 gap-2 sm:mt-0 sm:block"><DimensionBadge type="color" value={dimensions.color} compact /><div className="sm:hidden"><DimensionBadge type="size" value={dimensions.size} compact /></div></div><div className="hidden sm:block"><DimensionBadge type="size" value={dimensions.size} compact /></div><div className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm font-black text-slate-700 sm:mt-0 sm:bg-transparent sm:px-0 sm:py-0">Shopify <span className="float-right sm:float-none">{item.shopify_quantity}</span></div><div className="mt-2 sm:mt-0"><QuantityEditButton label="Qty ordered" value={item.ordered_quantity} onClick={() => openQuantityEditor("admin", item)} /></div></div>; })}
                       </div>
-                      {agentItems.map((item) => {
-                        const differs = Number(item.actual_quantity || 0) !== Number(item.ordered_quantity || 0);
-                        const dimensions = variantDimensions(item);
-                        return (
-                          <div key={item.id} className={`border-b border-slate-100 p-3 last:border-0 sm:grid sm:grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] sm:items-center sm:gap-2 sm:px-4 ${differs ? "bg-rose-50/70" : "bg-white"}`}>
-                            <ProductIdentity item={item} meta={item.inventory_synced_at ? "Shopify inventory previously synced" : null} />
-                            <div className="mt-3 grid grid-cols-2 gap-2 sm:mt-0 sm:block"><DimensionBadge type="color" value={dimensions.color} compact /><div className="sm:hidden"><DimensionBadge type="size" value={dimensions.size} compact /></div></div>
-                            <div className="hidden sm:block"><DimensionBadge type="size" value={dimensions.size} compact /></div>
-                            <div className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-sm font-black text-slate-700 sm:mt-0 sm:bg-transparent sm:px-0 sm:py-0">Ordered <span className="float-right sm:float-none">{item.ordered_quantity}</span></div>
-                            <div className="mt-2 sm:mt-0"><QuantityEditButton label="Qty found" value={item.actual_quantity} tone={differs ? "rose" : "indigo"} onClick={() => openQuantityEditor("agent", item)} /></div>
-                          </div>
-                        );
-                      })}
+                      <div className="mt-4 flex justify-end"><button type="button" onClick={saveAdminPlan} disabled={countBusy} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 text-sm font-bold text-white disabled:opacity-50">{countBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save plan</button></div>
                     </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3"><QuantityField label="Crates received" value={actualCrates} onChange={setActualCrates} /><div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Items found</div><div className="mt-1 text-2xl font-black">{actualItems}</div></div></div>
-                  <label className="block"><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Agent note · optional</span><textarea value={agentNote} onChange={(event) => setAgentNote(event.target.value)} rows="3" placeholder="Damaged box, opened crate, or anything the admin should know…" className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" /></label>
-                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-900">Saving receives new quantities into the transfer destination. If you correct an earlier count, Shopify inventory changes only by the difference.</div>
-                  <button disabled={countBusy || !agentItems.length} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-black text-white shadow-sm disabled:opacity-50 sm:w-auto">{countBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save & update Shopify inventory</button>
-                </form>
-              </div>
+                  </details>
+                )}
 
-              {selected.actual_crates != null && selected.actual_items != null && (
-                <div className={`rounded-3xl border p-5 ${selectedTone.row}`}>
-                  <div className="mb-4 flex items-center gap-2"><SelectedIcon className={`h-5 w-5 ${selected.status === "matched" ? "text-emerald-600" : "text-rose-600"}`} /><h3 className="font-black">Count summary</h3></div>
-                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    {[['Crates ordered', selected.ordered_crates || '—'], ['Crates received', selected.actual_crates], ['Items ordered', selected.expected_items], ['Items counted', selected.actual_items]].map(([label, value]) => <div key={label} className="rounded-2xl border border-white/80 bg-white/80 p-3"><div className="text-xs text-slate-500">{label}</div><div className="text-2xl font-black">{value}</div></div>)}
-                  </div>
-                  <p className={`mt-4 text-sm font-bold ${selected.status === "matched" ? "text-emerald-800" : "text-rose-800"}`}>{differenceText(selected)}</p>
-                  {selected.counted_by && <p className="mt-1 text-xs text-slate-500">Counted by {selected.counted_by.name || selected.counted_by.email}</p>}
+                <div className="rounded-2xl border border-slate-200 bg-white shadow-sm sm:rounded-3xl">
+                  <div className="flex items-center gap-3 border-b border-slate-100 p-4"><div className="rounded-xl bg-indigo-50 p-2 text-indigo-600"><PackageOpen className="h-5 w-5" /></div><div className="min-w-0"><h3 className="font-bold">Receiving count</h3><p className="text-xs text-slate-500">Tap Found to edit a color and size.</p></div><div className="ml-auto rounded-xl bg-indigo-50 px-3 py-2 text-right"><div className="text-[9px] font-bold uppercase text-indigo-600">Found</div><div className="text-xl font-black leading-none text-indigo-950">{actualItems}</div></div></div>
+                  <form onSubmit={reviewCount} className="space-y-4 p-3 sm:p-5">
+                    <div className="space-y-3">
+                      {groupedAgentItems.map((group) => (
+                        <div key={group.key} className="overflow-hidden rounded-2xl border border-slate-200">
+                          <div className="border-b border-slate-200 bg-slate-50 p-3"><ProductIdentity item={{ title: group.title, image_url: group.image_url, image_alt: group.image_alt, sku: `${group.items.length} variant${group.items.length === 1 ? "" : "s"}` }} /></div>
+                          <div className="grid grid-cols-[minmax(70px,1fr)_minmax(54px,.7fr)_48px_72px] gap-1.5 bg-slate-100 px-2 py-2 text-[9px] font-black uppercase tracking-wide text-slate-500 sm:grid-cols-[minmax(120px,1fr)_120px_70px_110px] sm:px-3"><span className="text-violet-700">Color</span><span className="text-sky-700">Size</span><span className="text-center">Order</span><span className="text-center">Found</span></div>
+                          {group.items.map((item) => {
+                            const differs = Number(item.actual_quantity || 0) !== Number(item.ordered_quantity || 0);
+                            const dimensions = variantDimensions(item);
+                            return (
+                              <div key={item.id} className={`grid grid-cols-[minmax(70px,1fr)_minmax(54px,.7fr)_48px_72px] items-center gap-1.5 border-t border-slate-100 px-2 py-2 sm:grid-cols-[minmax(120px,1fr)_120px_70px_110px] sm:px-3 ${differs ? "bg-rose-50/80" : "bg-white"}`}>
+                                <div className="min-w-0 rounded-lg bg-violet-50 px-2 py-2 text-xs font-black text-violet-950"><span className="block whitespace-normal break-words leading-tight">{dimensions.color}</span></div>
+                                <div className="min-w-0 rounded-lg bg-sky-50 px-2 py-2 text-xs font-black text-sky-950"><span className="block whitespace-normal break-words leading-tight">{dimensions.size}</span></div>
+                                <div className="text-center text-sm font-black text-slate-700">{item.ordered_quantity}</div>
+                                <button type="button" onClick={() => openQuantityEditor("agent", item)} className={`flex min-h-10 items-center justify-center gap-1 rounded-xl border px-1 text-base font-black shadow-sm active:scale-[0.98] ${differs ? "border-rose-300 bg-rose-100 text-rose-950" : "border-indigo-200 bg-indigo-50 text-indigo-950"}`}><span>{item.actual_quantity}</span><Pencil className="h-3 w-3" /></button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3"><QuantityField label="Crates received" value={actualCrates} onChange={setActualCrates} /><div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Items found</div><div className="mt-1 text-2xl font-black">{actualItems}</div></div></div>
+
+                    <details className="rounded-2xl border border-slate-200 bg-slate-50" open={!selected.photos?.length}>
+                      <summary className="flex cursor-pointer list-none items-center gap-2 p-3 text-sm font-black"><Camera className="h-4 w-4 text-indigo-600" /> Crate photos &amp; note <span className="ml-auto rounded-full bg-white px-2 py-1 text-[10px] text-slate-500">{selected.photos?.length || 0}/4 photos</span></summary>
+                      <div className="space-y-3 border-t border-slate-200 p-3">
+                        <label className={`inline-flex h-10 w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-white px-3 text-sm font-bold text-indigo-700 ${photoBusy || selected.photos?.length >= 4 ? "pointer-events-none opacity-50" : ""}`}><input type="file" accept="image/jpeg,image/png,image/webp" capture="environment" onChange={uploadPhoto} className="sr-only" />{photoBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />} Take or add crate photo</label>
+                        {!!selected.photos?.length && <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{selected.photos.map((photo) => <PrivatePhoto key={photo.id} photo={photo} onDelete={deletePhoto} canDelete={isAdmin || photo.uploaded_by_id === auth?.user?.id} />)}</div>}
+                        <label className="block"><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Agent note · optional</span><textarea value={agentNote} onChange={(event) => setAgentNote(event.target.value)} rows="2" placeholder="Damage, opened crate, or anything the admin should know…" className="w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" /></label>
+                      </div>
+                    </details>
+
+                    {!!lastSyncOperations.length && <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3"><div className="text-xs font-black uppercase tracking-wide text-emerald-800">Verified Shopify result</div>{lastSyncOperations.map((operation, index) => <div key={index} className="mt-1 text-xs font-bold text-emerald-950">{formatInventoryOperation(operation)}</div>)}</div>}
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">You will review every inventory reduction before it is applied to Shopify.</div>
+                    <button disabled={countBusy || !agentItems.length || !countHasChanges} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-black text-white shadow-sm disabled:bg-slate-300 disabled:text-slate-600"><Check className="h-4 w-4" />{countHasChanges ? "Review & update Shopify" : "Saved — no changes"}</button>
+                  </form>
                 </div>
-              )}
-            </section>
-          ) : (
-            receipts.length > 0 && <div className="flex min-h-44 items-center justify-center rounded-3xl border border-dashed border-slate-300 bg-white text-center text-slate-500"><div><PackageOpen className="mx-auto mb-3 h-9 w-9 text-slate-300" /><p className="font-bold">Tap a card to see all purchase-order details.</p></div></div>
+              </section>
+            </div>
           )}
         </div>
       </main>
@@ -842,6 +916,15 @@ export default function InventoryHelper() {
         onChange={(value) => setQuantityEditor((current) => current ? { ...current, value } : current)}
         onClose={() => setQuantityEditor(null)}
         onConfirm={confirmQuantityEditor}
+      />
+      <CountReviewSheet
+        open={showCountReview}
+        receipt={selected}
+        items={agentItems}
+        actualCrates={actualCrates}
+        busy={countBusy}
+        onClose={() => setShowCountReview(false)}
+        onConfirm={saveCount}
       />
     </div>
   );

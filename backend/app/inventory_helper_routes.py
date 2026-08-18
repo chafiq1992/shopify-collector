@@ -610,10 +610,10 @@ async def _receive_inventory_shipments(
     receipt_id: int,
     receive_groups: dict[str, dict[str, Any]],
     transition: str,
-) -> list[str]:
+) -> list[dict[str, Any]]:
     from .main import shopify_graphql
 
-    operations: list[str] = []
+    operations: list[dict[str, Any]] = []
     for shipment_id, group in receive_groups.items():
         if group.get("status") == "DRAFT":
             data = await shopify_graphql(
@@ -640,7 +640,13 @@ async def _receive_inventory_shipments(
         error = _user_error_message(data.get("inventoryShipmentReceive") or {}, "receive the shipment")
         if error:
             raise HTTPException(status_code=409, detail=error)
-        operations.append(f"Received {sum(int(item['quantity']) for item in line_items)} item(s)")
+        operations.append(
+            {
+                "type": "shipment_receive",
+                "quantity": sum(int(item["quantity"]) for item in line_items),
+                "shipment_id": shipment_id,
+            }
+        )
     return operations
 
 
@@ -649,7 +655,7 @@ async def _adjust_inventory_quantities(
     receipt_id: int,
     adjustments: list[dict[str, Any]],
     transition: str,
-) -> list[str]:
+) -> list[dict[str, Any]]:
     if not adjustments:
         return []
 
@@ -724,7 +730,42 @@ async def _adjust_inventory_quantities(
     if error:
         status = 409 if "STALE" in error.upper() else 400
         raise HTTPException(status_code=status, detail=error)
-    return [f"Adjusted {len(changes)} inventory variant(s)"]
+
+    # Read back the latest Shopify quantities so the agent sees concrete proof
+    # of what changed instead of a generic success message. A concurrent order
+    # can move available stock again immediately, so expose both the expected
+    # post-adjustment value and Shopify's latest value without treating that
+    # later movement as a failed mutation.
+    verify_data = await shopify_graphql(
+        _INVENTORY_LEVELS_QUERY,
+        {"ids": ids, "locationId": location_id},
+        store=store_key,
+        api_version=_TRANSFER_API_VERSION,
+    )
+    latest_by_id: dict[str, int] = {}
+    for node in verify_data.get("nodes") or []:
+        if not node:
+            continue
+        level = node.get("inventoryLevel") or {}
+        available = next(
+            (entry.get("quantity") for entry in (level.get("quantities") or []) if entry.get("name") == "available"),
+            None,
+        )
+        if available is not None:
+            latest_by_id[str(node.get("id"))] = int(available)
+
+    return [
+        {
+            "type": "inventory_adjustment",
+            "inventory_item_id": item["inventory_item_id"],
+            "title": item.get("title"),
+            "delta": int(item["delta"]),
+            "before_quantity": available_by_id[item["inventory_item_id"]],
+            "expected_after_quantity": available_by_id[item["inventory_item_id"]] + int(item["delta"]),
+            "after_quantity": latest_by_id.get(item["inventory_item_id"]),
+        }
+        for item in adjustments
+    ]
 
 
 @router.get("/lookup")
@@ -844,6 +885,7 @@ async def available_shopify_transfers(
 @router.get("/receipts")
 async def list_receipts(
     store: Optional[str] = Query(default=None),
+    purchase_date: Optional[date] = Query(default=None),
     db: AsyncSession = Depends(get_session),
     _: User = Depends(get_current_user),
 ):
@@ -859,6 +901,13 @@ async def list_receipts(
     )
     if store:
         stmt = stmt.where(InventoryReceipt.store_key == _clean_store(store))
+    if purchase_date:
+        # Shopify transfer timestamps are stored as ISO-8601 strings. Their
+        # leading date is also what the cards display, so the date selector and
+        # the visible purchase-order date always describe the same queue.
+        stmt = stmt.where(
+            InventoryReceipt.shopify_created_at.like(f"{purchase_date.isoformat()}%")
+        )
     # Legacy rows imported from Shopify's customer Order API stay preserved in
     # the database, but they are not purchase orders and must not appear here.
     stmt = stmt.where(InventoryReceipt.shopify_order_gid.like("gid://shopify/InventoryTransfer/%"))
@@ -954,7 +1003,7 @@ async def update_receipt_count(
                 for item, stored in zip(merged_items, stored_items)
             ],
         )
-        operations: list[str] = []
+        operations: list[dict[str, Any]] = []
         if body.sync_inventory:
             operations.extend(
                 await _receive_inventory_shipments(
@@ -972,6 +1021,21 @@ async def update_receipt_count(
                     transition,
                 )
             )
+            adjustment_by_item = {
+                str(operation.get("inventory_item_id")): operation
+                for operation in operations
+                if operation.get("type") == "inventory_adjustment"
+            }
+            for item in merged_items:
+                audit = adjustment_by_item.get(str(item.get("inventory_item_id")))
+                if audit:
+                    item["last_inventory_change"] = {
+                        "delta": audit["delta"],
+                        "before_quantity": audit["before_quantity"],
+                        "expected_after_quantity": audit["expected_after_quantity"],
+                        "after_quantity": audit["after_quantity"],
+                        "synced_at": item.get("inventory_synced_at"),
+                    }
         else:
             for merged, stored in zip(merged_items, stored_items):
                 merged["inventory_applied_quantity"] = int(

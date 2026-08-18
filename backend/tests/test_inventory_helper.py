@@ -5,8 +5,11 @@ os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 
 from datetime import date
 
+import pytest
+
 from backend.app.inventory_helper_routes import (
     InventoryCountLineItemInput,
+    _adjust_inventory_quantities,
     _build_inventory_sync_plan,
     _date_search_query,
     _line_items_from_shopify,
@@ -236,5 +239,135 @@ def test_sync_plan_corrects_previous_inventory_by_delta():
             "location_id": "gid://shopify/Location/8",
             "delta": -1,
             "title": "Item",
+        }
+    ]
+
+
+def test_sync_plan_removes_two_previously_received_units_when_agent_counts_zero():
+    transfer = {
+        "destination": {"location": {"id": "gid://shopify/Location/8"}},
+        "lineItems": {
+            "nodes": [
+                {
+                    "id": "line-red-21",
+                    "title": "Kids shoe",
+                    "totalQuantity": 2,
+                    "inventoryItem": {
+                        "id": "inventory-red-21",
+                        "variant": {
+                            "id": "variant-red-21",
+                            "title": "Red / 21",
+                            "selectedOptions": [
+                                {"name": "Color", "value": "Red"},
+                                {"name": "Size", "value": "21"},
+                            ],
+                            "product": {"title": "Kids shoe"},
+                        },
+                    },
+                }
+            ]
+        },
+        "shipments": {
+            "nodes": [
+                {
+                    "id": "shipment-1",
+                    "status": "RECEIVED",
+                    "lineItems": {
+                        "nodes": [
+                            {
+                                "id": "shipment-line-1",
+                                "acceptedQuantity": 2,
+                                "unreceivedQuantity": 0,
+                                "inventoryItem": {"id": "inventory-red-21"},
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+    }
+    stored = _line_items_from_shopify(transfer)
+    stored[0].update(
+        {
+            "actual_quantity": 2,
+            "shopify_received_quantity": 2,
+            "inventory_applied_quantity": 2,
+        }
+    )
+
+    merged, receives, adjustments = _build_inventory_sync_plan(
+        stored,
+        [InventoryCountLineItemInput(id="line-red-21", actual_quantity=0)],
+        transfer,
+    )
+
+    assert receives == {}
+    assert merged[0]["actual_quantity"] == 0
+    assert merged[0]["inventory_applied_quantity"] == 0
+    assert adjustments == [
+        {
+            "inventory_item_id": "inventory-red-21",
+            "location_id": "gid://shopify/Location/8",
+            "delta": -2,
+            "title": "Kids shoe",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_inventory_adjustment_reports_shopify_before_and_after(monkeypatch):
+    calls = []
+
+    async def fake_graphql(query, variables, **_kwargs):
+        calls.append((query, variables))
+        if "InventoryHelperAdjust" in query:
+            return {"inventoryAdjustQuantities": {"userErrors": []}}
+        available = 3 if len(calls) == 1 else 1
+        return {
+            "nodes": [
+                {
+                    "id": "inventory-red-21",
+                    "inventoryLevel": {
+                        "quantities": [{"name": "available", "quantity": available}]
+                    },
+                }
+            ]
+        }
+
+    from backend.app import main
+
+    monkeypatch.setattr(main, "shopify_graphql", fake_graphql)
+    result = await _adjust_inventory_quantities(
+        "irrakids",
+        689,
+        [
+            {
+                "inventory_item_id": "inventory-red-21",
+                "location_id": "gid://shopify/Location/8",
+                "delta": -2,
+                "title": "Kids shoe",
+            }
+        ],
+        "transition-key",
+    )
+
+    mutation_variables = calls[1][1]
+    assert mutation_variables["input"]["changes"] == [
+        {
+            "inventoryItemId": "inventory-red-21",
+            "locationId": "gid://shopify/Location/8",
+            "delta": -2,
+            "changeFromQuantity": 3,
+        }
+    ]
+    assert result == [
+        {
+            "type": "inventory_adjustment",
+            "inventory_item_id": "inventory-red-21",
+            "title": "Kids shoe",
+            "delta": -2,
+            "before_quantity": 3,
+            "expected_after_quantity": 1,
+            "after_quantity": 1,
         }
     ]
