@@ -50,6 +50,7 @@ _TRANSFER_CORE_FIELDS = """
         variant {
           id
           title
+          selectedOptions { name value }
           image { url altText }
           product {
             title
@@ -84,6 +85,7 @@ _TRANSFER_CARD_FIELDS = """
         variant {
           id
           title
+          selectedOptions { name value }
           image { url altText }
           product {
             title
@@ -172,6 +174,9 @@ class InventoryLineItemInput(BaseModel):
     variant_id: Optional[str] = None
     title: str
     variant_title: Optional[str] = None
+    variant_color: Optional[str] = None
+    variant_size: Optional[str] = None
+    selected_options: list[dict[str, str]] = Field(default_factory=list)
     sku: Optional[str] = None
     image_url: Optional[str] = None
     inventory_item_id: Optional[str] = None
@@ -307,6 +312,39 @@ def _shipment_state(transfer: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return dict(state)
 
 
+def _variant_dimensions(variant: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    color: Optional[str] = None
+    size: Optional[str] = None
+    color_names = {"color", "colour", "couleur", "colore", "farbe", "لون"}
+    size_names = {
+        "size",
+        "taille",
+        "pointure",
+        "shoe size",
+        "eu size",
+        "uk size",
+        "us size",
+        "größe",
+        "tamanho",
+        "مقاس",
+    }
+    for option in variant.get("selectedOptions") or []:
+        name = str(option.get("name") or "").strip().casefold()
+        value = str(option.get("value") or "").strip() or None
+        if name in color_names and value:
+            color = value
+        elif name in size_names and value:
+            size = value
+
+    # Legacy cards saved before selectedOptions were retained normally use
+    # Shopify's "Color / Size" variant-title format.
+    if color is None and size is None:
+        parts = [part.strip() for part in str(variant.get("title") or "").split("/") if part.strip()]
+        if len(parts) >= 2:
+            color, size = parts[0], parts[-1]
+    return color, size
+
+
 def _line_items_from_shopify(transfer: dict[str, Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     destination = transfer.get("destination") or {}
@@ -318,6 +356,7 @@ def _line_items_from_shopify(transfer: dict[str, Any]) -> list[dict[str, Any]]:
         product = variant.get("product") or {}
         product_preview = (((product.get("featuredMedia") or {}).get("preview")) or {})
         image = variant.get("image") or product_preview.get("image") or {}
+        variant_color, variant_size = _variant_dimensions(variant)
         quantity = max(0, int(item.get("totalQuantity") or 0))
         inventory_item_id = inventory_item.get("id")
         received_quantity = int(
@@ -329,6 +368,15 @@ def _line_items_from_shopify(transfer: dict[str, Any]) -> list[dict[str, Any]]:
                 "variant_id": variant.get("id"),
                 "title": product.get("title") or item.get("title") or "Untitled item",
                 "variant_title": variant.get("title"),
+                "variant_color": variant_color,
+                "variant_size": variant_size,
+                "selected_options": [
+                    {
+                        "name": str(option.get("name") or ""),
+                        "value": str(option.get("value") or ""),
+                    }
+                    for option in (variant.get("selectedOptions") or [])
+                ],
                 "sku": inventory_item.get("sku"),
                 "image_url": image.get("url"),
                 "image_alt": image.get("altText"),

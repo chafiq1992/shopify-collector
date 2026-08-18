@@ -51,6 +51,10 @@ def test_shopify_transfer_line_items_become_editable_order_quantities():
                         "variant": {
                             "id": "gid://shopify/ProductVariant/2",
                             "title": "Blue / M",
+                            "selectedOptions": [
+                                {"name": "Color", "value": "Blue"},
+                                {"name": "Size", "value": "M"},
+                            ],
                             "image": {"url": "https://cdn.example.test/blue.jpg", "altText": "Blue item"},
                             "product": {"title": "Classic crate", "featuredMedia": None},
                         },
@@ -68,6 +72,12 @@ def test_shopify_transfer_line_items_become_editable_order_quantities():
             "variant_id": "gid://shopify/ProductVariant/2",
             "title": "Classic crate",
             "variant_title": "Blue / M",
+            "variant_color": "Blue",
+            "variant_size": "M",
+            "selected_options": [
+                {"name": "Color", "value": "Blue"},
+                {"name": "Size", "value": "M"},
+            ],
             "sku": "BLUE-M",
             "image_url": "https://cdn.example.test/blue.jpg",
             "image_alt": "Blue item",

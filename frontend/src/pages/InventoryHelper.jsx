@@ -10,9 +10,13 @@ import {
   ClipboardList,
   Loader2,
   MapPin,
+  Minus,
   PackageOpen,
+  Palette,
+  Pencil,
   Plus,
   RefreshCw,
+  Ruler,
   Search,
   Trash2,
   X,
@@ -93,6 +97,89 @@ function ProductThumb({ src, alt = "Product" }) {
     );
   }
   return <img src={src} alt={alt} className="h-12 w-12 shrink-0 rounded-xl border border-slate-200 bg-white object-cover" />;
+}
+
+
+function variantDimensions(item) {
+  let color = String(item?.variant_color || "").trim();
+  let size = String(item?.variant_size || "").trim();
+  for (const option of item?.selected_options || []) {
+    const name = String(option?.name || "").trim().toLowerCase();
+    const value = String(option?.value || "").trim();
+    if (!color && ["color", "colour", "couleur", "colore", "farbe", "لون"].includes(name)) color = value;
+    if (!size && ["size", "taille", "pointure", "shoe size", "eu size", "uk size", "us size", "größe", "tamanho", "مقاس"].includes(name)) size = value;
+  }
+  if (!color && !size) {
+    const parts = String(item?.variant_title || "").split("/").map((part) => part.trim()).filter(Boolean);
+    if (parts.length >= 2) [color, size] = [parts[0], parts[parts.length - 1]];
+  }
+  return { color: color || "—", size: size || "—" };
+}
+
+
+function DimensionBadge({ type, value, compact = false }) {
+  const isColor = type === "color";
+  const Icon = isColor ? Palette : Ruler;
+  return (
+    <div className={`min-w-0 rounded-xl border ${compact ? "px-2 py-1.5" : "px-3 py-2"} ${isColor ? "border-violet-200 bg-violet-50 text-violet-950" : "border-sky-200 bg-sky-50 text-sky-950"}`}>
+      <div className={`flex items-center gap-1 font-black uppercase tracking-wide ${compact ? "text-[9px]" : "text-[10px]"} ${isColor ? "text-violet-600" : "text-sky-600"}`}><Icon className="h-3 w-3" />{isColor ? "Color" : "Size"}</div>
+      <div className={`mt-0.5 whitespace-normal break-words font-black leading-tight ${compact ? "text-xs" : "text-sm"}`}>{value}</div>
+    </div>
+  );
+}
+
+
+function ProductIdentity({ item, meta }) {
+  return (
+    <div className="flex min-w-0 items-start gap-3">
+      <ProductThumb src={item.image_url} alt={item.title} />
+      <div className="min-w-0 flex-1">
+        <div className="whitespace-normal break-words text-sm font-bold leading-snug text-slate-950">{item.title}</div>
+        <div className="mt-1 break-all text-[11px] text-slate-500">{item.sku || "No SKU"}</div>
+        {meta && <div className="mt-1 text-[10px] font-semibold text-slate-500">{meta}</div>}
+      </div>
+    </div>
+  );
+}
+
+
+function QuantityEditButton({ label, value, onClick, disabled = false, tone = "indigo" }) {
+  const toneClass = tone === "rose"
+    ? "border-rose-300 bg-rose-100 text-rose-950"
+    : "border-indigo-200 bg-indigo-50 text-indigo-950";
+  return (
+    <button type="button" disabled={disabled} onClick={onClick} className={`flex min-h-12 w-full items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left shadow-sm transition active:scale-[0.98] disabled:cursor-default disabled:border-slate-200 disabled:bg-slate-50 disabled:text-slate-500 ${disabled ? "" : toneClass}`}>
+      <span><span className="block text-[9px] font-black uppercase tracking-wide opacity-70">{label}</span><span className="block text-xl font-black leading-none">{value}</span></span>
+      {!disabled && <span className="rounded-lg bg-white/80 p-2"><Pencil className="h-4 w-4" /></span>}
+    </button>
+  );
+}
+
+
+function QuantityEditSheet({ editor, onChange, onClose, onConfirm }) {
+  if (!editor) return null;
+  const { color, size } = variantDimensions(editor.item);
+  const contextLabel = editor.mode === "agent" ? "Quantity found" : "Quantity ordered";
+  return (
+    <div className="fixed inset-0 z-[80] flex items-end justify-center bg-slate-950/60 p-0 backdrop-blur-sm sm:items-center sm:p-5" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <form onSubmit={(event) => { event.preventDefault(); onConfirm(); }} className="max-h-[100dvh] w-full overflow-y-auto overscroll-contain rounded-t-3xl border border-slate-200 bg-white px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 shadow-2xl sm:max-w-lg sm:rounded-3xl sm:p-6">
+        <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-slate-300 sm:hidden" />
+        <div className="flex items-start gap-3">
+          <ProductThumb src={editor.item.image_url} alt={editor.item.title} />
+          <div className="min-w-0 flex-1"><div className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Edit {contextLabel}</div><h3 className="mt-1 whitespace-normal break-words text-lg font-black leading-snug">{editor.item.title}</h3><div className="mt-1 break-all text-xs text-slate-500">{editor.item.sku || "No SKU"}</div></div>
+          <button type="button" onClick={onClose} className="rounded-xl border border-slate-200 p-2.5 text-slate-500" aria-label="Close quantity editor"><X className="h-5 w-5" /></button>
+        </div>
+        <div className="mt-4 grid grid-cols-2 gap-2"><DimensionBadge type="color" value={color} /><DimensionBadge type="size" value={size} /></div>
+        <div className="mt-4 grid grid-cols-2 gap-2 text-center">
+          <div className="rounded-xl bg-slate-50 px-3 py-2"><div className="text-[10px] font-bold uppercase text-slate-500">Shopify transfer</div><div className="text-xl font-black">{editor.item.shopify_quantity ?? "—"}</div></div>
+          <div className="rounded-xl bg-slate-50 px-3 py-2"><div className="text-[10px] font-bold uppercase text-slate-500">Ordered</div><div className="text-xl font-black">{editor.item.ordered_quantity ?? "—"}</div></div>
+        </div>
+        <label className="mt-5 block text-center"><span className="mb-2 block text-xs font-black uppercase tracking-widest text-slate-600">{contextLabel}</span><div className="grid grid-cols-[56px_minmax(0,1fr)_56px] gap-2"><button type="button" onClick={() => onChange(Math.max(0, editor.value - 1))} disabled={editor.value <= 0} className="flex h-14 items-center justify-center rounded-2xl border border-slate-300 bg-slate-100 disabled:opacity-40" aria-label="Decrease quantity"><Minus className="h-6 w-6" /></button><input autoFocus type="number" inputMode="numeric" min="0" value={editor.value} onFocus={(event) => event.currentTarget.select()} onChange={(event) => onChange(Math.max(0, Number(event.target.value || 0)))} className="h-14 min-w-0 rounded-2xl border-2 border-indigo-300 bg-white text-center text-3xl font-black outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-100" /><button type="button" onClick={() => onChange(editor.value + 1)} className="flex h-14 items-center justify-center rounded-2xl bg-indigo-600 text-white" aria-label="Increase quantity"><Plus className="h-6 w-6" /></button></div></label>
+        {editor.mode === "agent" && <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">This prepares the count only. Shopify inventory changes after you press “Save &amp; update Shopify inventory” on the main page.</div>}
+        <div className="mt-5 grid grid-cols-2 gap-2"><button type="button" onClick={onClose} className="h-12 rounded-xl border border-slate-300 text-sm font-black">Cancel</button><button type="submit" className="h-12 rounded-xl bg-indigo-600 px-3 text-sm font-black text-white">Confirm {editor.value}</button></div>
+      </form>
+    </div>
+  );
 }
 
 
@@ -219,6 +306,7 @@ export default function InventoryHelper() {
   const [agentNote, setAgentNote] = useState("");
   const [countBusy, setCountBusy] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
+  const [quantityEditor, setQuantityEditor] = useState(null);
   const detailRef = useRef(null);
   const actualItems = useMemo(
     () => agentItems.reduce((sum, item) => sum + Number(item.actual_quantity || 0), 0),
@@ -249,6 +337,7 @@ export default function InventoryHelper() {
 
   useEffect(() => {
     if (!selected) return;
+    setQuantityEditor(null);
     setAdminItems((selected.line_items || []).map((item) => ({ ...item })));
     setAgentItems((selected.line_items || []).map((item) => ({
       ...item,
@@ -287,6 +376,7 @@ export default function InventoryHelper() {
     setDraft(null);
     setReference("");
     setAvailableTransfers([]);
+    setQuantityEditor(null);
   }
 
   function refreshCurrent() {
@@ -356,11 +446,24 @@ export default function InventoryHelper() {
     }
   }
 
-  function changeDraftQuantity(index, value) {
-    setDraft((current) => ({
-      ...current,
-      line_items: current.line_items.map((item, itemIndex) => itemIndex === index ? { ...item, ordered_quantity: value } : item),
-    }));
+  function openQuantityEditor(mode, item) {
+    const field = mode === "agent" ? "actual_quantity" : "ordered_quantity";
+    setQuantityEditor({ mode, item, value: Math.max(0, Number(item[field] || 0)) });
+  }
+
+  function confirmQuantityEditor() {
+    if (!quantityEditor) return;
+    const itemId = String(quantityEditor.item.id);
+    const value = Math.max(0, Number(quantityEditor.value || 0));
+    const updateItems = (items, field) => items.map((item) => String(item.id) === itemId ? { ...item, [field]: value } : item);
+    if (quantityEditor.mode === "draft") {
+      setDraft((current) => current ? { ...current, line_items: updateItems(current.line_items || [], "ordered_quantity") } : current);
+    } else if (quantityEditor.mode === "admin") {
+      setAdminItems((current) => updateItems(current, "ordered_quantity"));
+    } else {
+      setAgentItems((current) => updateItems(current, "actual_quantity"));
+    }
+    setQuantityEditor(null);
   }
 
   async function saveDraft() {
@@ -475,7 +578,7 @@ export default function InventoryHelper() {
 
   return (
     <div className="min-h-screen bg-[#f6f7f9] text-slate-950">
-      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 pt-[env(safe-area-inset-top)] backdrop-blur">
         <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-3 sm:px-6">
           <button type="button" onClick={() => go(auth?.user?.role === "agent" ? "/confirmation" : "/")} className="rounded-xl border border-slate-200 p-2 text-slate-600 hover:bg-slate-50" aria-label="Back">
             <ArrowLeft className="h-4 w-4" />
@@ -492,7 +595,7 @@ export default function InventoryHelper() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl space-y-5 px-4 py-5 sm:px-6 sm:py-7">
+      <main className="mx-auto max-w-7xl space-y-5 px-3 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-4 sm:px-6 sm:py-7">
         {(error || notice) && (
           <div className={`flex flex-wrap items-center gap-3 rounded-2xl border px-4 py-3 text-sm font-medium ${error ? "border-rose-200 bg-rose-50 text-rose-800" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>
             <span>{error || notice}</span>
@@ -552,8 +655,8 @@ export default function InventoryHelper() {
         </section>
 
         {isAdmin && showCreate && (
-          <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/50 px-3 py-5 backdrop-blur-sm sm:py-10" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreate(); }}>
-          <section className="mx-auto max-w-3xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl">
+          <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/50 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] backdrop-blur-sm sm:px-3 sm:py-10" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreate(); }}>
+          <section className="mx-auto min-h-[calc(100dvh-1rem)] max-w-3xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl sm:min-h-0">
             <div className="border-b border-slate-100 p-4 sm:p-6">
               <div className="mb-4 flex items-start gap-3">
                 <div className="rounded-xl bg-indigo-50 p-2 text-indigo-600"><Plus className="h-5 w-5" /></div>
@@ -613,16 +716,21 @@ export default function InventoryHelper() {
                   <div className="ml-auto w-full sm:w-40"><QuantityField label="Crates ordered" value={draftCrates} onChange={setDraftCrates} /></div>
                 </div>
                 <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-                  <div className="hidden grid-cols-[minmax(0,1fr)_110px_120px] gap-3 border-b border-slate-200 bg-slate-50 px-4 py-2 text-[11px] font-bold uppercase tracking-wide text-slate-500 sm:grid">
-                    <span>Variant</span><span>Transfer qty</span><span>Qty ordered</span>
+                  <div className="hidden grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] items-center gap-2 border-b border-slate-200 bg-slate-100 px-4 py-2 text-[10px] font-black uppercase tracking-wide text-slate-600 sm:grid">
+                    <span>Product</span><span className="text-violet-700">Color</span><span className="text-sky-700">Size</span><span>Transfer</span><span>Ordered</span>
                   </div>
-                  {draft.line_items.map((item, index) => (
-                    <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_84px] items-center gap-3 border-b border-slate-100 p-3 last:border-0 sm:grid-cols-[minmax(0,1fr)_110px_120px] sm:px-4">
-                      <div className="flex min-w-0 items-center gap-3"><ProductThumb src={item.image_url} alt={item.title} /><div className="min-w-0"><div className="truncate text-sm font-bold">{item.title}</div><div className="truncate text-xs text-slate-500">{item.sku || "No SKU"}</div></div></div>
-                      <div className="hidden text-sm font-bold text-slate-600 sm:block">{item.shopify_quantity}</div>
-                      <QuantityField label="Ordered" value={item.ordered_quantity} onChange={(value) => changeDraftQuantity(index, value)} />
-                    </div>
-                  ))}
+                  {draft.line_items.map((item) => {
+                    const dimensions = variantDimensions(item);
+                    return (
+                      <div key={item.id} className="border-b border-slate-100 p-3 last:border-0 sm:grid sm:grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] sm:items-center sm:gap-2 sm:px-4">
+                        <ProductIdentity item={item} />
+                        <div className="mt-3 grid grid-cols-2 gap-2 sm:mt-0 sm:block"><DimensionBadge type="color" value={dimensions.color} compact /><div className="sm:hidden"><DimensionBadge type="size" value={dimensions.size} compact /></div></div>
+                        <div className="hidden sm:block"><DimensionBadge type="size" value={dimensions.size} compact /></div>
+                        <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm font-black text-slate-700 sm:mt-0 sm:bg-transparent sm:px-0 sm:py-0">Transfer <span className="float-right sm:float-none">{item.shopify_quantity}</span></div>
+                        <div className="mt-2 sm:mt-0"><QuantityEditButton label="Qty ordered" value={item.ordered_quantity} onClick={() => openQuantityEditor("draft", item)} /></div>
+                      </div>
+                    );
+                  })}
                 </div>
                 <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                   <button type="button" onClick={() => setDraft(null)} className="h-11 rounded-xl border border-slate-300 px-5 text-sm font-bold">Back</button>
@@ -657,12 +765,21 @@ export default function InventoryHelper() {
                 <div className="p-4 sm:p-6">
                   <div className="mb-4 grid grid-cols-2 gap-3 sm:max-w-sm"><div className="rounded-2xl bg-slate-50 p-3"><div className="text-xs text-slate-500">Expected items</div><div className="text-xl font-black">{adminItems.reduce((sum, item) => sum + Number(item.ordered_quantity || 0), 0)}</div></div><QuantityField label="Crates ordered" value={adminCrates} onChange={setAdminCrates} disabled={!isAdmin} /></div>
                   <div className="overflow-hidden rounded-2xl border border-slate-200">
-                    {adminItems.map((item, index) => (
-                      <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_84px] items-center gap-3 border-b border-slate-100 p-3 last:border-0 sm:grid-cols-[minmax(0,1fr)_120px] sm:px-4">
-                        <div className="flex min-w-0 items-center gap-3"><ProductThumb src={item.image_url} alt={item.title} /><div className="min-w-0"><div className="truncate text-sm font-bold">{item.title}</div><div className="truncate text-xs text-slate-500">{item.sku || item.variant_title || "Variant"} · Shopify {item.shopify_quantity}</div></div></div>
-                        <QuantityField label="Qty ordered" value={item.ordered_quantity} disabled={!isAdmin} onChange={(value) => setAdminItems((current) => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, ordered_quantity: value } : entry))} />
-                      </div>
-                    ))}
+                    <div className="hidden grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] items-center gap-2 border-b border-slate-200 bg-slate-100 px-4 py-2 text-[10px] font-black uppercase tracking-wide text-slate-600 sm:grid">
+                      <span>Product</span><span className="text-violet-700">Color</span><span className="text-sky-700">Size</span><span>Shopify</span><span>Ordered</span>
+                    </div>
+                    {adminItems.map((item) => {
+                      const dimensions = variantDimensions(item);
+                      return (
+                        <div key={item.id} className="border-b border-slate-100 p-3 last:border-0 sm:grid sm:grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] sm:items-center sm:gap-2 sm:px-4">
+                          <ProductIdentity item={item} />
+                          <div className="mt-3 grid grid-cols-2 gap-2 sm:mt-0 sm:block"><DimensionBadge type="color" value={dimensions.color} compact /><div className="sm:hidden"><DimensionBadge type="size" value={dimensions.size} compact /></div></div>
+                          <div className="hidden sm:block"><DimensionBadge type="size" value={dimensions.size} compact /></div>
+                          <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm font-black text-slate-700 sm:mt-0 sm:bg-transparent sm:px-0 sm:py-0">Shopify <span className="float-right sm:float-none">{item.shopify_quantity}</span></div>
+                          <div className="mt-2 sm:mt-0"><QuantityEditButton label="Qty ordered" value={item.ordered_quantity} disabled={!isAdmin} onClick={() => openQuantityEditor("admin", item)} /></div>
+                        </div>
+                      );
+                    })}
                   </div>
                   {isAdmin && <div className="mt-4 flex justify-end"><button type="button" onClick={saveAdminPlan} disabled={countBusy} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 text-sm font-bold text-white disabled:opacity-50">{countBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save plan</button></div>}
                 </div>
@@ -679,12 +796,19 @@ export default function InventoryHelper() {
                   <div>
                     <div className="mb-2 flex items-end justify-between"><div><div className="text-sm font-black">Variant quantities</div><div className="text-xs text-slate-500">Changing a saved value applies only the difference to Shopify inventory.</div></div><div className="rounded-xl bg-indigo-50 px-3 py-2 text-right"><div className="text-[10px] font-bold uppercase text-indigo-600">Counted</div><div className="text-xl font-black text-indigo-950">{actualItems}</div></div></div>
                     <div className="overflow-hidden rounded-2xl border border-slate-200">
-                      {agentItems.map((item, index) => {
+                      <div className="hidden grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] items-center gap-2 border-b border-slate-200 bg-slate-100 px-4 py-2 text-[10px] font-black uppercase tracking-wide text-slate-600 sm:grid">
+                        <span>Product</span><span className="text-violet-700">Color</span><span className="text-sky-700">Size</span><span>Ordered</span><span>Found</span>
+                      </div>
+                      {agentItems.map((item) => {
                         const differs = Number(item.actual_quantity || 0) !== Number(item.ordered_quantity || 0);
+                        const dimensions = variantDimensions(item);
                         return (
-                          <div key={item.id} className={`grid grid-cols-[minmax(0,1fr)_88px] items-center gap-3 border-b border-slate-100 p-3 last:border-0 sm:grid-cols-[minmax(0,1fr)_120px] sm:px-4 ${differs ? "bg-rose-50/60" : "bg-white"}`}>
-                            <div className="flex min-w-0 items-center gap-3"><ProductThumb src={item.image_url} alt={item.title} /><div className="min-w-0"><div className="truncate text-sm font-bold">{item.title}</div><div className="truncate text-xs text-slate-500">{item.sku || item.variant_title || "Variant"} · ordered {item.ordered_quantity}</div>{item.inventory_synced_at && <div className="text-[10px] font-bold text-emerald-700">Shopify inventory previously synced</div>}</div></div>
-                            <QuantityField label="Found" value={item.actual_quantity} onChange={(value) => setAgentItems((current) => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, actual_quantity: value } : entry))} />
+                          <div key={item.id} className={`border-b border-slate-100 p-3 last:border-0 sm:grid sm:grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] sm:items-center sm:gap-2 sm:px-4 ${differs ? "bg-rose-50/70" : "bg-white"}`}>
+                            <ProductIdentity item={item} meta={item.inventory_synced_at ? "Shopify inventory previously synced" : null} />
+                            <div className="mt-3 grid grid-cols-2 gap-2 sm:mt-0 sm:block"><DimensionBadge type="color" value={dimensions.color} compact /><div className="sm:hidden"><DimensionBadge type="size" value={dimensions.size} compact /></div></div>
+                            <div className="hidden sm:block"><DimensionBadge type="size" value={dimensions.size} compact /></div>
+                            <div className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-sm font-black text-slate-700 sm:mt-0 sm:bg-transparent sm:px-0 sm:py-0">Ordered <span className="float-right sm:float-none">{item.ordered_quantity}</span></div>
+                            <div className="mt-2 sm:mt-0"><QuantityEditButton label="Qty found" value={item.actual_quantity} tone={differs ? "rose" : "indigo"} onClick={() => openQuantityEditor("agent", item)} /></div>
                           </div>
                         );
                       })}
@@ -713,6 +837,12 @@ export default function InventoryHelper() {
           )}
         </div>
       </main>
+      <QuantityEditSheet
+        editor={quantityEditor}
+        onChange={(value) => setQuantityEditor((current) => current ? { ...current, value } : current)}
+        onClose={() => setQuantityEditor(null)}
+        onConfirm={confirmQuantityEditor}
+      />
     </div>
   );
 }
