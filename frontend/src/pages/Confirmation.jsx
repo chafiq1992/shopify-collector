@@ -118,6 +118,18 @@ const API = {
     }
     return res.json();
   },
+  async unarchiveOrder(orderId, store) {
+    const res = await authFetch(`/api/agent/orders/${encodeURIComponent(orderId)}/unarchive`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ store }),
+    });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Unarchive failed" }));
+      throw new Error(js.detail || `Unarchive failed (${res.status})`);
+    }
+    return res.json();
+  },
   async searchProductVariants(store, q) {
     const qs = new URLSearchParams({ store, q, first: "20" });
     const res = await authFetch(`/api/agent/product-variants/search?${qs}`, { headers: authHeaders() });
@@ -475,6 +487,7 @@ function AgentView({ me }) {
   // Per-row "..." dropdown + cancel-order modal
   const [actionsDropdownFor, setActionsDropdownFor] = useState(null);
   const [cancelModalFor, setCancelModalFor] = useState(null);
+  const [unarchiveBusyIds, setUnarchiveBusyIds] = useState(() => new Set());
   const requestIdRef = useRef(0);
   const teamRequestIdRef = useRef(0);
   const syncState = useSyncQueueState();
@@ -753,6 +766,26 @@ function AgentView({ me }) {
     pushToast(`Removing tag · ${tag}…`, "info");
   }
 
+  async function handleUnarchive(order) {
+    const label = order.name || `#${order.number}`;
+    setActionsDropdownFor(null);
+    setUnarchiveBusyIds((prev) => new Set(prev).add(order.id));
+    try {
+      const js = await API.unarchiveOrder(order.id, store);
+      patchOrderInPlace(order.id, () => js.order || { ...order, archived: false, closed_at: null });
+      await loadFirst();
+      pushToast(`✓ ${label} unarchived and restored to Today Suivi`, "success", 4500);
+    } catch (e) {
+      pushToast(e?.message || `Could not unarchive ${label}`, "error", 7000);
+    } finally {
+      setUnarchiveBusyIds((prev) => {
+        const next = new Set(prev);
+        next.delete(order.id);
+        return next;
+      });
+    }
+  }
+
   // ---------- Bulk selection / bulk tagging ----------
   function toggleRowSelected(orderId) {
     setSelected((prev) => {
@@ -875,6 +908,9 @@ function AgentView({ me }) {
     const isSelected = selected.has(o.id);
     const isActive = isOpen || pickerOpen;
     const isSyncing = pendingOrderIds.has(o.id);
+    const isArchived = Boolean(o.archived || (o.closed_at && !o.cancelled_at));
+    const isUnarchiving = unarchiveBusyIds.has(o.id);
+    const currentPhoneTag = tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "";
     const url = shopifyOrderUrl(o, meta.shop_domain);
     const label = o.name || `#${o.number}`;
     return (
@@ -917,6 +953,11 @@ function AgentView({ me }) {
             >{label}</a>
           ) : (
             <span className="text-base font-bold">{label}</span>
+          )}
+          {isArchived && (
+            <span className="text-[10px] font-semibold uppercase tracking-wide rounded-full border border-amber-300 bg-amber-50 text-amber-800 px-1.5 py-0.5">
+              Archived
+            </span>
           )}
           <span className="ml-auto text-base font-bold text-gray-900 tabular-nums whitespace-nowrap">
             {o.total_price} <span className="text-xs font-medium text-gray-500">{o.currency}</span>
@@ -971,15 +1012,27 @@ function AgentView({ me }) {
 
         {/* Action row */}
         <div className="mt-2.5 grid grid-cols-5 gap-1.5">
-          <button
-            disabled={isSyncing}
-            onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
-            className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky} !min-w-0 col-span-1`}
-            title="Copy phone + advance n1/n2/n3/n4"
-          >
-            <span aria-hidden className="text-sm">📞</span>
-            <span>{(tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "").toUpperCase() || "Call"}</span>
-          </button>
+          <div className="relative min-w-0 col-span-1">
+            <button
+              disabled={isSyncing}
+              onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
+              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky} !min-w-0 w-full !px-2`}
+              title="Copy phone + advance n1/n2/n3/n4"
+            >
+              <span aria-hidden className="text-sm">📞</span>
+              <span>{currentPhoneTag.toUpperCase() || "Call"}</span>
+            </button>
+            {currentPhoneTag && (
+              <button
+                type="button"
+                disabled={isSyncing}
+                onClick={(ev) => { ev.stopPropagation(); removeTagOptimistic(o, currentPhoneTag); }}
+                className={`absolute z-10 -right-1.5 -top-1.5 h-5 w-5 rounded-full border border-sky-700 bg-white text-sky-700 text-sm font-bold leading-none shadow hover:bg-rose-50 hover:border-rose-600 hover:text-rose-700 ${BTN_TAP}`}
+                title={`Remove ${currentPhoneTag.toUpperCase()} try`}
+                aria-label={`Remove ${currentPhoneTag.toUpperCase()} try`}
+              >×</button>
+            )}
+          </div>
           <button
             disabled={isSyncing}
             onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
@@ -1026,6 +1079,13 @@ function AgentView({ me }) {
             className="mt-2 border border-gray-200 rounded-lg shadow-sm bg-white overflow-hidden"
             onClick={(ev) => ev.stopPropagation()}
           >
+            {isArchived && (
+              <button
+                disabled={isUnarchiving}
+                onClick={() => handleUnarchive(o)}
+                className="block w-full text-left text-sm px-3 py-2 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+              >{isUnarchiving ? "Restoring…" : "↩ Unarchive to Today Suivi"}</button>
+            )}
             <button
               onClick={() => { setCancelModalFor(o); setActionsDropdownFor(null); }}
               className="block w-full text-left text-sm px-3 py-2 text-rose-700 hover:bg-rose-50"
@@ -1376,6 +1436,7 @@ function AgentView({ me }) {
                   const isOpen = expanded.has(o.id);
                   const pickerOpen = datePickerFor === o.id;
                   const isSyncing = pendingOrderIds.has(o.id);
+                  const currentPhoneTag = tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "";
                   return (
                     <React.Fragment key={o.id}>
                       <tr
@@ -1462,15 +1523,27 @@ function AgentView({ me }) {
                         </td>
                         <td className="px-2 py-2 text-right whitespace-nowrap sticky right-0 bg-white shadow-[-6px_0_8px_-6px_rgba(0,0,0,0.08)]">
                           <div className="inline-flex items-center gap-1">
-                            <button
-                              disabled={isSyncing}
-                              onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
-                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky} !min-w-[44px] !px-2`}
-                              title="Copy phone + advance n1/n2/n3/n4"
-                            >
-                              <span aria-hidden className="text-sm">📞</span>
-                              <span>{(tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "").toUpperCase() || "Call"}</span>
-                            </button>
+                            <div className="relative inline-flex">
+                              <button
+                                disabled={isSyncing}
+                                onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
+                                className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky} !min-w-[44px] !px-2`}
+                                title="Copy phone + advance n1/n2/n3/n4"
+                              >
+                                <span aria-hidden className="text-sm">📞</span>
+                                <span>{currentPhoneTag.toUpperCase() || "Call"}</span>
+                              </button>
+                              {currentPhoneTag && (
+                                <button
+                                  type="button"
+                                  disabled={isSyncing}
+                                  onClick={(ev) => { ev.stopPropagation(); removeTagOptimistic(o, currentPhoneTag); }}
+                                  className={`absolute z-10 -right-1.5 -top-1.5 h-5 w-5 rounded-full border border-sky-700 bg-white text-sky-700 text-sm font-bold leading-none shadow hover:bg-rose-50 hover:border-rose-600 hover:text-rose-700 ${BTN_TAP}`}
+                                  title={`Remove ${currentPhoneTag.toUpperCase()} try`}
+                                  aria-label={`Remove ${currentPhoneTag.toUpperCase()} try`}
+                                >×</button>
+                              )}
+                            </div>
                             <button
                               disabled={isSyncing}
                               onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}

@@ -505,6 +505,7 @@ legacyResourceId
 name
 createdAt
 cancelledAt
+closedAt
 tags
 note
 displayFinancialStatus
@@ -630,6 +631,8 @@ def _flatten_order(node: Dict[str, Any]) -> Dict[str, Any]:
         "customer_email": (cust.get("email") or ""),
         "created_at": node.get("createdAt"),
         "cancelled_at": node.get("cancelledAt"),
+        "closed_at": node.get("closedAt"),
+        "archived": bool(node.get("closedAt")) and not bool(node.get("cancelledAt")),
         "tags": list(node.get("tags") or []),
         "note": node.get("note") or "",
         "financial_status": node.get("displayFinancialStatus") or "",
@@ -1108,6 +1111,14 @@ def _classify_confirmation_search(raw: str) -> Dict[str, Any]:
     }
 
 
+def _include_archived_orders(query: str) -> str:
+    """Shopify order search defaults to open orders; global lookup must find archived ones."""
+    value = (query or "").strip()
+    if re.search(r"(^|\s)status:", value, flags=re.IGNORECASE):
+        return value
+    return f"status:any {value}".strip()
+
+
 @router.get("/api/agent/search")
 async def agent_search(
     store: str,
@@ -1143,7 +1154,7 @@ async def agent_search(
     async def _order_search(query: str, first: int = 25):
         return await shopify_graphql(
             SEARCH_ORDERS_GQL,
-            {"first": first, "query": query},
+            {"first": first, "query": _include_archived_orders(query)},
             store=store,
         )
 
@@ -1425,6 +1436,15 @@ mutation ConfirmationOrderShippingUpdate($input: OrderInput!) {{
 }}
 """
 
+ORDER_OPEN_GQL = f"""
+mutation ConfirmationOrderOpen($input: OrderOpenInput!) {{
+  orderOpen(input: $input) {{
+    order {{ {_ORDER_NODE_FIELDS} }}
+    userErrors {{ field message }}
+  }}
+}}
+"""
+
 
 class OrderLineQuantityInput(BaseModel):
     line_item_id: str
@@ -1463,6 +1483,10 @@ class OrderShippingEditBody(BaseModel):
     store: str
     order_id: str
     shipping_address: OrderShippingAddressInput
+
+
+class UnarchiveOrderBody(BaseModel):
+    store: str
 
 
 def _mutation_payload_or_error(data: Dict[str, Any], key: str) -> Dict[str, Any]:
@@ -1768,6 +1792,47 @@ async def update_order_shipping(
         action="order_shipping_edit",
         metadata={"city": address["city"], "country": address["country"]},
     )
+    return {"ok": True, "order": flattened}
+
+
+@router.post("/api/agent/orders/{order_gid:path}/unarchive")
+async def unarchive_order(
+    order_gid: str,
+    body: UnarchiveOrderBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Reopen a Shopify-archived order so it can qualify for Today Suivi again."""
+    store = (body.store or "").strip()
+    order_id = (order_gid or "").strip()
+    if not store or not order_id:
+        raise HTTPException(status_code=400, detail="store and order_id are required")
+
+    from .main import shopify_graphql  # type: ignore
+
+    data = await shopify_graphql(
+        ORDER_OPEN_GQL,
+        {"input": {"id": order_id}},
+        store=store,
+    )
+    opened = _mutation_payload_or_error(data, "orderOpen")
+    order_node = opened.get("order") or {}
+    if not order_node:
+        raise HTTPException(status_code=502, detail="Shopify opened the order but returned no order")
+
+    flattened = _flatten_order(order_node)
+    await _audit_confirmation_order_change(
+        db,
+        user=user,
+        store=store,
+        order_id=order_id,
+        action="confirmation_unarchived",
+        metadata={
+            "source": "confirmation",
+            "confirmation_actor": True,
+        },
+    )
+    invalidate_all_breakdown_caches()
     return {"ok": True, "order": flattened}
 
 
