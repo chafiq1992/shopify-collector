@@ -919,7 +919,17 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       if (!oid) {
         addLog("Order was already processed. Recovering its existing delivery record...");
         if (await recoverExistingDeliveryOrder(mid, orderNum)) return;
-        throw new Error("Could not add or recover the delivery order. Retry in a moment.");
+        const recoverableRow = normalizeDeliveryQueueRow({
+          ...row,
+          hasError: true,
+          errorType: row.errorType || (!row.cityId ? "city" : "delivery"),
+        });
+        setQueueRow(recoverableRow);
+        populateEditFromRow(recoverableRow);
+        setShowEdit(true);
+        setPhase("fix_errors");
+        addLog("The queue row still needs correction. Review the city and apply the fix.");
+        return;
       }
       setDeliveryOrderId(oid);
       setOrderMap(orderNum, oid, store, mid);

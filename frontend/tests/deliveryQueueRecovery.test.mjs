@@ -47,6 +47,35 @@ test("a city error is derived even when the queue omits has_error", () => {
 });
 
 
+test("a null city ID forces city correction even when the backend says there is no error", () => {
+  const row = findDeliveryQueueRow([
+    {
+      id: 61140,
+      orderName: "#161660",
+      city: "تاوريرت نسيم رقم 2",
+      cityId: null,
+      hasError: false,
+      errorType: null,
+    },
+  ], "161660");
+
+  assert.equal(row.hasError, true);
+  assert.equal(row.errorType, "city");
+  assert.equal(row.cityId, null);
+});
+
+
+test("a resolved city ID remains valid when no error is reported", () => {
+  const row = findDeliveryQueueRow([
+    { id: 61141, orderName: "#161661", city: "Casablanca", cityId: 12, hasError: false },
+  ], "161661");
+
+  assert.equal(row.hasError, false);
+  assert.equal(row.errorType, "");
+  assert.equal(row.cityId, 12);
+});
+
+
 test("empty update errors are successful and populated errors are not", () => {
   assert.equal(hasDeliveryUpdateErrors({ success: true, errors: [] }), false);
   assert.equal(hasDeliveryUpdateErrors({ ok: true, errors: {} }), false);

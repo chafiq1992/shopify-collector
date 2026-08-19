@@ -29,7 +29,13 @@ export function parseMerchantOrderReference(value) {
 
 export function normalizeDeliveryQueueRow(row) {
   if (!row || typeof row !== "object") return null;
-  const errorType = normalizeErrorValue(
+  const rawCity = String(row.city ?? row.city_name ?? "").trim();
+  const exposesCityId = Object.prototype.hasOwnProperty.call(row, "cityId") ||
+    Object.prototype.hasOwnProperty.call(row, "city_id");
+  const rawCityId = row.cityId ?? row.city_id;
+  const missingCityId = exposesCityId && Boolean(rawCity) &&
+    (rawCityId == null || String(rawCityId).trim() === "" || Number(rawCityId) === 0);
+  const reportedErrorType = normalizeErrorValue(
     row.errorType ??
     row.error_type ??
     row.validationError ??
@@ -37,6 +43,7 @@ export function normalizeDeliveryQueueRow(row) {
     row.error ??
     row.errors
   );
+  const errorType = reportedErrorType || (missingCityId ? "city" : "");
   const explicitError = row.hasError ?? row.has_error ?? row.invalid ?? row.isInvalid ?? row.is_invalid;
   return {
     ...row,
@@ -44,6 +51,8 @@ export function normalizeDeliveryQueueRow(row) {
     orderName: row.orderName ?? row.order_name ?? "",
     customerName: row.customerName ?? row.customer_name ?? "",
     customerPhone: row.customerPhone ?? row.customer_phone ?? "",
+    city: rawCity,
+    cityId: rawCityId ?? null,
     cashAmount: row.cashAmount ?? row.cash_amount ?? "",
     specialNote: row.specialNote ?? row.special_note ?? "",
     hasError: truthyErrorFlag(explicitError) || Boolean(errorType),
