@@ -1,8 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
-import { canDirectPrintEnvoyLabel, isDirectEnvoyPrintCompany } from "../lib/directEnvoyPrint";
+import { canDirectPrintEnvoyLabel, isAssignedEnvoyCompany } from "../lib/directEnvoyPrint";
 import { parseExplicitDeliveryOrderId } from "../lib/deliveryOrderReference";
-import { findDeliveryQueueRow, normalizeDeliveryQueueRow, parseMerchantOrderReference } from "../lib/deliveryQueueRecovery";
+import {
+  findCreatedDeliveryOrderId,
+  findDeliveryQueueRow,
+  hasDeliveryUpdateErrors,
+  normalizeDeliveryQueueRow,
+  parseMerchantOrderReference,
+} from "../lib/deliveryQueueRecovery";
 
 const LS_MERCHANT = "dlvMerchantId";
 const LS_ORDER_MAP = "dlvOrderIdMap";
@@ -242,7 +248,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
   const [deliveryOrderId, setDeliveryOrderId] = useState(null);
   const [envoyCode, setEnvoyCode] = useState(null);
   const [companyId, setCompanyId] = useState("");
-  const [partnerSendState, setPartnerSendState] = useState({ ok: null, message: "", sentAt: null });
+  const [partnerSendState, setPartnerSendState] = useState({ ok: null, message: "", sentAt: null, integrationFailure: false });
   const [cityName, setCityName] = useState(order?.shipping_city || "");
   const [manualId, setManualId] = useState("");
   const [notConfigured, setNotConfigured] = useState(false);
@@ -274,7 +280,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     const code = String(envCode || "").trim();
     const oid = Number(orderId || 0);
     if (!code || !oid) {
-      setPartnerSendState({ ok: null, message: "", sentAt: null });
+      setPartnerSendState({ ok: null, message: "", sentAt: null, integrationFailure: false });
       return null;
     }
     const delays = [0, 600, 1200, 2000, 3000];
@@ -284,20 +290,22 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         const env = await dlvApi(`admin/envoy-notes/${encodeURIComponent(code)}`);
         const items = Array.isArray(env?.items) ? env.items : [];
         const item = items.find(x => Number(x?.orderId || x?.order_id) === oid) || null;
+        const sentMessage = String(item?.sentMsg || "").trim();
         const next = {
           ok: item?.sentOk === true ? true : (item?.sentOk === false ? false : null),
-          message: String(item?.sentMsg || "").trim(),
+          message: sentMessage,
           sentAt: item?.sentAt || null,
+          integrationFailure: item?.sentOk === false && Boolean(sentMessage),
         };
         setPartnerSendState(next);
         return next;
       } catch (e) {
         if (e?.status === 404 && attempt < delays.length - 1) continue;
-        setPartnerSendState({ ok: null, message: "", sentAt: null });
+        setPartnerSendState({ ok: null, message: "", sentAt: null, integrationFailure: false });
         return null;
       }
     }
-    setPartnerSendState({ ok: null, message: "", sentAt: null });
+    setPartnerSendState({ ok: null, message: "", sentAt: null, integrationFailure: false });
     return null;
   }, []);
   const applyResolvedCompany = useCallback((companyName) => {
@@ -457,7 +465,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
 
   useEffect(() => {
     if (!envoyCode || !deliveryOrderId) {
-      setPartnerSendState({ ok: null, message: "", sentAt: null });
+      setPartnerSendState({ ok: null, message: "", sentAt: null, integrationFailure: false });
       return;
     }
     let cancelled = false;
@@ -874,15 +882,16 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         method: "POST",
         body: { rows: [{ id: queueRow.id, orderName: updated.orderName, customerName: updated.customerName, customerPhone: updated.customerPhone, address: updated.address, city: updated.city, cashAmount: updated.cashAmount, description: updated.description, specialNote: updated.specialNote }] },
       });
-      if (fixRes.errors) {
+      if (hasDeliveryUpdateErrors(fixRes)) {
         setError("Order still has errors. Check the fields and try again.");
         setBusy(false);
         return;
       }
       addLog("Fixes saved.");
-      setQueueRow(updated);
-      setCityName(updated.city || cityName);
-      await createNote(merchantId, updated);
+      const corrected = { ...updated, hasError: false, errorType: "" };
+      setQueueRow(corrected);
+      setCityName(corrected.city || cityName);
+      await createNote(merchantId, corrected);
     } catch (e) {
       setError(e?.message || "Fix failed");
     } finally {
@@ -906,10 +915,12 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       addLog(`Note #${note.id} created`);
 
       const addRes = await dlvApi(`ext/admin/merchant-notes/${note.id}/items`, { method: "POST", query: { merchant_id: mid }, body: { ids: [row.id] } });
-      const r0 = ((addRes?.results) || []).find(x => Number(x.queueRowId) === Number(row.id) && x.status === "added");
-      if (!r0?.orderId) throw new Error("Could not add order (duplicate or already processed)");
-
-      const oid = r0.orderId;
+      const oid = findCreatedDeliveryOrderId(addRes, row.id);
+      if (!oid) {
+        addLog("Order was already processed. Recovering its existing delivery record...");
+        if (await recoverExistingDeliveryOrder(mid, orderNum)) return;
+        throw new Error("Could not add or recover the delivery order. Retry in a moment.");
+      }
       setDeliveryOrderId(oid);
       setOrderMap(orderNum, oid, store, mid);
       addLog(`Order ID: ${oid}`);
@@ -990,6 +1001,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     setBusy(true);
     setError(null);
     addLog("Sending to partner...");
+    let partnerRequestStarted = false;
     try {
       if (!envoyCode) throw new Error("Assign an envoy note before sending to partner.");
       if (!companyId) throw new Error("Select the envoy company before sending to partner.");
@@ -1001,19 +1013,31 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       if (editFields.customerName) verifyPayload.customer_name = editFields.customerName;
       if (editFields.customerPhone) verifyPayload.customer_phone = editFields.customerPhone;
       if (editFields.address) verifyPayload.address = editFields.address;
+      const updateRequests = [];
       if (Object.keys(verifyPayload).length > 0) {
-        await dlvApi(`admin/verify/${deliveryOrderId}`, { method: "PUT", body: verifyPayload });
-        addLog("Order details updated");
+        updateRequests.push(
+          dlvApi(`admin/verify/${deliveryOrderId}`, { method: "PUT", body: verifyPayload })
+            .then(() => addLog("Order details updated"))
+        );
       }
 
       if (companyId && companyId !== "unassigned") {
-        const companyRes = await dlvApi(`admin/envoy-notes/items/${deliveryOrderId}/company`, { method: "PUT", body: { company_id: Number(companyId) } });
-        if (companyRes?.success === false) throw new Error("Company assignment was not accepted.");
-        addLog("Company set");
+        updateRequests.push(
+          dlvApi(`admin/envoy-notes/items/${deliveryOrderId}/company`, { method: "PUT", body: { company_id: Number(companyId) } })
+            .then((companyRes) => {
+              if (companyRes?.success === false) throw new Error("Company assignment was not accepted.");
+              addLog("Company set");
+            })
+        );
       } else if (companyId === "unassigned") {
-        const companyRes = await dlvApi(`admin/envoy-notes/items/${deliveryOrderId}/company`, { method: "PUT", body: { unassigned: true } });
-        if (companyRes?.success === false) throw new Error("Unassigned envoy assignment was not accepted.");
+        updateRequests.push(
+          dlvApi(`admin/envoy-notes/items/${deliveryOrderId}/company`, { method: "PUT", body: { unassigned: true } })
+            .then((companyRes) => {
+              if (companyRes?.success === false) throw new Error("Unassigned envoy assignment was not accepted.");
+            })
+        );
       }
+      await Promise.all(updateRequests);
 
       const assigned = await fetchAssignedEnvoyForOrder(deliveryOrderId);
       assertSelectedCompanyMatchesEnvoy(assigned);
@@ -1044,21 +1068,18 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         openpackage: item?.openpackage != null ? Number(item.openpackage) : 1,
       };
 
+      partnerRequestStarted = true;
       const sendResult = await dlvApi(`admin/envoy-notes/items/${deliveryOrderId}/send`, { method: "POST", body: payload });
       const partnerResponse = sendResult?.response;
       if (!partnerResponse || partnerResponse.ok !== true) {
         throw new Error(partnerResponse?.message || partnerResponse?.detail || "Partner rejected the order.");
       }
       addLog("Sent! Ready to print.");
-      const optimisticSentState = { ok: true, message: partnerResponse?.message || "Sent successfully", sentAt: new Date().toISOString() };
+      const optimisticSentState = { ok: true, message: partnerResponse?.message || "Sent successfully", sentAt: new Date().toISOString(), integrationFailure: false };
       setPartnerSendState(optimisticSentState);
-      const refreshed = await refreshPartnerSendState(activeEnvoyCode, deliveryOrderId);
-      if (refreshed?.ok !== true) {
-        throw new Error(refreshed?.message || "Partner send was not confirmed.");
-      }
       setPhase("ready_print");
     } catch (e) {
-      setPartnerSendState({ ok: false, message: e?.message || "Send failed", sentAt: null });
+      setPartnerSendState({ ok: false, message: e?.message || "Send failed", sentAt: null, integrationFailure: partnerRequestStarted });
       setError(e?.message || "Send failed");
     } finally {
       setBusy(false);
@@ -1102,10 +1123,15 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       setPhase("company_select");
       return;
     }
+    if (bypassPartnerSend && (partnerSendState.ok !== false || partnerSendState.integrationFailure !== true)) {
+      setError("Fallback printing is available only after a partner integration send fails.");
+      setPhase("company_select");
+      return;
+    }
     try {
       const assigned = await fetchAssignedEnvoyForOrder(id);
-      if (bypassPartnerSend && !isDirectEnvoyPrintCompany(assigned)) {
-        throw new Error("Direct printing without partner send is only available for Oscario and Marrakech.");
+      if (bypassPartnerSend && !isAssignedEnvoyCompany(assigned)) {
+        throw new Error("Fallback printing requires an assigned company envoy.");
       }
       const activeEnvoyCode = assigned.code || validatedEnvoyCode;
       const envDet = await dlvApi(`admin/envoy-notes/${encodeURIComponent(activeEnvoyCode)}`);
@@ -1244,7 +1270,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     setPhase("init");
     setQueueRow(null);
     setShowEdit(false);
-    setPartnerSendState({ ok: null, message: "", sentAt: null });
+    setPartnerSendState({ ok: null, message: "", sentAt: null, integrationFailure: false });
     initRan.current = false;
     init();
   }
@@ -1286,7 +1312,8 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
   const directPrintEligible = canDirectPrintEnvoyLabel({
     deliveryOrderId,
     envoyCode,
-    company: selectedCompany,
+    company: selectedCompany || orderTagMatch?.company,
+    partnerSendState,
   });
   const queueState = useMemo(() => {
     if (printStatus === "success") return { statusKey: "printed", statusLabel: "Printed" };
@@ -1605,7 +1632,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
                 )}
                 {canDirectPrintLabel && (
                   <div className="text-xs text-violet-700">
-                    Available only for assigned Oscario and Marrakech envoys.
+                    Partner integration failed. This order is already assigned to a company envoy, so its label can be printed safely.
                   </div>
                 )}
                 <div className={`text-xs ${partnerSendState.ok === true ? "text-green-700" : partnerSendState.ok === false ? "text-red-700" : "text-amber-700"}`}>

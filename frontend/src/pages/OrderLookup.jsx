@@ -2515,7 +2515,7 @@ export default function OrderLookup(){
               const showCityError = isError && item.phase === "fix_errors";
               const partnerOk = item.partnerSendState?.ok === true;
               const showSendBtn = showCompanyControls && item.envoyCode && !partnerOk;
-              const showDirectPrintBtn = showCompanyControls && item.envoyCode && !partnerOk && item.directPrintEligible && item.actions?.handleDirectPrint;
+              const showDirectPrintBtn = showCompanyControls && item.envoyCode && item.partnerSendState?.ok === false && item.directPrintEligible && item.actions?.handleDirectPrint;
               const showPrintBtn = (isReadyPrint || isPrinted) && item.actions;
 
               const itemStoreKey = String(item.store || store || "").trim().toLowerCase();
@@ -2687,7 +2687,7 @@ export default function OrderLookup(){
                       )}
                       {showDirectPrintBtn && (
                         <div className="text-[10px] text-violet-700 font-semibold">
-                          Available for Oscario and Marrakech only
+                          Partner integration failed; order is already in its company envoy.
                         </div>
                       )}
                       {partnerOk && (

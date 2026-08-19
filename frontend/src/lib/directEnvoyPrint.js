@@ -1,15 +1,15 @@
-const DIRECT_PRINT_COMPANY_KEYS = new Set([
-  "oscario",
-  "marrakech",
-  "kech",
-  "k",
+const UNASSIGNED_COMPANY_KEYS = new Set([
+  "unassigned",
+  "unas",
+  "none",
+  "no company",
 ]);
 
 function normalizeCompanyKey(value) {
   return String(value || "").trim().toLowerCase();
 }
 
-export function isDirectEnvoyPrintCompany(company) {
+export function isAssignedEnvoyCompany(company) {
   if (!company) return false;
 
   const values = typeof company === "object"
@@ -25,9 +25,18 @@ export function isDirectEnvoyPrintCompany(company) {
       ]
     : [company];
 
-  return values.some((value) => DIRECT_PRINT_COMPANY_KEYS.has(normalizeCompanyKey(value)));
+  return values.some((value) => {
+    const key = normalizeCompanyKey(value);
+    return Boolean(key) && !UNASSIGNED_COMPANY_KEYS.has(key);
+  });
 }
 
-export function canDirectPrintEnvoyLabel({ deliveryOrderId, envoyCode, company } = {}) {
-  return Boolean(deliveryOrderId && envoyCode && isDirectEnvoyPrintCompany(company));
+export function canDirectPrintEnvoyLabel({ deliveryOrderId, envoyCode, company, partnerSendState } = {}) {
+  return Boolean(
+    deliveryOrderId &&
+    envoyCode &&
+    partnerSendState?.ok === false &&
+    partnerSendState?.integrationFailure === true &&
+    isAssignedEnvoyCompany(company)
+  );
 }
