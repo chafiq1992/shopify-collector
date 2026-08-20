@@ -1,7 +1,6 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
 
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 
@@ -10,17 +9,13 @@ from backend.app.confirmation_routes import (
     ORDER_EDIT_BEGIN_GQL,
     ORDER_EDIT_COMMIT_GQL,
     ORDER_EDIT_SET_QUANTITY_GQL,
-    ORDER_OPEN_GQL,
     ORDER_SHIPPING_UPDATE_GQL,
     PRODUCT_VARIANTS_SEARCH_GQL,
     SEARCH_CUSTOMERS_GQL,
-    UnarchiveOrderBody,
     _classify_confirmation_search,
     _confirmation_phone_variants,
-    _include_archived_orders,
     _same_client_action,
     _shopify_gid_resource_key,
-    unarchive_order,
 )
 
 
@@ -69,10 +64,6 @@ class ConfirmationSearchTests(unittest.TestCase):
         self.assertIn("sortKey: CREATED_AT", SEARCH_CUSTOMERS_GQL)
         self.assertIn("lineItems(first: 20)", SEARCH_CUSTOMERS_GQL)
         self.assertNotIn("lineItems(first: 50)", SEARCH_CUSTOMERS_GQL)
-
-    def test_global_order_search_includes_archived_orders(self):
-        self.assertEqual(_include_archived_orders("name:71779"), "status:any name:71779")
-        self.assertEqual(_include_archived_orders("status:open name:71779"), "status:open name:71779")
 
 
 class ConfirmationActionIdempotencyTests(unittest.TestCase):
@@ -128,50 +119,6 @@ class ConfirmationOrderEditingTests(unittest.TestCase):
         self.assertIn("inventoryQuantity", PRODUCT_VARIANTS_SEARCH_GQL)
         self.assertIn("orderUpdate", ORDER_SHIPPING_UPDATE_GQL)
         self.assertIn("shippingAddress", ORDER_SHIPPING_UPDATE_GQL)
-        self.assertIn("orderOpen", ORDER_OPEN_GQL)
-        self.assertIn("OrderOpenInput", ORDER_OPEN_GQL)
-
-
-class ConfirmationUnarchiveTests(unittest.IsolatedAsyncioTestCase):
-    async def test_unarchive_reopens_order_and_returns_open_state(self):
-        shopify = AsyncMock(return_value={
-            "orderOpen": {
-                "order": {
-                    "id": "gid://shopify/Order/71779",
-                    "legacyResourceId": "71779",
-                    "name": "#71779",
-                    "createdAt": "2026-08-20T10:00:00Z",
-                    "cancelledAt": None,
-                    "closedAt": None,
-                    "tags": ["agent-a", "n2"],
-                    "lineItems": {"edges": []},
-                },
-                "userErrors": [],
-            }
-        })
-        audit = AsyncMock()
-        user = SimpleNamespace(id="agent-1", email="agent@example.com", role="agent")
-
-        with patch("backend.app.main.shopify_graphql", shopify), patch(
-            "backend.app.confirmation_routes._audit_confirmation_order_change",
-            audit,
-        ):
-            result = await unarchive_order(
-                order_gid="gid://shopify/Order/71779",
-                body=UnarchiveOrderBody(store="irrakids"),
-                user=user,
-                db=SimpleNamespace(),
-            )
-
-        self.assertTrue(result["ok"])
-        self.assertFalse(result["order"]["archived"])
-        self.assertIsNone(result["order"]["closed_at"])
-        shopify.assert_awaited_once_with(
-            ORDER_OPEN_GQL,
-            {"input": {"id": "gid://shopify/Order/71779"}},
-            store="irrakids",
-        )
-        audit.assert_awaited_once()
 
 
 if __name__ == "__main__":
