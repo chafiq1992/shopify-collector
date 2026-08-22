@@ -222,7 +222,7 @@ export default function App(){
   const [search, setSearch] = useState("");
   const [productIdFilter, setProductIdFilter] = useState("");
   const [showProductFilter, setShowProductFilter] = useState(false);
-  const [statusFilter, setStatusFilter] = useState("collect"); // collect|verification
+  const [statusFilter, setStatusFilter] = useState("collect"); // collect|verification|urgent|m3tla
   // COD date filtering is optional; keep it empty by default so collectors see orders immediately.
   const [codDate, setCodDate] = useState(""); // legacy single date (YYYY-MM-DD)
   const [codFromDate, setCodFromDate] = useState(""); // YYYY-MM-DD
@@ -945,6 +945,11 @@ export default function App(){
                   label="Urgent"
                   active={statusFilter === "urgent"}
                   onClick={()=>{ setStatusFilter(prev => prev === "urgent" ? null : "urgent"); setShowDatePicker(false); }}
+                />
+                <Chip
+                  label="m3tla"
+                  active={statusFilter === "m3tla"}
+                  onClick={()=>{ setStatusFilter(prev => prev === "m3tla" ? null : "m3tla"); setShowDatePicker(false); }}
                 />
               <Chip
                 label="Product"

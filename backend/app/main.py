@@ -1322,6 +1322,9 @@ def build_query_string(
     elif status_filter == "urgent":
         # open, unfulfilled and tagged urgent
         q += " status:open fulfillment_status:unfulfilled tag:urgent"
+    elif status_filter == "m3tla":
+        # open, unfulfilled and tagged m3
+        q += " status:open fulfillment_status:unfulfilled tag:m3"
     # Tag chip filter
     if tag_filter:
         q += f" tag:{tag_filter}"
@@ -2045,7 +2048,7 @@ async def health():
 async def list_orders(
     limit: int = Query(25, ge=1, le=250),
     cursor: Optional[str] = None,
-    status_filter: Optional[str] = Query(None, pattern="^(all|collect|verification|urgent)$"),
+    status_filter: Optional[str] = Query(None, pattern="^(all|collect|verification|urgent|m3tla)$"),
     tag_filter: Optional[str] = None,
     search: Optional[str] = None,
     cod_date: Optional[str] = Query(None, description="Date for COD tag in format DD/MM/YY"),
