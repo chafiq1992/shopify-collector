@@ -8,8 +8,8 @@ import {
   Check,
   CheckCircle2,
   ClipboardList,
+  History,
   Loader2,
-  MapPin,
   Minus,
   PackageOpen,
   Palette,
@@ -17,7 +17,7 @@ import {
   Plus,
   RefreshCw,
   Ruler,
-  Search,
+  Tag,
   Trash2,
   X,
 } from "lucide-react";
@@ -57,6 +57,12 @@ function statusStyle(status) {
     label: "Complete",
     icon: CheckCircle2,
   };
+  if (status === "incomplete") return {
+    row: "border-amber-300 bg-amber-50/90",
+    badge: "border-amber-300 bg-amber-100 text-amber-950",
+    label: "Incomplete",
+    icon: AlertTriangle,
+  };
   if (status === "pending" || status === "mismatch") return {
     row: "border-amber-200 bg-amber-50/80",
     badge: "border-amber-200 bg-amber-100 text-amber-900",
@@ -76,8 +82,7 @@ function differenceText(receipt) {
   if (receipt?.actual_crates == null || receipt?.actual_items == null) {
     return "The receiving count has not been submitted yet.";
   }
-  const hasCratePlan = Number(receipt.ordered_crates) > 0;
-  const crateDiff = hasCratePlan ? Number(receipt.actual_crates) - Number(receipt.ordered_crates) : 0;
+  const crateDiff = Number(receipt.actual_crates) - Number(receipt.ordered_crates);
   const itemDiff = Number(receipt.actual_items) - Number(receipt.expected_items);
   const reportedDiff = receipt.reported_items_received == null ? 0 : Number(receipt.reported_items_received) - Number(receipt.actual_items);
   const variantDiffs = (receipt.line_items || []).filter((item) => item.actual_quantity != null && Number(item.actual_quantity) !== Number(item.ordered_quantity));
@@ -274,6 +279,33 @@ function selectedPeriodLabel(dateFrom, dateTo) {
 }
 
 
+function historyDayKey(value) {
+  const date = new Date(value || 0);
+  if (Number.isNaN(date.getTime())) return "unknown";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Africa/Casablanca",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const part = (type) => parts.find((entry) => entry.type === type)?.value || "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+
+function historyDayLabel(value) {
+  const date = new Date(value || 0);
+  if (Number.isNaN(date.getTime())) return "Earlier";
+  return new Intl.DateTimeFormat("en", {
+    timeZone: "Africa/Casablanca",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(date);
+}
+
+
 async function mobilePhoto(file) {
   if (!file?.type?.startsWith("image/") || file.type === "image/gif") return file;
   try {
@@ -329,29 +361,12 @@ function PrivatePhoto({ photo, onDelete, canDelete }) {
 }
 
 
-function QuantityField({ value, onChange, label, disabled = false }) {
-  return (
-    <label className="block">
-      <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</span>
-      <input
-        type="number"
-        inputMode="numeric"
-        min="0"
-        value={value}
-        disabled={disabled}
-        onChange={(event) => onChange(Math.max(0, Number(event.target.value || 0)))}
-        className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-base font-bold text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 disabled:bg-slate-50 disabled:text-slate-600"
-      />
-    </label>
-  );
-}
-
-
 export default function InventoryHelper() {
   const auth = loadAuth();
   const isAdmin = auth?.user?.role === "admin";
   const [store, setStore] = useState(() => readCurrentStore());
   const [receipts, setReceipts] = useState([]);
+  const [historyReceipts, setHistoryReceipts] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [viewDateFrom, setViewDateFrom] = useState(localDateInput);
   const [viewDateTo, setViewDateTo] = useState("");
@@ -360,18 +375,7 @@ export default function InventoryHelper() {
   const [notice, setNotice] = useState("");
   const [needsShopifyReconnect, setNeedsShopifyReconnect] = useState(false);
 
-  const [reference, setReference] = useState("");
-  const [showCreate, setShowCreate] = useState(false);
-  const [lookupBusy, setLookupBusy] = useState(false);
-  const [browseDate, setBrowseDate] = useState(localDateInput);
-  const [availableTransfers, setAvailableTransfers] = useState([]);
-  const [browseBusy, setBrowseBusy] = useState(false);
-  const [choosingTransferId, setChoosingTransferId] = useState(null);
-  const [draft, setDraft] = useState(null);
-  const [draftCrates, setDraftCrates] = useState(0);
-  const [savingDraft, setSavingDraft] = useState(false);
-
-  const selected = receipts.find((receipt) => receipt.id === selectedId) || null;
+  const selected = [...receipts, ...historyReceipts].find((receipt) => receipt.id === selectedId) || null;
   const [adminItems, setAdminItems] = useState([]);
   const [agentItems, setAgentItems] = useState([]);
   const [adminCrates, setAdminCrates] = useState(0);
@@ -392,6 +396,16 @@ export default function InventoryHelper() {
     () => groupInventoryItems(agentItems).map((group) => ({ ...group, colors: groupInventoryColors(group.items) })),
     [agentItems],
   );
+  const historyGroups = useMemo(() => {
+    const groups = new Map();
+    for (const receipt of historyReceipts) {
+      const markedAt = receipt.finalized_at || receipt.counted_at || receipt.updated_at;
+      const key = historyDayKey(markedAt);
+      if (!groups.has(key)) groups.set(key, { key, label: historyDayLabel(markedAt), receipts: [] });
+      groups.get(key).receipts.push(receipt);
+    }
+    return [...groups.values()];
+  }, [historyReceipts]);
   const countHasChanges = useMemo(() => {
     if (!selected) return false;
     if (selected.actual_items == null || selected.actual_crates == null) return true;
@@ -413,11 +427,11 @@ export default function InventoryHelper() {
   }
 
   const totals = useMemo(() => ({
-    all: receipts.length,
+    queue: receipts.length,
     new: receipts.filter((item) => item.status === "new" || item.status === "waiting").length,
     pending: receipts.filter((item) => item.status === "pending" || item.status === "mismatch").length,
-    complete: receipts.filter((item) => item.status === "complete" || item.status === "matched").length,
-  }), [receipts]);
+    history: historyReceipts.length,
+  }), [receipts, historyReceipts]);
 
   useEffect(() => {
     persistStoreSelection(store);
@@ -437,7 +451,7 @@ export default function InventoryHelper() {
       actual_quantity: item.actual_quantity ?? (Number(item.shopify_received_quantity || 0) > 0 ? item.shopify_received_quantity : item.ordered_quantity),
     })));
     setAdminCrates(Number(selected.ordered_crates || 0));
-    setActualCrates(selected.actual_crates ?? selected.ordered_crates ?? 0);
+    setActualCrates(selected.actual_crates == null ? "" : String(selected.actual_crates));
     setAgentTotalItems(selected.reported_items_received == null ? "" : String(selected.reported_items_received));
     setAgentNote(selected.agent_note || "");
   }, [selected?.id, selected?.updated_at]);
@@ -459,8 +473,10 @@ export default function InventoryHelper() {
         headers: authHeaders({ Accept: "application/json" }),
       });
       const list = data.receipts || [];
+      const history = data.history || [];
       setReceipts(list);
-      setSelectedId((current) => preferredId || (list.some((item) => item.id === current) ? current : null));
+      setHistoryReceipts(history);
+      setSelectedId((current) => preferredId || ([...list, ...history].some((item) => item.id === current) ? current : null));
     } catch (err) {
       showApiError(err);
     } finally {
@@ -474,80 +490,18 @@ export default function InventoryHelper() {
     window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);
   }
 
-  function closeCreate() {
-    if (savingDraft || lookupBusy || browseBusy || choosingTransferId) return;
-    setShowCreate(false);
-    setDraft(null);
-    setReference("");
-    setAvailableTransfers([]);
-    setQuantityEditor(null);
-  }
-
   function refreshCurrent() {
     loadReceipts(selected?.id, viewDateFrom, viewDateTo);
   }
 
   function replaceReceipt(next) {
-    setReceipts((current) => current.map((item) => item.id === next.id ? next : item));
-  }
-
-  async function lookup(event) {
-    event?.preventDefault();
-    if (!reference.trim()) return;
-    setLookupBusy(true);
-    setError("");
-    setDraft(null);
-    try {
-      const data = await apiJson(`/api/inventory-helper/lookup?store=${encodeURIComponent(store)}&reference=${encodeURIComponent(reference.trim())}`, {
-        headers: authHeaders({ Accept: "application/json" }),
-      });
-      setDraft({ ...data, line_items: (data.line_items || []).map((item) => ({ ...item })) });
-      setDraftCrates(0);
-    } catch (err) {
-      showApiError(err);
-    } finally {
-      setLookupBusy(false);
-    }
-  }
-
-  async function loadAvailable(event) {
-    event?.preventDefault();
-    if (!browseDate) return;
-    setBrowseBusy(true);
-    setError("");
-    setNotice("");
-    setDraft(null);
-    try {
-      const data = await apiJson(`/api/inventory-helper/available?store=${encodeURIComponent(store)}&purchase_date=${encodeURIComponent(browseDate)}`, {
-        headers: authHeaders({ Accept: "application/json" }),
-      });
-      setAvailableTransfers(data.transfers || []);
-      if (!(data.transfers || []).length) {
-        setNotice(`No linked inventory transfers were created on ${browseDate}.`);
-      }
-    } catch (err) {
-      showApiError(err);
-    } finally {
-      setBrowseBusy(false);
-    }
-  }
-
-  async function chooseTransfer(transfer) {
-    if (transfer.already_added || choosingTransferId) return;
-    setChoosingTransferId(transfer.shopify_order_gid);
-    setError("");
-    setNotice("");
-    try {
-      const data = await apiJson(`/api/inventory-helper/lookup?store=${encodeURIComponent(store)}&reference=${encodeURIComponent(transfer.shopify_order_gid)}`, {
-        headers: authHeaders({ Accept: "application/json" }),
-      });
-      setDraft({ ...data, line_items: (data.line_items || []).map((item) => ({ ...item })) });
-      setDraftCrates(0);
-    } catch (err) {
-      showApiError(err);
-    } finally {
-      setChoosingTransferId(null);
-    }
+    const finalized = next.status === "complete" || next.status === "incomplete";
+    setReceipts((current) => finalized
+      ? current.filter((item) => item.id !== next.id)
+      : current.map((item) => item.id === next.id ? next : item));
+    setHistoryReceipts((current) => finalized
+      ? [next, ...current.filter((item) => item.id !== next.id)]
+      : current.filter((item) => item.id !== next.id));
   }
 
   function openQuantityEditor(mode, item) {
@@ -560,41 +514,12 @@ export default function InventoryHelper() {
     const itemId = String(quantityEditor.item.id);
     const value = Math.max(0, Number(quantityEditor.value || 0));
     const updateItems = (items, field) => items.map((item) => String(item.id) === itemId ? { ...item, [field]: value } : item);
-    if (quantityEditor.mode === "draft") {
-      setDraft((current) => current ? { ...current, line_items: updateItems(current.line_items || [], "ordered_quantity") } : current);
-    } else if (quantityEditor.mode === "admin") {
+    if (quantityEditor.mode === "admin") {
       setAdminItems((current) => updateItems(current, "ordered_quantity"));
     } else {
       setAgentItems((current) => updateItems(current, "actual_quantity"));
     }
     setQuantityEditor(null);
-  }
-
-  async function saveDraft() {
-    if (!draft) return;
-    setSavingDraft(true);
-    setError("");
-    try {
-      const saved = await apiJson("/api/inventory-helper/receipts", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ ...draft, ordered_crates: draftCrates }),
-      });
-      setDraft(null);
-      setReference("");
-      setAvailableTransfers((current) => current.map((item) => item.shopify_order_gid === saved.shopify_order_gid ? { ...item, already_added: true } : item));
-      setNotice(`${saved.order_number} added to Inventory Helper.`);
-      setShowCreate(false);
-      const savedDate = receiptDateInput(saved.shopify_created_at) || viewDateFrom;
-      setViewDateFrom(savedDate);
-      setViewDateTo("");
-      await loadReceipts(saved.id, savedDate, "");
-      window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);
-    } catch (err) {
-      showApiError(err);
-    } finally {
-      setSavingDraft(false);
-    }
   }
 
   async function saveAdminPlan() {
@@ -619,6 +544,10 @@ export default function InventoryHelper() {
   function reviewCount(event) {
     event.preventDefault();
     if (!selected || !agentItems.length || !countHasChanges) return;
+    if (actualCrates === "") {
+      setError("Enter the number of crates received before reviewing the count.");
+      return;
+    }
     if (agentTotalItems === "") {
       setError("Enter the total items received before reviewing the count.");
       return;
@@ -671,7 +600,9 @@ export default function InventoryHelper() {
         headers: authHeaders({ Accept: "application/json" }),
       });
       replaceReceipt(saved);
-      setNotice(`${saved.order_number} marked complete.`);
+      setNotice(saved.status === "complete"
+        ? `${saved.order_number} moved to received history as complete.`
+        : `${saved.order_number} moved to received history as incomplete because the crate count differs.`);
     } catch (err) {
       showApiError(err);
     } finally {
@@ -713,7 +644,8 @@ export default function InventoryHelper() {
     }
   }
 
-  const selectedTone = statusStyle(selected?.status === "complete" && countHasChanges ? "pending" : selected?.status);
+  const isFinalized = selected?.status === "complete" || selected?.status === "incomplete";
+  const selectedTone = statusStyle(selected?.status);
   const SelectedIcon = selectedTone.icon;
 
   return (
@@ -753,9 +685,8 @@ export default function InventoryHelper() {
               <div>
               <div className="text-xs font-bold uppercase tracking-wide text-indigo-600">Receiving queue</div>
               <h2 className="text-lg font-black">Purchase orders</h2>
-                <p className="text-xs text-slate-500">Choose one day or add an end date for a period. Results load automatically.</p>
+                <p className="text-xs text-slate-500">Choose a day or period. Shopify purchase orders appear automatically.</p>
               </div>
-              {isAdmin && <button type="button" onClick={() => { setShowCreate(true); setError(""); setNotice(""); }} className="ml-auto inline-flex h-10 items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 text-xs font-black text-indigo-700 shadow-sm"><Plus className="h-4 w-4" /> Import</button>}
             </div>
             <div className="mt-4 rounded-2xl border border-indigo-100 bg-indigo-50/70 p-3">
               <div className="mb-2 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-indigo-700"><CalendarDays className="h-4 w-4" /> Purchase-order date or period</div>
@@ -769,14 +700,13 @@ export default function InventoryHelper() {
           {loading ? (
             <div className="flex items-center justify-center gap-2 p-10 text-sm font-semibold text-slate-500"><Loader2 className="h-5 w-5 animate-spin" /> Loading purchase orders…</div>
           ) : !receipts.length ? (
-            <div className="p-10 text-center"><ClipboardList className="mx-auto mb-3 h-9 w-9 text-slate-300" /><div className="font-black">No purchase orders for {selectedPeriodLabel(viewDateFrom, viewDateTo)}</div><p className="mx-auto mt-1 max-w-lg text-sm text-slate-500">{isAdmin ? "Use Import to add a linked Shopify transfer, or choose another period." : "Choose another date or period, or ask an admin to import the purchase order."}</p></div>
+            <div className="p-10 text-center"><ClipboardList className="mx-auto mb-3 h-9 w-9 text-slate-300" /><div className="font-black">No open purchase orders for {selectedPeriodLabel(viewDateFrom, viewDateTo)}</div><p className="mx-auto mt-1 max-w-lg text-sm text-slate-500">The app checked Shopify automatically. Choose another date or period.</p></div>
           ) : (
             <div className="grid grid-cols-2 gap-2.5 p-2.5 sm:grid-cols-3 sm:gap-4 sm:p-4 lg:grid-cols-4">
               {receipts.map((receipt) => {
                 const tone = statusStyle(receipt.status);
                 const Icon = tone.icon;
                 const image = receipt.line_items?.find((item) => item.image_url)?.image_url;
-                const isCounted = receipt.actual_items != null && receipt.actual_crates != null;
                 return (
                   <button key={receipt.id} type="button" onClick={() => openReceipt(receipt.id)} className={`min-w-0 overflow-hidden rounded-2xl border text-left shadow-sm transition active:scale-[0.98] ${tone.row} ${selected?.id === receipt.id ? "ring-2 ring-indigo-500 ring-offset-2" : "hover:shadow-md"}`}>
                     <div className="space-y-2 p-2.5 sm:p-3">
@@ -786,9 +716,10 @@ export default function InventoryHelper() {
                       </div>
                       <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-black ${tone.badge}`}><Icon className="h-3 w-3" />{tone.label}</span>
                       <div className="grid grid-cols-2 gap-1.5 text-center">
-                        <div className="rounded-lg border border-slate-200 bg-white/80 px-1 py-1.5"><div className="text-[9px] text-slate-500">Ordered</div><div className="text-sm font-black">{receipt.expected_items}</div></div>
-                        <div className="rounded-lg border border-slate-200 bg-white/80 px-1 py-1.5"><div className="text-[9px] text-slate-500">Crates</div><div className="text-sm font-black">{isCounted ? receipt.actual_crates : (receipt.ordered_crates || "—")}</div></div>
+                        <div className="rounded-lg border border-slate-200 bg-white/80 px-1 py-1.5"><div className="text-[9px] text-slate-500">Items ordered</div><div className="text-sm font-black">{receipt.expected_items}</div></div>
+                        <div className="rounded-lg border border-slate-200 bg-white/80 px-1 py-1.5"><div className="text-[9px] text-slate-500">Crates received</div><div className="text-sm font-black">{receipt.actual_crates ?? "—"}</div></div>
                       </div>
+                      <div className="rounded-xl border-2 border-violet-300 bg-violet-50 px-2 py-2 text-center text-violet-950"><div className="flex items-center justify-center gap-1 text-[9px] font-black uppercase tracking-wide text-violet-700"><Tag className="h-3 w-3" /> Crates ordered · Shopify tag</div><div className="text-2xl font-black leading-none">{receipt.ordered_crates}</div></div>
                       <div className="rounded-xl border-2 border-indigo-300 bg-indigo-50 px-2 py-2 text-center text-indigo-950"><div className="text-[9px] font-black uppercase tracking-wide text-indigo-600">Agent total received</div><div className="text-xl font-black leading-none">{receipt.reported_items_received ?? "—"}</div></div>
                       {receipt.agent_note && <div className="rounded-xl border border-amber-300 bg-amber-100 px-2 py-2 text-[10px] font-bold leading-snug text-amber-950 sm:text-xs"><span className="block text-[9px] uppercase tracking-wide text-amber-700">Agent note</span><span className="block truncate">{receipt.agent_note}</span></div>}
                     </div>
@@ -799,96 +730,40 @@ export default function InventoryHelper() {
           )}
         </section>
 
-        {isAdmin && showCreate && (
-          <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/50 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] backdrop-blur-sm sm:px-3 sm:py-10" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCreate(); }}>
-          <section className="mx-auto min-h-[calc(100dvh-1rem)] max-w-3xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl sm:min-h-0">
-            <div className="border-b border-slate-100 p-4 sm:p-6">
-              <div className="mb-4 flex items-start gap-3">
-                <div className="rounded-xl bg-indigo-50 p-2 text-indigo-600"><Plus className="h-5 w-5" /></div>
-                <div><h2 className="font-bold">Add purchase order</h2><p className="text-sm text-slate-500">Browse linked Shopify transfers by date or search a transfer reference.</p></div>
-                <button type="button" onClick={closeCreate} className="ml-auto rounded-xl border border-slate-200 p-2 text-slate-500 hover:bg-slate-50" aria-label="Close"><X className="h-4 w-4" /></button>
-              </div>
-              {error && (
-                <div className="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-800">
-                  <span>{error}</span>
-                  {needsShopifyReconnect && <a href={reconnectUrl} className="ml-auto rounded-lg bg-rose-800 px-3 py-2 text-xs font-black text-white">Reconnect Shopify</a>}
-                </div>
-              )}
-              <form onSubmit={loadAvailable} className="mb-4 rounded-2xl border border-indigo-100 bg-indigo-50/70 p-3">
-                <div className="mb-2 flex items-center gap-2 text-xs font-black uppercase tracking-wide text-indigo-700"><CalendarDays className="h-4 w-4" /> Browse by transfer date</div>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <input type="date" value={browseDate} onChange={(event) => setBrowseDate(event.target.value)} className="h-11 flex-1 rounded-xl border border-indigo-200 bg-white px-3 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" />
-                  <button disabled={browseBusy || !browseDate} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-bold text-white disabled:opacity-50">
-                    {browseBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarDays className="h-4 w-4" />} Load date
-                  </button>
-                </div>
-              </form>
-              <div className="mb-2 text-[10px] font-black uppercase tracking-widest text-slate-400">Or search one linked transfer</div>
-              <form onSubmit={lookup} className="flex flex-col gap-2 sm:flex-row">
-                <label className="relative flex-1">
-                  <Search className="absolute left-3 top-3.5 h-4 w-4 text-slate-400" />
-                  <input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="Transfer name or PO reference" autoFocus className="h-11 w-full rounded-xl border border-slate-300 pl-10 pr-3 text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" />
-                </label>
-                <button disabled={lookupBusy || !reference.trim()} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 text-sm font-bold text-white disabled:opacity-50">
-                  {lookupBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />} Find in Shopify
-                </button>
-              </form>
-            </div>
-
-            {!draft && availableTransfers.length > 0 && (
-              <div className="border-b border-slate-100 bg-slate-50/70 p-3 sm:p-5">
-                <div className="mb-3 flex items-center justify-between"><div><div className="font-black">Transfers created {shortDate(browseDate)}</div><div className="text-xs text-slate-500">Tap a card to review every variant before adding it.</div></div><span className="rounded-full bg-white px-3 py-1 text-xs font-black text-slate-600">{availableTransfers.length}</span></div>
-                <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-                  {availableTransfers.map((transfer) => {
-                    const image = transfer.line_items?.find((item) => item.image_url)?.image_url;
-                    const isChoosing = choosingTransferId === transfer.shopify_order_gid;
-                    return (
-                      <button key={transfer.shopify_order_gid} type="button" disabled={transfer.already_added || Boolean(choosingTransferId)} onClick={() => chooseTransfer(transfer)} className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-white text-left shadow-sm transition active:scale-[0.98] disabled:opacity-55">
-                        <div className="aspect-[4/3] bg-slate-100">{image ? <img src={image} alt={transfer.line_items?.[0]?.title || "Transfer product"} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-slate-300"><Boxes className="h-8 w-8" /></div>}</div>
-                        <div className="space-y-1.5 p-2.5"><div className="truncate text-sm font-black">{transfer.order_number}</div><div className="text-lg font-black">{transfer.expected_items} <span className="text-[10px] font-bold text-slate-500">items</span></div><div className="flex items-center gap-1 truncate text-[10px] text-slate-500"><MapPin className="h-3 w-3 shrink-0" />{transfer.destination_name || "Shopify location"}</div><div className={`flex items-center gap-1 text-[10px] font-black ${transfer.already_added ? "text-emerald-700" : "text-indigo-700"}`}>{isChoosing && <Loader2 className="h-3 w-3 animate-spin" />}{transfer.already_added ? "Already added" : isChoosing ? "Loading variants" : "Review variants"}</div></div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {draft && (
-              <div className="bg-slate-50/70 p-4 sm:p-6">
-                <div className="mb-5 flex flex-wrap items-center gap-3">
-                  <div><div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Linked Shopify transfer</div><div className="text-xl font-black">{draft.order_number}</div>{draft.destination_name && <div className="mt-1 flex items-center gap-1 text-xs text-slate-500"><MapPin className="h-3 w-3" />{draft.destination_name}</div>}</div>
-                  {draft.po_number && <span className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-bold text-indigo-700">PO {draft.po_number}</span>}
-                  <div className="ml-auto w-full sm:w-40"><QuantityField label="Crates ordered" value={draftCrates} onChange={setDraftCrates} /></div>
-                </div>
-                <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-                  <div className="hidden grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] items-center gap-2 border-b border-slate-200 bg-slate-100 px-4 py-2 text-[10px] font-black uppercase tracking-wide text-slate-600 sm:grid">
-                    <span>Product</span><span className="text-violet-700">Color</span><span className="text-sky-700">Size</span><span>Transfer</span><span>Ordered</span>
-                  </div>
-                  {draft.line_items.map((item) => {
-                    const dimensions = variantDimensions(item);
-                    return (
-                      <div key={item.id} className="border-b border-slate-100 p-3 last:border-0 sm:grid sm:grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] sm:items-center sm:gap-2 sm:px-4">
-                        <ProductIdentity item={item} />
-                        <div className="mt-3 grid grid-cols-2 gap-2 sm:mt-0 sm:block"><DimensionBadge type="color" value={dimensions.color} compact /><div className="sm:hidden"><DimensionBadge type="size" value={dimensions.size} compact /></div></div>
-                        <div className="hidden sm:block"><DimensionBadge type="size" value={dimensions.size} compact /></div>
-                        <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm font-black text-slate-700 sm:mt-0 sm:bg-transparent sm:px-0 sm:py-0">Transfer <span className="float-right sm:float-none">{item.shopify_quantity}</span></div>
-                        <div className="mt-2 sm:mt-0"><QuantityEditButton label="Qty ordered" value={item.ordered_quantity} onClick={() => openQuantityEditor("draft", item)} /></div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                  <button type="button" onClick={() => setDraft(null)} className="h-11 rounded-xl border border-slate-300 px-5 text-sm font-bold">Back</button>
-                  <button type="button" onClick={saveDraft} disabled={savingDraft || !draft.line_items.length} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-bold text-white disabled:opacity-50">{savingDraft && <Loader2 className="h-4 w-4 animate-spin" />} Create purchase-order card</button>
-                </div>
-              </div>
-            )}
-          </section>
+        <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex items-start gap-3 border-b border-slate-100 px-4 py-4 sm:px-6">
+            <div className="rounded-xl bg-emerald-50 p-2 text-emerald-700"><History className="h-5 w-5" /></div>
+            <div><div className="text-xs font-bold uppercase tracking-wide text-emerald-700">Received history</div><h2 className="text-lg font-black">Completed receiving</h2><p className="text-xs text-slate-500">Grouped by the day the purchase order was marked complete or incomplete.</p></div>
           </div>
-        )}
+          {!historyGroups.length ? (
+            <div className="px-4 py-8 text-center text-sm font-semibold text-slate-500">No purchase orders have been finalized yet.</div>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {historyGroups.map((group) => (
+                <div key={group.key} className="p-3 sm:p-4">
+                  <div className="mb-2 flex items-center gap-2 text-xs font-black text-slate-700"><CalendarDays className="h-4 w-4 text-emerald-700" />{group.label}<span className="ml-auto rounded-full bg-slate-100 px-2 py-1 text-[10px] text-slate-500">{group.receipts.length}</span></div>
+                  <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4">
+                    {group.receipts.map((receipt) => {
+                      const tone = statusStyle(receipt.status);
+                      const Icon = tone.icon;
+                      const image = receipt.line_items?.find((item) => item.image_url)?.image_url;
+                      return (
+                        <button key={receipt.id} type="button" onClick={() => openReceipt(receipt.id)} className={`min-w-0 rounded-2xl border p-2.5 text-left shadow-sm transition active:scale-[0.98] ${tone.row}`}>
+                          <div className="flex min-w-0 items-start gap-2">{image ? <img src={image} alt="" className="h-9 w-9 shrink-0 rounded-lg border border-slate-200 object-cover" /> : <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/80"><Boxes className="h-4 w-4 text-slate-400" /></div>}<div className="min-w-0"><div className="truncate text-sm font-black">{receipt.order_number}</div><div className="text-[10px] font-semibold text-slate-500">{receipt.actual_crates ?? 0} / {receipt.ordered_crates} crates</div></div></div>
+                          <span className={`mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-black ${tone.badge}`}><Icon className="h-3 w-3" />{tone.label}</span>
+                          <div className="mt-2 grid grid-cols-2 gap-1 text-center"><div className="rounded-lg bg-white/75 px-1 py-1"><div className="text-[8px] uppercase text-slate-500">Items</div><div className="text-sm font-black">{receipt.reported_items_received ?? receipt.actual_items ?? "—"}</div></div><div className="rounded-lg bg-white/75 px-1 py-1"><div className="text-[8px] uppercase text-slate-500">Crates</div><div className="text-sm font-black">{receipt.actual_crates ?? "—"}</div></div></div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
 
         <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[[`POs ${selectedPeriodLabel(viewDateFrom, viewDateTo)}`, totals.all, 'text-slate-950'], ['New', totals.new, 'text-slate-700'], ['Pending', totals.pending, 'text-amber-700'], ['Complete', totals.complete, 'text-emerald-700']].map(([label, value, tone]) => (
+          {[[`Queue ${selectedPeriodLabel(viewDateFrom, viewDateTo)}`, totals.queue, 'text-slate-950'], ['New', totals.new, 'text-slate-700'], ['Pending', totals.pending, 'text-amber-700'], ['Received history', totals.history, 'text-emerald-700']].map(([label, value, tone]) => (
             <div key={label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-xs font-semibold text-slate-500">{label}</div><div className={`mt-1 text-2xl font-black ${tone}`}>{value}</div></div>
           ))}
         </section>
@@ -905,16 +780,17 @@ export default function InventoryHelper() {
                     <button type="button" onClick={() => setSelectedId(null)} className="rounded-xl border border-slate-300 bg-white/90 p-2.5 text-slate-600" aria-label="Close purchase order"><X className="h-5 w-5" /></button>
                   </div>
                   <div className="mt-3 grid grid-cols-4 gap-1.5 text-center">
-                    {[['Crates', selected.ordered_crates || '—'], ['Received', selected.actual_crates ?? '—'], ['Ordered', selected.expected_items], ['Agent total', selected.reported_items_received ?? '—']].map(([label, value]) => <div key={label} className={`rounded-xl px-1 py-2 ${label === 'Agent total' ? 'border border-indigo-300 bg-indigo-50 text-indigo-950' : 'bg-white/80'}`}><div className={`text-[9px] font-bold uppercase ${label === 'Agent total' ? 'text-indigo-600' : 'text-slate-500'}`}>{label}</div><div className="text-lg font-black leading-none">{value}</div></div>)}
+                    {[['Tag crates', selected.ordered_crates], ['Received', selected.actual_crates ?? '—'], ['Items ordered', selected.expected_items], ['Agent total', selected.reported_items_received ?? '—']].map(([label, value]) => <div key={label} className={`rounded-xl px-1 py-2 ${label === 'Agent total' ? 'border border-indigo-300 bg-indigo-50 text-indigo-950' : label === 'Tag crates' ? 'border border-violet-300 bg-violet-50 text-violet-950' : 'bg-white/80'}`}><div className={`text-[9px] font-bold uppercase ${label === 'Agent total' ? 'text-indigo-600' : label === 'Tag crates' ? 'text-violet-700' : 'text-slate-500'}`}>{label}</div><div className="text-lg font-black leading-none">{value}</div></div>)}
                   </div>
+                  <div className="mt-2 flex items-center gap-1 text-[10px] font-bold text-violet-800"><Tag className="h-3 w-3" /> Shopify tags: {(selected.shopify_tags || []).join(", ") || "No numeric crate tag"}</div>
                   {selected.agent_note && <div className="mt-3 rounded-xl border border-amber-300 bg-amber-100 px-3 py-2 text-xs font-bold text-amber-950"><span className="mr-1 text-[9px] uppercase tracking-wider text-amber-700">Agent note</span>{selected.agent_note}</div>}
                 </div>
 
-                {isAdmin && (
+                {isAdmin && !isFinalized && (
                   <details className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-                    <summary className="flex cursor-pointer list-none items-center gap-3 p-4"><div className="rounded-xl bg-slate-100 p-2 text-slate-700"><ClipboardList className="h-5 w-5" /></div><div><h3 className="font-bold">Admin order plan</h3><p className="text-xs text-slate-500">Open to edit ordered crates or quantities.</p></div><Pencil className="ml-auto h-4 w-4 text-slate-400" /></summary>
+                    <summary className="flex cursor-pointer list-none items-center gap-3 p-4"><div className="rounded-xl bg-slate-100 p-2 text-slate-700"><ClipboardList className="h-5 w-5" /></div><div><h3 className="font-bold">Admin order plan</h3><p className="text-xs text-slate-500">Open to review the Shopify tag and edit item quantities.</p></div><Pencil className="ml-auto h-4 w-4 text-slate-400" /></summary>
                     <div className="border-t border-slate-100 p-4">
-                      <div className="mb-4 grid grid-cols-2 gap-3 sm:max-w-sm"><div className="rounded-2xl bg-slate-50 p-3"><div className="text-xs text-slate-500">Expected items</div><div className="text-xl font-black">{adminItems.reduce((sum, item) => sum + Number(item.ordered_quantity || 0), 0)}</div></div><QuantityField label="Crates ordered" value={adminCrates} onChange={setAdminCrates} /></div>
+                      <div className="mb-4 grid grid-cols-2 gap-3 sm:max-w-sm"><div className="rounded-2xl bg-slate-50 p-3"><div className="text-xs text-slate-500">Expected items</div><div className="text-xl font-black">{adminItems.reduce((sum, item) => sum + Number(item.ordered_quantity || 0), 0)}</div></div><div className="rounded-2xl border border-violet-200 bg-violet-50 p-3"><div className="flex items-center gap-1 text-xs font-bold text-violet-700"><Tag className="h-3 w-3" /> Crates from tag</div><div className="text-xl font-black text-violet-950">{adminCrates}</div></div></div>
                       <div className="overflow-hidden rounded-2xl border border-slate-200">
                         <div className="hidden grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] items-center gap-2 border-b border-slate-200 bg-slate-100 px-4 py-2 text-[10px] font-black uppercase tracking-wide text-slate-600 sm:grid"><span>Product</span><span className="text-violet-700">Color</span><span className="text-sky-700">Size</span><span>Shopify</span><span>Ordered</span></div>
                         {adminItems.map((item) => { const dimensions = variantDimensions(item); return <div key={item.id} className="border-b border-slate-100 p-3 last:border-0 sm:grid sm:grid-cols-[minmax(180px,1.5fr)_120px_100px_90px_130px] sm:items-center sm:gap-2 sm:px-4"><ProductIdentity item={item} /><div className="mt-3 grid grid-cols-2 gap-2 sm:mt-0 sm:block"><DimensionBadge type="color" value={dimensions.color} compact /><div className="sm:hidden"><DimensionBadge type="size" value={dimensions.size} compact /></div></div><div className="hidden sm:block"><DimensionBadge type="size" value={dimensions.size} compact /></div><div className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm font-black text-slate-700 sm:mt-0 sm:bg-transparent sm:px-0 sm:py-0">Shopify <span className="float-right sm:float-none">{item.shopify_quantity}</span></div><div className="mt-2 sm:mt-0"><QuantityEditButton label="Qty ordered" value={item.ordered_quantity} onClick={() => openQuantityEditor("admin", item)} /></div></div>; })}
@@ -927,9 +803,14 @@ export default function InventoryHelper() {
                 <div className="rounded-2xl border border-slate-200 bg-white shadow-sm sm:rounded-3xl">
                   <div className="flex items-center gap-3 border-b border-slate-100 p-4"><div className="rounded-xl bg-indigo-50 p-2 text-indigo-600"><PackageOpen className="h-5 w-5" /></div><div className="min-w-0"><h3 className="font-bold">Receiving count</h3><p className="text-xs text-slate-500">Tap Found to edit a color and size.</p></div><div className="ml-auto rounded-xl bg-indigo-50 px-3 py-2 text-right"><div className="text-[9px] font-bold uppercase text-indigo-600">Found</div><div className="text-xl font-black leading-none text-indigo-950">{actualItems}</div></div></div>
                   <form onSubmit={reviewCount} className="space-y-4 p-3 sm:p-5">
+                    <label className="block rounded-2xl border-2 border-violet-300 bg-violet-50 p-3 text-violet-950 shadow-sm">
+                      <span className="block text-[10px] font-black uppercase tracking-widest text-violet-700">Crates received · enter manually</span>
+                      <input type="number" inputMode="numeric" min="0" required disabled={isFinalized} value={actualCrates} onChange={(event) => setActualCrates(event.target.value === "" ? "" : String(Math.max(0, Number(event.target.value))))} placeholder="0" className="mt-2 h-14 w-full rounded-xl border border-violet-300 bg-white px-3 text-center text-3xl font-black outline-none focus:border-violet-600 focus:ring-4 focus:ring-violet-100 disabled:bg-violet-100" />
+                      <span className="mt-1 block text-center text-[10px] font-semibold text-violet-700">Shopify tag says {selected.ordered_crates} crate{Number(selected.ordered_crates) === 1 ? "" : "s"} ordered</span>
+                    </label>
                     <label className="block rounded-2xl border-2 border-indigo-300 bg-indigo-50 p-3 text-indigo-950 shadow-sm">
                       <span className="block text-[10px] font-black uppercase tracking-widest text-indigo-700">Total items received · enter manually</span>
-                      <input type="number" inputMode="numeric" min="0" required value={agentTotalItems} onChange={(event) => setAgentTotalItems(event.target.value === "" ? "" : String(Math.max(0, Number(event.target.value))))} placeholder="0" className="mt-2 h-14 w-full rounded-xl border border-indigo-300 bg-white px-3 text-center text-3xl font-black outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-100" />
+                      <input type="number" inputMode="numeric" min="0" required disabled={isFinalized} value={agentTotalItems} onChange={(event) => setAgentTotalItems(event.target.value === "" ? "" : String(Math.max(0, Number(event.target.value))))} placeholder="0" className="mt-2 h-14 w-full rounded-xl border border-indigo-300 bg-white px-3 text-center text-3xl font-black outline-none focus:border-indigo-600 focus:ring-4 focus:ring-indigo-100 disabled:bg-indigo-100" />
                       <span className="mt-1 block text-center text-[10px] font-semibold text-indigo-700">Variant sum: {actualItems}</span>
                     </label>
                     <div className="space-y-3">
@@ -953,7 +834,7 @@ export default function InventoryHelper() {
                                   {colorGroup.items.map((item) => {
                                     const differs = Number(item.actual_quantity || 0) !== Number(item.ordered_quantity || 0);
                                     const dimensions = variantDimensions(item);
-                                    return <div key={item.id} className={`grid grid-cols-[minmax(70px,1fr)_60px_82px] items-center gap-2 border-t border-slate-100 px-3 py-2 ${differs ? "bg-rose-50/80" : "bg-white"}`}><div className="rounded-lg bg-sky-50 px-2 py-2 text-xs font-black text-sky-950">{dimensions.size}</div><div className="text-center text-sm font-black text-slate-700">{item.ordered_quantity}</div><button type="button" onClick={() => openQuantityEditor("agent", item)} className={`flex min-h-10 items-center justify-center gap-1 rounded-xl border px-1 text-base font-black shadow-sm active:scale-[0.98] ${differs ? "border-rose-300 bg-rose-100 text-rose-950" : "border-indigo-200 bg-indigo-50 text-indigo-950"}`}><span>{item.actual_quantity}</span><Pencil className="h-3 w-3" /></button></div>;
+                                    return <div key={item.id} className={`grid grid-cols-[minmax(70px,1fr)_60px_82px] items-center gap-2 border-t border-slate-100 px-3 py-2 ${differs ? "bg-rose-50/80" : "bg-white"}`}><div className="rounded-lg bg-sky-50 px-2 py-2 text-xs font-black text-sky-950">{dimensions.size}</div><div className="text-center text-sm font-black text-slate-700">{item.ordered_quantity}</div><button type="button" disabled={isFinalized} onClick={() => openQuantityEditor("agent", item)} className={`flex min-h-10 items-center justify-center gap-1 rounded-xl border px-1 text-base font-black shadow-sm active:scale-[0.98] disabled:cursor-default disabled:opacity-80 ${differs ? "border-rose-300 bg-rose-100 text-rose-950" : "border-indigo-200 bg-indigo-50 text-indigo-950"}`}><span>{item.actual_quantity}</span>{!isFinalized && <Pencil className="h-3 w-3" />}</button></div>;
                                   })}
                                 </div>
                               </details>
@@ -963,22 +844,20 @@ export default function InventoryHelper() {
                       ))}
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3"><QuantityField label="Crates received" value={actualCrates} onChange={setActualCrates} /><div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Items found</div><div className="mt-1 text-2xl font-black">{actualItems}</div></div></div>
-
-                    <details className="rounded-2xl border border-slate-200 bg-slate-50" open={!selected.photos?.length}>
+                    {!isFinalized && <details className="rounded-2xl border border-slate-200 bg-slate-50" open={!selected.photos?.length}>
                       <summary className="flex cursor-pointer list-none items-center gap-2 p-3 text-sm font-black"><Camera className="h-4 w-4 text-indigo-600" /> Crate photos &amp; note <span className="ml-auto rounded-full bg-white px-2 py-1 text-[10px] text-slate-500">{selected.photos?.length || 0}/4 photos</span></summary>
                       <div className="space-y-3 border-t border-slate-200 p-3">
                         <label className={`inline-flex h-10 w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-white px-3 text-sm font-bold text-indigo-700 ${photoBusy || selected.photos?.length >= 4 ? "pointer-events-none opacity-50" : ""}`}><input type="file" accept="image/jpeg,image/png,image/webp" capture="environment" onChange={uploadPhoto} className="sr-only" />{photoBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />} Take or add crate photo</label>
                         {!!selected.photos?.length && <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{selected.photos.map((photo) => <PrivatePhoto key={photo.id} photo={photo} onDelete={deletePhoto} canDelete={isAdmin || photo.uploaded_by_id === auth?.user?.id} />)}</div>}
                         <label className="block"><span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Agent note · optional</span><textarea value={agentNote} onChange={(event) => setAgentNote(event.target.value)} rows="2" placeholder="Damage, opened crate, or anything the admin should know…" className="w-full rounded-xl border border-slate-300 bg-white px-3 py-3 text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" /></label>
                       </div>
-                    </details>
+                    </details>}
 
                     {!!lastSyncOperations.length && <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3"><div className="text-xs font-black uppercase tracking-wide text-emerald-800">Verified Shopify result</div>{lastSyncOperations.map((operation, index) => <div key={index} className="mt-1 text-xs font-bold text-emerald-950">{formatInventoryOperation(operation)}</div>)}</div>}
-                    <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">You will review every inventory reduction before it is applied to Shopify.</div>
-                    <button disabled={countBusy || !agentItems.length || !countHasChanges || agentTotalItems === ""} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-black text-white shadow-sm disabled:bg-slate-300 disabled:text-slate-600"><Check className="h-4 w-4" />{countHasChanges ? (selected.status === "complete" ? "Review changes & return to pending" : "Review & save as pending") : (selected.status === "complete" ? "Complete — no changes" : "Saved as pending")}</button>
-                    {selected.actual_items != null && selected.status !== "complete" && <button type="button" onClick={markComplete} disabled={countBusy || countHasChanges} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 text-sm font-black text-white shadow-sm disabled:bg-slate-300 disabled:text-slate-600"><CheckCircle2 className="h-5 w-5" />{countHasChanges ? "Save changes before completing" : "Mark purchase order complete"}</button>}
-                    {selected.status === "complete" && !countHasChanges && <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-center text-sm font-black text-emerald-800"><CheckCircle2 className="mr-1 inline h-5 w-5" /> Purchase order complete</div>}
+                    {!isFinalized && <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">You will review every inventory change before it is applied to Shopify.</div>}
+                    {!isFinalized && <button disabled={countBusy || !agentItems.length || !countHasChanges || agentTotalItems === "" || actualCrates === ""} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-black text-white shadow-sm disabled:bg-slate-300 disabled:text-slate-600"><Check className="h-4 w-4" />{countHasChanges ? "Review & update Shopify inventory" : "Inventory count saved"}</button>}
+                    {!isFinalized && selected.actual_items != null && <button type="button" onClick={markComplete} disabled={countBusy || countHasChanges} className={`inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl px-5 text-sm font-black text-white shadow-sm disabled:bg-slate-300 disabled:text-slate-600 ${Number(selected.actual_crates) === Number(selected.ordered_crates) ? "bg-emerald-600" : "bg-amber-600"}`}><CheckCircle2 className="h-5 w-5" />{countHasChanges ? "Save inventory before approving" : Number(selected.actual_crates) === Number(selected.ordered_crates) ? "Approve & mark complete" : "Approve & mark incomplete"}</button>}
+                    {isFinalized && <div className={`rounded-2xl border px-4 py-3 text-center text-sm font-black ${selected.status === "complete" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-300 bg-amber-50 text-amber-900"}`}>{selected.status === "complete" ? <CheckCircle2 className="mr-1 inline h-5 w-5" /> : <AlertTriangle className="mr-1 inline h-5 w-5" />} Purchase order {selected.status}. This received-history record is locked.</div>}
                   </form>
                 </div>
               </section>

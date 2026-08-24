@@ -129,3 +129,37 @@ async def init_db():
             # The Inventory Helper table may not exist in partial test schemas.
             pass
 
+        # Inventory Helper automatic Shopify sync and received-history fields.
+        # Tags are retained as the source for the ordered-crate number, while
+        # finalized_at groups completed/incomplete receipts by receiving day.
+        try:
+            if is_sqlite_engine:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE inventory_receipts ADD COLUMN shopify_tags TEXT NOT NULL DEFAULT '[]'"
+                )
+            else:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE inventory_receipts ADD COLUMN IF NOT EXISTS shopify_tags JSONB NOT NULL DEFAULT '[]'::jsonb"
+                )
+        except Exception:
+            pass
+        try:
+            if is_sqlite_engine:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE inventory_receipts ADD COLUMN finalized_at DATETIME"
+                )
+            else:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE inventory_receipts ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMPTZ"
+                )
+        except Exception:
+            pass
+        try:
+            await conn.exec_driver_sql(
+                "UPDATE inventory_receipts "
+                "SET finalized_at = COALESCE(finalized_at, counted_at, updated_at, created_at) "
+                "WHERE status IN ('complete', 'incomplete') AND finalized_at IS NULL"
+            )
+        except Exception:
+            pass
+

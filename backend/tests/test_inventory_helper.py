@@ -11,8 +11,11 @@ from backend.app.inventory_helper_routes import (
     InventoryCountLineItemInput,
     _adjust_inventory_quantities,
     _build_inventory_sync_plan,
+    _date_range_search_query,
     _date_search_query,
+    _final_receipt_status,
     _line_items_from_shopify,
+    _ordered_crates_from_tags,
     _shopify_transfer_payload,
     _stored_receipt_date_prefixes,
     _stored_receipt_range_prefixes,
@@ -23,7 +26,7 @@ from backend.app.inventory_helper_routes import (
 def test_inventory_status_waiting_match_and_mismatch():
     assert _status(3, 24, None, None) == "waiting"
     assert _status(3, 24, 3, 24) == "matched"
-    assert _status(0, 24, 3, 24) == "matched"
+    assert _status(0, 24, 3, 24) == "mismatch"
     assert _status(3, 24, 2, 24) == "mismatch"
     assert _status(3, 24, 3, 25) == "mismatch"
     assert _status(
@@ -105,6 +108,24 @@ def test_date_query_uses_casablanca_day_boundaries():
     assert "created_at:<2026-08-18T23:00:00Z" in query
 
 
+def test_date_range_query_includes_the_full_end_day():
+    query = _date_range_search_query(date(2026, 8, 16), date(2026, 8, 18))
+    assert "created_at:>=2026-08-15T23:00:00Z" in query
+    assert "created_at:<2026-08-18T23:00:00Z" in query
+
+
+def test_numeric_shopify_tag_becomes_ordered_crate_count():
+    assert _ordered_crates_from_tags(["summer", "2", "warehouse"]) == 2
+    assert _ordered_crates_from_tags(["Crates: 4"]) == 4
+    assert _ordered_crates_from_tags(["no crate plan"]) == 0
+
+
+def test_final_status_is_incomplete_only_when_crate_count_differs():
+    assert _final_receipt_status(2, 2) == "complete"
+    assert _final_receipt_status(2, 1) == "incomplete"
+    assert _final_receipt_status(2, 3) == "incomplete"
+
+
 def test_saved_receipt_date_filter_supports_iso_and_shopify_formats():
     assert _stored_receipt_date_prefixes(date(2026, 8, 16)) == (
         "2026-08-16",
@@ -132,6 +153,7 @@ def test_date_card_uses_transfer_total_when_only_preview_line_is_loaded():
     transfer = {
         "id": "gid://shopify/InventoryTransfer/1",
         "name": "ST0001",
+        "tags": ["3"],
         "totalQuantity": 24,
         "lineItems": {
             "nodes": [
@@ -148,6 +170,8 @@ def test_date_card_uses_transfer_total_when_only_preview_line_is_loaded():
     payload = _shopify_transfer_payload(transfer, "irranova")
 
     assert payload["expected_items"] == 24
+    assert payload["shopify_tags"] == ["3"]
+    assert payload["ordered_crates"] == 3
     assert len(payload["line_items"]) == 1
 
 

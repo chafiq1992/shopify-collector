@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 import json
 import os
+import re
 from typing import Any, Optional
 from uuid import NAMESPACE_URL, uuid5
 from zoneinfo import ZoneInfo
@@ -34,6 +35,7 @@ _TRANSFER_CORE_FIELDS = """
   dateCreated
   status
   note
+  tags
   totalQuantity
   destination {
     name
@@ -69,6 +71,7 @@ _TRANSFER_CARD_FIELDS = """
   dateCreated
   status
   note
+  tags
   totalQuantity
   destination {
     name
@@ -196,6 +199,7 @@ class InventoryReceiptCreate(BaseModel):
     order_number: str
     po_number: Optional[str] = None
     shopify_created_at: Optional[str] = None
+    shopify_tags: list[str] = Field(default_factory=list)
     ordered_crates: int = Field(ge=0)
     line_items: list[InventoryLineItemInput]
 
@@ -235,9 +239,7 @@ def _status(
 ) -> str:
     if actual_crates is None or actual_items is None:
         return "waiting"
-    # Zero means the admin has not entered a crate plan yet. In that case the
-    # extracted Shopify item total can still be fully verified by the agent.
-    crates_match = expected_crates <= 0 or actual_crates == expected_crates
+    crates_match = actual_crates == expected_crates
     counted_variants = [item for item in (line_items or []) if item.get("actual_quantity") is not None]
     variants_match = not counted_variants or (
         len(counted_variants) == len(line_items or [])
@@ -269,6 +271,7 @@ def _serialize(row: InventoryReceipt) -> dict[str, Any]:
         "order_number": row.order_number,
         "po_number": row.po_number,
         "shopify_created_at": row.shopify_created_at,
+        "shopify_tags": row.shopify_tags or [],
         "line_items": row.line_items or [],
         "ordered_crates": row.ordered_crates,
         "expected_items": row.expected_items,
@@ -288,6 +291,7 @@ def _serialize(row: InventoryReceipt) -> dict[str, Any]:
         "created_by": _person(row.created_by),
         "counted_by": _person(row.counted_by),
         "counted_at": row.counted_at.isoformat() if row.counted_at else None,
+        "finalized_at": row.finalized_at.isoformat() if row.finalized_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         "photos": [
@@ -415,12 +419,15 @@ def _shopify_transfer_payload(transfer: dict[str, Any], store_key: str) -> dict[
     transfer_name = transfer.get("name")
     destination = transfer.get("destination") or {}
     location = destination.get("location") or {}
+    tags = [str(tag).strip() for tag in (transfer.get("tags") or []) if str(tag).strip()]
     return {
         "store": store_key,
         "shopify_order_gid": transfer.get("id"),
         "order_number": display_name,
         "po_number": transfer_name if transfer_name != display_name else None,
         "shopify_created_at": transfer.get("dateCreated"),
+        "shopify_tags": tags,
+        "ordered_crates": _ordered_crates_from_tags(tags),
         "transfer_status": transfer.get("status"),
         "destination_name": location.get("name") or destination.get("name"),
         "line_items": items,
@@ -436,12 +443,42 @@ def _shopify_transfer_payload(transfer: dict[str, Any], store_key: str) -> dict[
 
 
 def _date_search_query(selected_date: date) -> str:
+    return _date_range_search_query(selected_date, selected_date)
+
+
+def _date_range_search_query(start_date: date, end_date: date) -> str:
+    if end_date < start_date:
+        raise ValueError("The end date must be on or after the start date")
     local_tz = ZoneInfo("Africa/Casablanca")
-    start_local = datetime.combine(selected_date, time.min, tzinfo=local_tz)
-    end_local = start_local + timedelta(days=1)
+    start_local = datetime.combine(start_date, time.min, tzinfo=local_tz)
+    end_local = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=local_tz)
     start_utc = start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     end_utc = end_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"created_at:>={start_utc} created_at:<{end_utc}"
+
+
+def _ordered_crates_from_tags(tags: list[str]) -> int:
+    """Extract the PO crate plan from Shopify transfer tags.
+
+    A pure numeric tag is the primary convention (for example ``2`` means two
+    crates). Labeled forms are accepted as a forgiving fallback.
+    """
+    cleaned = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
+    labeled = re.compile(
+        r"(?i)(?:crates?|boxes?)\s*[:#x-]?\s*(\d+)|(\d+)\s*(?:crates?|boxes?)"
+    )
+    for tag in cleaned:
+        match = labeled.fullmatch(tag)
+        if match:
+            return max(0, int(match.group(1) or match.group(2)))
+    for tag in cleaned:
+        if re.fullmatch(r"\d+", tag):
+            return max(0, int(tag))
+    return 0
+
+
+def _final_receipt_status(ordered_crates: int, actual_crates: int) -> str:
+    return "complete" if int(actual_crates) == int(ordered_crates) else "incomplete"
 
 
 def _stored_receipt_date_prefixes(selected_date: date) -> tuple[str, str]:
@@ -488,6 +525,14 @@ async def _loaded_receipt(db: AsyncSession, receipt_id: int) -> InventoryReceipt
     if not row:
         raise HTTPException(status_code=404, detail="inventory record not found")
     return row
+
+
+def _ensure_receipt_open(row: InventoryReceipt) -> None:
+    if row.status in {"complete", "incomplete"}:
+        raise HTTPException(
+            status_code=409,
+            detail="This purchase order is already in received history and can no longer be edited",
+        )
 
 
 async def _shopify_transfer_by_id(store_key: str, transfer_id: str, *, detailed: bool) -> dict[str, Any]:
@@ -915,6 +960,102 @@ async def available_shopify_transfers(
     }
 
 
+async def _shopify_transfers_for_period(
+    store_key: str,
+    selected_from: date,
+    selected_to: date,
+) -> list[dict[str, Any]]:
+    """Load every Shopify inventory transfer created in the selected period."""
+    from .main import shopify_graphql
+
+    query = f"query InventoryHelperTransfersForPeriod($query: String!, $after: String) {{ inventoryTransfers(first: 50, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {{ nodes {{ {_TRANSFER_CORE_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }} }}"
+    transfers: list[dict[str, Any]] = []
+    after: Optional[str] = None
+    try:
+        while True:
+            data = await shopify_graphql(
+                query,
+                {"query": _date_range_search_query(selected_from, selected_to), "after": after},
+                store=store_key,
+                api_version=_TRANSFER_API_VERSION,
+            )
+            connection = data.get("inventoryTransfers") or {}
+            transfers.extend(connection.get("nodes") or [])
+            page_info = connection.get("pageInfo") or {}
+            after = page_info.get("endCursor")
+            if not page_info.get("hasNextPage") or not after:
+                break
+    except HTTPException as exc:
+        _translate_shopify_access_error(exc)
+    return transfers
+
+
+async def _sync_shopify_transfers_for_period(
+    db: AsyncSession,
+    store_key: str,
+    selected_from: date,
+    selected_to: date,
+    user: User,
+) -> int:
+    """Create queue cards automatically while preserving started/final history."""
+    transfers = await _shopify_transfers_for_period(store_key, selected_from, selected_to)
+    transfer_ids = [str(transfer.get("id")) for transfer in transfers if transfer.get("id")]
+    if not transfer_ids:
+        return 0
+
+    existing_rows = (
+        await db.scalars(
+            select(InventoryReceipt).where(
+                InventoryReceipt.store_key == store_key,
+                InventoryReceipt.shopify_order_gid.in_(transfer_ids),
+            )
+        )
+    ).all()
+    existing_by_gid = {row.shopify_order_gid: row for row in existing_rows}
+    created = 0
+    for transfer in transfers:
+        payload = _shopify_transfer_payload(transfer, store_key)
+        transfer_id = str(payload.get("shopify_order_gid") or "")
+        if not transfer_id:
+            continue
+        row = existing_by_gid.get(transfer_id)
+        if row:
+            # Keep finalized snapshots immutable. For active receipts, refresh
+            # transfer metadata and the tag-derived crate plan. Untouched rows
+            # also receive the latest Shopify variant list and quantities.
+            if row.status not in {"complete", "incomplete"}:
+                row.order_number = str(payload.get("order_number") or row.order_number)
+                row.po_number = payload.get("po_number")
+                row.shopify_created_at = payload.get("shopify_created_at")
+                row.shopify_tags = payload.get("shopify_tags") or []
+                row.ordered_crates = int(payload.get("ordered_crates") or 0)
+                if row.actual_items is None:
+                    row.line_items = payload.get("line_items") or []
+                    row.expected_items = int(payload.get("expected_items") or 0)
+            continue
+
+        items = payload.get("line_items") or []
+        row = InventoryReceipt(
+            store_key=store_key,
+            shopify_order_gid=transfer_id,
+            order_number=str(payload.get("order_number") or "Shopify transfer"),
+            po_number=payload.get("po_number"),
+            shopify_created_at=payload.get("shopify_created_at"),
+            shopify_tags=payload.get("shopify_tags") or [],
+            line_items=items,
+            ordered_crates=int(payload.get("ordered_crates") or 0),
+            expected_items=int(payload.get("expected_items") or 0),
+            status="new",
+            created_by_id=user.id,
+        )
+        db.add(row)
+        existing_by_gid[transfer_id] = row
+        created += 1
+
+    await db.commit()
+    return created
+
+
 @router.get("/receipts")
 async def list_receipts(
     store: Optional[str] = Query(default=None),
@@ -922,8 +1063,27 @@ async def list_receipts(
     date_from: Optional[date] = Query(default=None),
     date_to: Optional[date] = Query(default=None),
     db: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
+    store_key = _clean_store(store) if store else None
+    selected_from = date_from or purchase_date
+    selected_to = date_to or selected_from
+    if date_to and not selected_from:
+        raise HTTPException(status_code=400, detail="Choose a start date before the end date")
+    if selected_from and selected_to:
+        try:
+            _stored_receipt_range_prefixes(selected_from, selected_to)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if store_key:
+            await _sync_shopify_transfers_for_period(
+                db,
+                store_key,
+                selected_from,
+                selected_to,
+                user,
+            )
+
     stmt = (
         select(InventoryReceipt)
         .options(
@@ -931,23 +1091,16 @@ async def list_receipts(
             selectinload(InventoryReceipt.counted_by),
             selectinload(InventoryReceipt.photos),
         )
-        .order_by(InventoryReceipt.created_at.desc(), InventoryReceipt.id.desc())
+        .order_by(InventoryReceipt.shopify_created_at.desc(), InventoryReceipt.id.desc())
         .limit(1000)
     )
-    if store:
-        stmt = stmt.where(InventoryReceipt.store_key == _clean_store(store))
-    selected_from = date_from or purchase_date
-    selected_to = date_to or selected_from
-    if date_to and not selected_from:
-        raise HTTPException(status_code=400, detail="Choose a start date before the end date")
+    if store_key:
+        stmt = stmt.where(InventoryReceipt.store_key == store_key)
     if selected_from and selected_to:
         # New transfers normally use ISO-8601, while older Shopify Date scalar
         # values in production were saved as MM/DD/YYYY. Keep both searchable
         # across either one selected day or a selected period.
-        try:
-            prefixes = _stored_receipt_range_prefixes(selected_from, selected_to)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        prefixes = _stored_receipt_range_prefixes(selected_from, selected_to)
         stmt = stmt.where(
             or_(*[
                 InventoryReceipt.shopify_created_at.like(f"{prefix}%")
@@ -957,11 +1110,31 @@ async def list_receipts(
     # Legacy rows imported from Shopify's customer Order API stay preserved in
     # the database, but they are not purchase orders and must not appear here.
     stmt = stmt.where(InventoryReceipt.shopify_order_gid.like("gid://shopify/InventoryTransfer/%"))
+    stmt = stmt.where(InventoryReceipt.status.notin_(("complete", "incomplete")))
     rows = (await db.scalars(stmt)).all()
+
+    history_stmt = (
+        select(InventoryReceipt)
+        .options(
+            selectinload(InventoryReceipt.created_by),
+            selectinload(InventoryReceipt.counted_by),
+            selectinload(InventoryReceipt.photos),
+        )
+        .where(
+            InventoryReceipt.shopify_order_gid.like("gid://shopify/InventoryTransfer/%"),
+            InventoryReceipt.status.in_(("complete", "incomplete")),
+        )
+        .order_by(InventoryReceipt.finalized_at.desc(), InventoryReceipt.id.desc())
+        .limit(500)
+    )
+    if store_key:
+        history_stmt = history_stmt.where(InventoryReceipt.store_key == store_key)
+    history_rows = (await db.scalars(history_stmt)).all()
     return {
         "date_from": selected_from.isoformat() if selected_from else None,
         "date_to": selected_to.isoformat() if selected_to else None,
         "receipts": [_serialize(row) for row in rows],
+        "history": [_serialize(row) for row in history_rows],
     }
 
 
@@ -988,6 +1161,7 @@ async def create_receipt(
         order_number=body.order_number.strip(),
         po_number=(body.po_number or "").strip() or None,
         shopify_created_at=body.shopify_created_at,
+        shopify_tags=body.shopify_tags,
         line_items=items,
         ordered_crates=body.ordered_crates,
         expected_items=sum(item["ordered_quantity"] for item in items),
@@ -1007,6 +1181,7 @@ async def update_receipt_admin(
     _: User = Depends(require_admin),
 ):
     row = await _loaded_receipt(db, receipt_id)
+    _ensure_receipt_open(row)
     items = _merge_admin_items(list(row.line_items or []), body.line_items)
     row.line_items = items
     row.ordered_crates = body.ordered_crates
@@ -1025,6 +1200,7 @@ async def update_receipt_count(
     user: User = Depends(get_current_user),
 ):
     row = await _loaded_receipt(db, receipt_id)
+    _ensure_receipt_open(row)
     stored_items = list(row.line_items or [])
     if not body.line_items:
         raise HTTPException(status_code=400, detail="Enter the received quantity for every variant")
@@ -1098,6 +1274,7 @@ async def update_receipt_count(
     row.agent_note = (body.agent_note or "").strip() or None
     row.counted_by_id = user.id
     row.counted_at = datetime.now(timezone.utc)
+    row.finalized_at = None
     # Saving or editing never completes a card. This prevents an agent from
     # accidentally turning a purchase order green before the final review.
     row.status = "pending"
@@ -1118,9 +1295,12 @@ async def complete_receipt(
         raise HTTPException(status_code=409, detail="Save the receiving count before marking this purchase order complete")
     if row.reported_items_received is None:
         raise HTTPException(status_code=409, detail="Enter the total items received before marking this purchase order complete")
-    row.status = "complete"
+    _ensure_receipt_open(row)
+    now = datetime.now(timezone.utc)
+    row.status = _final_receipt_status(row.ordered_crates, row.actual_crates)
     row.counted_by_id = user.id
-    row.counted_at = datetime.now(timezone.utc)
+    row.counted_at = now
+    row.finalized_at = now
     await db.commit()
     return _serialize(await _loaded_receipt(db, row.id))
 
@@ -1133,6 +1313,7 @@ async def upload_receipt_photo(
     user: User = Depends(get_current_user),
 ):
     row = await _loaded_receipt(db, receipt_id)
+    _ensure_receipt_open(row)
     if len(row.photos or []) >= _MAX_PHOTOS:
         raise HTTPException(status_code=400, detail=f"A maximum of {_MAX_PHOTOS} photos is allowed")
     content_type = (photo.content_type or "").lower()
@@ -1184,6 +1365,7 @@ async def delete_receipt_photo(
     if user.role != "admin" and photo.uploaded_by_id != user.id:
         raise HTTPException(status_code=403, detail="Only the uploader or an admin can remove this photo")
     row = await _loaded_receipt(db, photo.receipt_id)
+    _ensure_receipt_open(row)
     await db.delete(photo)
     row.status = "pending"
     await db.commit()

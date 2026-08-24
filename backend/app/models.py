@@ -162,6 +162,7 @@ class InventoryReceipt(Base):
     order_number = Column(String(64), nullable=False, index=True)
     po_number = Column(String(128), nullable=True, index=True)
     shopify_created_at = Column(String(40), nullable=True)
+    shopify_tags = Column(_json_type(), nullable=False, default=list)
     line_items = Column(_json_type(), nullable=False, default=list)
     ordered_crates = Column(Integer, nullable=False, default=0)
     expected_items = Column(Integer, nullable=False, default=0)
@@ -173,6 +174,7 @@ class InventoryReceipt(Base):
     created_by_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     counted_by_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     counted_at = Column(DateTime(timezone=True), nullable=True)
+    finalized_at = Column(DateTime(timezone=True), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
