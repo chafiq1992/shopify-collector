@@ -28,6 +28,26 @@ _ALLOWED_PHOTO_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 _TRANSFER_API_VERSION = os.environ.get("SHOPIFY_INVENTORY_API_VERSION", "2026-07").strip()
 
+_TRANSFER_LINE_ITEM_FIELDS = """
+  id
+  title
+  totalQuantity
+  inventoryItem {
+    id
+    sku
+    variant {
+      id
+      title
+      selectedOptions { name value }
+      image { url altText }
+      product {
+        title
+        featuredMedia { preview { image { url altText } } }
+      }
+    }
+  }
+"""
+
 _TRANSFER_CORE_FIELDS = """
   id
   name
@@ -41,26 +61,11 @@ _TRANSFER_CORE_FIELDS = """
     name
     location { id name }
   }
-  lineItems(first: 250) {
+  lineItems(first: 100) {
     nodes {
-      id
-      title
-      totalQuantity
-      inventoryItem {
-        id
-        sku
-        variant {
-          id
-          title
-          selectedOptions { name value }
-          image { url altText }
-          product {
-            title
-            featuredMedia { preview { image { url altText } } }
-          }
-        }
-      }
+""" + _TRANSFER_LINE_ITEM_FIELDS + """
     }
+    pageInfo { hasNextPage endCursor }
   }
 """
 
@@ -79,34 +84,18 @@ _TRANSFER_CARD_FIELDS = """
   }
   lineItems(first: 1) {
     nodes {
-      id
-      title
-      totalQuantity
-      inventoryItem {
-        id
-        sku
-        variant {
-          id
-          title
-          selectedOptions { name value }
-          image { url altText }
-          product {
-            title
-            featuredMedia { preview { image { url altText } } }
-          }
-        }
-      }
+""" + _TRANSFER_LINE_ITEM_FIELDS + """
     }
   }
 """
 
 _TRANSFER_DETAIL_FIELDS = _TRANSFER_CORE_FIELDS + """
-  shipments(first: 50) {
+  shipments(first: 2) {
     nodes {
       id
       name
       status
-      lineItems(first: 250) {
+      lineItems(first: 100) {
         nodes {
           id
           quantity
@@ -272,6 +261,7 @@ def _serialize(row: InventoryReceipt) -> dict[str, Any]:
         "po_number": row.po_number,
         "shopify_created_at": row.shopify_created_at,
         "shopify_tags": row.shopify_tags or [],
+        "shopify_details_loaded": bool(row.shopify_details_loaded),
         "line_items": row.line_items or [],
         "ordered_crates": row.ordered_crates,
         "expected_items": row.expected_items,
@@ -549,6 +539,23 @@ async def _shopify_transfer_by_id(store_key: str, transfer_id: str, *, detailed:
     transfer = data.get("inventoryTransfer")
     if not transfer:
         raise HTTPException(status_code=404, detail="The linked Shopify inventory transfer no longer exists")
+    connection = transfer.get("lineItems") or {}
+    nodes = list(connection.get("nodes") or [])
+    page_info = connection.get("pageInfo") or {}
+    after = page_info.get("endCursor")
+    page_query = f"query InventoryHelperTransferLines($id: ID!, $after: String!) {{ inventoryTransfer(id: $id) {{ lineItems(first: 100, after: $after) {{ nodes {{ {_TRANSFER_LINE_ITEM_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }} }} }}"
+    while page_info.get("hasNextPage") and after:
+        page_data = await shopify_graphql(
+            page_query,
+            {"id": transfer_id, "after": after},
+            store=store_key,
+            api_version=_TRANSFER_API_VERSION,
+        )
+        next_connection = ((page_data.get("inventoryTransfer") or {}).get("lineItems") or {})
+        nodes.extend(next_connection.get("nodes") or [])
+        page_info = next_connection.get("pageInfo") or {}
+        after = page_info.get("endCursor")
+    transfer["lineItems"] = {"nodes": nodes, "pageInfo": page_info}
     return transfer
 
 
@@ -968,7 +975,9 @@ async def _shopify_transfers_for_period(
     """Load every Shopify inventory transfer created in the selected period."""
     from .main import shopify_graphql
 
-    query = f"query InventoryHelperTransfersForPeriod($query: String!, $after: String) {{ inventoryTransfers(first: 50, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {{ nodes {{ {_TRANSFER_CORE_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }} }}"
+    # Keep the home-page query below Shopify's maximum query cost. Full variant
+    # details are loaded for one receipt only when the agent opens its card.
+    query = f"query InventoryHelperTransfersForPeriod($query: String!, $after: String) {{ inventoryTransfers(first: 50, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {{ nodes {{ {_TRANSFER_CARD_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }} }}"
     transfers: list[dict[str, Any]] = []
     after: Optional[str] = None
     try:
@@ -1029,7 +1038,7 @@ async def _sync_shopify_transfers_for_period(
                 row.shopify_created_at = payload.get("shopify_created_at")
                 row.shopify_tags = payload.get("shopify_tags") or []
                 row.ordered_crates = int(payload.get("ordered_crates") or 0)
-                if row.actual_items is None:
+                if row.actual_items is None and not row.shopify_details_loaded:
                     row.line_items = payload.get("line_items") or []
                     row.expected_items = int(payload.get("expected_items") or 0)
             continue
@@ -1042,6 +1051,7 @@ async def _sync_shopify_transfers_for_period(
             po_number=payload.get("po_number"),
             shopify_created_at=payload.get("shopify_created_at"),
             shopify_tags=payload.get("shopify_tags") or [],
+            shopify_details_loaded=False,
             line_items=items,
             ordered_crates=int(payload.get("ordered_crates") or 0),
             expected_items=int(payload.get("expected_items") or 0),
@@ -1162,6 +1172,7 @@ async def create_receipt(
         po_number=(body.po_number or "").strip() or None,
         shopify_created_at=body.shopify_created_at,
         shopify_tags=body.shopify_tags,
+        shopify_details_loaded=True,
         line_items=items,
         ordered_crates=body.ordered_crates,
         expected_items=sum(item["ordered_quantity"] for item in items),
@@ -1169,6 +1180,42 @@ async def create_receipt(
         created_by_id=admin.id,
     )
     db.add(row)
+    await db.commit()
+    return _serialize(await _loaded_receipt(db, row.id))
+
+
+@router.patch("/receipts/{receipt_id}/details")
+async def load_receipt_details(
+    receipt_id: int,
+    db: AsyncSession = Depends(get_session),
+    _: User = Depends(get_current_user),
+):
+    """Hydrate one lightweight queue card with its complete Shopify variants."""
+    row = await _loaded_receipt(db, receipt_id)
+    if row.shopify_details_loaded:
+        return _serialize(row)
+    if row.actual_items is not None:
+        row.shopify_details_loaded = True
+        await db.commit()
+        return _serialize(await _loaded_receipt(db, row.id))
+
+    try:
+        transfer = await _shopify_transfer_by_id(
+            row.store_key,
+            row.shopify_order_gid,
+            detailed=False,
+        )
+    except HTTPException as exc:
+        _translate_shopify_access_error(exc)
+    payload = _shopify_transfer_payload(transfer, row.store_key)
+    row.order_number = str(payload.get("order_number") or row.order_number)
+    row.po_number = payload.get("po_number")
+    row.shopify_created_at = payload.get("shopify_created_at")
+    row.shopify_tags = payload.get("shopify_tags") or []
+    row.ordered_crates = int(payload.get("ordered_crates") or 0)
+    row.line_items = payload.get("line_items") or []
+    row.expected_items = int(payload.get("expected_items") or 0)
+    row.shopify_details_loaded = True
     await db.commit()
     return _serialize(await _loaded_receipt(db, row.id))
 
@@ -1182,6 +1229,8 @@ async def update_receipt_admin(
 ):
     row = await _loaded_receipt(db, receipt_id)
     _ensure_receipt_open(row)
+    if not row.shopify_details_loaded:
+        raise HTTPException(status_code=409, detail="Open this purchase order to load every Shopify variant first")
     items = _merge_admin_items(list(row.line_items or []), body.line_items)
     row.line_items = items
     row.ordered_crates = body.ordered_crates
@@ -1201,6 +1250,8 @@ async def update_receipt_count(
 ):
     row = await _loaded_receipt(db, receipt_id)
     _ensure_receipt_open(row)
+    if not row.shopify_details_loaded:
+        raise HTTPException(status_code=409, detail="Open this purchase order to load every Shopify variant first")
     stored_items = list(row.line_items or [])
     if not body.line_items:
         raise HTTPException(status_code=400, detail="Enter the received quantity for every variant")

@@ -1063,6 +1063,21 @@ def _shopify_graphql_url(
     version = (api_version or SHOPIFY_API_VERSION).strip()
     return f"https://{domain}/admin/api/{version}/graphql.json"
 
+
+def _shopify_graphql_retry_delay(data: Dict[str, Any], attempt: int, base_delay: float = 0.75) -> float:
+    """Use Shopify's cost metadata when available, with bounded backoff."""
+    exponential = base_delay * (2 ** attempt)
+    cost = ((data.get("extensions") or {}).get("cost") or {}) if isinstance(data, dict) else {}
+    throttle = cost.get("throttleStatus") or {}
+    try:
+        requested = float(cost.get("requestedQueryCost") or cost.get("actualQueryCost") or 0)
+        available = float(throttle.get("currentlyAvailable") or 0)
+        restore_rate = float(throttle.get("restoreRate") or 0)
+        cost_wait = max(0.0, requested - available) / restore_rate if restore_rate > 0 else 0.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        cost_wait = 0.0
+    return min(15.0, max(exponential, cost_wait + 0.25) + random.uniform(0, 0.2))
+
 async def shopify_graphql(
     query: str,
     variables: Dict[str, Any] | None,
@@ -1080,8 +1095,8 @@ async def shopify_graphql(
     # Always use token/password header (custom/private app password)
     headers["X-Shopify-Access-Token"] = access_token
 
-    max_retries = 5
-    base_delay = 0.35
+    max_retries = 7
+    base_delay = 0.75
     last_exc: Optional[Exception] = None
     url = _shopify_graphql_url(domain, access_token, api_key, api_version)
     async with _shared_shopify_http_client() as client:
@@ -1109,10 +1124,14 @@ async def shopify_graphql(
                     errs = data.get("errors") or []
                     # If throttled at GraphQL layer, backoff and retry
                     is_throttled = any(((e.get("extensions") or {}).get("code") or "").upper() == "THROTTLED" for e in errs)
-                    if is_throttled and attempt < max_retries - 1:
-                        wait = base_delay * (2 ** attempt) + random.uniform(0, 0.15)
-                        await asyncio.sleep(wait)
-                        continue
+                    if is_throttled:
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(_shopify_graphql_retry_delay(data, attempt, base_delay))
+                            continue
+                        raise HTTPException(
+                            status_code=429,
+                            detail="Shopify is busy. Inventory Helper waited and retried; please try again in a moment.",
+                        )
                     # Non-throttling errors → surface as 502
                     detail = f"Shopify GraphQL errors: {errs}"
                     raise HTTPException(status_code=502, detail=detail)

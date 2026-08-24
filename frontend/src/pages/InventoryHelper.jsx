@@ -371,6 +371,7 @@ export default function InventoryHelper() {
   const [viewDateFrom, setViewDateFrom] = useState(localDateInput);
   const [viewDateTo, setViewDateTo] = useState("");
   const [loading, setLoading] = useState(true);
+  const [detailBusyId, setDetailBusyId] = useState(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [needsShopifyReconnect, setNeedsShopifyReconnect] = useState(false);
@@ -484,10 +485,30 @@ export default function InventoryHelper() {
     }
   }
 
-  function openReceipt(receiptId) {
-    setSelectedId(receiptId);
+  async function openReceipt(receiptId) {
+    const receipt = [...receipts, ...historyReceipts].find((item) => item.id === receiptId);
+    if (!receipt || detailBusyId) return;
     setLastSyncOperations([]);
-    window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);
+    if (receipt.shopify_details_loaded || receipt.status === "complete" || receipt.status === "incomplete") {
+      setSelectedId(receiptId);
+      window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);
+      return;
+    }
+    setDetailBusyId(receiptId);
+    setError("");
+    try {
+      const hydrated = await apiJson(`/api/inventory-helper/receipts/${receiptId}/details`, {
+        method: "PATCH",
+        headers: authHeaders({ Accept: "application/json" }),
+      });
+      replaceReceipt(hydrated);
+      setSelectedId(receiptId);
+      window.setTimeout(() => detailRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 60);
+    } catch (err) {
+      showApiError(err);
+    } finally {
+      setDetailBusyId(null);
+    }
   }
 
   function refreshCurrent() {
@@ -708,13 +729,13 @@ export default function InventoryHelper() {
                 const Icon = tone.icon;
                 const image = receipt.line_items?.find((item) => item.image_url)?.image_url;
                 return (
-                  <button key={receipt.id} type="button" onClick={() => openReceipt(receipt.id)} className={`min-w-0 overflow-hidden rounded-2xl border text-left shadow-sm transition active:scale-[0.98] ${tone.row} ${selected?.id === receipt.id ? "ring-2 ring-indigo-500 ring-offset-2" : "hover:shadow-md"}`}>
+                  <button key={receipt.id} type="button" disabled={Boolean(detailBusyId)} onClick={() => openReceipt(receipt.id)} className={`min-w-0 overflow-hidden rounded-2xl border text-left shadow-sm transition active:scale-[0.98] disabled:opacity-65 ${tone.row} ${selected?.id === receipt.id ? "ring-2 ring-indigo-500 ring-offset-2" : "hover:shadow-md"}`}>
                     <div className="space-y-2 p-2.5 sm:p-3">
                       <div className="flex min-w-0 items-start gap-2">
                         {image ? <img src={image} alt={receipt.line_items?.[0]?.title || "Purchase order product"} className="h-10 w-10 shrink-0 rounded-xl border border-slate-200 object-cover" /> : <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-400"><Boxes className="h-5 w-5" /></div>}
                         <div className="min-w-0 flex-1"><div className="truncate text-sm font-black sm:text-base">{receipt.order_number}</div><div className="truncate text-[10px] font-semibold text-slate-500 sm:text-xs">{orderedLabel(receipt)}</div></div>
                       </div>
-                      <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-black ${tone.badge}`}><Icon className="h-3 w-3" />{tone.label}</span>
+                      <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-black ${tone.badge}`}>{detailBusyId === receipt.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Icon className="h-3 w-3" />}{detailBusyId === receipt.id ? "Loading variants" : tone.label}</span>
                       <div className="grid grid-cols-2 gap-1.5 text-center">
                         <div className="rounded-lg border border-slate-200 bg-white/80 px-1 py-1.5"><div className="text-[9px] text-slate-500">Items ordered</div><div className="text-sm font-black">{receipt.expected_items}</div></div>
                         <div className="rounded-lg border border-slate-200 bg-white/80 px-1 py-1.5"><div className="text-[9px] text-slate-500">Crates received</div><div className="text-sm font-black">{receipt.actual_crates ?? "—"}</div></div>

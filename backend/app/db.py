@@ -146,6 +146,17 @@ async def init_db():
         try:
             if is_sqlite_engine:
                 await conn.exec_driver_sql(
+                    "ALTER TABLE inventory_receipts ADD COLUMN shopify_details_loaded BOOLEAN NOT NULL DEFAULT 1"
+                )
+            else:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE inventory_receipts ADD COLUMN IF NOT EXISTS shopify_details_loaded BOOLEAN NOT NULL DEFAULT TRUE"
+                )
+        except Exception:
+            pass
+        try:
+            if is_sqlite_engine:
+                await conn.exec_driver_sql(
                     "ALTER TABLE inventory_receipts ADD COLUMN finalized_at DATETIME"
                 )
             else:

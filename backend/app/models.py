@@ -163,6 +163,7 @@ class InventoryReceipt(Base):
     po_number = Column(String(128), nullable=True, index=True)
     shopify_created_at = Column(String(40), nullable=True)
     shopify_tags = Column(_json_type(), nullable=False, default=list)
+    shopify_details_loaded = Column(Boolean, nullable=False, default=False)
     line_items = Column(_json_type(), nullable=False, default=list)
     ordered_crates = Column(Integer, nullable=False, default=0)
     expected_items = Column(Integer, nullable=False, default=0)

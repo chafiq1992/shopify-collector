@@ -17,6 +17,8 @@ from backend.app.inventory_helper_routes import (
     _line_items_from_shopify,
     _ordered_crates_from_tags,
     _shopify_transfer_payload,
+    _shopify_transfer_by_id,
+    _shopify_transfers_for_period,
     _stored_receipt_date_prefixes,
     _stored_receipt_range_prefixes,
     _status,
@@ -124,6 +126,87 @@ def test_final_status_is_incomplete_only_when_crate_count_differs():
     assert _final_receipt_status(2, 2) == "complete"
     assert _final_receipt_status(2, 1) == "incomplete"
     assert _final_receipt_status(2, 3) == "incomplete"
+
+
+@pytest.mark.asyncio
+async def test_period_sync_uses_lightweight_card_query(monkeypatch):
+    calls = []
+
+    async def fake_graphql(query, variables, **_kwargs):
+        calls.append((query, variables))
+        return {
+            "inventoryTransfers": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }
+        }
+
+    from backend.app import main
+
+    monkeypatch.setattr(main, "shopify_graphql", fake_graphql)
+    assert await _shopify_transfers_for_period(
+        "irranova",
+        date(2026, 8, 16),
+        date(2026, 8, 18),
+    ) == []
+    assert "lineItems(first: 1)" in calls[0][0]
+    assert "lineItems(first: 250)" not in calls[0][0]
+
+
+def test_graphql_backoff_uses_shopify_cost_bucket(monkeypatch):
+    from backend.app import main
+
+    monkeypatch.setattr(main.random, "uniform", lambda *_args: 0)
+    delay = main._shopify_graphql_retry_delay(
+        {
+            "extensions": {
+                "cost": {
+                    "requestedQueryCost": 500,
+                    "throttleStatus": {"currentlyAvailable": 100, "restoreRate": 50},
+                }
+            }
+        },
+        attempt=0,
+    )
+    assert delay == 8.25
+
+
+@pytest.mark.asyncio
+async def test_transfer_details_paginate_variants_in_cost_safe_pages(monkeypatch):
+    calls = []
+
+    async def fake_graphql(query, variables, **_kwargs):
+        calls.append((query, variables))
+        if len(calls) == 1:
+            return {
+                "inventoryTransfer": {
+                    "id": variables["id"],
+                    "lineItems": {
+                        "nodes": [{"id": "line-1"}],
+                        "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                    },
+                }
+            }
+        return {
+            "inventoryTransfer": {
+                "lineItems": {
+                    "nodes": [{"id": "line-2"}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            }
+        }
+
+    from backend.app import main
+
+    monkeypatch.setattr(main, "shopify_graphql", fake_graphql)
+    transfer = await _shopify_transfer_by_id(
+        "irranova",
+        "gid://shopify/InventoryTransfer/1",
+        detailed=False,
+    )
+    assert [item["id"] for item in transfer["lineItems"]["nodes"]] == ["line-1", "line-2"]
+    assert "lineItems(first: 100" in calls[0][0]
+    assert calls[1][1]["after"] == "cursor-1"
 
 
 def test_saved_receipt_date_filter_supports_iso_and_shopify_formats():
