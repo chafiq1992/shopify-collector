@@ -9,6 +9,7 @@ import pytest
 
 from backend.app.inventory_helper_routes import (
     InventoryCountLineItemInput,
+    InventoryFinalizeUpdate,
     _adjust_inventory_quantities,
     _build_inventory_sync_plan,
     _date_range_search_query,
@@ -126,6 +127,14 @@ def test_final_status_is_incomplete_only_when_crate_count_differs():
     assert _final_receipt_status(2, 2) == "complete"
     assert _final_receipt_status(2, 1) == "incomplete"
     assert _final_receipt_status(2, 3) == "incomplete"
+
+
+def test_agent_can_choose_either_final_receiving_outcome():
+    assert InventoryFinalizeUpdate(outcome="complete").outcome == "complete"
+    assert InventoryFinalizeUpdate(outcome="incomplete").outcome == "incomplete"
+
+    with pytest.raises(ValueError):
+        InventoryFinalizeUpdate(outcome="pending")
 
 
 @pytest.mark.asyncio

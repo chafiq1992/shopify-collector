@@ -437,7 +437,6 @@ export default function InventoryHelper() {
   useEffect(() => {
     persistStoreSelection(store);
     setNeedsShopifyReconnect(false);
-    setSelectedId(null);
     setLastSyncOperations([]);
     loadReceipts(null, viewDateFrom, viewDateTo);
   }, [store, viewDateFrom, viewDateTo]);
@@ -519,7 +518,9 @@ export default function InventoryHelper() {
     const finalized = next.status === "complete" || next.status === "incomplete";
     setReceipts((current) => finalized
       ? current.filter((item) => item.id !== next.id)
-      : current.map((item) => item.id === next.id ? next : item));
+      : current.some((item) => item.id === next.id)
+        ? current.map((item) => item.id === next.id ? next : item)
+        : [next, ...current]);
     setHistoryReceipts((current) => finalized
       ? [next, ...current.filter((item) => item.id !== next.id)]
       : current.filter((item) => item.id !== next.id));
@@ -611,19 +612,42 @@ export default function InventoryHelper() {
     }
   }
 
-  async function markComplete() {
+  async function finalizeReceipt(outcome) {
     if (!selected || selected.actual_items == null || countHasChanges) return;
     setCountBusy(true);
     setError("");
     try {
       const saved = await apiJson(`/api/inventory-helper/receipts/${selected.id}/complete`, {
         method: "PATCH",
+        headers: authHeaders({ Accept: "application/json", "Content-Type": "application/json" }),
+        body: JSON.stringify({ outcome }),
+      });
+      replaceReceipt(saved);
+      setNotice(`${saved.order_number} moved to received history as ${saved.status}.`);
+    } catch (err) {
+      showApiError(err);
+    } finally {
+      setCountBusy(false);
+    }
+  }
+
+  async function reopenReceipt() {
+    if (!selected || !isFinalized || countBusy) return;
+    setCountBusy(true);
+    setError("");
+    try {
+      const saved = await apiJson(`/api/inventory-helper/receipts/${selected.id}/reopen`, {
+        method: "PATCH",
         headers: authHeaders({ Accept: "application/json" }),
       });
       replaceReceipt(saved);
-      setNotice(saved.status === "complete"
-        ? `${saved.order_number} moved to received history as complete.`
-        : `${saved.order_number} moved to received history as incomplete because the crate count differs.`);
+      setSelectedId(saved.id);
+      const purchaseOrderDate = receiptDateInput(saved.shopify_created_at);
+      if (purchaseOrderDate && (purchaseOrderDate !== viewDateFrom || viewDateTo)) {
+        setViewDateFrom(purchaseOrderDate);
+        setViewDateTo("");
+      }
+      setNotice(`${saved.order_number} returned to the receiving queue. You can edit and approve it again.`);
     } catch (err) {
       showApiError(err);
     } finally {
@@ -877,8 +901,17 @@ export default function InventoryHelper() {
                     {!!lastSyncOperations.length && <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3"><div className="text-xs font-black uppercase tracking-wide text-emerald-800">Verified Shopify result</div>{lastSyncOperations.map((operation, index) => <div key={index} className="mt-1 text-xs font-bold text-emerald-950">{formatInventoryOperation(operation)}</div>)}</div>}
                     {!isFinalized && <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">You will review every inventory change before it is applied to Shopify.</div>}
                     {!isFinalized && <button disabled={countBusy || !agentItems.length || !countHasChanges || agentTotalItems === "" || actualCrates === ""} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-black text-white shadow-sm disabled:bg-slate-300 disabled:text-slate-600"><Check className="h-4 w-4" />{countHasChanges ? "Review & update Shopify inventory" : "Inventory count saved"}</button>}
-                    {!isFinalized && selected.actual_items != null && <button type="button" onClick={markComplete} disabled={countBusy || countHasChanges} className={`inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl px-5 text-sm font-black text-white shadow-sm disabled:bg-slate-300 disabled:text-slate-600 ${Number(selected.actual_crates) === Number(selected.ordered_crates) ? "bg-emerald-600" : "bg-amber-600"}`}><CheckCircle2 className="h-5 w-5" />{countHasChanges ? "Save inventory before approving" : Number(selected.actual_crates) === Number(selected.ordered_crates) ? "Approve & mark complete" : "Approve & mark incomplete"}</button>}
-                    {isFinalized && <div className={`rounded-2xl border px-4 py-3 text-center text-sm font-black ${selected.status === "complete" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-300 bg-amber-50 text-amber-900"}`}>{selected.status === "complete" ? <CheckCircle2 className="mr-1 inline h-5 w-5" /> : <AlertTriangle className="mr-1 inline h-5 w-5" />} Purchase order {selected.status}. This received-history record is locked.</div>}
+                    {!isFinalized && selected.actual_items != null && <div className="space-y-2">
+                      {countHasChanges && <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-center text-xs font-bold text-slate-600">Save the inventory changes before choosing the final status.</div>}
+                      <div className="grid grid-cols-2 gap-2">
+                        <button type="button" onClick={() => finalizeReceipt("complete")} disabled={countBusy || countHasChanges} className="inline-flex min-h-12 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-2 py-3 text-xs font-black text-white shadow-sm active:scale-[0.98] disabled:bg-slate-300 disabled:text-slate-600 sm:text-sm"><CheckCircle2 className="h-5 w-5 shrink-0" />Mark complete</button>
+                        <button type="button" onClick={() => finalizeReceipt("incomplete")} disabled={countBusy || countHasChanges} className="inline-flex min-h-12 items-center justify-center gap-1.5 rounded-xl bg-amber-500 px-2 py-3 text-xs font-black text-amber-950 shadow-sm active:scale-[0.98] disabled:bg-slate-300 disabled:text-slate-600 sm:text-sm"><AlertTriangle className="h-5 w-5 shrink-0" />Mark incomplete</button>
+                      </div>
+                    </div>}
+                    {isFinalized && <div className="space-y-2">
+                      <div className={`rounded-2xl border px-4 py-3 text-center text-sm font-black ${selected.status === "complete" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-300 bg-amber-50 text-amber-900"}`}>{selected.status === "complete" ? <CheckCircle2 className="mr-1 inline h-5 w-5" /> : <AlertTriangle className="mr-1 inline h-5 w-5" />} Purchase order marked {selected.status}.</div>
+                      <button type="button" onClick={reopenReceipt} disabled={countBusy} className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border-2 border-indigo-200 bg-white px-4 py-3 text-sm font-black text-indigo-700 shadow-sm active:scale-[0.98] disabled:opacity-50">{countBusy ? <Loader2 className="h-5 w-5 animate-spin" /> : <RefreshCw className="h-5 w-5" />}Return to receiving queue &amp; edit</button>
+                    </div>}
                   </form>
                 </div>
               </section>

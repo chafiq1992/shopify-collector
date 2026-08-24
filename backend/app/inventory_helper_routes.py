@@ -5,7 +5,7 @@ from datetime import date, datetime, time, timedelta, timezone
 import json
 import os
 import re
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import NAMESPACE_URL, uuid5
 from zoneinfo import ZoneInfo
 
@@ -209,6 +209,10 @@ class InventoryCountUpdate(BaseModel):
     line_items: list[InventoryCountLineItemInput] = Field(default_factory=list)
     sync_inventory: bool = True
     agent_note: Optional[str] = Field(default=None, max_length=2000)
+
+
+class InventoryFinalizeUpdate(BaseModel):
+    outcome: Literal["complete", "incomplete"]
 
 
 def _clean_store(value: str) -> str:
@@ -1338,20 +1342,39 @@ async def update_receipt_count(
 @router.patch("/receipts/{receipt_id}/complete")
 async def complete_receipt(
     receipt_id: int,
+    body: Optional[InventoryFinalizeUpdate] = None,
     db: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
     row = await _loaded_receipt(db, receipt_id)
     if row.actual_items is None or row.actual_crates is None:
-        raise HTTPException(status_code=409, detail="Save the receiving count before marking this purchase order complete")
+        raise HTTPException(status_code=409, detail="Save the receiving count before choosing the final status")
     if row.reported_items_received is None:
-        raise HTTPException(status_code=409, detail="Enter the total items received before marking this purchase order complete")
+        raise HTTPException(status_code=409, detail="Enter the total items received before choosing the final status")
     _ensure_receipt_open(row)
     now = datetime.now(timezone.utc)
-    row.status = _final_receipt_status(row.ordered_crates, row.actual_crates)
+    # The receiving agent chooses the final outcome. Keep the crate-derived
+    # fallback temporarily so an older frontend remains compatible while a new
+    # Cloud Run revision is rolling out.
+    row.status = body.outcome if body else _final_receipt_status(row.ordered_crates, row.actual_crates)
     row.counted_by_id = user.id
     row.counted_at = now
     row.finalized_at = now
+    await db.commit()
+    return _serialize(await _loaded_receipt(db, row.id))
+
+
+@router.patch("/receipts/{receipt_id}/reopen")
+async def reopen_receipt(
+    receipt_id: int,
+    db: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
+):
+    row = await _loaded_receipt(db, receipt_id)
+    if row.status not in {"complete", "incomplete"}:
+        raise HTTPException(status_code=409, detail="This purchase order is already in the receiving queue")
+    row.status = "pending"
+    row.finalized_at = None
     await db.commit()
     return _serialize(await _loaded_receipt(db, row.id))
 
