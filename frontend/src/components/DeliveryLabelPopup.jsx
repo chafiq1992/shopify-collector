@@ -36,7 +36,10 @@ async function dlvApi(path, { method = "GET", body, query, _retries = 3 } = {}) 
   for (let attempt = 0; ; attempt++) {
     let res;
     try {
-      res = await authFetch(url, opts);
+      // A 401 here belongs to the proxied Delivery service, not necessarily to
+      // the operator's Order Collector session. Keep the user signed in and
+      // surface the Delivery error in this popup instead.
+      res = await authFetch(url, { ...opts, clearAuthOn401: false });
     } catch (netErr) {
       // Network error (offline, DNS, etc.) — retry if attempts remain
       if (attempt < _retries) { await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); continue; }

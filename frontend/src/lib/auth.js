@@ -42,9 +42,10 @@ export function authHeaders(extra = {}) {
 }
 
 export async function authFetch(url, options = {}) {
-  const headers = authHeaders(options.headers || {});
-  const resp = await fetch(url, { ...options, headers });
-  if (resp.status === 401) {
+  const { clearAuthOn401 = true, ...fetchOptions } = options;
+  const headers = authHeaders(fetchOptions.headers || {});
+  const resp = await fetch(url, { ...fetchOptions, headers });
+  if (resp.status === 401 && clearAuthOn401) {
     clearAuth();
     // Let the app react immediately (e.g. show login screen)
     try {
@@ -53,4 +54,3 @@ export async function authFetch(url, options = {}) {
   }
   return resp;
 }
-

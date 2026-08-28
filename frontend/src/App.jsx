@@ -326,7 +326,8 @@ export default function App(){
     }
   }
 
-  // If any API call gets a 401, authFetch() clears storage; this listener makes the UI switch to Login immediately.
+  // If an authenticated app API call gets a 401, authFetch() clears storage;
+  // this listener makes the UI switch to Login immediately.
   useEffect(() => {
     const onCleared = () => {
       try { setAuth(null); } catch {}
