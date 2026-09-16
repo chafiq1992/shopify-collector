@@ -88,6 +88,7 @@ services:
 
     networks:
       internal: {}
+      pgnet: {}                   # shared self-hosted Postgres, as `postgres`
       edge:
         aliases: [collector-web]  # how Caddy addresses it. NOT the bare name
                                   # `web` — /opt/apex and /opt/whatsapp both
@@ -112,6 +113,10 @@ networks:
   edge:
     name: edge
     external: true
+  pgnet:                          # shared self-hosted Postgres, `postgres:5432`
+    name: pgnet                   # Each app has its OWN database and role in
+    external: true                # that one instance; verified that a role
+                                  # cannot read another app's tables.
 
 # No `redisnet`: this app uses no Redis at all (nothing in requirements.txt,
 # no client anywhere in backend/). It therefore needs no user in
