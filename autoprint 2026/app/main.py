@@ -226,10 +226,72 @@ def _select_store_for_order(cfg: Dict[str, Any], order_number: str, preferred_st
     # Default: legacy / first store
     return _select_store(cfg, None)
 
+# ----------------- relay failover -----------------
+# The collector runs in two places during the Cloud Run -> Netcup move, and
+# both talk to the SAME Postgres database, so the print queue is one queue no
+# matter which host serves it. That makes plain failover safe: try one, and if
+# it is unreachable or refuses, use the next.
+#
+# Configure in config.yaml as a list, most-preferred first:
+#
+#   relay_urls:
+#     - "https://shopify-collector.chattbase.site"
+#     - "https://shopify-collector-985002633728.europe-west1.run.app"
+#
+# The old single `relay_url` still works and is treated as the first entry.
+#
+# Only ONE url is polled at a time. Never poll both concurrently: /pull claims
+# jobs with a SELECT followed by a separate UPDATE, so two pollers on one pc_id
+# can lease the same job and print it twice.
+_RELAY_LOCK = threading.Lock()
+_RELAY_URLS: List[str] = []
+_RELAY_IDX = 0
+
+
+def _relay_candidates(cfg: Dict[str, Any]) -> List[str]:
+    urls: List[str] = []
+    raw = cfg.get("relay_urls")
+    if isinstance(raw, (list, tuple)):
+        for u in raw:
+            u = str(u or "").strip().rstrip("/")
+            if u and u not in urls:
+                urls.append(u)
+    single = str(cfg.get("relay_url") or "").strip().rstrip("/")
+    if single and single not in urls:
+        urls.insert(0, single)
+    return urls
+
+
+def _set_relay_urls(cfg: Dict[str, Any]) -> List[str]:
+    global _RELAY_URLS, _RELAY_IDX
+    with _RELAY_LOCK:
+        _RELAY_URLS = _relay_candidates(cfg)
+        _RELAY_IDX = 0
+        return list(_RELAY_URLS)
+
+
+def _active_relay() -> str:
+    with _RELAY_LOCK:
+        return _RELAY_URLS[_RELAY_IDX] if _RELAY_URLS else ""
+
+
+def _rotate_relay(reason: str) -> str:
+    global _RELAY_IDX
+    with _RELAY_LOCK:
+        if len(_RELAY_URLS) < 2:
+            return _RELAY_URLS[0] if _RELAY_URLS else ""
+        _RELAY_IDX = (_RELAY_IDX + 1) % len(_RELAY_URLS)
+        nxt = _RELAY_URLS[_RELAY_IDX]
+    _plog(f"[RELAY] {reason} -- switching to {nxt}")
+    return nxt
+
+
 # ----------------- overrides bridging (collector -> local) -----------------
 def _collector_base_url(cfg: Dict[str, Any]) -> str:
-    # Reuse relay_url as the collector base; both run on the same service
-    return (cfg.get("relay_url") or "").strip().rstrip("/")
+    # Reuse the relay as the collector base; both run on the same service.
+    # Prefer whichever relay is currently answering, so a failover carries the
+    # override/label calls with it instead of stranding them on a dead host.
+    return _active_relay() or (cfg.get("relay_url") or "").strip().rstrip("/")
 
 def _build_http_session(pool_size: int = 8) -> requests.Session:
     sess = requests.Session()
@@ -781,7 +843,7 @@ def _print_status_banner():
 # ----------------- delivery label printing (from delivery print-agent) -----------------
 def _print_delivery_label(job: dict, cfg: dict, session: Optional[requests.Session] = None):
     """Download and print a delivery label. Mirrors print-agent/poller.py logic."""
-    relay = (cfg.get("relay_url") or "").strip().rstrip("/")
+    relay = _collector_base_url(cfg)
     if not relay:
         raise RuntimeError("relay_url not configured – cannot fetch delivery label")
 
@@ -900,7 +962,8 @@ def start_poller():
         _plog("[poller] cannot load config; disabled")
         return
 
-    relay = (cfg.get("relay_url") or "").strip().rstrip("/")
+    relays = _set_relay_urls(cfg)
+    relay = relays[0] if relays else ""
     pc_id = cfg.get("pc_id")
     pc_secret = cfg.get("pc_secret")
     if not (relay and pc_id and pc_secret):
@@ -917,7 +980,7 @@ def start_poller():
     # ── relay helpers (connection-pooled) ──
     def _pull() -> list:
         r = sess.get(
-            f"{relay}/pull",
+            f"{_active_relay()}/pull",
             params={"pc_id": pc_id, "max_items": max_items, "wait": long_poll_sec},
             headers={"X-PC-Secret": pc_secret},
             timeout=long_poll_sec + 15,
@@ -927,7 +990,7 @@ def start_poller():
 
     def _ack(jid: str):
         try:
-            sess.post(f"{relay}/ack",
+            sess.post(f"{_active_relay()}/ack",
                        json={"pc_id": pc_id, "secret": pc_secret, "job_id": jid},
                        timeout=10)
         except Exception as e:
@@ -935,7 +998,7 @@ def start_poller():
 
     def _nack(jid: str):
         try:
-            sess.post(f"{relay}/nack",
+            sess.post(f"{_active_relay()}/nack",
                        json={"pc_id": pc_id, "secret": pc_secret, "job_id": jid},
                        timeout=10)
         except Exception as e:
@@ -973,7 +1036,9 @@ def start_poller():
         _plog("=" * 58)
         _plog("  AUTOPRINT ENGINE v2  (parallel + long-poll + reliable)")
         _plog("=" * 58)
-        _plog(f"  Relay:       {relay}")
+        _plog(f"  Relay:       {_active_relay()}")
+        for extra in relays[1:]:
+            _plog(f"  Fallback:    {extra}")
         _plog(f"  PC:          {pc_id}")
         _plog(f"  Workers:     {max_workers} parallel")
         _plog(f"  Long-poll:   {long_poll_sec}s  |  Max batch: {max_items}")
@@ -1000,16 +1065,25 @@ def start_poller():
                             _pq.fail(jid, str(e)[:80])
 
                 except requests.exceptions.ConnectionError:
+                    _rotate_relay("connection lost")
                     _plog("[NET] connection lost -- retry in 5s")
                     time.sleep(5)
                 except requests.exceptions.Timeout:
+                    # A long-poll that returns nothing is normal, not a fault.
                     pass
                 except requests.exceptions.HTTPError as e:
                     st = getattr(getattr(e, "response", None), "status_code", 0)
                     if st == 401:
+                        # Wrong credentials rotate nothing: the other host uses
+                        # the same pc_secret, so switching cannot help.
                         _plog("[AUTH] 401 Unauthorized -- check pc_id / pc_secret. Retry in 30s")
                         time.sleep(30)
                     else:
+                        # 503 is what a deployment answers while another one
+                        # owns the queue (WORKER_LOOPS=0); 404/5xx means it is
+                        # not serving. Either way, try the next relay.
+                        if st in (403, 404, 500, 502, 503, 504):
+                            _rotate_relay(f"HTTP {st}")
                         _plog(f"[HTTP] {e} -- retry in 5s")
                         time.sleep(5)
                 except Exception as e:

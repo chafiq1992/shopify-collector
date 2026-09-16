@@ -26,7 +26,16 @@ admin_api_version: "2024-07"
 
 currency_suffix: " DH"
 
-relay_url: "https://your-cloud-run.run.app"
+# Relay endpoints, tried in order. A single `relay_url:` still works and is
+# treated as the first entry. Use a list when the collector runs in more than
+# one place and they share a database, so a dead host fails over instead of
+# stopping the printer.
+relay_urls:
+  - "https://collector.example.com"
+  - "https://your-cloud-run.run.app"
+
+# Kept for agents running older code, which read only this key.
+relay_url: "https://collector.example.com"
 pc_id: "pc-lab-1"
 pc_secret: "YOUR_SECRET"
 # Poller: long_poll_seconds: 20, max_workers: 4, max_items: 10
