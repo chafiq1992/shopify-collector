@@ -35,7 +35,7 @@ docker compose exec -T -e PGPASSWORD="$PGPW" -e SRC="$SRC" postgres sh -c 'psql 
 
 echo "-- connections currently open to the source --"
 docker compose exec -T -e PGPASSWORD="$PGPW" -e SRC="$SRC" postgres sh -c 'psql "$SRC" -P pager=off -tAc "
-  SELECT count(*) || \" total, \" || count(*) FILTER (WHERE state = \x27active\x27) || \" active\"
+  SELECT count(*) || $$ total, $$ || count(*) FILTER (WHERE state = $$active$$) || $$ active$$
   FROM pg_stat_activity WHERE datname = current_database();
 "'
 
