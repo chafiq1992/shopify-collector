@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
+import { isFinancialStatusPaid, canMarkInvoiceRowPaid, invoiceLookupItems } from "../lib/invoiceVerification";
 
 function getRowKey(row, fallbackIndex = 0) {
   return [
@@ -8,19 +9,6 @@ function getRowKey(row, fallbackIndex = 0) {
     row?.orderNumber || "",
     row?._idx || fallbackIndex,
   ].join("::");
-}
-
-function normalizeFinancialStatus(status) {
-  return String(status || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .trim()
-    .toLowerCase();
-}
-
-function isFinancialStatusPaid(status) {
-  const normalized = normalizeFinancialStatus(status);
-  return normalized.includes("paid") || normalized.includes("paye");
 }
 
 const MAX_PARSE_FILE_COUNT = 10;
@@ -32,6 +20,7 @@ export default function InvoicesVerifier() {
   const [parsed, setParsed] = useState([]);            // [{fileName, company, invoiceNumber, invoiceDate, rows:[]}]
   const [lookup, setLookup] = useState({});            // row lookupKey -> Shopify lookup result
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
   const [error, setError] = useState(null);
   const [paidBusy, setPaidBusy] = useState(false);
   const [paidMsg, setPaidMsg] = useState(null);
@@ -78,7 +67,7 @@ export default function InvoicesVerifier() {
       const diff = (invComparable != null && shopComparable != null) ? (shopComparable - invComparable) : null;
       const absDiff = diff != null ? Math.abs(diff) : null;
       const financialStatus = info?.financial_status || null;
-      const canMarkPaid = !!(info?.found && info?.order_gid && info?.store) && !isFinancialStatusPaid(financialStatus);
+      const canMarkPaid = canMarkInvoiceRowPaid(r, info);
       return {
         ...r,
         _rowKey: getRowKey(r, index),
@@ -90,6 +79,7 @@ export default function InvoicesVerifier() {
         absDiff,
         financialStatus,
         canMarkPaid,
+        invoiceOnly: r.invoiceOnly || info?.invoice_only || false,
       };
     });
   }, [flatRows, lookup]);
@@ -99,17 +89,19 @@ export default function InvoicesVerifier() {
     const matched = selected.filter((r) => r.shopify?.found);
     const payable = selected.filter((r) => r.canMarkPaid);
     const alreadyPaid = selected.filter((r) => r.shopify?.found && isFinancialStatusPaid(r.financialStatus));
-    const missing = selected.filter((r) => !r.shopify?.found);
+    const missing = selected.filter((r) => !r.shopify?.found && !r.invoiceOnly);
     return {
       total: selected.length,
       matched: matched.length,
       payable: payable.length,
       alreadyPaid: alreadyPaid.length,
       missing: missing.length,
+      invoiceOnly: selected.filter(r => r.invoiceOnly).length,
     };
   }, [rowsWithShopify, selectedRows]);
 
   const allRowsSelected = rowsWithShopify.length > 0 && rowsWithShopify.every((r) => selectedRows[r._rowKey] !== false);
+  const hasGlog = parsed.some(doc => doc.company === "G-Log");
 
   function applySelection(mode) {
     const next = {};
@@ -127,8 +119,9 @@ export default function InvoicesVerifier() {
     const ok = rowsWithShopify.filter((r) => r.shopify?.found);
     const green = ok.filter((r) => (r.absDiff != null && r.absDiff < 3));
     const red = ok.filter((r) => (r.absDiff != null && r.absDiff >= 3));
-    const missing = rowsWithShopify.filter((r) => !r.shopify?.found);
-    return { total: rowsWithShopify.length, ok: ok.length, green: green.length, red: red.length, missing: missing.length };
+    const missing = rowsWithShopify.filter((r) => !r.shopify?.found && !r.invoiceOnly);
+    return { total: rowsWithShopify.length, ok: ok.length, green: green.length, red: red.length, missing: missing.length,
+      invoiceOnly: rowsWithShopify.filter(r => r.invoiceOnly).length };
   }, [rowsWithShopify]);
 
   async function loadSettings() {
@@ -216,44 +209,76 @@ export default function InvoicesVerifier() {
     setBusy(true);
     setError(null);
     setPaidMsg(null);
+    setParsed([]);
+    setLookup({});
+    const docs = [];
     try {
-      const formData = new FormData();
-      for (const f of fileList) {
-        formData.append("files", f);
+      for (const [index, file] of fileList.entries()) {
+        setProgress(`Reading invoice ${index + 1}/${fileList.length}: ${file.name}`);
+        const formData = new FormData();
+        formData.append("files", file);
+        try {
+          const js = await invoiceRequest("/api/invoices/parse-pdf?include_lookup=false", { body: formData }, 240_000);
+          const doc = js.docs?.[0] || { fileName: file.name, error: "No result returned", rows: [] };
+          (doc.rows || []).forEach((row, rowIndex) => {
+            row.lookupKey = `${index}:${rowIndex}:${row.orderNumber || ""}`;
+          });
+          docs.push(doc);
+        } catch (e) {
+          docs.push({ fileName: file.name, error: e.message, rows: [] });
+        }
+        setParsed([...docs]);
       }
-
-      // Keep a long timeout for the unknown-layout LLM fallback.
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 300_000);
-
-      const res = await authFetch("/api/invoices/parse-pdf", {
-        method: "POST",
-        headers: authHeaders(),  // No Content-Type — browser sets multipart boundary
-        body: formData,
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-      const js = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(js?.detail || js?.error || `Server error ${res.status}`);
-      if (js.ok !== true) throw new Error(js?.error || "Parse failed");
-
-      setParsed(js.docs || []);
-      setLookup(js.lookup || {});
-
-      // Check for per-file errors
-      const errors = (js.docs || []).filter(d => d.error);
-      if (errors.length) {
-        setError(`Warnings: ${errors.map(d => `${d.fileName}: ${d.error}`).join("; ")}`);
-      }
-    } catch (e) {
-      const msg = e?.name === "AbortError" ? "Request timed out — try a smaller invoice batch." : (e?.message || "Failed to parse invoices");
-      setError(msg);
-      setParsed([]);
-      setLookup({});
-      setSelectedRows({});
+      await lookupInvoiceBatches(docs);
+      const errors = docs.filter(doc => doc.error);
+      if (errors.length) setError(errors.map(doc => `${doc.fileName}: ${doc.error}`).join("; "));
     } finally {
       setBusy(false);
+      setProgress("");
     }
+  }
+
+  async function invoiceRequest(url, { body, json } = {}, timeoutMs = 90_000) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await authFetch(url, {
+        method: "POST", headers: authHeaders(json ? { "Content-Type": "application/json" } : {}),
+        body: json ? JSON.stringify(json) : body, signal: controller.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok !== true) throw new Error(data.detail || data.error || `Request failed (${res.status})`);
+      return data;
+    } catch (e) {
+      if (e.name === "AbortError") throw new Error("Request timed out. Retry this invoice or its order lookups.");
+      throw e;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function lookupInvoiceBatches(docs, retryOnly = false) {
+    const items = invoiceLookupItems(docs).filter(item => !retryOnly || (!lookup[item.lookup_key]?.found && !lookup[item.lookup_key]?.skipped));
+    for (let offset = 0; offset < items.length; offset += 20) {
+      const batch = items.slice(offset, offset + 20);
+      setProgress(`Checking Shopify orders ${offset + 1}–${Math.min(offset + 20, items.length)} of ${items.length}`);
+      try {
+        const js = await invoiceRequest("/api/invoices/lookup-orders", { json: { items: batch } });
+        const returned = Object.fromEntries((js.rows || []).map(row => [row.lookup_key, row]));
+        const next = Object.fromEntries(batch.map(item => [item.lookup_key,
+          returned[item.lookup_key] || { found: false, error: "No lookup result returned; retry." }]));
+        setLookup(current => ({ ...current, ...next }));
+      } catch (e) {
+        setLookup(current => ({ ...current, ...Object.fromEntries(batch.map(item => [item.lookup_key,
+          { found: false, error: e.message }])) }));
+      }
+    }
+  }
+
+  async function retryLookups() {
+    setBusy(true);
+    try { await lookupInvoiceBatches(parsed, true); }
+    finally { setBusy(false); setProgress(""); }
   }
 
   // Mark the selected matched unpaid orders as paid in Shopify
@@ -266,7 +291,7 @@ export default function InvoicesVerifier() {
       for (const r of rowsWithShopify) {
         if (selectedRows[r._rowKey] === false) continue;
         if (!r.canMarkPaid) continue;
-        toPay.push({ order_gid: r.shopify.order_gid, store: r.shopify.store });
+        toPay.push({ order_gid: r.shopify.order_gid, store: r.shopify.store, send_code: r.sendCode, company: r._doc?.company });
       }
       if (!toPay.length) {
         setPaidMsg("No selected unpaid matched orders to mark as paid.");
@@ -291,6 +316,8 @@ export default function InvoicesVerifier() {
             store: row.shopify?.store || row.routingStore || null,
             crbt: row.crbt,
             is_refused: row.isRefused,
+            send_code: row.sendCode,
+            company: row._doc?.company,
           }));
         const r2 = await authFetch("/api/invoices/lookup-orders", {
           method: "POST",
@@ -336,6 +363,7 @@ export default function InvoicesVerifier() {
               type="file"
               accept=".pdf,.xls,.csv,.tsv,application/pdf,application/vnd.ms-excel,text/csv,text/tab-separated-values"
               multiple
+              disabled={busy || paidBusy}
               onChange={(e) => {
                 const list = Array.from(e.target.files || []);
                 setFileList(list);
@@ -357,7 +385,7 @@ export default function InvoicesVerifier() {
               <div className="flex-1">
                 <h2 className="text-sm font-bold text-gray-900">Merchant routing</h2>
                 <p className="mt-1 text-xs text-gray-600">
-                  Map the merchant identifier before the dash (for example <span className="font-mono">7</span> in <span className="font-mono">7-160885</span>) or the invoice Client value to its Shopify store. Code-prefix rules take priority over invoice-client matching.
+                  Merchant prefixes identify the Shopify store: 7 → irrakids, 9 → irranova. These mappings apply to every carrier. Add code-prefix rules for other merchants. Invoice client names are never used to choose a store.
                 </p>
               </div>
               <button type="button" onClick={() => setSettingsOpen(false)} className="text-xs text-gray-500 hover:text-gray-900">Close</button>
@@ -376,7 +404,7 @@ export default function InvoicesVerifier() {
 
             <div className="mt-4 space-y-2">
               {routingRules.length === 0 && !settingsBusy && (
-                <div className="rounded-lg border border-dashed border-gray-300 p-3 text-xs text-gray-500">No explicit rules yet. Exact invoice-client/store names still route automatically; duplicate order numbers remain safely marked ambiguous.</div>
+                <div className="rounded-lg border border-dashed border-gray-300 p-3 text-xs text-gray-500">7 → irrakids and 9 → irranova are built in. Other prefixes require a mapping; missing prefixes require review.</div>
               )}
               {routingRules.map((rule, index) => (
                 <div key={index} className="grid grid-cols-1 gap-2 rounded-xl border border-gray-200 p-3 md:grid-cols-[1fr_1.2fr_1.2fr_1fr_auto]">
@@ -392,7 +420,7 @@ export default function InvoicesVerifier() {
                     className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs"
                   >
                     <option value="code_prefix">Merchant code prefix</option>
-                    <option value="invoice_client">Invoice Client value</option>
+                    {rule.match_type === "invoice_client" && <option value="invoice_client" disabled>Invoice Client (inactive)</option>}
                   </select>
                   <input
                     value={rule.value || ""}
@@ -441,7 +469,7 @@ export default function InvoicesVerifier() {
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
             </svg>
-            <span>Parsing and verifying invoice rows…</span>
+            <span role="status">{progress || "Parsing and verifying invoice rows…"}</span>
           </div>
         )}
         {!busy && error && <div className="text-red-600 mb-3">{error}</div>}
@@ -459,6 +487,7 @@ export default function InvoicesVerifier() {
                   <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700">Green (&lt; 3 DH): {summary.green}</span>
                   <span className="px-2 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700">Red (≥ 3 DH): {summary.red}</span>
                   <span className="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800">Missing: {summary.missing}</span>
+                  <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">Invoice only (no store mapped): {summary.invoiceOnly}</span>
                 </div>
                 <div className="mt-2 text-[11px] text-gray-500">
                   {parsed.map((d) => (
@@ -469,6 +498,9 @@ export default function InvoicesVerifier() {
                       {d.invoiceNumber ? <span> • {d.invoiceNumber}</span> : null}
                       {d.invoiceDate ? <span> • {d.invoiceDate}</span> : null}
                       <span> • rows: {(d.rows || []).length}</span>
+                      {d.validation && <span className={d.validation.complete ? "text-emerald-700 font-semibold" : "text-amber-800 font-semibold"}>
+                        {" • "}{d.validation.extractedRows}/{d.validation.expectedRows ?? "?"} rows — {d.validation.complete ? "Extraction checked; totals reconcile" : "Incomplete or inconsistent — payment blocked"}
+                      </span>}
                       {(d.invoiceTotalBrut != null || d.invoiceTotalNet != null || d.invoiceAdditionalFeesTotal != null) ? (
                         <span>
                           {" "}• Invoice totals:
@@ -479,6 +511,7 @@ export default function InvoicesVerifier() {
                         </span>
                       ) : null}
                       {d.error ? <span className="text-amber-600"> • ⚠ {d.error}</span> : null}
+                      {(d.validation?.warnings || []).map((warning, i) => <div key={i} className="text-amber-800">{warning}</div>)}
                     </div>
                   ))}
                 </div>
@@ -558,11 +591,14 @@ export default function InvoicesVerifier() {
               </button>
             </div>
             <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-gray-200 pt-3 text-xs">
+              <button disabled={busy || paidBusy} onClick={retryLookups} className="px-3 py-1 rounded-lg border border-blue-300 disabled:opacity-50">Retry unmatched / failed lookups</button>
+              {parsed.some(doc => doc.error) && <button disabled={busy || paidBusy} onClick={parseSelectedFiles} className="px-3 py-1 rounded-lg border border-amber-300">Retry invoice files</button>}
               <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">Selected rows: {selectedSummary.total}</span>
               <span className="px-2 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-700">Selected matched: {selectedSummary.matched}</span>
               <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700">Ready to mark paid: {selectedSummary.payable}</span>
               <span className="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800">Already paid: {selectedSummary.alreadyPaid}</span>
               <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">Not matched: {selectedSummary.missing}</span>
+              <span className="px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">Invoice only: {selectedSummary.invoiceOnly}</span>
               <button onClick={() => applySelection("all")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Select all</button>
               <button onClick={() => applySelection("none")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Clear all</button>
               <button onClick={() => applySelection("matched")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Matched only</button>
@@ -609,9 +645,10 @@ export default function InvoicesVerifier() {
         {/* Results table */}
         {rowsWithShopify.length > 0 && (
           <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden">
+            <div className="px-3 py-2 text-xs text-gray-500">Scroll horizontally to view every invoice column. “—” means the source did not provide a value or extraction needs review.</div>
             <div className="max-h-[70vh] overflow-auto">
-              <table className="min-w-[1200px] w-full text-xs">
-                <thead className="bg-gray-50 border-b border-gray-200">
+              <table className="min-w-[1900px] w-full text-xs [&_td]:whitespace-nowrap">
+                <thead className="sticky top-0 z-10 bg-gray-50 border-b border-gray-200">
                   <tr>
                     <th className="text-left px-3 py-2">
                       <input
@@ -623,12 +660,18 @@ export default function InvoicesVerifier() {
                     <th className="text-left px-3 py-2">#</th>
                     <th className="text-left px-3 py-2">Invoice</th>
                     <th className="text-left px-3 py-2">Code d&apos;envoi</th>
+                    <th className="text-left px-3 py-2">Carrier tracking</th>
                     <th className="text-left px-3 py-2">Order #</th>
                     <th className="text-left px-3 py-2">Store</th>
                     <th className="text-left px-3 py-2">Status</th>
                     <th className="text-left px-3 py-2">City</th>
+                    <th className="text-left px-3 py-2">Phone</th>
+                    <th className="text-left px-3 py-2">Pickup date</th>
+                    <th className="text-left px-3 py-2">Delivery date</th>
                     <th className="text-right px-3 py-2">Frais (DH)</th>
                     <th className="text-right px-3 py-2">Invoice CRBT (DH)</th>
+                    <th className="text-right px-3 py-2">Invoice net (DH)</th>
+                    {hasGlog && ["Tariff", "Refusal fees", "Return fees", "Expenses"].map(label => <th key={label} className="text-right px-3 py-2">{label} (DH)</th>)}
                     <th className="text-right px-3 py-2">Shopify total (DH)</th>
                     <th className="text-right px-3 py-2">Diff (Shopify - CRBT)</th>
                     <th className="text-left px-3 py-2">Payment</th>
@@ -659,18 +702,27 @@ export default function InvoicesVerifier() {
                           <div className="font-medium">{r._doc?.invoiceNumber || r._doc?.fileName}</div>
                           <div className="text-[11px] text-gray-500">{r._doc?.invoiceDate || ""}</div>
                         </td>
-                        <td className="px-3 py-2 font-mono">{r.sendCode}</td>
+                        <td className="px-3 py-2 font-mono">{r.sendCode}
+                          {r.extractionIssues?.map((issue, i) => <div key={i} className="text-amber-800 font-sans">{issue}</div>)}
+                        </td>
+                        <td className="px-3 py-2 font-mono">{r.carrierCode || r.yfdCode || "—"}</td>
                         <td className="px-3 py-2 font-mono">{r.orderNumber || "—"}</td>
                         <td className="px-3 py-2">
-                          <div>{r.shopify?.store || r.routingStore || "—"}</div>
+                          <div>{r.invoiceOnly ? "Invoice only" : (r.shopify?.store || r.routingStore || "—")}</div>
+                          {r.invoiceOnly && <div className="text-[10px] text-gray-500">No Shopify store mapped. Included in invoice totals; skipped for payment.</div>}
                           {r.merchantCode ? <div className="text-[10px] text-gray-500">merchant {r.merchantCode}</div> : null}
                           {r.shopify?.ambiguous ? <div className="text-[10px] font-semibold text-amber-700">Ambiguous: {(r.shopify.candidate_stores || []).join(", ")}</div> : null}
                           {!r.shopify?.found && r.shopify?.error ? <div className="max-w-[220px] text-[10px] text-red-600">{r.shopify.error}</div> : null}
                         </td>
                         <td className="px-3 py-2">{r.status || "—"}</td>
                         <td className="px-3 py-2">{r.city || "—"}</td>
+                        <td className="px-3 py-2 font-mono">{r.phone || "—"}</td>
+                        <td className="px-3 py-2">{r.pickupDate || "—"}</td>
+                        <td className="px-3 py-2">{r.deliveryDate || "—"}</td>
                         <td className="px-3 py-2 text-right font-semibold">{r.fees != null ? Number(r.fees).toFixed(2) : "—"}</td>
                         <td className="px-3 py-2 text-right font-semibold">{r.isRefused ? "0.00" : (r.crbt != null ? Number(r.crbt).toFixed(2) : "—")}</td>
+                        <td className="px-3 py-2 text-right font-semibold">{r.total != null ? Number(r.total).toFixed(2) : "—"}</td>
+                        {hasGlog && ["tariff", "refusalFees", "returnFees", "expenses"].map(key => <td key={key} className="px-3 py-2 text-right">{r[key] != null ? Number(r[key]).toFixed(2) : "—"}</td>)}
                         <td className="px-3 py-2 text-right font-semibold">{r.shopTotal != null ? Number(r.shopTotal).toFixed(2) : (r.shopify?.error ? "not found" : "—")}</td>
                         <td className={`px-3 py-2 text-right font-semibold ${isGreen ? "text-emerald-700" : isRed ? "text-red-700" : "text-gray-700"}`}>
                           {r.diff != null ? Number(r.diff).toFixed(2) : "—"}
@@ -694,9 +746,11 @@ export default function InvoicesVerifier() {
                     return (
                       <tr className="bg-gray-900 text-white">
                         <td className="px-3 py-2 font-extrabold">—</td>
-                        <td className="px-3 py-2 font-extrabold" colSpan={7}>TOTALS (all invoice rows; Shopify/diff matched delivered only)</td>
+                        <td className="px-3 py-2 font-extrabold" colSpan={11}>TOTALS (extracted rows; Shopify/diff matched delivered only)</td>
                         <td className="px-3 py-2 text-right font-extrabold">{sumFees.toFixed(2)}</td>
                         <td className="px-3 py-2 text-right font-extrabold">{sumCrbt.toFixed(2)}</td>
+                        <td className="px-3 py-2 text-right font-extrabold">{rows.reduce((sum, row) => sum + Number(row.total || 0), 0).toFixed(2)}</td>
+                        {hasGlog && ["tariff", "refusalFees", "returnFees", "expenses"].map(key => <td key={key} className="px-3 py-2 text-right font-extrabold">{rows.reduce((sum, row) => sum + Number(row[key] || 0), 0).toFixed(2)}</td>)}
                         <td className="px-3 py-2 text-right font-extrabold">{sumShop.toFixed(2)}</td>
                         <td className="px-3 py-2 text-right font-extrabold">{sumDiff.toFixed(2)}</td>
                         <td className="px-3 py-2 font-extrabold">—</td>

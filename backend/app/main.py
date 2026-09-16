@@ -3856,12 +3856,13 @@ async def get_fulfillment_orders(order_gid: str, store: Optional[str] = Query(No
 
 
 # ---------- Invoice file parsing ----------
-from .invoice_parser import extract_pages_text, parse_invoice_from_pages, parse_invoice_spreadsheet
+from .invoice_parser import extract_pages_text, parse_invoice_from_pages, parse_invoice_spreadsheet, validate_invoice
 from .invoice_routing import choose_shopify_candidate, merchant_code_prefix, resolve_row_store, sanitize_rules
 
 @app.post("/api/invoices/parse-pdf", response_model=Dict[str, Any])
 async def invoice_parse_pdf(
     files: List[UploadFile] = File(..., description="One or more PDF, HTML/XLS, or CSV invoice files"),
+    include_lookup: bool = True,
     admin: User = Depends(require_admin),  # type: ignore
 ):
     """
@@ -3886,12 +3887,12 @@ async def invoice_parse_pdf(
                 suffix = os.path.splitext(f.filename)[1].lower()
                 is_pdf = suffix == ".pdf" or raw_bytes.startswith(b"%PDF")
                 if is_pdf:
-                    pages = extract_pages_text(raw_bytes)
+                    pages = await asyncio.to_thread(extract_pages_text, raw_bytes)
                     if not pages:
                         raise ValueError("No text found in PDF")
                     parsed = await parse_invoice_from_pages(pages)
                 elif suffix in {".xls", ".csv", ".tsv"}:
-                    parsed = parse_invoice_spreadsheet(raw_bytes, f.filename)
+                    parsed = validate_invoice(await asyncio.to_thread(parse_invoice_spreadsheet, raw_bytes, f.filename))
                 else:
                     raise ValueError("Unsupported invoice file type; use PDF, HTML .xls, CSV, or TSV")
             except Exception as e:
@@ -3909,6 +3910,7 @@ async def invoice_parse_pdf(
                 "invoiceFeesTotal": parsed.get("totalFees"),
                 "invoiceAdditionalFeesTotal": parsed.get("totalAdditionalFees"),
                 "rows": parsed.get("rows", []),
+                "validation": parsed.get("validation"),
             }
             docs.append(doc)
 
@@ -3949,6 +3951,10 @@ async def invoice_parse_pdf(
                     )
                     row["routingStore"] = route.get("store")
                     row["routingSource"] = route.get("source")
+                    row["routingError"] = route.get("error")
+                    row["invoiceOnly"] = route.get("source") == "unmapped_prefix"
+                    if not include_lookup:
+                        continue
                     tasks.append(
                         _lookup_invoice_row(
                             lookup_key=lookup_key,
@@ -3964,7 +3970,7 @@ async def invoice_parse_pdf(
                         )
                     )
 
-            results = await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks) if include_lookup else []
             for r in results:
                 if r:
                     lookup[str(r.get("lookup_key") or "")] = r
@@ -3999,8 +4005,11 @@ async def _lookup_invoice_row(
     sem: asyncio.Semaphore,
 ) -> Dict[str, Any]:
     base = {"lookup_key": lookup_key, "order_number": order_number}
+    if routing_source == "unmapped_prefix":
+        return {**base, "found": False, "skipped": True, "invoice_only": True,
+                "message": "Invoice only — no Shopify store mapped; included in invoice totals"}
     if route_error:
-        return {**base, "found": False, "ambiguous": True, "error": route_error}
+        return {**base, "found": False, "ambiguous": routing_source == "conflicting_rules", "error": route_error}
 
     preferred = str(preferred_store or "").strip().lower() or None
     if preferred and preferred not in all_store_keys:
@@ -4043,6 +4052,8 @@ async def _lookup_invoice_row(
         invoice_crbt=invoice_crbt,
         is_refused=is_refused,
     )
+    if errors:
+        return {**base, "found": False, "error": "Shopify lookup incomplete; retry. " + "; ".join(errors)}
     return {**base, **selected}
 
 
@@ -4052,6 +4063,16 @@ class InvoiceLookupItem(BaseModel):
     store: Optional[str] = None
     crbt: Optional[float] = None
     is_refused: bool = False
+    routing_error: Optional[str] = None
+    send_code: Optional[str] = None
+    company: Optional[str] = None
+
+
+async def _invoice_prefix_rules() -> List[Dict[str, str]]:
+    if HAVE_AUTH_DB and SessionLocal is not None:
+        async with SessionLocal() as db:
+            return await get_invoice_routing_rules(db)
+    return []
 
 
 class InvoiceLookupRequest(BaseModel):
@@ -4179,6 +4200,7 @@ async def invoice_lookup_orders(body: InvoiceLookupRequest, admin: User = Depend
             items.append(InvoiceLookupItem(order_number=number, lookup_key=number))
 
     all_store_keys = await known_store_labels()
+    rules = await _invoice_prefix_rules()
     store_ready = {store_key: await _invoice_store_ready(store_key) for store_key in all_store_keys}
     sem = asyncio.Semaphore(8)
     tasks = []
@@ -4186,15 +4208,17 @@ async def invoice_lookup_orders(body: InvoiceLookupRequest, admin: User = Depend
         number = str(item.order_number or "").strip().lstrip("#")
         if not number:
             continue
+        route = resolve_row_store(company=item.company, invoice_client=None, send_code=item.send_code,
+                                  rules=rules, known_stores=all_store_keys)
         tasks.append(
             _lookup_invoice_row(
                 lookup_key=str(item.lookup_key or f"refresh:{index}:{number}"),
                 order_number=number,
                 invoice_crbt=item.crbt,
                 is_refused=bool(item.is_refused),
-                preferred_store=item.store,
-                routing_source="existing_store_selection" if item.store else None,
-                route_error=None,
+                preferred_store=route.get("store"),
+                routing_source=route.get("source"),
+                route_error=route.get("error"),
                 all_store_keys=all_store_keys,
                 store_ready=store_ready,
                 sem=sem,
@@ -4206,6 +4230,8 @@ async def invoice_lookup_orders(body: InvoiceLookupRequest, admin: User = Depend
 class InvoiceMarkPaidOrder(BaseModel):
     order_gid: str
     store: str
+    send_code: Optional[str] = None
+    company: Optional[str] = None
 
 
 class InvoiceMarkPaidRequest(BaseModel):
@@ -4216,6 +4242,15 @@ class InvoiceMarkPaidRequest(BaseModel):
 async def invoice_mark_paid(body: InvoiceMarkPaidRequest, admin: User = Depends(require_admin)):  # type: ignore
     items = body.orders or []
     known_stores = set(await known_store_labels())
+    rules = await _invoice_prefix_rules()
+    # Validate the entire batch before any Shopify payment mutation. Older tabs
+    # without merchant identity must reload rather than reuse a stale store.
+    for item in items:
+        route = resolve_row_store(company=item.company, invoice_client=None, send_code=item.send_code,
+                                  rules=rules, known_stores=known_stores)
+        if route.get("error") or route.get("store") != item.store.strip().lower():
+            raise HTTPException(status_code=400, detail=route.get("error") or
+                                "Invoice merchant and Shopify store disagree. Reload and reparse the invoice.")
     ready_stores = {store for store in known_stores if await _invoice_store_ready(store)}
     # Defensive dedupe
     dedup: List[InvoiceMarkPaidOrder] = []

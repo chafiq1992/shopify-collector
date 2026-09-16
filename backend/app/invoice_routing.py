@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 
 RULE_TYPES = {"code_prefix", "invoice_client"}
+MERCHANT_STORES = {"7": "irrakids", "9": "irranova"}
 
 
 def normalize_match_value(value: Any) -> str:
@@ -65,20 +66,24 @@ def resolve_row_store(
     rules: Iterable[Any],
     known_stores: Iterable[str],
 ) -> Dict[str, Any]:
-    """Resolve a row using explicit rules, then an exact client/store identity."""
+    """Route by shipment merchant identity, never by the invoice account name."""
     company_key = normalize_match_value(company)
-    client_key = normalize_match_value(invoice_client)
     prefix_key = merchant_code_prefix(send_code)
-    stores = {str(store or "").strip().lower() for store in known_stores or [] if str(store or "").strip()}
+    if prefix_key in MERCHANT_STORES:
+        return {"store": MERCHANT_STORES[prefix_key], "source": "merchant_prefix", "rule": None}
+    if not prefix_key:
+        return {"store": None, "source": "missing_prefix",
+                "error": "Order reference has no merchant prefix; store identity requires review"}
 
     candidates: List[Dict[str, Any]] = []
     for rule in sanitize_rules(rules):
+        if rule["match_type"] != "code_prefix":
+            continue
         carrier_key = normalize_match_value(rule.get("carrier"))
         if carrier_key and carrier_key != company_key:
             continue
         value_key = normalize_match_value(rule.get("value"))
-        actual = prefix_key if rule["match_type"] == "code_prefix" else client_key
-        if actual != value_key:
+        if prefix_key != value_key:
             continue
         candidates.append(
             {
@@ -103,14 +108,8 @@ def resolve_row_store(
             "candidate_stores": sorted(stores_found),
         }
 
-    # Common carrier labels include account IDs, e.g. "5716-irrakids".
-    # Treat a known store token as an implicit exact identity, but do not use
-    # fuzzy substring matching ("kids" must not match "irrakids").
-    client_tokens = set(client_key.split())
-    implicit = sorted(store for store in stores if normalize_match_value(store) in client_tokens)
-    if len(implicit) == 1:
-        return {"store": implicit[0], "source": "invoice_client_store_key", "rule": None}
-    return {"store": None, "source": None, "rule": None}
+    return {"store": None, "source": "unmapped_prefix",
+            "error": f"Merchant prefix {prefix_key} has no store mapping; add a code-prefix rule in Merchant & store settings"}
 
 
 def choose_shopify_candidate(
