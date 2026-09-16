@@ -1,0 +1,118 @@
+# shopify-collector on the Netcup box, beside /opt/apex and /opt/whatsapp.
+#
+# Two files feed this, and mixing them is the classic footgun:
+#   /opt/collector/.env      -> Compose substitution only (IMAGE_TAG, build args)
+#   /opt/collector/app.env   -> the application's runtime environment (chmod 600)
+name: collector
+
+services:
+  web:
+    # The frontend is compiled INTO the image: Vite inlines VITE_* at build
+    # time, so these are build args and not runtime env. Changing one means
+    # rebuilding, which is why they live in .env beside IMAGE_TAG.
+    build:
+      context: /opt/collector/src
+      args:
+        VITE_PRINT_RELAY_URL: "${VITE_PRINT_RELAY_URL:?set in /opt/collector/.env}"
+        VITE_PRINT_RELAY_API_KEY: "${VITE_PRINT_RELAY_API_KEY:?set in /opt/collector/.env}"
+        VITE_PRINT_RELAY_PC_ID: "${VITE_PRINT_RELAY_PC_ID:-pc-lab-1}"
+    image: shopify-collector:${IMAGE_TAG:-latest}
+    env_file: [/opt/collector/app.env]
+    restart: unless-stopped
+
+    environment:
+      PORT: "8080"
+      # THE parallel-run switch, same name as /opt/apex and /opt/whatsapp use.
+      # 0 while Cloud Run is still live; 1 only once it has stopped serving.
+      #
+      # This app runs no schedulers and no cron — every `while True` in it is
+      # request-scoped pagination or a long-poll with a deadline — so unlike
+      # the other two apps this gates exactly one thing: the /pull print-job
+      # endpoint. /pull SELECTs `pending` rows and flips them to `inflight` in
+      # a second statement, with no FOR UPDATE SKIP LOCKED and no atomic
+      # claim, so two deployments polling one database can lease the same job
+      # twice and print it twice.
+      WORKER_LOOPS: "${WORKER_LOOPS:-0}"
+
+      # Cloud Run set K_SERVICE, and backend/app/main.py keys a SQLite
+      # durability warning off it. Harmless to lose (DATABASE_URL is set
+      # explicitly below and is Postgres), but stated so the absence is a
+      # decision rather than an accident. See trap 7 in PORT-TO-NETCUP.
+      K_SERVICE: "collector-netcup"
+
+    # Stated explicitly rather than inherited from the image's CMD, because
+    # the worker count is a correctness constraint here, not a tuning knob:
+    #
+    #   * /ws broadcasts go through an in-process ConnectionManager with no
+    #     Redis pub/sub behind it, so a second worker's clients would never
+    #     see an update raised on the first.
+    #   * _DEDUP_CACHE and RECENT_ENQUEUED_ORDERS are plain in-process dicts,
+    #     so the 10 s duplicate-print guard only holds within one process.
+    #
+    # NEVER raise this. (Cloud Run has the same flaw ACROSS instances at
+    # maxScale=5 — see deploy/README.md, "Things worth fixing".)
+    #
+    # --proxy-headers/--forwarded-allow-ips: nothing in this app reads the
+    # client IP today, so this changes no behaviour; it is here so that if
+    # anything ever does, it sees the real address rather than Caddy's.
+    command:
+      - uvicorn
+      - backend.app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --workers
+      - "1"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
+      - --timeout-keep-alive
+      - "120"
+
+    expose: ["8080"]              # never `ports:` — Docker's iptables bypass ufw
+
+    healthcheck:
+      # /api/health answers 200 whenever the process is up, so a status-code
+      # check would gate on nothing: startup swallows database failures
+      # (_init_db_tables catches everything and prints), which means a
+      # container that cannot reach Supabase still boots and still answers
+      # 200. The verdict `up -d --wait` needs is db.ok in the body.
+      test: ["CMD-SHELL", "python -c \"import json,urllib.request,sys; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/api/health',timeout=8)); sys.exit(0 if (d.get('db') or {}).get('ok') else 1)\""]
+      interval: 15s
+      timeout: 12s
+      retries: 5
+      # First boot runs the full CREATE TABLE IF NOT EXISTS set plus the
+      # additive ALTERs against Supabase, over a ~10 ms round trip.
+      start_period: 60s
+
+    networks:
+      internal: {}
+      edge:
+        aliases: [collector-web]  # how Caddy addresses it. NOT the bare name
+                                  # `web` — /opt/apex and /opt/whatsapp both
+                                  # have a `web` service on this same network.
+
+    # Cloud Run runs this at 512Mi / 1 CPU. The headroom is for the invoice
+    # parser: PyMuPDF rasterises pages and the OpenAI step fans out chunks.
+    mem_limit: ${WEB_MEM:-768m}
+    cpus: ${WEB_CPUS:-2.0}
+    pids_limit: 512
+
+networks:
+  internal:                       # a NAME, not Docker's `internal: true` flag.
+                                  # The app must reach Shopify, OpenAI, Google
+                                  # Maps and Supabase.
+    enable_ipv6: true             # DATABASE_URL is the DIRECT Supabase host,
+                                  # db.qkomhpjcxgnoyhjdvlgb.supabase.co, which
+                                  # has AAAA and no A record. Measured on this
+                                  # box: a plain Compose bridge gets
+                                  # `OSError: [Errno 101] Network is
+                                  # unreachable` while the host resolves fine.
+  edge:
+    name: edge
+    external: true
+
+# No `redisnet`: this app uses no Redis at all (nothing in requirements.txt,
+# no client anywhere in backend/). It therefore needs no user in
+# /opt/redis/users.acl — the one shared-Redis step in the brief does not apply.

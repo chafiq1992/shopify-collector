@@ -304,6 +304,16 @@ _DEDUP_WINDOW_SEC = 10
 _INFLIGHT_TIMEOUT_SEC = 90
 _MAX_ATTEMPTS = 4
 
+# THE switch for running beside another live deployment of this app, named to
+# match /opt/apex and /opt/whatsapp on the same box. It defaults to ON so the
+# Cloud Run service — which does not set it — keeps behaving exactly as it
+# does today; only the Netcup deployment ever sets it to 0.
+#
+# This app runs no schedulers and no cron: every `while True` in it is either
+# request-scoped pagination or a long-poll with a deadline. The one piece of
+# queue-consuming work is the /pull print relay below.
+WORKER_LOOPS = (os.environ.get("WORKER_LOOPS", "1") or "1").strip() not in ("0", "false", "False")
+
 def _dedup_key_for_label(delivery_order_id: str, store: Optional[str] = None) -> str:
     return f"label:{delivery_order_id}:{store or ''}"
 
@@ -596,6 +606,16 @@ async def pull(
     # Prefer a header so credentials never appear in Cloud Run request URLs.
     # Retain the hidden query parameter temporarily for older installed agents.
     _require_pc(pc_id, x_pc_secret or secret or "")
+    # Claiming below is a SELECT of `pending` rows followed by a separate
+    # mutation — no FOR UPDATE SKIP LOCKED and no atomic claim — so two
+    # deployments polling one database can lease the same job twice and print
+    # it twice. While another deployment still owns the print queue this one
+    # must refuse, loudly, rather than quietly serve an empty list.
+    if not WORKER_LOOPS:
+        raise HTTPException(
+            status_code=503,
+            detail="print relay disabled on this deployment (WORKER_LOOPS=0)",
+        )
     import time as _t
     wait = min(max(wait, 0), 25)
     deadline = _t.time() + wait
@@ -2061,7 +2081,26 @@ def _apply_cached_order_overrides(items: List["OrderDTO"], store: Optional[str])
 # ---------- Routes ----------
 @app.get("/api/health")
 async def health():
-    return {"ok": True}
+    # `ok` stays True whenever the process is serving HTTP: that is what the
+    # existing callers check, and changing it would be a behaviour change.
+    # The database verdict is a separate field because startup deliberately
+    # swallows database failures (`_init_db_tables` catches everything), so a
+    # container that cannot reach its database still boots and still answers
+    # 200. The container healthcheck therefore reads db.ok, not the status
+    # code — otherwise `up -d --wait` would gate on nothing.
+    db: Dict[str, Any] = {"configured": SessionLocal is not None, "ok": False}
+    if SessionLocal is not None:
+        try:
+            from sqlalchemy import text as _sql_text
+            async with SessionLocal() as session:  # type: ignore[misc]
+                await session.execute(_sql_text("SELECT 1"))
+            db["ok"] = True
+        except Exception as e:
+            db["error"] = f"{type(e).__name__}: {e}"
+    else:
+        # No database configured at all — there is nothing to gate on.
+        db["ok"] = True
+    return {"ok": True, "db": db, "worker_loops": WORKER_LOOPS}
 
 @app.get("/api/orders")
 async def list_orders(

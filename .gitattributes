@@ -1,0 +1,11 @@
+# Shell scripts must keep LF endings. A CRLF on the shebang line makes bash
+# report `set: pipefail: invalid option name`, which looks like a bash version
+# problem and is not — and MSYS/Git-Bash grep hides the \r, so the file looks
+# clean on Windows. Check on the server with `file script.sh`.
+*.sh text eol=lf
+
+# Everything under deploy/ is copied onto a Linux box as-is: Compose files,
+# Caddy site configs, env templates. A CRLF in an env template becomes an
+# invisible trailing carriage return on every value inside the container.
+deploy/** text eol=lf
+*.caddy text eol=lf

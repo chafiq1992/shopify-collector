@@ -1,0 +1,69 @@
+# shopify-collector.
+#
+# DO NOT INSTALL THIS FILE UNTIL THE HOSTNAME BELOW RESOLVES TO 159.195.204.91.
+#
+# Caddy requests a certificate the instant this config loads, and the HTTP-01
+# challenge can only succeed once the name points here. Loading it early fires
+# challenges Caddy cannot answer and burns Let's Encrypt's failed-validation
+# budget for that hostname.
+#
+# And never look the name up before the record exists: the zone's SOA negative
+# cache is 3601 s, so one premature query blinds your resolver AND its upstream
+# to the name for an hour. Create the record first, then query it.
+#
+# Correct order:
+#   1. create  A  shopify-collector.chattbase.site -> 159.195.204.91
+#   2. dig +short shopify-collector.chattbase.site          # must return 159.195.204.91
+#   3. copy this file into /opt/edge/sites/ and reload Caddy:
+#      docker compose -f /opt/edge/compose.yaml exec caddy \
+#        caddy reload --config /etc/caddy/Caddyfile
+shopify-collector.chattbase.site {
+	encode zstd gzip
+
+	# The invoice verifier posts several PDF/HTML/XLS/CSV invoices in one
+	# request, and the inventory helper uploads receipt photos. Cloud Run
+	# caps a request at 32 MB; keep this at or above that so the move does
+	# not quietly make a working upload fail.
+	request_body {
+		max_size 64MB
+	}
+
+	# Vite emits content-hashed filenames into dist/assets/, so a new deploy
+	# always changes the URL — they can be cached permanently.
+	@immutable path /assets/*
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+	# index.html must NOT be cached, or browsers keep loading an old bundle
+	# that references assets a later deploy has already replaced.
+	@html path / /index.html
+	header @html Cache-Control "no-cache"
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+
+	# collector-web is the network alias declared in /opt/collector/compose.yaml.
+	# Do NOT use the bare service name: /opt/apex and /opt/whatsapp each have a
+	# `web` service on this same shared network, and Caddy would route to
+	# whichever answered first.
+	reverse_proxy collector-web:8080 {
+		# Ride out a container restart instead of returning 502.
+		lb_try_duration 20s
+		lb_try_interval 500ms
+
+		transport http {
+			# Two long-lived paths: the /ws order-update socket, and /pull,
+			# which the print agents hold open for up to 25 s per poll.
+			# uvicorn runs with --timeout-keep-alive 120.
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+
+	# Logs go to Docker, which the daemon rotates at 20 MB x 5.
+	log
+}
