@@ -4638,30 +4638,103 @@ async def get_print_data(numbers: str = Query("", description="Comma-separated o
 
     return {"ok": True, "orders": out}
 
+# ---------- GCS credentials for the image proxy ----------
+# The agent screenshots live in a PRIVATE bucket, so fetching one needs a
+# token. On Cloud Run that arrived free from the metadata server. Off it there
+# is no metadata server at all, every fetch goes out anonymous, and GCS answers
+# "Anonymous caller does not have storage.objects.get access" — which reaches
+# the browser as a broken image with no clue why.
+#
+# So: metadata server when there is one, an explicit service-account key
+# otherwise. Cached, because minting a token is a network round trip and a
+# single order page proxies several screenshots.
+_GCS_SA_CREDS: Any = None
+_GCS_SA_LOADED = False
+_GCS_TOKEN_LOCK = asyncio.Lock()
+_GCS_SCOPE = "https://www.googleapis.com/auth/devstorage.read_only"
+
+
+def _gcs_service_account_credentials():
+    """Service-account credentials from the environment, or None. Loaded once."""
+    global _GCS_SA_CREDS, _GCS_SA_LOADED
+    if _GCS_SA_LOADED:
+        return _GCS_SA_CREDS
+    _GCS_SA_LOADED = True
+
+    raw = (os.environ.get("GCS_CREDENTIALS_JSON") or "").strip()
+    if not raw:
+        path = (
+            os.environ.get("GCS_CREDENTIALS_FILE")
+            or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            or ""
+        ).strip()
+        if path and os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    raw = fh.read()
+            except Exception as e:
+                print(f"[GCS] cannot read {path}: {type(e).__name__}: {e}")
+    if not raw:
+        print("[GCS] no service-account key configured; the image proxy can only read public objects")
+        return None
+
+    try:
+        from google.oauth2 import service_account  # type: ignore
+        info = json.loads(raw)
+        _GCS_SA_CREDS = service_account.Credentials.from_service_account_info(
+            info, scopes=[_GCS_SCOPE]
+        )
+        print(f"[GCS] image proxy authenticating as {info.get('client_email')}")
+    except Exception as e:
+        print(f"[GCS] service-account key unusable: {type(e).__name__}: {e}")
+        _GCS_SA_CREDS = None
+    return _GCS_SA_CREDS
+
+
+async def _gcs_access_token() -> Optional[str]:
+    """A read-only GCS token, or None if this deployment has no credentials."""
+    # 1. Metadata server — present on Cloud Run / GCE, absent anywhere else.
+    #    Kept so a GCP deployment still works with no key configured.
+    try:
+        async with httpx.AsyncClient() as client:
+            meta_res = await client.get(
+                "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+                headers={"Metadata-Flavor": "Google"},
+                timeout=2.0,
+            )
+            if meta_res.status_code == 200:
+                token = meta_res.json().get("access_token")
+                if token:
+                    return token
+    except Exception:
+        # No metadata server here. Expected off GCP; fall through to the key.
+        pass
+
+    # 2. Explicit service-account key.
+    creds = _gcs_service_account_credentials()
+    if creds is None:
+        return None
+    async with _GCS_TOKEN_LOCK:
+        if not creds.valid:
+            try:
+                import google.auth.transport.requests as google_requests  # type: ignore
+                # refresh() is blocking I/O; keep it off the event loop.
+                await asyncio.to_thread(creds.refresh, google_requests.Request())
+            except Exception as e:
+                print(f"[GCS] token refresh failed: {type(e).__name__}: {e}")
+                return None
+        return creds.token
+
+
 @app.get("/api/proxy-image")
 async def proxy_image(url: str = Query(..., description="The GCS URL to proxy")):
     """
-    Proxies an image from Google Cloud Storage, handling authentication if running on Cloud Run.
+    Proxies an image from Google Cloud Storage, authenticating when it can.
     """
     if not url.startswith("https://storage.googleapis.com/"):
         raise HTTPException(status_code=400, detail="Invalid URL domain")
 
-    # Try to get GCS access token from metadata server
-    access_token = None
-    try:
-        async with httpx.AsyncClient() as client:
-            # Metadata server URL for Cloud Run / GCE
-            meta_res = await client.get(
-                "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
-                headers={"Metadata-Flavor": "Google"},
-                timeout=2.0
-            )
-            if meta_res.status_code == 200:
-                data = meta_res.json()
-                access_token = data.get("access_token")
-    except Exception:
-        # Ignore metadata errors (e.g. running locally)
-        pass
+    access_token = await _gcs_access_token()
 
     headers = {}
     if access_token:

@@ -18,4 +18,7 @@ openai>=1.30.0
 PyMuPDF>=1.24.0
 reportlab>=4.0.0
 
-
+# The agent-screenshot proxy reads a PRIVATE GCS bucket. On Cloud Run the token
+# came from the metadata server; anywhere else it has to be minted from a
+# service-account key, which is what google-auth does. Pure-Python deps only.
+google-auth>=2.30.0

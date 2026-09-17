@@ -24,6 +24,18 @@ TEST_HOST="${2:-}"
 #   BASE_URL_OVERRIDE=https://shopify-collector.chattbase.site \
 #     ./deploy/pull-env.sh deploy@159.195.204.91 shopify-collector.chattbase.site
 BASE_URL_OVERRIDE="${BASE_URL_OVERRIDE:-}"
+
+# The database is the one value that must NEVER come back from Cloud Run once
+# it has been migrated. The Cloud Run service still names Supabase; the box
+# points at its own Postgres. Regenerating app.env from Cloud Run would send
+# the app back to Supabase on the next release and split the data across two
+# live databases with no merge path. So: if the box is already on the local
+# instance, that DSN wins and is carried through untouched.
+CURRENT_DB="$(ssh -o BatchMode=yes "${TARGET}" "grep -m1 '^DATABASE_URL=' /opt/collector/app.env 2>/dev/null | cut -d= -f2-" || true)"
+case "${CURRENT_DB}" in
+  *@postgres:*) echo "  keeping the local DATABASE_URL already on the box" ;;
+  *) CURRENT_DB="" ;;
+esac
 SERVICE=shopify-collector
 REGION=europe-west1
 
@@ -48,6 +60,7 @@ sys.stdout.reconfigure(encoding="utf-8", newline=chr(10))
 
 test_host = sys.argv[1] if len(sys.argv) > 1 else ""
 base_override = sys.argv[2] if len(sys.argv) > 2 else ""
+keep_db = sys.argv[3] if len(sys.argv) > 3 else ""
 svc = json.load(sys.stdin)
 container = svc["spec"]["template"]["spec"]["containers"][0]
 
@@ -115,11 +128,36 @@ extra = [
     "DB_POOL_TIMEOUT=30",
     "DB_POOL_RECYCLE_SECONDS=300",
 ]
+if keep_db:
+    lines = [l for l in lines if not l.startswith("DATABASE_URL=")]
+    extra += ["", "DATABASE_URL=" + keep_db]
+    # Pool sizing chosen for a 9 ms round trip to Supabase is wrong for a
+    # 0.05 ms one on the same host. Replace, do not append: a duplicate key in
+    # an env_file leaves which value wins up to Compose.
+    extra = [e for e in extra if not e.startswith(("DB_MAX_OVERFLOW=", "DB_POOL_RECYCLE_SECONDS="))]
+    extra += ["DB_MAX_OVERFLOW=5", "DB_POOL_RECYCLE_SECONDS=1800"]
+
 if base_override:
     # The OAuth redirect base. Overriding it is a cutover decision, so it is
     # never inferred from test_host - it has to be stated explicitly.
     lines = [l for l in lines if not l.startswith("BASE_URL=")]
     extra += ["", "BASE_URL=" + base_override]
+
+# The agent-screenshot proxy reads a PRIVATE GCS bucket. The Cloud Run
+# service carries no GCS credential at all because it got a token free from
+# the metadata server; off GCP there is no metadata server, so the key has to
+# be stated or every screenshot renders as a broken image.
+try:
+    _key = subprocess.run(
+        "gcloud secrets versions access latest --secret gcs-sa-key",
+        shell=True, capture_output=True, text=True, check=True,
+    ).stdout
+    # env_file cannot represent a newline, and the key is pretty-printed JSON.
+    _compact = json.dumps(json.loads(_key), separators=(",", ":"))
+    extra += ["", "GCS_CREDENTIALS_JSON=" + _compact]
+    print("  secret %-28s <- gcs-sa-key" % "GCS_CREDENTIALS_JSON", file=sys.stderr)
+except Exception as _e:
+    print("  ! could not read gcs-sa-key: %s" % _e, file=sys.stderr)
 
 if test_host:
     # APPEND. Replacing it would cut the Cloud Run UI off mid-validation,
@@ -141,7 +179,7 @@ header = [
     "",
 ]
 sys.stdout.write("\n".join(header + sorted(lines) + extra) + "\n")
-' "${TEST_HOST}" "${BASE_URL_OVERRIDE}" \
+' "${TEST_HOST}" "${BASE_URL_OVERRIDE}" "${CURRENT_DB}" \
 | ssh -o BatchMode=yes "${TARGET}" \
     'umask 077 && mkdir -p /opt/collector && cat > /opt/collector/app.env && chmod 600 /opt/collector/app.env'
 
