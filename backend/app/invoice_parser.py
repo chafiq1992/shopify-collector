@@ -324,6 +324,17 @@ def _parse_twelve_livery_invoice(text: str) -> Optional[Dict[str, Any]]:
     return _parse_tcpdf_invoice(text)
 
 
+def _money_cells_end(segment: str) -> Optional[int]:
+    """Offset just past a row's COD and fee cells, where the merchant code starts."""
+    status_match = re.search(_STATUS_TOKEN_RE, segment, re.IGNORECASE)
+    if not status_match:
+        return None
+    amounts = list(re.finditer(r"-?\d+(?:[.,]\d+)?\s*DH\b", segment[status_match.end():], re.IGNORECASE))
+    if len(amounts) < 2:
+        return None
+    return status_match.end() + amounts[1].end()
+
+
 def _parse_mpdf_carrier_invoice(
     text: str,
     company: str,
@@ -335,12 +346,21 @@ def _parse_mpdf_carrier_invoice(
 
     parsed = _extract_invoice_metadata(text, company)
     seen_codes = set()
+    consumed_codes = set()
     for index, tracking_match in enumerate(tracking_matches):
         segment_end = tracking_matches[index + 1].start() if index + 1 < len(tracking_matches) else len(text)
         segment = text[tracking_match.end():segment_end]
-        send_match = re.search(rf"(?<![\w/-])({_MERCHANT_CODE_PATTERN})(?![\w/-])", segment, re.IGNORECASE)
-        if not send_match:
+        code_matches = list(re.finditer(rf"(?<![\w/-])({_MERCHANT_CODE_PATTERN})(?![\w/-])", segment, re.IGNORECASE))
+        if not code_matches:
             continue
+        # These carriers print the merchant reference after the money cells. The
+        # product column sits before them, and there a size range such as "12-18"
+        # run together with the printed row number reads as a merchant code.
+        boundary = _money_cells_end(segment)
+        send_match = next(
+            (match for match in code_matches if boundary is not None and match.start() >= boundary),
+            code_matches[0],
+        )
         send_code = send_match.group(1).strip()
         if send_code in seen_codes:
             continue
@@ -353,6 +373,10 @@ def _parse_mpdf_carrier_invoice(
         if row:
             seen_codes.add(send_code)
             parsed["rows"].append(row)
+            # Codes read off the product column of a row that did parse are not
+            # shipments the parser missed, so they must not become stub rows.
+            consumed_codes.update(match.group(1).strip() for match in code_matches)
+    parsed["_consumedCodes"] = sorted(consumed_codes)
     return parsed if parsed["rows"] else None
 
 
@@ -381,6 +405,41 @@ def _parse_tcpdf_invoice(text: str) -> Optional[Dict[str, Any]]:
     return parsed if parsed["rows"] else None
 
 
+def _column_cities(pages: List[Tuple[int, str]]) -> Dict[str, str]:
+    """Read the city column off the printed cell gaps, keyed by phone number.
+
+    Carriers that print the city between the phone and the delivery status lose
+    that column once whitespace is collapsed, because the product description is
+    interleaved with it. The runs of spaces separating the printed cells survive
+    text extraction, so the column can be recovered from them.
+    """
+    cities: Dict[str, str] = {}
+    for _, page_text in (pages or []):
+        for line in (page_text or "").splitlines():
+            cells = [cell.strip() for cell in re.split(r"[ \t]{2,}", line) if cell.strip()]
+            phone_index = next((i for i, cell in enumerate(cells) if re.fullmatch(r"0\d{9}", cell)), None)
+            if phone_index is None:
+                continue
+            status_index = next((i for i, cell in enumerate(cells)
+                                 if i > phone_index and re.fullmatch(_STATUS_TOKEN_RE, cell, re.IGNORECASE)), None)
+            # Nothing between the two columns means this row's city wrapped away.
+            if status_index is None or status_index <= phone_index + 1:
+                continue
+            cities.setdefault(cells[phone_index], cells[phone_index + 1][:120])
+    return cities
+
+
+def _fill_column_cities(parsed: Dict[str, Any], pages: Optional[List[Tuple[int, str]]]) -> None:
+    pending = [row for row in (parsed.get("rows") or []) if not row.get("city") and row.get("phone")]
+    if not pending or not pages:
+        return
+    cities = _column_cities(pages)
+    for row in pending:
+        city = cities.get(str(row.get("phone") or "").strip())
+        if city:
+            row["city"] = city
+
+
 def _parse_invoice_deterministically(pages: List[Tuple[int, str]]) -> Optional[Dict[str, Any]]:
     text = _normalize_invoice_text("\n".join(page_text for _, page_text in (pages or [])))
     if not text:
@@ -389,8 +448,10 @@ def _parse_invoice_deterministically(pages: List[Tuple[int, str]]) -> Optional[D
     for parser in (_parse_lionex_invoice, _parse_numbered_twelve, _parse_livre24_pdf, _parse_glog, _parse_yfd_invoice, _parse_oscario_invoice, _parse_tcpdf_invoice):
         parsed = parser(text)
         if parsed is not None:
+            _fill_column_cities(parsed, pages)
             normalized = _normalize_llm_response(parsed)
             normalized["_expectedRowCount"] = parsed.get("_expectedRowCount")
+            normalized["_consumedCodes"] = parsed.get("_consumedCodes") or []
             return normalized
     return None
 
@@ -559,7 +620,9 @@ def validate_invoice(parsed: Dict[str, Any], pages: Optional[List[Tuple[int, str
     if not rows:
         warnings.append("No shipment rows could be extracted.")
     for index, row in enumerate(rows, 1):
-        missing = [key for key in ("sendCode", "status", "city", "crbt", "fees", "total")
+        # The city is a display column: it feeds no match, no route and no total,
+        # so a city the layout swallowed must not block a reconciled payment.
+        missing = [key for key in ("sendCode", "status", "crbt", "fees", "total")
                    if row.get(key) is None or row.get(key) == ""]
         if parsed.get("company") == "Livre24" and pages is not None:
             missing += [key for key in ("phone", "deliveryDate", "carrierCode") if not row.get(key)]
@@ -594,7 +657,7 @@ def validate_invoice(parsed: Dict[str, Any], pages: Optional[List[Tuple[int, str
         if empty:
             warnings.append(f"No readable text on pages {', '.join(empty)}; those pages need review or OCR.")
         source_codes = set(_MERCHANT_CODE_RE.findall("\n".join(t for _, t in pages)))
-        absent = source_codes - {r.get("sendCode") for r in rows}
+        absent = source_codes - {r.get("sendCode") for r in rows} - set(parsed.get("_consumedCodes") or [])
         if absent:
             warnings.append(f"{len(absent)} source order references were not extracted.")
     parsed["validation"] = {"complete": not warnings, "expectedRows": expected,
@@ -1089,7 +1152,7 @@ def _backfill_missing_codes(
     all_text = "\n".join(text for _, text in pages)
     found_in_pdf = set(_MERCHANT_CODE_RE.findall(all_text))
 
-    missing = found_in_pdf - existing_codes
+    missing = found_in_pdf - existing_codes - set(merged.get("_consumedCodes") or [])
     if not missing:
         return
 

@@ -162,3 +162,47 @@ def test_lionex_repeated_reference_keeps_both_shipments_and_bad_net_is_blocked()
     assert len(result["rows"]) == 2
     assert not result["validation"]["complete"]
     assert result["rows"][1]["extractionIssues"] == ["Row amounts do not reconcile"]
+
+
+def test_yfd_product_size_range_is_not_mistaken_for_a_merchant_code():
+    # The printed row number runs into the "12-18 months" size of the product
+    # column, which reads exactly like a merchant reference. Picking it loses the
+    # real order and leaves a stub row that blocks the whole invoice.
+    result = parse("\n".join([
+        "Client: 5716-irrakids",
+        "Nombre de colis: 2",
+        "Date: 28/08/2026",
+        "Facture client Nº:",
+        "FC-28082026-00001",
+        "Nº         Code          Téléphone        Ville         Produit      Etat        CRBT            Frais",
+        "YFD-25082026-4711042",
+        "1                    0624694354      Rabat       blue / 27 x 1     Livré        230 DH        20 DH        7-163181",
+        "YFD-25082026-1259525                    brown / 12-1820              0634655632     El menzeh          Livré     385 DH      25 DH",
+        "7-162096                            months / Khaki /",
+        "36 x 1",
+        "Total Brut 615 DH Frais TTC 45 DH Total Net 570 DH",
+    ]))
+    assert [r["sendCode"] for r in result["rows"]] == ["7-163181", "7-162096"]
+    assert [r["orderNumber"] for r in result["rows"]] == ["163181", "162096"]
+    assert result["validation"]["warnings"] == []
+    assert result["validation"]["complete"] is True
+
+
+def test_yfd_city_comes_from_the_printed_column_and_never_blocks_payment():
+    # YFD prints the city before the status, interleaved with the product, so the
+    # column gaps are the only reliable source — and a city that wrapped out of
+    # its cell must still leave a reconciled row payable.
+    result = parse("\n".join([
+        "Client: 5716-irrakids",
+        "Nombre de colis: 2",
+        "Facture client Nº:",
+        "FC-28082026-00002",
+        "YFD-24082026-7481448",
+        "1                  0696446192       Allal tazi      black / 42 x 1    Livré      250 DH     30 DH      9-89066",
+        "YFD-26082026-4900614           Sala al      jeans / 8 years / 2          0708260027            Livré     249 DH     25 DH",
+        "7-163382                       jadida       black / 30 x 1",
+        "Total Brut 499 DH Frais TTC 55 DH Total Net 444 DH",
+    ]))
+    assert [r["city"] for r in result["rows"]] == ["Allal tazi", None]
+    assert [r["extractionComplete"] for r in result["rows"]] == [True, True]
+    assert result["validation"]["complete"] is True
