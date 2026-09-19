@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
-import { isFinancialStatusPaid, canMarkInvoiceRowPaid, invoiceLookupItems } from "../lib/invoiceVerification";
+import { isFinancialStatusPaid, canMarkInvoiceRowPaid, invoiceRowPaymentBlocker, invoiceLookupItems } from "../lib/invoiceVerification";
 
 function getRowKey(row, fallbackIndex = 0) {
   return [
@@ -67,7 +67,8 @@ export default function InvoicesVerifier() {
       const diff = (invComparable != null && shopComparable != null) ? (shopComparable - invComparable) : null;
       const absDiff = diff != null ? Math.abs(diff) : null;
       const financialStatus = info?.financial_status || null;
-      const canMarkPaid = canMarkInvoiceRowPaid(r, info);
+      const paymentBlocker = invoiceRowPaymentBlocker(r, info);
+      const canMarkPaid = paymentBlocker === null;
       return {
         ...r,
         _rowKey: getRowKey(r, index),
@@ -79,6 +80,7 @@ export default function InvoicesVerifier() {
         absDiff,
         financialStatus,
         canMarkPaid,
+        paymentBlocker,
         invoiceOnly: r.invoiceOnly || info?.invoice_only || false,
       };
     });
@@ -499,7 +501,7 @@ export default function InvoicesVerifier() {
                       {d.invoiceDate ? <span> • {d.invoiceDate}</span> : null}
                       <span> • rows: {(d.rows || []).length}</span>
                       {d.validation && <span className={d.validation.complete ? "text-emerald-700 font-semibold" : "text-amber-800 font-semibold"}>
-                        {" • "}{d.validation.extractedRows}/{d.validation.expectedRows ?? "?"} rows — {d.validation.complete ? "Extraction checked; totals reconcile" : "Incomplete or inconsistent — payment blocked"}
+                        {" • "}{d.validation.extractedRows}/{d.validation.expectedRows ?? "?"} rows — {d.validation.complete ? "Extraction checked; totals reconcile" : "Incomplete or inconsistent — review the flagged rows below"}
                       </span>}
                       {(d.invoiceTotalBrut != null || d.invoiceTotalNet != null || d.invoiceAdditionalFeesTotal != null) ? (
                         <span>
@@ -602,7 +604,7 @@ export default function InvoicesVerifier() {
               <button onClick={() => applySelection("all")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Select all</button>
               <button onClick={() => applySelection("none")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Clear all</button>
               <button onClick={() => applySelection("matched")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Matched only</button>
-              <button onClick={() => applySelection("payable")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Unpaid matched only</button>
+              <button onClick={() => applySelection("payable")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Ready to pay only</button>
             </div>
           </div>
         )}
@@ -728,7 +730,10 @@ export default function InvoicesVerifier() {
                           {r.diff != null ? Number(r.diff).toFixed(2) : "—"}
                         </td>
                         <td className="px-3 py-2">
-                          {r.financialStatus ? String(r.financialStatus) : "—"}
+                          <div>{r.financialStatus ? String(r.financialStatus) : "—"}</div>
+                          {r.canMarkPaid
+                            ? <div className="text-[10px] font-semibold text-emerald-700">Ready to pay</div>
+                            : <div className="max-w-[220px] text-[10px] text-amber-800">{r.paymentBlocker}</div>}
                         </td>
                       </tr>
                     );

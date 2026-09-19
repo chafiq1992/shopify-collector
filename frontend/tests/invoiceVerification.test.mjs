@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isFinancialStatusPaid, canMarkInvoiceRowPaid, invoiceLookupItems } from "../src/lib/invoiceVerification.js";
+import { isFinancialStatusPaid, canMarkInvoiceRowPaid, invoiceRowPaymentBlocker, invoiceLookupItems } from "../src/lib/invoiceVerification.js";
 
 test("unpaid and partially paid are not confused with fully paid", () => {
   assert.equal(isFinancialStatusPaid("PAID"), true);
@@ -9,15 +9,37 @@ test("unpaid and partially paid are not confused with fully paid", () => {
   assert.equal(isFinancialStatusPaid("PARTIALLY_PAID"), false);
 });
 
-test("payment eligibility requires complete invoice and delivered row", () => {
+test("payment eligibility requires a delivered row matched in its own store", () => {
   const row = { sendCode: "7-123456", routingStore: "irrakids", status: "Livré", extractionComplete: true, _doc: { validation: { complete: true } } };
   const match = { found: true, order_gid: "1", store: "irrakids", financial_status: "PENDING" };
   assert.equal(canMarkInvoiceRowPaid(row, match), true);
   assert.equal(canMarkInvoiceRowPaid({ ...row, sendCode: "9-123456" }, match), false);
   assert.equal(canMarkInvoiceRowPaid({ ...row, status: "Refusé" }, match), false);
   assert.equal(canMarkInvoiceRowPaid({ ...row, extractionComplete: false }, match), false);
-  assert.equal(canMarkInvoiceRowPaid({ ...row, _doc: {} }, match), false);
   assert.equal(canMarkInvoiceRowPaid(row, { ...match, ambiguous: true }), false);
+  assert.equal(canMarkInvoiceRowPaid(row, { ...match, financial_status: "PAID" }), false);
+});
+
+test("a row the operator cannot pay says why, so it can be found and deselected", () => {
+  const row = { sendCode: "7-123456", routingStore: "irrakids", status: "Livré", extractionComplete: true };
+  const match = { found: true, order_gid: "1", store: "irrakids", financial_status: "PENDING" };
+  assert.equal(invoiceRowPaymentBlocker(row, match), null);
+  assert.equal(invoiceRowPaymentBlocker({ ...row, extractionComplete: false, extractionIssues: ["Missing crbt"] }, match), "Missing crbt");
+  assert.equal(invoiceRowPaymentBlocker({ ...row, status: "Refusé" }, match), "Not delivered (Refusé)");
+  assert.equal(invoiceRowPaymentBlocker(row, { found: false }), "No Shopify order matched");
+  assert.equal(invoiceRowPaymentBlocker(row, { ...match, store: "irranova" }), "Invoice says irrakids, Shopify matched irranova");
+  assert.equal(invoiceRowPaymentBlocker(row, { ...match, financial_status: "PAID" }), "Already paid");
+});
+
+test("one unverifiable row does not hold back the rows that did verify", () => {
+  // The whole point of the checkboxes: an invoice that does not reconcile is a
+  // warning on the document, not a freeze on every order inside it.
+  const doc = { validation: { complete: false, warnings: ["Expected 22 invoice rows; extracted 21."] } };
+  const good = { sendCode: "7-163181", status: "Livré", extractionComplete: true, _doc: doc };
+  const bad = { sendCode: "7-163382", status: "Livré", extractionComplete: false, extractionIssues: ["Missing crbt"], _doc: doc };
+  const match = { found: true, order_gid: "gid://1", store: "irrakids", financial_status: "PENDING" };
+  assert.equal(canMarkInvoiceRowPaid(good, match), true);
+  assert.equal(canMarkInvoiceRowPaid(bad, match), false);
 });
 
 test("lookup batches retain every shipment, short reference and routing error", () => {
@@ -40,5 +62,5 @@ test("invoice-only merchants remain in invoice totals without disabling other pa
   assert.equal(canMarkInvoiceRowPaid({ ...doc.rows[0], _doc: doc }, match), true);
   assert.equal(canMarkInvoiceRowPaid({ ...doc.rows[1], _doc: doc }, match), false);
   assert.equal(canMarkInvoiceRowPaid({ ...doc.rows[2], _doc: doc }, match), false);
-  assert.equal(canMarkInvoiceRowPaid({ ...doc.rows[0], _doc: { validation: { complete: false } } }, match), false);
+  assert.equal(canMarkInvoiceRowPaid({ ...doc.rows[0], _doc: { validation: { complete: false } } }, match), true);
 });
