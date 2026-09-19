@@ -92,7 +92,14 @@ export default function InvoicesVerifier() {
     const payable = selected.filter((r) => r.canMarkPaid);
     const alreadyPaid = selected.filter((r) => r.shopify?.found && isFinancialStatusPaid(r.financialStatus));
     const missing = selected.filter((r) => !r.shopify?.found && !r.invoiceOnly);
+    const blockers = new Map();
+    for (const row of selected) {
+      if (row.canMarkPaid) continue;
+      const reason = row.paymentBlocker || "Not payable";
+      blockers.set(reason, (blockers.get(reason) || 0) + 1);
+    }
     return {
+      blockers: [...blockers.entries()].sort((a, b) => b[1] - a[1]),
       total: selected.length,
       matched: matched.length,
       payable: payable.length,
@@ -589,7 +596,7 @@ export default function InvoicesVerifier() {
                 disabled={paidBusy || busy || selectedSummary.payable === 0}
                 className="px-4 py-2 rounded-xl text-white text-sm font-semibold bg-green-600 hover:bg-green-700 disabled:opacity-60 active:scale-[.98]"
               >
-                {paidBusy ? "Marking paid…" : `Mark selected as paid (${selectedSummary.payable})`}
+                {paidBusy ? "Marking paid…" : `Mark ${selectedSummary.payable} of ${selectedSummary.total} selected as paid`}
               </button>
             </div>
             <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-gray-200 pt-3 text-xs">
@@ -605,6 +612,14 @@ export default function InvoicesVerifier() {
               <button onClick={() => applySelection("none")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Clear all</button>
               <button onClick={() => applySelection("matched")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Matched only</button>
               <button onClick={() => applySelection("payable")} className="px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50">Ready to pay only</button>
+              {selectedSummary.blockers.length > 0 && (
+                <div className="w-full flex flex-wrap items-center gap-2 pt-1">
+                  <span className="text-gray-500">Not payable because:</span>
+                  {selectedSummary.blockers.map(([reason, count]) => (
+                    <span key={reason} className="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800">{count} × {reason}</span>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
