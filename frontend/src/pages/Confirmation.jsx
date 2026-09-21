@@ -151,11 +151,11 @@ const API = {
     }
     return res.json();
   },
-  async pullPreview({ store, level, exclude_tags }) {
+  async pullPreview({ store, level, exclude_tags, include_assigned }) {
     const res = await authFetch(`/api/agent/pull/preview`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ store, level, exclude_tags }),
+      body: JSON.stringify({ store, level, exclude_tags, include_assigned: !!include_assigned }),
     });
     if (!res.ok) {
       const js = await res.json().catch(() => ({ detail: "Preview failed" }));
@@ -163,11 +163,13 @@ const API = {
     }
     return res.json();
   },
-  async pullExecute({ store, level, exclude_tags, limit, agent_tag }) {
+  async pullExecute({ store, level, exclude_tags, limit, agent_tag, include_assigned }) {
     const res = await authFetch(`/api/agent/pull/execute`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ store, level, exclude_tags, limit, agent_tag }),
+      body: JSON.stringify({
+        store, level, exclude_tags, limit, agent_tag, include_assigned: !!include_assigned,
+      }),
     });
     if (!res.ok) {
       const js = await res.json().catch(() => ({ detail: "Pull failed" }));
@@ -1652,10 +1654,20 @@ function AgentView({ me }) {
           onClose={() => setPullMode(null)}
           onSuccess={(result) => {
             setPullMode(null);
+            const took = Number(result.reassigned || 0);
             pushToast(
-              `✅ Pulled ${result.pulled} order${result.pulled === 1 ? "" : "s"} into your queue`,
+              `✅ Pulled ${result.pulled} order${result.pulled === 1 ? "" : "s"} into your queue`
+              + (took ? ` (${took} taken over from another agent)` : ""),
               "success",
             );
+            // A tag removal that failed leaves the order owned by two agents.
+            if (result.reassign_failed) {
+              pushToast(
+                `⚠️ ${result.reassign_failed} order${result.reassign_failed === 1 ? "" : "s"} kept the previous agent's tag — remove it by hand`,
+                "error",
+                7000,
+              );
+            }
             // The agent's queue + every other agent's queue changed — refresh both.
             loadFirst();
             loadTeam();
@@ -1778,7 +1790,10 @@ function CancelOrderModal({ order, store, onClose, onSuccess }) {
 // claim a batch of orders into their queue. Two flavours, picked by `mode`:
 //
 //   "new"   — orders that no other active agent has claimed (no other agent
-//             tag is present). No extra inputs needed.
+//             tag is present). The "include other agents' orders" switch widens
+//             this to every order that isn't already mine, so an order sitting
+//             in someone else's queue can be taken over; execute strips their
+//             tag either way, so the order never ends up with two agent tags.
 //   "n1"/"n2"/"n3"/"n4"/"nowtp"/"enatt" — orders carrying that call-attempt
 //             tag, optionally MINUS up to two agent-specified exclude tags
 //             (e.g. "n2 but not fz and not zineb"). These can currently sit in
@@ -1803,8 +1818,13 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
   const isLevelMode = mode !== "new";
   const [excludeA, setExcludeA] = useState("");
   const [excludeB, setExcludeB] = useState("");
+  // "new" mode only: drop the other-agent exclusions so already-assigned orders
+  // show up in the pool and can be taken over.
+  const [includeAssigned, setIncludeAssigned] = useState(false);
   // Server-reported count for the current (mode, exclude_tags) combo.
   const [available, setAvailable] = useState(null);
+  // How many of `available` currently belong to another agent.
+  const [assignedAvailable, setAssignedAvailable] = useState(0);
   const [previewing, setPreviewing] = useState(false);
   const [previewErr, setPreviewErr] = useState(null);
   // Which of the user's agent_tags to apply on pull. Defaults to first.
@@ -1827,9 +1847,12 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
       const reqId = ++previewReqRef.current;
       setPreviewing(true); setPreviewErr(null);
       try {
-        const js = await API.pullPreview({ store, level: mode, exclude_tags: excludeTags });
+        const js = await API.pullPreview({
+          store, level: mode, exclude_tags: excludeTags, include_assigned: includeAssigned,
+        });
         if (reqId !== previewReqRef.current) return;
         setAvailable(Number(js.available || 0));
+        setAssignedAvailable(Number(js.assigned_available || 0));
         // If the server reports a different "default agent tag" and the user
         // hasn't picked one yet, pre-fill it.
         if (!agentTag && js.agent_tag) setAgentTag(js.agent_tag);
@@ -1837,6 +1860,7 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
         if (reqId !== previewReqRef.current) return;
         setPreviewErr(e?.message || "Preview failed");
         setAvailable(0);
+        setAssignedAvailable(0);
       } finally {
         if (reqId === previewReqRef.current) setPreviewing(false);
       }
@@ -1844,7 +1868,7 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
     return () => clearTimeout(handle);
     // We intentionally ignore agentTag in the deps — it doesn't affect the count.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store, mode, excludeA, excludeB]);
+  }, [store, mode, excludeA, excludeB, includeAssigned]);
 
   async function submit() {
     const limit = takeAll ? 0 : Math.max(0, Number(amount) || 0);
@@ -1860,6 +1884,7 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
     try {
       const js = await API.pullExecute({
         store, level: mode, exclude_tags: excludeTags, limit, agent_tag: agentTag,
+        include_assigned: includeAssigned,
       });
       onSuccess?.(js);
     } catch (e) {
@@ -1889,13 +1914,58 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="text-base font-semibold mb-1">
-          {cfg.icon} {cfg.title}
+          {cfg.icon} {!isLevelMode && includeAssigned ? "Pull orders (including other agents')" : cfg.title}
         </div>
         <div className="text-[11px] text-gray-500 mb-4">
           Store: <span className="font-medium">{store}</span>
         </div>
 
-        {isLevelMode && (
+        {!isLevelMode && (
+          <label
+            className={`mb-3 flex items-start gap-3 rounded-xl border px-3 py-2 cursor-pointer select-none ${
+              includeAssigned
+                ? "border-amber-300 bg-amber-50"
+                : "border-gray-200 bg-gray-50 hover:bg-gray-100"
+            }`}
+          >
+            <input
+              type="checkbox"
+              className="sr-only"
+              checked={includeAssigned}
+              disabled={busy}
+              onChange={(e) => {
+                setIncludeAssigned(e.target.checked);
+                // Switching off hides the exclude inputs — don't keep filtering
+                // the pool by values the agent can no longer see.
+                if (!e.target.checked) { setExcludeA(""); setExcludeB(""); }
+              }}
+            />
+            <span
+              aria-hidden="true"
+              className={`mt-0.5 shrink-0 w-9 h-5 rounded-full p-0.5 transition-colors duration-150 ${
+                includeAssigned ? "bg-amber-500" : "bg-gray-300"
+              }`}
+            >
+              <span
+                className={`block w-4 h-4 rounded-full bg-white shadow transition-transform duration-150 ${
+                  includeAssigned ? "translate-x-4" : "translate-x-0"
+                }`}
+              />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-xs font-semibold text-gray-800">
+                Include orders already assigned to another agent
+              </span>
+              <span className="block text-[11px] text-gray-500 mt-0.5">
+                {includeAssigned
+                  ? "Showing other agents' orders too. Pulling one takes it off them — their tag is removed."
+                  : "Off: only orders nobody is working on right now."}
+              </span>
+            </span>
+          </label>
+        )}
+
+        {(isLevelMode || includeAssigned) && (
           <div className="mb-3 grid grid-cols-2 gap-2">
             <div>
               <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">Exclude tag #1</label>
@@ -1920,11 +1990,19 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
           </div>
         )}
 
-        <div className="mb-4 rounded-xl bg-indigo-50 border border-indigo-200 px-3 py-2 flex items-center gap-2">
-          <span className="text-xs text-indigo-700">Available now</span>
-          <span className="text-xl font-bold tabular-nums text-indigo-900 ml-auto">
-            {previewing ? "…" : (available != null ? available : "—")}
-          </span>
+        <div className="mb-4 rounded-xl bg-indigo-50 border border-indigo-200 px-3 py-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-indigo-700">Available now</span>
+            <span className="text-xl font-bold tabular-nums text-indigo-900 ml-auto">
+              {previewing ? "…" : (available != null ? available : "—")}
+            </span>
+          </div>
+          {!previewing && assignedAvailable > 0 && (
+            <div className="text-[11px] text-amber-800 mt-1 pt-1 border-t border-indigo-200">
+              {assignedAvailable} of these currently belong to another agent and will be
+              taken over.
+            </div>
+          )}
         </div>
         {previewErr && (
           <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 mb-3">
@@ -1990,7 +2068,8 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
         )}
 
         <div className="text-[11px] text-gray-500 mb-3">
-          Pulled orders get tagged{agentTag ? <> with <code className="bg-gray-100 px-1 rounded">{agentTag}</code></> : ""} and any other agent's tag is removed.
+          Pulled orders get tagged{agentTag ? <> with <code className="bg-gray-100 px-1 rounded">{agentTag}</code></> : ""} and every other agent's tag is removed, so each order
+          is owned by exactly one agent — the last one to pull it.
         </div>
 
         <div className="flex justify-end gap-2">

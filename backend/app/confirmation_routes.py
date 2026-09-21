@@ -254,6 +254,27 @@ async def _other_agents_active_tags(db: AsyncSession, exclude_user_id: Optional[
     return sorted(out)
 
 
+async def _other_agents_all_tags(db: AsyncSession, exclude_user_id: Optional[str] = None) -> List[str]:
+    """Every Shopify tag claimed by some OTHER user, whatever their role or active flag.
+
+    Wider than :func:`_other_agents_active_tags` on purpose. That one defines the
+    *unassigned* pool, so it only counts agents who are still working. This one is
+    what a pull *strips*: an order carrying the tag of a deactivated agent (or of
+    someone whose role has since changed) is still an order with somebody else's
+    name on it, and the invariant we want is that exactly one agent tag survives
+    a pull.
+    """
+    res = await db.execute(select(User))
+    out: set = set()
+    for u in res.scalars().all():
+        if exclude_user_id and u.id == exclude_user_id:
+            continue
+        for t in (u.agent_tags or []):
+            if t:
+                out.add(t)
+    return sorted(out)
+
+
 async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
     """Return the Shopify search query an agent's queue should use.
 
@@ -2059,33 +2080,44 @@ async def build_pull_query(
     *,
     level: Optional[str],
     exclude_tags: Optional[List[str]] = None,
-) -> Tuple[Optional[str], str, List[str]]:
+    include_assigned: bool = False,
+) -> Tuple[Optional[str], str, List[str], List[str]]:
     """Build the Shopify search query for the agent's pull pool.
 
-    Returns ``(query, agent_tag_default, other_agent_tags)``.
+    Returns ``(query, agent_tag_default, other_agent_tags, strip_tags)``.
 
     - ``agent_tag_default`` = first of ``user.agent_tags`` (the tag the frontend
       proposes to apply; can be overridden in the execute body if the user has
       multiple tags).
     - ``other_agent_tags`` = every Shopify tag currently claimed by some OTHER
-      active confirmation user. We exclude those tags from the search (so "new"
-      really means unassigned) and on execute we *strip* whichever of them is on
-      a pulled order — that's how the order becomes exclusively the puller's.
+      active confirmation user. In "new" mode these are excluded from the search
+      so the pool really means unassigned — unless ``include_assigned`` is set.
+    - ``strip_tags`` = every tag belonging to anyone else (active or not), i.e.
+      what execute takes *off* a pulled order so it ends up carrying exactly one
+      agent tag: the puller's.
+
+    ``include_assigned`` only affects "new". The level pools (n1…n4, nowtp,
+    enatt) already reach into other agents' queues by design.
     """
     lv = (level or _PULL_LEVEL_NEW).lower().strip()
     if lv not in _PULL_VALID_LEVELS:
-        return None, "", []
+        return None, "", [], []
 
     my_tags = list(user.agent_tags or [])
     other_active = await _other_agents_active_tags(db, exclude_user_id=user.id)
+    strip_tags = await _other_agents_all_tags(db, exclude_user_id=user.id)
 
     parts: List[str] = ["status:open", "fulfillment_status:unshipped", _COD_EXCLUSION]
 
     if lv == _PULL_LEVEL_NEW:
-        # Unassigned pool: no other agent tag, no own tag.
-        for t in other_active:
-            if t:
-                parts.append(f"-tag:{_escape_tag(t)}")
+        # Unassigned pool: no other agent tag, no own tag. With include_assigned
+        # the other-agent exclusions drop away, so the pool becomes "anything not
+        # already mine" — including orders sitting in someone else's queue, which
+        # the execute step then re-assigns by stripping their tag.
+        if not include_assigned:
+            for t in other_active:
+                if t:
+                    parts.append(f"-tag:{_escape_tag(t)}")
         # Free-form extra exclusions if the agent wants them.
         for t in (exclude_tags or []):
             if t:
@@ -2112,7 +2144,7 @@ async def build_pull_query(
         if t:
             parts.append(f"-tag:{_escape_tag(t)}")
 
-    return " ".join(parts), (my_tags[0] if my_tags else ""), other_active
+    return " ".join(parts), (my_tags[0] if my_tags else ""), other_active, strip_tags
 
 
 async def _scan_pull_pool(
@@ -2121,12 +2153,16 @@ async def _scan_pull_pool(
     query: str,
     limit: int,
     collect_orders: bool,
-) -> Tuple[int, List[Dict[str, Any]]]:
+    assigned_tags: Optional[List[str]] = None,
+) -> Tuple[int, List[Dict[str, Any]], int]:
     """Walk Shopify pages for ``query``, dropping cod-tagged stragglers in Python
     (Shopify's tag-wildcard exclusion can't match multi-word ``cod dd/mm/yy``).
 
-    If ``collect_orders`` is True, returns up to ``limit`` ``{id, tags}`` dicts
-    (used by execute). Otherwise returns just the total count (used by preview).
+    Returns ``(total, orders, assigned_total)``. ``orders`` is up to ``limit``
+    ``{id, tags}`` dicts when ``collect_orders`` is True (used by execute) and
+    empty otherwise (preview only needs the counts). ``assigned_total`` counts how
+    many of the scanned orders carry one of ``assigned_tags`` — i.e. how much of
+    the pool would be taken away from another agent.
     """
     from .main import shopify_graphql  # type: ignore
 
@@ -2149,7 +2185,9 @@ async def _scan_pull_pool(
     gql = gql_collect if collect_orders else gql_count
     cursor: Optional[str] = None
     total = 0
+    assigned_total = 0
     out: List[Dict[str, Any]] = []
+    assigned_lower = {str(t or "").strip().lower() for t in (assigned_tags or []) if t}
     cap = max(0, int(limit))
     while True:
         if collect_orders and len(out) >= cap:
@@ -2170,6 +2208,10 @@ async def _scan_pull_pool(
             if has_cod_tag(tags_list):
                 continue
             total += 1
+            if assigned_lower and any(
+                str(t or "").strip().lower() in assigned_lower for t in tags_list
+            ):
+                assigned_total += 1
             if collect_orders:
                 gid = node.get("id")
                 if gid:
@@ -2185,13 +2227,14 @@ async def _scan_pull_pool(
         # Safety net on counting paths: don't walk forever on a runaway query.
         if not collect_orders and total >= _BREAKDOWN_HARD_CAP:
             break
-    return total, out
+    return total, out, assigned_total
 
 
 class PullPreviewBody(BaseModel):
     store: str
     level: Optional[str] = None          # "new" | "n1".."n4" | "nowtp" | "enatt"
     exclude_tags: Optional[List[str]] = None
+    include_assigned: bool = False       # "new" mode: also show other agents' orders
 
 
 @router.post("/api/agent/pull/preview")
@@ -2206,18 +2249,26 @@ async def pull_preview(
     store = (body.store or "").strip()
     if not store:
         raise HTTPException(status_code=400, detail="store is required")
-    q, default_tag, other_active = await build_pull_query(
-        db, user, level=body.level, exclude_tags=body.exclude_tags
+    q, default_tag, other_active, strip_tags = await build_pull_query(
+        db, user,
+        level=body.level,
+        exclude_tags=body.exclude_tags,
+        include_assigned=body.include_assigned,
     )
     if not q:
         raise HTTPException(status_code=400, detail=f"invalid level: {body.level!r}")
-    available, _ = await _scan_pull_pool(store=store, query=q, limit=0, collect_orders=False)
+    available, _, assigned = await _scan_pull_pool(
+        store=store, query=q, limit=0, collect_orders=False, assigned_tags=strip_tags,
+    )
     return {
         "ok": True,
         "store": store,
         "level": (body.level or _PULL_LEVEL_NEW).lower().strip(),
         "exclude_tags": [t for t in (body.exclude_tags or []) if t],
+        "include_assigned": bool(body.include_assigned),
         "available": int(available),
+        # How many of `available` would be taken off another agent.
+        "assigned_available": int(assigned),
         "agent_tag": default_tag,
         "agent_tags": list(user.agent_tags or []),
         "other_agent_tags": other_active,
@@ -2230,6 +2281,7 @@ class PullExecuteBody(BaseModel):
     exclude_tags: Optional[List[str]] = None
     limit: Optional[int] = None          # how many to pull; 0 / None = take everything
     agent_tag: Optional[str] = None      # which of the user's own tags to apply
+    include_assigned: bool = False       # "new" mode: also claim other agents' orders
 
 
 _PULL_HARD_CAP = 2000
@@ -2246,17 +2298,20 @@ async def pull_execute(
     For every order pulled we:
       - Add the agent's tag (defaults to the first of their assigned tags;
         ``agent_tag`` body field can override, but must be one the user owns).
-      - Remove every OTHER active agent's tag that's currently on the order.
-        That's what makes the assignment exclusive — Laila's "laila" tag,
-        ndcon's "ndcon" tag, etc. all come off so the order shows up only in
-        the pulling agent's queue.
+      - Remove every OTHER agent's tag that's currently on the order — active or
+        not. That's what makes the assignment exclusive — Laila's "laila" tag,
+        ndcon's "ndcon" tag, etc. all come off so the order shows up only in the
+        pulling agent's queue, and an order never carries two agent tags at once.
     """
     store = (body.store or "").strip()
     if not store:
         raise HTTPException(status_code=400, detail="store is required")
 
-    q, default_tag, other_active = await build_pull_query(
-        db, user, level=body.level, exclude_tags=body.exclude_tags
+    q, default_tag, _other_active, strip_tags = await build_pull_query(
+        db, user,
+        level=body.level,
+        exclude_tags=body.exclude_tags,
+        include_assigned=body.include_assigned,
     )
     if not q:
         raise HTTPException(status_code=400, detail=f"invalid level: {body.level!r}")
@@ -2271,11 +2326,13 @@ async def pull_execute(
     if my_tags and chosen_tag.lower() not in {t.lower() for t in my_tags if t}:
         raise HTTPException(status_code=400, detail="agent_tag must be one of your assigned tags")
 
-    # If "chosen_tag" happens to overlap with another agent's claimed tag (shouldn't
-    # happen in a well-configured roster but be defensive) we must not strip it.
-    chosen_lower = chosen_tag.lower()
-    other_active = [t for t in other_active if (t or "").lower() != chosen_lower]
-    other_active_lower = {t.lower() for t in other_active}
+    # Never strip a tag we're about to apply, nor any of the puller's own tags:
+    # if "chosen_tag" overlaps with somebody else's claimed tag (shouldn't happen
+    # in a well-configured roster, but be defensive) the order still has to end up
+    # tagged for this pull.
+    keep_lower = {chosen_tag.lower()} | {t.lower() for t in my_tags if t}
+    strip_tags = [t for t in strip_tags if (t or "").lower() not in keep_lower]
+    strip_lower = {t.lower() for t in strip_tags}
 
     # Resolve how many to take.
     raw_limit = int(body.limit or 0)
@@ -2284,8 +2341,8 @@ async def pull_execute(
     else:
         target = min(raw_limit, _PULL_HARD_CAP)
 
-    _total, candidates = await _scan_pull_pool(
-        store=store, query=q, limit=target, collect_orders=True,
+    _total, candidates, _assigned = await _scan_pull_pool(
+        store=store, query=q, limit=target, collect_orders=True, assigned_tags=strip_tags,
     )
     if not candidates:
         return {
@@ -2304,9 +2361,13 @@ async def pull_execute(
     )
 
     sem = asyncio.Semaphore(_BULK_CONCURRENCY)
-    pulled_ids: List[str] = []
 
-    async def _claim_one(item: Dict[str, Any]) -> Optional[str]:
+    async def _claim_one(item: Dict[str, Any]) -> Optional[Tuple[str, List[str], List[str]]]:
+        """Tag one order for this agent and take every other agent's tag off it.
+
+        Returns ``(order_gid, removed, stuck)`` — ``stuck`` being other agents'
+        tags Shopify refused to remove, which would leave the order double-owned.
+        """
         async with sem:
             oid = item["id"]
             try:
@@ -2315,17 +2376,27 @@ async def pull_execute(
                 logger.exception("pull add-tag failed (order=%s tag=%s)", oid, chosen_tag)
                 return None
             # Strip the other agents' tags so this order becomes exclusively ours.
+            removed: List[str] = []
+            stuck: List[str] = []
             for t in (item.get("tags") or []):
                 tl = str(t or "").strip().lower()
-                if tl and tl in other_active_lower:
+                if tl and tl in strip_lower:
                     try:
                         await _shopify_remove_tag(oid, t, store)
+                        removed.append(t)
                     except Exception:
                         logger.exception("pull remove-tag failed (order=%s tag=%s)", oid, t)
-            return oid
+                        stuck.append(t)
+            return oid, removed, stuck
 
     results = await asyncio.gather(*[_claim_one(it) for it in candidates])
-    pulled_ids = [oid for oid in results if oid]
+    claims = [r for r in results if r]
+    pulled_ids = [oid for oid, _removed, _stuck in claims]
+    removed_by_order = {oid: removed for oid, removed, _stuck in claims}
+    # Orders that kept somebody else's tag because the removal call failed. They
+    # now carry two agent tags, so surface them instead of swallowing the log line.
+    stuck_orders = {oid: stuck for oid, _removed, stuck in claims if stuck}
+    reassigned = sum(1 for _oid, removed, _stuck in claims if removed)
 
     # Audit log each successful pull.
     store_key_norm = _normalize_store(store)
@@ -2352,7 +2423,8 @@ async def pull_execute(
                     "tag": chosen_tag,
                     "level": level_norm,
                     "exclude_tags": [t for t in (body.exclude_tags or []) if t],
-                    "removed_other_agent_tags": other_active,
+                    "include_assigned": bool(body.include_assigned),
+                    "removed_other_agent_tags": removed_by_order.get(oid, []),
                     "role": getattr(user, "role", None),
                     "source": "confirmation",
                     "confirmation_actor": True,
@@ -2381,7 +2453,10 @@ async def pull_execute(
         "audited": audited,
         "requested": raw_limit,
         "available_seen": len(candidates),
-        "removed_other_agent_tags": other_active,
+        "include_assigned": bool(body.include_assigned),
+        # How many of the pulled orders were taken off another agent.
+        "reassigned": reassigned,
+        "reassign_failed": len(stuck_orders),
     }
 
 
