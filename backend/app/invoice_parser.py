@@ -569,7 +569,11 @@ def _parse_glog(text: str) -> Optional[Dict[str, Any]]:
                   _expectedRowCount=_extract_count(text, "Nbr des Commandes"))
     amount = r"-?\d+(?: \d{3})*[.,]\d{2}"
     six_amounts = r"\s+".join(f"({amount})" for _ in range(6))
-    starts = list(re.finditer(rf"(?<![\w-])({_MERCHANT_CODE_PATTERN})(?![\w-])", text))
+    # G-Log prints some references without their store prefix, so a bare number
+    # has to start a row too. It must not swallow a money cell: "6528,00" in the
+    # Totaux line is four digits followed by a decimal comma, not an order.
+    reference = rf"{_MERCHANT_CODE_PATTERN}|\d{{4,8}}(?![.,]\d)"
+    starts = list(re.finditer(rf"(?<![\w-])({reference})(?![\w-])", text))
     for i, match in enumerate(starts):
         segment = text[match.end():starts[i+1].start() if i+1 < len(starts) else len(text)]
         cells = re.search(rf"(.+?)\s+{six_amounts}", segment)

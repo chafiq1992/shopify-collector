@@ -206,3 +206,23 @@ def test_yfd_city_comes_from_the_printed_column_and_never_blocks_payment():
     assert [r["city"] for r in result["rows"]] == ["Allal tazi", None]
     assert [r["extractionComplete"] for r in result["rows"]] == [True, True]
     assert result["validation"]["complete"] is True
+
+
+def test_glog_bare_references_are_kept_and_money_cells_are_not_mistaken_for_them():
+    # G-Log prints some references without their store prefix. Dropping them
+    # loses real orders and silently breaks every printed total.
+    result = parse("""Sté GLOG SOLUTIONS sarl 17-08-2026 Client Facture N° : FV06286-2026
+        Irrakids Sarl  Irrakids Nbr des Commandes : 3
+        Référence La Ville Montant Tarif Refusé Retour Dépenses Reste
+        7-161446 MEKNES 300,00 15,00 0,00 0,00 0,00 285,00 Livrée - 15-08-2026 14:30
+        160935 FES 299,00 15,00 0,00 0,00 0,00 284,00 Livrée - 15-08-2026 17:38
+        158437 TAOUNATE 477,00 23,00 0,00 0,00 0,00 454,00 Livrée - 14-08-2026 18:02
+        Totaux 1076,00 53,00 0,00 0,00 0,00 1023,00
+        Total Commandes Reste Commandes Extras Total 1076,00 MAD 1023,00 MAD 0,00 MAD 1023,00 MAD""")
+    # 1076 and 1023 are four digits on their own: only the decimal comma tells
+    # them apart from an order reference.
+    assert [r["sendCode"] for r in result["rows"]] == ["7-161446", "160935", "158437"]
+    assert [r["orderNumber"] for r in result["rows"]] == ["161446", "160935", "158437"]
+    assert [r["city"] for r in result["rows"]] == ["MEKNES", "FES", "TAOUNATE"]
+    assert result["validation"]["warnings"] == []
+    assert result["validation"]["complete"] is True
