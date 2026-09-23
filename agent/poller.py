@@ -81,8 +81,8 @@ def print_locally(orders, copies, store: str | None = None) -> bool:
     def _fetch_overrides(required_orders: list[str], force_live: bool) -> dict:
         try:
             joined = ",".join([str(o).lstrip("#") for o in required_orders])
-            headers = {"x-api-key": API_KEY} if API_KEY else {}
-            params = {"orders": joined, **({"store": store} if store else {}), **({"force_live": "1"} if force_live else {})}
+            headers = {"X-PC-Secret": PC_SECRET, **({"x-api-key": API_KEY} if API_KEY else {})}
+            params = {"orders": joined, "pc_id": PC_ID, **({"store": store} if store else {}), **({"force_live": "1"} if force_live else {})}
             ro = requests.get(f"{RELAY_URL}/api/overrides", params=params, headers=headers, timeout=15)
             ro.raise_for_status()
             return (ro.json() or {}).get("overrides") or {}
@@ -117,8 +117,8 @@ def print_locally(orders, copies, store: str | None = None) -> bool:
         if missing and store_key == "":
             try:
                 joined = ",".join([str(o).lstrip("#") for o in missing])
-                headers = {"x-api-key": API_KEY} if API_KEY else {}
-                ro2 = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined, "store": "irranova", "force_live": "1"}, headers=headers, timeout=12)
+                headers = {"X-PC-Secret": PC_SECRET, **({"x-api-key": API_KEY} if API_KEY else {})}
+                ro2 = requests.get(f"{RELAY_URL}/api/overrides", params={"orders": joined, "pc_id": PC_ID, "store": "irranova", "force_live": "1"}, headers=headers, timeout=12)
                 ro2.raise_for_status()
                 ov2 = (ro2.json() or {}).get("overrides") or {}
                 overrides.update(ov2)
@@ -215,19 +215,20 @@ def _html_to_pdf(html_path: str, pdf_path: str) -> None:
 def print_label(delivery_order_id: str, envoy_code: str = "") -> bool:
     """Download a delivery label and print it silently."""
     url = f"{RELAY_URL}/api/delivery-label/{delivery_order_id}"
-    params = {"autoprint": "false"}
+    params = {"autoprint": "false", "pc_id": PC_ID}
+    auth = {"X-PC-Secret": PC_SECRET}
     if envoy_code:
         params["envoy_code"] = envoy_code
     try:
         if envoy_code:
-            r = requests.get(url, params=params, timeout=30)
+            r = requests.get(url, params=params, headers=auth, timeout=30)
         else:
-            r = requests.get(url, params={**params, "format": "pdf"}, timeout=30)
+            r = requests.get(url, params={**params, "format": "pdf"}, headers=auth, timeout=30)
         r.raise_for_status()
     except Exception as e:
         print(f"  Failed to fetch label (PDF attempt): {e}")
         try:
-            r = requests.get(url, params=params, timeout=30)
+            r = requests.get(url, params=params, headers=auth, timeout=30)
             r.raise_for_status()
         except Exception as e2:
             print(f"  Failed to fetch label (HTML fallback): {e2}")
