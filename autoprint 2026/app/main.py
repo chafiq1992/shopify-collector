@@ -23,6 +23,14 @@ import base64
 
 # ----------------- config & app -----------------
 BASE = Path(__file__).resolve().parent.parent
+
+# Bump on every change that matters to the collector. It is sent as the
+# User-Agent and printed at startup, so the server logs show which shop PCs
+# run which build.
+#   2026.09.23-print-auth: send pc_id + X-PC-Secret on /api/overrides and
+#   /api/delivery-label (the collector will start requiring them).
+AGENT_VERSION = "2026.09.23-print-auth"
+AGENT_USER_AGENT = f"autoprint-agent/{AGENT_VERSION}"
 CONFIG_PATH = BASE / "config.yaml"
 
 def load_config() -> dict:
@@ -293,8 +301,22 @@ def _collector_base_url(cfg: Dict[str, Any]) -> str:
     # override/label calls with it instead of stranding them on a dead host.
     return _active_relay() or (cfg.get("relay_url") or "").strip().rstrip("/")
 
+def _collector_auth(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """(params, headers) that authenticate this PC to the collector.
+
+    The same pc_id / pc_secret the poller already uses for /pull. The secret
+    travels only in a header, never in the URL.
+    """
+    pc_id = str(cfg.get("pc_id") or "").strip()
+    pc_secret = str(cfg.get("pc_secret") or "").strip()
+    headers = {"User-Agent": AGENT_USER_AGENT}
+    if pc_id and pc_secret:
+        return {"pc_id": pc_id}, {**headers, "X-PC-Secret": pc_secret}
+    return {}, headers
+
 def _build_http_session(pool_size: int = 8) -> requests.Session:
     sess = requests.Session()
+    sess.headers["User-Agent"] = AGENT_USER_AGENT
     try:
         adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size, max_retries=0)
         sess.mount("http://", adapter)
@@ -314,11 +336,12 @@ def fetch_overrides_from_collector(
         return {}
     try:
         joined = ",".join(str(n).lstrip("#") for n in order_numbers)
-        params = {"orders": joined}
+        auth_params, auth_headers = _collector_auth(cfg)
+        params = {"orders": joined, **auth_params}
         if store:
             params["store"] = store
         client = session or requests
-        r = client.get(f"{base}/api/overrides", params=params, timeout=8)
+        r = client.get(f"{base}/api/overrides", params=params, headers=auth_headers, timeout=8)
         r.raise_for_status()
         js = r.json() or {}
         return js.get("overrides") or {}
@@ -855,16 +878,18 @@ def _print_delivery_label(job: dict, cfg: dict, session: Optional[requests.Sessi
     if envoy_code:
         params["envoy_code"] = envoy_code
 
+    auth_params, auth_headers = _collector_auth(cfg)
+    params.update(auth_params)
     client = session or requests
     r = None
     try:
         req_params = {**params}
         if not envoy_code:
             req_params["format"] = "pdf"
-        r = client.get(url, params=req_params, timeout=30)
+        r = client.get(url, params=req_params, headers=auth_headers, timeout=30)
         r.raise_for_status()
     except Exception:
-        r = client.get(url, params=params, timeout=30)
+        r = client.get(url, params=params, headers=auth_headers, timeout=30)
         r.raise_for_status()
 
     content_type = (r.headers.get("content-type") or "").lower()
@@ -1035,6 +1060,7 @@ def start_poller():
     def _poller_loop():
         _plog("=" * 58)
         _plog("  AUTOPRINT ENGINE v2  (parallel + long-poll + reliable)")
+        _plog(f"  Version:     {AGENT_VERSION}")
         _plog("=" * 58)
         _plog(f"  Relay:       {_active_relay()}")
         for extra in relays[1:]:

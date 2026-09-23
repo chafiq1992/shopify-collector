@@ -20,6 +20,39 @@ const STORE_MERCHANT_MAP = {
   irranova: 9,
 };
 
+const LABEL_WINDOW_FEATURES = "width=450,height=600,scrollbars=yes";
+
+/* The label route needs credentials, and a tab opened with window.open() cannot
+   send the Authorization header. Ask the server (with the token) for a
+   short-lived signed link instead; it stays valid for about 10 minutes. */
+async function fetchSignedLabelUrl(orderId, envoyLabelCode) {
+  const qs = envoyLabelCode ? `?envoy_code=${encodeURIComponent(envoyLabelCode)}` : "";
+  const res = await authFetch(`/api/delivery-label-url/${encodeURIComponent(orderId)}${qs}`, {
+    headers: authHeaders({ Accept: "application/json" }),
+  });
+  if (!res.ok) throw new Error(`Could not get a label link (${res.status})`);
+  const js = await res.json();
+  if (!js?.url) throw new Error("Could not get a label link");
+  return js.url;
+}
+
+/* Open the label in a new window. Pass a window opened synchronously in the
+   click handler (window.open("", ...)) so the popup blocker sees a user
+   gesture; the signed URL is filled in once it arrives. */
+async function openLabelWindow(orderId, envoyLabelCode, preopened = null) {
+  try {
+    const url = await fetchSignedLabelUrl(orderId, envoyLabelCode);
+    if (preopened && !preopened.closed) {
+      preopened.location.href = url;
+    } else {
+      window.open(url, "_blank", LABEL_WINDOW_FEATURES);
+    }
+  } catch (e) {
+    try { if (preopened && !preopened.closed) preopened.close(); } catch {}
+    throw e;
+  }
+}
+
 async function dlvApi(path, { method = "GET", body, query, _retries = 3 } = {}) {
   let url = `/api/delivery/${path.replace(/^\/+/, "")}`;
   if (query && typeof query === "object") {
@@ -1160,7 +1193,6 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       setPhase("company_select");
       return;
     }
-    const labelUrl = `/api/delivery-label/${encodeURIComponent(id)}?envoy_code=${encodeURIComponent(validatedEnvoyCode)}`;
     const sourceRect = printButtonRef.current?.getBoundingClientRect
       ? (() => {
           const rect = printButtonRef.current.getBoundingClientRect();
@@ -1184,7 +1216,11 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       };
     } catch (e) {
       addLog(`Relay failed: ${e.message} — opening in browser instead.`);
-      window.open(labelUrl, "_blank", "width=450,height=600,scrollbars=yes");
+      try {
+        await openLabelWindow(id, validatedEnvoyCode);
+      } catch (openErr) {
+        addLog(`Could not open the label: ${openErr?.message || openErr}`);
+      }
       setPrintStatus("fallback");
       setPhase("done");
     } finally {
@@ -1688,11 +1724,15 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
                   </div>
                 )}
                 <button
-                  onClick={() => {
+                  onClick={async () => {
                     const id = deliveryOrderId;
-                    if (id) {
-                      const labelUrl = `/api/delivery-label/${encodeURIComponent(id)}${envoyCode ? `?envoy_code=${encodeURIComponent(envoyCode)}` : ""}`;
-                      window.open(labelUrl, "_blank", "width=450,height=600,scrollbars=yes");
+                    if (!id) return;
+                    // Open now, inside the click, so the popup is not blocked.
+                    const win = window.open("", "_blank", LABEL_WINDOW_FEATURES);
+                    try {
+                      await openLabelWindow(id, envoyCode, win);
+                    } catch (e) {
+                      setError(e?.message || "Could not open the label");
                     }
                   }}
                   className="w-full px-3 py-1.5 rounded-lg border border-gray-300 text-xs text-gray-600 hover:bg-gray-50"

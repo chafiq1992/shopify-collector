@@ -160,3 +160,124 @@ def test_signed_in_user_passes_the_delivery_proxy_gate(client, token, monkeypatc
 def test_signed_in_user_can_read_order_tagger_status(client, token):
     r = client.get("/api/order-tagger/status?store=irrakids", headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200, r.status_code
+
+
+# ── Print routes: /api/overrides and /api/delivery-label ─────────────────────
+# Accepted: a user bearer, pc_id + X-PC-Secret (as /pull), and for the label a
+# short-lived signed URL. PRINT_ROUTES_ENFORCE decides what happens to the rest.
+
+PC_ID, PC_SECRET = "pc-test", "pc-test-secret"
+LABEL = "/api/delivery-label/4242"
+
+
+@pytest.fixture
+def print_env(monkeypatch):
+    monkeypatch.setattr(main, "PCS", {PC_ID: PC_SECRET})
+    monkeypatch.setenv("JWT_SECRET", "unit-test-signing-secret-0123456789")
+    # No delivery backend in tests: a label request that clears the gate gets
+    # the proxy's own 503 and never leaves the process.
+    monkeypatch.setattr(main, "DELVERY_BACKEND_URL", "")
+    return monkeypatch
+
+
+def _enforce(monkeypatch, on: bool):
+    monkeypatch.setattr(main, "PRINT_ROUTES_ENFORCE", on)
+
+
+def _pc():
+    return {"params": {"pc_id": PC_ID}, "headers": {"X-PC-Secret": PC_SECRET}}
+
+
+@pytest.mark.parametrize("enforce", [False, True])
+def test_overrides_accepts_user_bearer(client, token, print_env, enforce):
+    _enforce(print_env, enforce)
+    r = client.get("/api/overrides?orders=1001", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+
+
+@pytest.mark.parametrize("enforce", [False, True])
+def test_overrides_accepts_pc_credentials(client, print_env, enforce):
+    _enforce(print_env, enforce)
+    r = client.get("/api/overrides", params={"orders": "1001", "pc_id": PC_ID}, headers={"X-PC-Secret": PC_SECRET})
+    assert r.status_code == 200
+
+
+def test_overrides_anonymous_is_served_and_logged_while_not_enforced(client, print_env, capsys):
+    _enforce(print_env, False)
+    r = client.get("/api/overrides?orders=77777", headers={"User-Agent": "python-requests/2.31.0"})
+    assert r.status_code == 200
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if l.startswith("print_route_unauthenticated"))
+    assert "route=overrides" in line and "ua=python-requests/2.31.0" in line and "enforce=0" in line
+    assert "77777" not in out  # never the order numbers
+
+
+@pytest.mark.parametrize("secret", [None, "wrong"])
+def test_overrides_refused_when_enforced_without_valid_credentials(client, print_env, secret):
+    _enforce(print_env, True)
+    headers = {"X-PC-Secret": secret} if secret else {}
+    r = client.get("/api/overrides", params={"orders": "1001", "pc_id": PC_ID}, headers=headers)
+    assert r.status_code == 401
+
+
+def test_overrides_secret_in_query_is_not_accepted(client, print_env):
+    # Only the header counts: secrets in URLs end up in access logs.
+    _enforce(print_env, True)
+    r = client.get("/api/overrides", params={"orders": "1001", "pc_id": PC_ID, "secret": PC_SECRET})
+    assert r.status_code == 401
+
+
+@pytest.mark.parametrize("enforce", [False, True])
+def test_label_accepts_pc_credentials(client, print_env, enforce):
+    _enforce(print_env, enforce)
+    assert client.get(LABEL, **_pc()).status_code == 503
+
+
+@pytest.mark.parametrize("enforce", [False, True])
+def test_label_accepts_user_bearer(client, token, print_env, enforce):
+    _enforce(print_env, enforce)
+    assert client.get(LABEL, headers={"Authorization": f"Bearer {token}"}).status_code == 503
+
+
+def test_label_anonymous_served_while_not_enforced_refused_when_enforced(client, print_env, capsys):
+    _enforce(print_env, False)
+    assert client.get(LABEL).status_code == 503
+    assert "print_route_unauthenticated route=delivery-label" in capsys.readouterr().out
+    _enforce(print_env, True)
+    assert client.get(LABEL).status_code == 401
+
+
+def test_signed_label_url_round_trip(client, token, print_env):
+    _enforce(print_env, True)
+    assert client.get("/api/delivery-label-url/4242?envoy_code=EN-1").status_code == 401
+    r = client.get("/api/delivery-label-url/4242?envoy_code=EN-1", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    url = r.json()["url"]
+    assert url.startswith("/api/delivery-label/4242?") and "sig=" in url and "EN-1" in url
+    # No header at all, as window.open() sends it: passes the gate.
+    assert client.get(url).status_code == 503
+
+
+def test_signed_label_url_rejects_tampering_and_expiry(client, print_env):
+    _enforce(print_env, True)
+    now = int(main._time_mod.time())
+    good = main.sign_delivery_label_url("4242", "EN-1")
+    assert client.get(good).status_code == 503
+    # Different order, same signature.
+    assert client.get(good.replace("/4242?", "/4243?")).status_code == 401
+    # Different envoy code, same signature.
+    assert client.get(good.replace("EN-1", "EN-2")).status_code == 401
+    # Expired.
+    old = main.sign_delivery_label_url("4242", "EN-1", now=now - main.LABEL_URL_TTL_SECONDS - 60)
+    assert client.get(old).status_code == 401
+    # A lifetime longer than the server ever issues.
+    key = main._label_signing_key()
+    far = now + 3600
+    sig = main._label_signature(key, "4242", "EN-1", far)
+    assert client.get(f"{LABEL}?envoy_code=EN-1&exp={far}&sig={sig}").status_code == 401
+
+
+def test_label_signing_refuses_the_default_secret(print_env):
+    print_env.setenv("JWT_SECRET", "CHANGE_ME_SECRET")
+    assert main.sign_delivery_label_url("4242", None) is None
+    assert main._label_signature_valid("4242", None, "9999999999", "00") is False

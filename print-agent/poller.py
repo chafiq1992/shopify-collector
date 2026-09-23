@@ -147,20 +147,22 @@ def _process_label(job: dict) -> bool:
     envoy_code = job.get("envoy_code", "") or ""
 
     url = f"{RELAY_URL}/api/delivery-label/{delivery_order_id}"
-    params: dict = {"autoprint": "false"}
+    # Same credentials as /pull; the collector is starting to require them here.
+    params: dict = {"autoprint": "false", "pc_id": PC_ID}
+    auth = {"X-PC-Secret": PC_SECRET}
     if envoy_code:
         params["envoy_code"] = envoy_code
 
     r = None
     try:
         if envoy_code:
-            r = _session.get(url, params=params, timeout=30)
+            r = _session.get(url, params=params, headers=auth, timeout=30)
         else:
-            r = _session.get(url, params={**params, "format": "pdf"}, timeout=30)
+            r = _session.get(url, params={**params, "format": "pdf"}, headers=auth, timeout=30)
         r.raise_for_status()
     except Exception:
         try:
-            r = _session.get(url, params=params, timeout=30)
+            r = _session.get(url, params=params, headers=auth, timeout=30)
             r.raise_for_status()
         except Exception as e:
             _log(f"  [ERR] download failed: {e}")
