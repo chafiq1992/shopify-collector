@@ -993,7 +993,10 @@ async def orders_create_webhook(
 
 # ---------- Order Tagger status endpoint ----------
 @app.get("/api/order-tagger/status")
-async def order_tagger_status(store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+async def order_tagger_status(
+    store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
+    _user: User = Depends(get_current_user),  # type: ignore
+):
     try:
         sk = (store or "").strip().lower() or None
         zones_path = None
@@ -3032,7 +3035,7 @@ if HAVE_AUTH_DB:
         order_gid: str,
         payload: TagPayload,
         store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
-        user: Optional[User] = Depends(get_current_user_optional),  # type: ignore
+        user: User = Depends(get_current_user),  # type: ignore  # was optional: anyone could tag any order
         session: AsyncSession = Depends(get_session),  # type: ignore
     ):
         data = await _shopify_add_tag(order_gid, payload.tag, store)
@@ -3054,7 +3057,7 @@ if HAVE_AUTH_DB:
         order_gid: str,
         payload: TagPayload,
         store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
-        user: Optional[User] = Depends(get_current_user_optional),  # type: ignore
+        user: User = Depends(get_current_user),  # type: ignore  # was optional: anyone could untag any order
         session: AsyncSession = Depends(get_session),  # type: ignore
     ):
         data = await _shopify_remove_tag(order_gid, payload.tag, store)
@@ -3087,7 +3090,12 @@ class AppendNotePayload(BaseModel):
     append: str
 
 @app.post("/api/orders/{order_gid:path}/append-note")
-async def append_note(order_gid: str, payload: AppendNotePayload, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+async def append_note(
+    order_gid: str,
+    payload: AppendNotePayload,
+    store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
+    _user: User = Depends(get_current_user),  # type: ignore
+):
     data2 = await _shopify_append_note(order_gid, payload.append, store)
     await manager.broadcast({"type": "order.note_updated", "id": order_gid, "note": payload.append})
     return {"ok": True, "result": data2}
@@ -3646,7 +3654,12 @@ class FulfillRequest(BaseModel):
     order_number: Optional[str] = None
 
 @app.post("/api/orders/{order_gid:path}/fulfill")
-async def fulfill_order(order_gid: str, body: FulfillRequest, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+async def fulfill_order(
+    order_gid: str,
+    body: FulfillRequest,
+    store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
+    _user: User = Depends(get_current_user),  # type: ignore
+):
     # 1) Build the fulfillment groups. If the client already sent exact
     # fulfillment-order line item selections, avoid a duplicate Shopify read.
     groups_payload: List[Dict[str, Any]] = []
@@ -3818,7 +3831,11 @@ if HAVE_AUTH_DB:
         }
 
 @app.get("/api/orders/{order_gid:path}/fulfillment-orders")
-async def get_fulfillment_orders(order_gid: str, store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'")):
+async def get_fulfillment_orders(
+    order_gid: str,
+    store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
+    _user: User = Depends(get_current_user),  # type: ignore
+):
     q = """
     query GetFO($id: ID!) {
       order(id: $id) {
@@ -4791,7 +4808,10 @@ else:
     print("[DELIVERY] DELVERY_BACKEND_URL not set -- delivery proxy disabled")
 
 @app.api_route("/api/delivery/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
-async def delivery_proxy(path: str, request: Request):
+async def delivery_proxy(path: str, request: Request, _user: User = Depends(get_current_user)):  # type: ignore
+    # This proxy attaches DELVERY_ADMIN_TOKEN to whatever it forwards, so an
+    # anonymous caller here would hold the delivery app's admin API. Signed-in
+    # collector staff only.
     if not DELVERY_BACKEND_URL:
         return JSONResponse(status_code=503, content={"detail": "Delivery backend not configured. Set DELVERY_BACKEND_URL env var."})
     target_url = f"{DELVERY_BACKEND_URL}/{path}"

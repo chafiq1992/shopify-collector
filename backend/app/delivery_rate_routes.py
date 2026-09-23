@@ -13,9 +13,12 @@ across ALL known company tags instead of once per company.
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
-router = APIRouter()
+from .auth_routes import get_current_user
+
+# Every route here reads order data from Shopify: signed-in staff only.
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 # Fallback list if the caller doesn't pass ?companies=... explicitly. The frontend
 # (frontend/src/lib/deliveryCompanies.js) is the source of truth and always passes its

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { authFetch, authHeaders } from "../lib/auth";
 
 export default function OrderTagger(){
 	const [statusIrrakids, setStatusIrrakids] = useState({ ok: true, enabled: false, zones: [], store: 'irrakids' });
@@ -12,8 +13,8 @@ export default function OrderTagger(){
 			try {
 				setLoading(true);
 				const [r1, r2] = await Promise.all([
-					fetch("/api/order-tagger/status?store=irrakids"),
-					fetch("/api/order-tagger/status?store=irranova"),
+					authFetch("/api/order-tagger/status?store=irrakids", { headers: authHeaders() }),
+					authFetch("/api/order-tagger/status?store=irranova", { headers: authHeaders() }),
 				]);
 				const [js1, js2] = await Promise.all([r1.json(), r2.json()]);
 				if (!alive) return;

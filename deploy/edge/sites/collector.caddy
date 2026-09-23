@@ -64,6 +64,13 @@ shopify-collector.chattbase.site {
 	# `web` service on this same shared network, and Caddy would route to
 	# whichever answered first.
 	reverse_proxy collector-web:8080 {
+		# Send the app ONE address: the real client, as Caddy resolved it
+		# through Cloudflare (trusted_proxies in the global Caddyfile). Otherwise
+		# X-Forwarded-For arrives as "client, cloudflare-edge" and uvicorn, which
+		# trusts only Caddy's exact IP, takes the rightmost untrusted hop - the
+		# Cloudflare edge - so every log line and any per-IP limit sees Cloudflare.
+		header_up X-Forwarded-For {client_ip}
+
 		# Ride out a container restart instead of returning 502.
 		lb_try_duration 20s
 		lb_try_interval 500ms

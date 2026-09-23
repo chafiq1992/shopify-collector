@@ -106,3 +106,57 @@ def test_print_agent_routes_keep_their_own_auth(client):
     # must keep answering the shop's print agents exactly as before.
     r = client.get("/pull", params={"pc_id": "nope"}, headers={"X-PC-Secret": "wrong"})
     assert r.status_code == 401
+
+
+# ── Second pass: writes, remaining reads, and the delivery admin proxy ──────
+
+GID = "gid://shopify/Order/1"
+
+PROTECTED_CALLS = [
+    ("POST", f"/api/orders/{GID}/add-tag", {"tag": "t"}),
+    ("POST", f"/api/orders/{GID}/remove-tag", {"tag": "t"}),
+    ("POST", f"/api/orders/{GID}/append-note", {"append": "x"}),
+    ("POST", f"/api/orders/{GID}/fulfill", {}),
+    ("GET", f"/api/orders/{GID}/fulfillment-orders", None),
+    ("GET", "/api/order-tagger/status?store=irrakids", None),
+    ("GET", "/api/delivery-rate?date_from=2026-09-01&date_to=2026-09-02", None),
+    # The proxy attaches the delivery app's admin token to what it forwards.
+    ("GET", "/api/delivery/ext/admin/merchants", None),
+    ("POST", "/api/delivery/ext/admin/merchant-notes/create", {}),
+    ("PUT", "/api/delivery/admin/orders/1", {}),
+    ("DELETE", "/api/delivery/admin/orders/1", None),
+]
+
+
+def _call(client, method, path, body, headers=None):
+    return client.request(method, path, json=body, headers=headers or {})
+
+
+@pytest.mark.parametrize("method,path,body", PROTECTED_CALLS)
+def test_anonymous_call_is_refused(client, method, path, body):
+    r = _call(client, method, path, body)
+    assert r.status_code == 401, (method, path, r.status_code)
+
+
+@pytest.mark.parametrize("method,path,body", PROTECTED_CALLS)
+def test_garbage_token_call_is_refused(client, method, path, body):
+    r = _call(client, method, path, body, {"Authorization": "Bearer nope"})
+    assert r.status_code == 401, (method, path, r.status_code)
+
+
+def test_anonymous_delivery_admin_merchants_is_401(client):
+    # The exact request that bypassed the delivery app's own admin auth.
+    assert client.get("/api/delivery/ext/admin/merchants").status_code == 401
+
+
+def test_signed_in_user_passes_the_delivery_proxy_gate(client, token, monkeypatch):
+    # No backend configured in tests, so a request that clears auth gets the
+    # proxy's own 503 rather than a 401 - and never leaves the process.
+    monkeypatch.setattr(main, "DELVERY_BACKEND_URL", "")
+    r = client.get("/api/delivery/ext/admin/merchants", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 503, r.status_code
+
+
+def test_signed_in_user_can_read_order_tagger_status(client, token):
+    r = client.get("/api/order-tagger/status?store=irrakids", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200, r.status_code
