@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .auth_routes import get_current_user
 from .db import get_session
 from .settings_store import (
     get_shopify_oauth_record,
@@ -260,6 +261,7 @@ def _verify_shopify_hmac(*, request: Request, client_secret: str) -> Tuple[bool,
 async def oauth_status(
     store: str = Query(...),
     db: AsyncSession = Depends(get_session),
+    _user=Depends(get_current_user),
 ):
     s = normalize_store_label(store)
     rec = await get_shopify_oauth_record(db, s)
@@ -274,7 +276,7 @@ async def oauth_status(
 
 
 @router.get("/api/shopify/stores")
-async def shopify_stores(db: AsyncSession = Depends(get_session)):
+async def shopify_stores(db: AsyncSession = Depends(get_session), _user=Depends(get_current_user)):
     labels = {"irrakids", "irranova"}
     labels.update(await list_shopify_oauth_store_labels(db))
     registered = set(await list_registered_shopify_store_labels(db))

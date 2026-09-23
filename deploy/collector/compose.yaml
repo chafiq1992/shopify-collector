@@ -52,9 +52,14 @@ services:
     # NEVER raise this. (Cloud Run has the same flaw ACROSS instances at
     # maxScale=5 — see deploy/README.md, "Things worth fixing".)
     #
-    # --proxy-headers/--forwarded-allow-ips: nothing in this app reads the
-    # client IP today, so this changes no behaviour; it is here so that if
-    # anything ever does, it sees the real address rather than Caddy's.
+    # --proxy-headers/--forwarded-allow-ips: trust X-Forwarded-For only from
+    # Caddy, whose address on the shared `edge` network is pinned to
+    # 172.18.0.3 in /opt/edge/compose.yaml. It was "*", which let ANY
+    # container on `edge` (every other app on this box) forge a client IP.
+    # uvicorn compares trusted hosts as plain strings, so this must be the
+    # exact IP: a CIDR such as 172.18.0.0/16 silently matches nothing. If
+    # Caddy's pinned address ever changes, change it here too, or real client
+    # IPs degrade to Caddy's (nothing breaks, the logs just lose the address).
     command:
       - uvicorn
       - backend.app.main:app
@@ -66,7 +71,7 @@ services:
       - "1"
       - --proxy-headers
       - --forwarded-allow-ips
-      - "*"
+      - "172.18.0.3"
       - --timeout-keep-alive
       - "120"
 
