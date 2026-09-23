@@ -57,6 +57,8 @@ except Exception:
         raise HTTPException(status_code=503, detail="auth not configured")
     def require_admin():  # type: ignore
         raise HTTPException(status_code=503, detail="auth not configured")
+    async def get_current_user_optional():  # type: ignore
+        return None
     class User(BaseModel):  # type: ignore
         id: str = "unknown"
         email: Optional[str] = None
@@ -494,6 +496,118 @@ def _require_pc(pc_id: str, secret: str):
     expect = PCS.get(pc_id)
     if not expect or secret != expect:
         raise HTTPException(status_code=401, detail="unauthorized")
+
+
+# ---------- Print-route access: /api/overrides and /api/delivery-label ----------
+# Both return customer data (name, phone, address) and are called by three kinds
+# of client: signed-in staff in the browser (bearer token), the print agents on
+# the shop PCs (pc_id + X-PC-Secret, exactly as /pull), and a browser tab opened
+# with window.open(), which cannot carry a header (a short-lived signed URL,
+# /api/delivery-label only).
+#
+# The agents are installed on shop PCs and are updated by hand, so this rolls
+# out in two steps. While PRINT_ROUTES_ENFORCE is off, a request with none of
+# the three is still served, and leaves one greppable line in the log:
+#     print_route_unauthenticated route=<name> ip=<client> ua=<user agent>
+# Once that line stops appearing, set PRINT_ROUTES_ENFORCE=1 and such requests
+# get a 401.
+PRINT_ROUTES_ENFORCE = os.environ.get("PRINT_ROUTES_ENFORCE", "0").strip().lower() in ("1", "true", "yes", "on")
+LABEL_URL_TTL_SECONDS = 600  # signed label links live at most 10 minutes
+import time as _time_mod
+
+
+def _print_route_log(line: str) -> None:
+    # print(), like the rest of this module: uvicorn only configures its own
+    # loggers, so an INFO record on a module logger would never reach docker logs.
+    print(line, flush=True)
+
+
+def _label_signing_key() -> Optional[bytes]:
+    # Derived from JWT_SECRET (already a server-only secret) with a fixed label,
+    # so a label signature can never double as anything else. Refuse to sign at
+    # all with the development default.
+    secret = (os.environ.get("JWT_SECRET") or "").strip()
+    if not secret or secret == "CHANGE_ME_SECRET":
+        return None
+    return hmac.new(secret.encode("utf-8"), b"delivery-label-url/v1", hashlib.sha256).digest()
+
+
+def _label_signature(key: bytes, order_id: str, envoy_code: str, exp: int) -> str:
+    msg = f"{order_id}\n{envoy_code}\n{int(exp)}".encode("utf-8")
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+def sign_delivery_label_url(order_id: str, envoy_code: Optional[str], now: Optional[int] = None) -> Optional[str]:
+    key = _label_signing_key()
+    if key is None:
+        return None
+    exp = int(now if now is not None else _time_mod.time()) + LABEL_URL_TTL_SECONDS
+    env = (envoy_code or "").strip()
+    sig = _label_signature(key, str(order_id), env, exp)
+    qs = {"exp": str(exp), "sig": sig}
+    if env:
+        qs["envoy_code"] = env
+    from urllib.parse import urlencode as _urlencode
+    return f"/api/delivery-label/{quote(str(order_id), safe='')}?{_urlencode(qs)}"
+
+
+def _label_signature_valid(order_id: str, envoy_code: Optional[str], exp: Optional[str], sig: Optional[str]) -> bool:
+    if not exp or not sig:
+        return False
+    key = _label_signing_key()
+    if key is None:
+        return False
+    try:
+        exp_i = int(exp)
+    except (TypeError, ValueError):
+        return False
+    now = int(_time_mod.time())
+    # Expired, or claiming a lifetime longer than we ever issue.
+    if exp_i < now or exp_i > now + LABEL_URL_TTL_SECONDS + 5:
+        return False
+    expect = _label_signature(key, str(order_id), (envoy_code or "").strip(), exp_i)
+    return hmac.compare_digest(expect, str(sig))
+
+
+def _pc_credentials_valid(pc_id: Optional[str], secret: Optional[str]) -> bool:
+    try:
+        _require_pc(pc_id or "", secret or "")
+        return True
+    except HTTPException:
+        return False
+
+
+def _log_value(v: Optional[str], limit: int = 120) -> str:
+    s = (v or "-").strip() or "-"
+    return re.sub(r"\s+", "_", s)[:limit]
+
+
+def _print_route_gate(request: Request, route: str, *, user: Any, pc_id: Optional[str], pc_secret: Optional[str], signed_ok: bool = False) -> str:
+    """Decide how a print-route request is authenticated; returns user|pc|signed|none.
+
+    Raises 401 for "none" only while PRINT_ROUTES_ENFORCE is on. Logs route,
+    client IP and user agent, never the query (it holds order numbers).
+    """
+    if user is not None:
+        via = "user"
+    elif pc_id and pc_secret and _pc_credentials_valid(pc_id, pc_secret):
+        via = "pc"
+    elif signed_ok:
+        via = "signed"
+    else:
+        via = "none"
+    ip = request.client.host if request.client else "-"
+    ua = request.headers.get("user-agent")
+    if via == "none":
+        _print_route_log(
+            f"print_route_unauthenticated route={route} ip={_log_value(ip, 64)} "
+            f"ua={_log_value(ua)} enforce={1 if PRINT_ROUTES_ENFORCE else 0}"
+        )
+        if PRINT_ROUTES_ENFORCE:
+            raise HTTPException(status_code=401, detail="unauthorized")
+    else:
+        _print_route_log(f"print_route_authenticated route={route} via={via} ip={_log_value(ip, 64)} ua={_log_value(ua)}")
+    return via
 
 # ---------- Best-effort tagging to trigger webhook ----------
 async def _find_order_gid_by_number(number: str, store: Optional[str]) -> Optional[str]:
@@ -4486,10 +4600,15 @@ async def orders_update_webhook(
 
 @app.get("/api/overrides")
 async def get_overrides(
+    request: Request,
     orders: str = Query(""),
     store: Optional[str] = Query(None),
     force_live: bool = Query(False, description="If true, attempt live fetch even if cached"),
+    pc_id: Optional[str] = Query(None, description="Print agent id; send its secret as X-PC-Secret"),
+    x_pc_secret: Optional[str] = Header(default=None, alias="X-PC-Secret"),
+    user: Optional[User] = Depends(get_current_user_optional),  # type: ignore
 ):
+    _print_route_gate(request, "overrides", user=user, pc_id=pc_id, pc_secret=x_pc_secret)
     keys = [o.strip().lstrip("#") for o in (orders or "").split(",") if o.strip()]
     out: Dict[str, Any] = {}
 
@@ -4883,14 +5002,41 @@ async def delivery_proxy(path: str, request: Request, _user: User = Depends(get_
             resp_headers[k] = resp.headers[k]
     return Response(content=resp.content, status_code=resp.status_code, headers=resp_headers)
 
+@app.get("/api/delivery-label-url/{order_id}")
+async def delivery_label_signed_url(
+    order_id: str,
+    envoy_code: Optional[str] = Query(None),
+    _user: User = Depends(get_current_user),  # type: ignore
+):
+    """A link to the label that a new browser tab can open without a token.
+
+    window.open() cannot send the Authorization header, so signed-in staff get
+    a URL signed over (order id, envoy code, expiry), valid for 10 minutes.
+    """
+    url = sign_delivery_label_url(order_id, envoy_code)
+    if not url:
+        raise HTTPException(status_code=503, detail="label signing is not configured")
+    return {"url": url, "expires_in": LABEL_URL_TTL_SECONDS}
+
+
 @app.get("/api/delivery-label/{order_id}")
 async def delivery_label_proxy(
+    request: Request,
     order_id: str,
     renderer: str = Query("html"),
     autoprint: bool = Query(True),
     format: Optional[str] = Query(None),
     envoy_code: Optional[str] = Query(None),
+    pc_id: Optional[str] = Query(None, description="Print agent id; send its secret as X-PC-Secret"),
+    x_pc_secret: Optional[str] = Header(default=None, alias="X-PC-Secret"),
+    exp: Optional[str] = Query(None, include_in_schema=False),
+    sig: Optional[str] = Query(None, include_in_schema=False),
+    user: Optional[User] = Depends(get_current_user_optional),  # type: ignore
 ):
+    _print_route_gate(
+        request, "delivery-label", user=user, pc_id=pc_id, pc_secret=x_pc_secret,
+        signed_ok=_label_signature_valid(order_id, envoy_code, exp, sig),
+    )
     if not DELVERY_BACKEND_URL:
         return JSONResponse(status_code=503, content={"detail": "Delivery backend not configured."})
     params = {"renderer": renderer}
