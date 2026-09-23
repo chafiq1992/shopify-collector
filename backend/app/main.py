@@ -4757,13 +4757,53 @@ async def _gcs_access_token() -> Optional[str]:
         return creds.token
 
 
+# Buckets /api/proxy-image may read. The proxy attaches this app's own GCS
+# credentials, and it stays anonymous because the frontend uses it as an
+# <img src>, which cannot carry a bearer token. Without an allowlist it would
+# read ANY bucket the service account can reach, for anyone on the internet.
+# 72h of production traffic used exactly one bucket: WhatsApp screenshots
+# referenced from order notes.
+PROXY_IMAGE_BUCKETS = frozenset(
+    b.strip()
+    for b in (os.environ.get("PROXY_IMAGE_BUCKETS") or "whatsappinbox").split(",")
+    if b.strip()
+)
+
+
+def _proxy_image_url_allowed(url: str) -> bool:
+    """True only for https://storage.googleapis.com/<allowed-bucket>/<object>.
+
+    Parsed, not prefix-matched: a prefix check would let a crafted URL such as
+    .../whatsappinbox/../other-bucket/x or .../whatsappinbox.evil/x through.
+    """
+    from urllib.parse import urlsplit, unquote
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme != "https" or parts.hostname != "storage.googleapis.com":
+        return False
+    if parts.port not in (None, 443) or parts.username or parts.password:
+        return False
+    segments = unquote(parts.path).split("/")
+    # ["", bucket, object...]
+    if len(segments) < 3 or segments[0] != "" or not segments[2]:
+        return False
+    if any(s in (".", "..") or "\\" in s for s in segments[1:]):
+        return False
+    return segments[1] in PROXY_IMAGE_BUCKETS
+
+
 @app.get("/api/proxy-image")
 async def proxy_image(url: str = Query(..., description="The GCS URL to proxy")):
     """
     Proxies an image from Google Cloud Storage, authenticating when it can.
+    Only buckets in PROXY_IMAGE_BUCKETS; anything else is refused before any
+    request is made.
     """
-    if not url.startswith("https://storage.googleapis.com/"):
-        raise HTTPException(status_code=400, detail="Invalid URL domain")
+    if not _proxy_image_url_allowed(url):
+        raise HTTPException(status_code=400, detail="URL not allowed")
 
     access_token = await _gcs_access_token()
 
