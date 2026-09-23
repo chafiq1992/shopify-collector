@@ -220,7 +220,16 @@ async def resolve_store_settings_effective(store: Optional[str]) -> Tuple[str, s
     return (domain, token, api_key)
 
 # ---------- FastAPI ----------
-app = FastAPI(title="Order Collector API", version="1.0.0")
+# The interactive docs publish every route and parameter of this API, which
+# carries customer data. Off unless explicitly asked for (e.g. local dev).
+ENABLE_API_DOCS = os.environ.get("ENABLE_API_DOCS", "").strip().lower() in ("1", "true", "yes", "on")
+app = FastAPI(
+    title="Order Collector API",
+    version="1.0.0",
+    docs_url="/docs" if ENABLE_API_DOCS else None,
+    redoc_url="/redoc" if ENABLE_API_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_API_DOCS else None,
+)
 if HAVE_AUTH_DB and auth_router is not None:
     app.include_router(auth_router)
 if HAVE_AUTH_DB and admin_bootstrap_router is not None:
@@ -2124,6 +2133,7 @@ async def list_orders(
     financial_status: Optional[str] = Query(None, description="Filter by payment status: paid, pending, or paid_or_pending"),
     aggregate_by: Optional[str] = Query(None, pattern="^(products|cod_date)$", description="Optional server-side aggregation mode"),
     debug: bool = Query(False, description="If true, include debug metadata (resolved Shopify query, scan stats)"),
+    _user: User = Depends(get_current_user),  # type: ignore  # returns customer PII: signed-in staff only
 ):
     domain, access_token, _ = await resolve_store_settings_effective(store)
     if not domain or not access_token:
@@ -4563,7 +4573,11 @@ async def get_overrides(
 
 # Print-friendly data: only unfulfilled items and current total
 @app.get("/api/print-data")
-async def get_print_data(numbers: str = Query("", description="Comma-separated order names (e.g. #1234,#1235)"), store: Optional[str] = Query(None)):
+async def get_print_data(
+    numbers: str = Query("", description="Comma-separated order names (e.g. #1234,#1235)"),
+    store: Optional[str] = Query(None),
+    _user: User = Depends(get_current_user),  # type: ignore
+):
     # Normalize numbers
     nums = [n.strip().lstrip("#") for n in (numbers or "").split(",") if n.strip()]
     if not nums:
@@ -4906,7 +4920,7 @@ async def delivery_label_proxy(
     return Response(content=resp.content, status_code=resp.status_code, media_type=media_type)
 
 @app.get("/api/delivery-config")
-async def delivery_config_check():
+async def delivery_config_check(_user: User = Depends(get_current_user)):  # type: ignore
     return {"configured": bool(DELVERY_BACKEND_URL), "hint": "Set DELVERY_BACKEND_URL and DELVERY_ADMIN_TOKEN env vars" if not DELVERY_BACKEND_URL else "ok"}
 
 # --------- SPA client-side routes (serve index.html) ---------
@@ -4968,6 +4982,10 @@ async def _spa_fallback(full_path: str):
     """
     p = (full_path or "").lstrip("/")
     if p.startswith("api/") or p == "api" or p.startswith("ws") or p == "ws":
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    # With ENABLE_API_DOCS off these must be a plain 404, not the SPA shell,
+    # so "are the docs exposed?" has an unambiguous answer.
+    if p in ("docs", "redoc", "openapi.json") or p.startswith("docs/"):
         return JSONResponse({"detail": "Not Found"}, status_code=404)
     try:
         base = _frontend_dist_dir()
