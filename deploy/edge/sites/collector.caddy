@@ -18,6 +18,19 @@
 #      docker compose -f /opt/edge/compose.yaml exec caddy \
 #        caddy reload --config /etc/caddy/Caddyfile
 shopify-collector.chattbase.site {
+
+	# ── edge hardening (added 2026-09-23, Netcup audit follow-up) ──────────
+	# Interactive API docs and the OpenAPI schema hand out a complete map of
+	# the API, including every admin route. Nothing legitimate used them (7
+	# days of edge logs: only audit probes). The application should ALSO turn
+	# them off; this is the layer that holds while it does not.
+	@hidden_docs path /docs /docs/* /redoc /openapi.json /api/docs /api/docs/* /api/redoc /api/openapi.json
+	respond @hidden_docs 404
+
+	# Internet background scanning. Anchored at ^/ so real paths cannot match.
+	# Same list as apex.caddy.
+	@probes path_regexp ^/(wp-admin|wp-login|wp-content|wp-includes|xmlrpc\.php|phpmyadmin|phpMyAdmin|pma/|admin\.php|\.env|\.git/|\.aws/|\.ssh/|vendor/)
+	respond @probes 404
 	encode zstd gzip
 
 	# The invoice verifier posts several PDF/HTML/XLS/CSV invoices in one
