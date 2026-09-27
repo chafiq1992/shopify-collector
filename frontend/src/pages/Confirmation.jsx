@@ -1,13 +1,32 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowRightLeft,
+  Ban,
+  Boxes,
+  CalendarCheck,
   Check,
+  ChevronLeft,
   ChevronRight,
+  CircleAlert,
+  Copy,
+  Ellipsis,
+  Hourglass,
+  Inbox,
+  LoaderCircle,
+  LogOut,
+  MessageCircleOff,
   Minus,
   Package,
   Pencil,
+  Phone,
   Plus,
+  RefreshCw,
   Search,
+  SlidersHorizontal,
+  Sparkles,
   Trash2,
+  Trophy,
+  Users,
   X,
   MapPin,
 } from "lucide-react";
@@ -15,6 +34,7 @@ import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import OrderLabel from "../components/OrderLabel";
 import { useToasts, ToastStack } from "../components/Toast";
+import { AnimatedNumber, useDepartingList, useFlipList } from "../components/Motion";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 import {
   enqueueTagWrite,
@@ -33,19 +53,95 @@ import {
 
 // Tailwind utility chunk applied to interactive buttons so every click visually presses
 // the button. Pairs with the existing color/hover styling.
-const BTN_TAP = "active:scale-[0.96] transition-transform duration-75";
+const BTN_TAP = "active:scale-[0.97] transition duration-150";
 
-// Shared "action chip" styling for the per-order action row. Gradient background +
-// soft shadow + ring on hover + tap press.
-const ACTION_BTN_BASE = "inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-semibold text-white shadow-md hover:shadow-lg hover:-translate-y-px focus:outline-none focus:ring-2 focus:ring-offset-1 active:scale-[0.95] transition-all duration-100 min-w-[60px] justify-center disabled:opacity-50 disabled:cursor-wait disabled:hover:translate-y-0 disabled:hover:shadow-md";
-const ACTION_BTN_THEMES = {
-  sky:     "bg-gradient-to-br from-sky-500 to-sky-600 hover:from-sky-600 hover:to-sky-700 focus:ring-sky-400",
-  violet:  "bg-gradient-to-br from-violet-500 to-violet-600 hover:from-violet-600 hover:to-violet-700 focus:ring-violet-400",
-  fuchsia: "bg-gradient-to-br from-fuchsia-500 to-fuchsia-600 hover:from-fuchsia-600 hover:to-fuchsia-700 focus:ring-fuchsia-400",
-  indigo:  "bg-gradient-to-br from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700 focus:ring-indigo-400",
-  rose:    "bg-gradient-to-br from-rose-500 to-rose-600 hover:from-rose-600 hover:to-rose-700 focus:ring-rose-400",
-  emerald: "bg-gradient-to-br from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 focus:ring-emerald-400",
+// Shared button looks, so every control on the page reads as one system.
+const BTN = {
+  primary: "inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 text-sm font-semibold text-white shadow-sm shadow-indigo-600/20 hover:bg-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 active:scale-[0.97] transition duration-150",
+  secondary: "inline-flex items-center justify-center gap-1.5 rounded-xl bg-white px-3 text-sm font-medium text-slate-700 ring-1 ring-inset ring-slate-200 hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 disabled:cursor-not-allowed disabled:opacity-50 active:scale-[0.97] transition duration-150",
+  ghost: "inline-flex items-center justify-center gap-1.5 rounded-xl px-2.5 text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 disabled:opacity-50 active:scale-[0.97] transition duration-150",
 };
+
+// Per-order action buttons: one height, colour-coded by what the click records.
+const ACTION_BTN = "inline-flex h-8 items-center justify-center gap-1 rounded-lg px-2.5 text-xs font-semibold transition duration-150 active:scale-[0.94] focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 disabled:cursor-wait disabled:opacity-50";
+const ACTION_THEMES = {
+  call:    "bg-sky-600 text-white shadow-sm shadow-sky-600/25 hover:bg-sky-700 focus-visible:ring-sky-400",
+  nowtp:   "bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-200 hover:bg-violet-100 focus-visible:ring-violet-400",
+  enatt:   "bg-fuchsia-50 text-fuchsia-700 ring-1 ring-inset ring-fuchsia-200 hover:bg-fuchsia-100 focus-visible:ring-fuchsia-400",
+  confirm: "bg-emerald-600 text-white shadow-sm shadow-emerald-600/25 hover:bg-emerald-700 focus-visible:ring-emerald-400",
+  more:    "bg-white text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50 hover:text-slate-900 focus-visible:ring-slate-400",
+};
+
+const CARD = "rounded-2xl border border-slate-200/80 bg-white shadow-sm shadow-slate-900/[0.03]";
+
+// Colour families shared by the level tabs, tag chips, pull modes and team cards.
+const TONES = {
+  slate:   { dot: "bg-slate-400",   soft: "bg-slate-100 text-slate-700 ring-slate-200",       solid: "bg-slate-800 text-white",   text: "text-slate-700" },
+  indigo:  { dot: "bg-indigo-500",  soft: "bg-indigo-50 text-indigo-700 ring-indigo-200",     solid: "bg-indigo-600 text-white",  text: "text-indigo-700" },
+  amber:   { dot: "bg-amber-500",   soft: "bg-amber-50 text-amber-800 ring-amber-200",        solid: "bg-amber-500 text-white",   text: "text-amber-700" },
+  orange:  { dot: "bg-orange-500",  soft: "bg-orange-50 text-orange-700 ring-orange-200",     solid: "bg-orange-500 text-white",  text: "text-orange-700" },
+  rose:    { dot: "bg-rose-500",    soft: "bg-rose-50 text-rose-700 ring-rose-200",           solid: "bg-rose-500 text-white",    text: "text-rose-700" },
+  red:     { dot: "bg-red-600",     soft: "bg-red-50 text-red-700 ring-red-200",              solid: "bg-red-600 text-white",     text: "text-red-700" },
+  violet:  { dot: "bg-violet-500",  soft: "bg-violet-50 text-violet-700 ring-violet-200",     solid: "bg-violet-600 text-white",  text: "text-violet-700" },
+  fuchsia: { dot: "bg-fuchsia-500", soft: "bg-fuchsia-50 text-fuchsia-700 ring-fuchsia-200",  solid: "bg-fuchsia-600 text-white", text: "text-fuchsia-700" },
+  emerald: { dot: "bg-emerald-500", soft: "bg-emerald-50 text-emerald-700 ring-emerald-200",  solid: "bg-emerald-600 text-white", text: "text-emerald-700" },
+  sky:     { dot: "bg-sky-500",     soft: "bg-sky-50 text-sky-700 ring-sky-200",              solid: "bg-sky-600 text-white",     text: "text-sky-700" },
+};
+
+// Queue levels, in the order agents work through them. `key` is the backend level.
+const LEVELS = [
+  { key: "",      label: "All",         tone: "slate",   count: "total" },
+  { key: "new",   label: "New",         tone: "indigo",  count: "new" },
+  { key: "n1",    label: "N1",          tone: "amber",   count: "n1" },
+  { key: "n2",    label: "N2",          tone: "orange",  count: "n2" },
+  { key: "n3",    label: "N3",          tone: "rose",    count: "n3" },
+  { key: "n4",    label: "N4",          tone: "red",     count: "n4" },
+  { key: "nowtp", label: "No WhatsApp", tone: "violet",  count: "nowtp" },
+  { key: "enatt", label: "En attente",  tone: "fuchsia", count: "enatt" },
+];
+
+function tagTone(tag) {
+  const t = String(tag || "").trim().toLowerCase();
+  if (isCodTag(t)) return "emerald";
+  if (t === "n1") return "amber";
+  if (t === "n2") return "orange";
+  if (t === "n3") return "rose";
+  if (t === "n4") return "red";
+  if (t.startsWith("nowtp")) return "violet";
+  if (t.startsWith("enatt")) return "fuchsia";
+  return "slate";
+}
+
+function initialOf(value) {
+  return ((String(value || "?").trim().charAt(0)) || "?").toUpperCase();
+}
+
+// "3h ago"-style age for an order, so agents can prioritise without reading dates.
+function timeAgo(iso) {
+  const t = iso ? new Date(iso).getTime() : NaN;
+  if (!Number.isFinite(t)) return "";
+  const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (sec < 60) return "just now";
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const days = Math.round(hr / 24);
+  return `${days}d ago`;
+}
+
+// Clicks on these (or inside them) act on the control, not the row.
+function isInteractiveTarget(event) {
+  try {
+    return !!event.target?.closest?.("button, a, input, select, textarea, label, [role='menu']");
+  } catch {
+    return false;
+  }
+}
+
+function Spinner({ className = "w-4 h-4" }) {
+  return <LoaderCircle aria-hidden className={`animate-spin ${className}`} />;
+}
 
 // ---------- API helpers ----------
 const API = {
@@ -151,11 +247,14 @@ const API = {
     }
     return res.json();
   },
-  async pullPreview({ store, level, exclude_tags, include_assigned }) {
+  async pullPreview({ store, level, exclude_tags, include_assigned, source_agent_id, target_agent_id }) {
     const res = await authFetch(`/api/agent/pull/preview`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ store, level, exclude_tags, include_assigned: !!include_assigned }),
+      body: JSON.stringify({
+        store, level, exclude_tags, include_assigned: !!include_assigned,
+        source_agent_id: source_agent_id || null, target_agent_id: target_agent_id || null,
+      }),
     });
     if (!res.ok) {
       const js = await res.json().catch(() => ({ detail: "Preview failed" }));
@@ -163,12 +262,13 @@ const API = {
     }
     return res.json();
   },
-  async pullExecute({ store, level, exclude_tags, limit, agent_tag, include_assigned }) {
+  async pullExecute({ store, level, exclude_tags, limit, agent_tag, include_assigned, source_agent_id, target_agent_id }) {
     const res = await authFetch(`/api/agent/pull/execute`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         store, level, exclude_tags, limit, agent_tag, include_assigned: !!include_assigned,
+        source_agent_id: source_agent_id || null, target_agent_id: target_agent_id || null,
       }),
     });
     if (!res.ok) {
@@ -272,13 +372,23 @@ export default function Confirmation() {
 
   if (error) {
     return (
-      <div className="min-h-screen w-full flex items-center justify-center text-gray-700 px-4 text-center">
-        {error}. <a className="ml-2 underline" href="/login">Sign in</a>
+      <div className="min-h-screen w-full flex items-center justify-center bg-slate-50 px-4">
+        <div className={`${CARD} cf-pop-in max-w-sm w-full p-6 text-center`}>
+          <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-rose-50 text-rose-600">
+            <CircleAlert className="h-5 w-5" aria-hidden />
+          </div>
+          <div className="text-sm font-semibold text-slate-900">{error}</div>
+          <a className={`${BTN.primary} mt-4 h-10 w-full`} href="/login">Sign in</a>
+        </div>
       </div>
     );
   }
   if (!me) {
-    return <div className="min-h-screen w-full flex items-center justify-center text-gray-500">Loading…</div>;
+    return (
+      <div className="min-h-screen w-full flex items-center justify-center gap-2 bg-slate-50 text-sm text-slate-500">
+        <Spinner /> Loading your queue…
+      </div>
+    );
   }
 
   // Any logged-in user can use the confirmation page; whether their queue is non-empty
@@ -287,33 +397,87 @@ export default function Confirmation() {
 }
 
 // ---------- Header ----------
-function Header({ title, rightSlot, me }) {
-  const initial = ((me?.name || me?.email || "?").trim().charAt(0) || "?").toUpperCase();
+
+// Owns its own 1-second ticker so the "updated Xs ago" label doesn't re-render the
+// whole page every second.
+function UpdatedAgo({ at, loading }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (loading && !at) return <span>Loading…</span>;
+  if (!at) return <span>Not loaded</span>;
+  const sec = Math.max(0, Math.floor((Date.now() - at) / 1000));
+  return <span>{loading ? "Refreshing…" : sec < 5 ? "Up to date" : `Updated ${sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m`} ago`}</span>;
+}
+
+function TopBar({ me, store, loading, lastLoadedAt, syncState, onRefresh, onInventory }) {
+  const syncCount = syncState.count;
+  const blocked = syncState.blockedCount > 0;
   return (
-    <header className="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-gray-200">
-      <div className="w-full px-3 sm:px-4 xl:px-6 py-3 flex items-center gap-3 flex-wrap">
-        <div className="text-lg font-semibold">{title}</div>
-        {me && (
-          <div className="inline-flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-full pl-1 pr-3 py-1">
-            <div className="w-6 h-6 rounded-full bg-indigo-600 text-white text-xs font-bold flex items-center justify-center">
-              {initial}
+    <header className="sticky top-0 z-30 border-b border-slate-200/80 bg-white/85 backdrop-blur-md">
+      <div className="mx-auto flex h-14 sm:h-16 max-w-[1600px] items-center gap-2 sm:gap-3 px-3 sm:px-5 lg:px-8">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-sm shadow-indigo-600/30">
+          <Phone className="h-4 w-4" aria-hidden />
+        </div>
+        <div className="min-w-0 leading-tight">
+          <div className="text-[15px] sm:text-base font-semibold text-slate-900">Confirmation</div>
+          <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-500">
+            <span className={`h-1.5 w-1.5 rounded-full ${loading ? "bg-amber-400" : "bg-emerald-500 cf-live-dot text-emerald-500"}`} aria-hidden />
+            <UpdatedAgo at={lastLoadedAt} loading={loading} />
+            <span className="text-slate-300">·</span>
+            <span className="font-medium text-slate-600">{store}</span>
+          </div>
+        </div>
+
+        <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
+          {syncCount > 0 && (
+            <button
+              type="button"
+              onClick={retrySyncQueueNow}
+              className={`cf-fade-in inline-flex h-9 items-center gap-1.5 rounded-xl px-2.5 text-xs font-semibold ring-1 ring-inset ${
+                blocked ? "bg-rose-50 text-rose-700 ring-rose-200" : "bg-amber-50 text-amber-800 ring-amber-200"
+              }`}
+              title={syncState.lastError || "Your clicks are being saved to Shopify"}
+            >
+              {blocked ? <CircleAlert className="h-3.5 w-3.5" aria-hidden /> : <Spinner className="h-3.5 w-3.5" />}
+              <span className="hidden sm:inline">{blocked ? `${syncCount} not saved · Retry` : `Saving ${syncCount}`}</span>
+              <span className="sm:hidden">{syncCount}</span>
+            </button>
+          )}
+          <button type="button" onClick={onInventory} className={`${BTN.secondary} h-9`} title="Inventory helper">
+            <Boxes className="h-4 w-4 text-emerald-600" aria-hidden />
+            <span className="hidden md:inline">Inventory</span>
+          </button>
+          <button
+            type="button"
+            onClick={onRefresh}
+            className={`${BTN.secondary} h-9 w-9 !px-0 sm:w-auto sm:!px-3`}
+            title="Refresh now (R)"
+            aria-label="Refresh"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin text-indigo-600" : ""}`} aria-hidden />
+            <span className="hidden sm:inline">Refresh</span>
+          </button>
+          <div className="hidden lg:flex items-center gap-2 rounded-xl pl-1 pr-3 py-1 ring-1 ring-inset ring-slate-200 bg-white">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-100 text-xs font-bold text-indigo-700">
+              {initialOf(me?.name || me?.email)}
             </div>
-            <div className="leading-tight">
-              {me.name && (
-                <div className="text-xs font-semibold text-indigo-900 leading-tight">{me.name}</div>
-              )}
-              <div className={`text-[11px] text-indigo-700 leading-tight ${!me.name ? "font-semibold" : ""}`}>
-                {me.email}
-              </div>
+            <div className="leading-tight max-w-[160px]">
+              <div className="truncate text-xs font-semibold text-slate-800">{me?.name || me?.email}</div>
+              {me?.name && <div className="truncate text-[10px] text-slate-500">{me.email}</div>}
             </div>
           </div>
-        )}
-        <div className="ml-auto flex items-center gap-2">
-          {rightSlot}
           <button
+            type="button"
             onClick={() => { clearAuth(); try { location.href = "/login"; } catch {} }}
-            className="text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50 active:scale-[0.96] transition-transform duration-75"
-          >Logout</button>
+            className={`${BTN.ghost} h-9 w-9 !px-0`}
+            title="Log out"
+            aria-label="Log out"
+          >
+            <LogOut className="h-4 w-4" aria-hidden />
+          </button>
         </div>
       </div>
     </header>
@@ -337,7 +501,6 @@ function AgentView({ me }) {
   const [pageBusy, setPageBusy] = useState(false);
   const [error, setError] = useState(null);
   const [lastLoadedAt, setLastLoadedAt] = useState(null);
-  const [nowTick, setNowTick] = useState(0);
   const [expanded, setExpanded] = useState(() => new Set());
   const [datePickerFor, setDatePickerFor] = useState(null);
   const [chosenDate, setChosenDate] = useState(() => todayISO());
@@ -349,9 +512,9 @@ function AgentView({ me }) {
   const [bulkBusy, setBulkBusy] = useState(false);
   // Filter for the top stat pills: "" | "n1" | "n2" | "n3" | "n4" | "new"
   const [filterLevel, setFilterLevel] = useState("");
-  // Pull-orders modal — opened by the "Get more orders" panel. `pullMode` is the
-  // level being pulled ("new" | "n1" | "n2" | "n3" | "n4" | "nowtp" | "enatt");
-  // null = closed.
+  // Pull-orders modal — opened by the "Get more orders" panel. `pullMode` is
+  // `{ mode, includeAssigned }` where mode is the level being pulled ("new" | "n1" |
+  // "n2" | "n3" | "n4" | "nowtp" | "enatt"); null = closed.
   const [pullMode, setPullMode] = useState(null);
   // Toast notifications (button feedback)
   const [toasts, pushToast, dismissToast] = useToasts();
@@ -582,13 +745,6 @@ function AgentView({ me }) {
     };
   }, [loadFirst, loadTeam, pageIndex]);
 
-  // 1s freshness ticker + re-apply pending writes (so stats reflect just-clicked actions
-  // even when Shopify hasn't fully propagated the tag yet).
-  useEffect(() => {
-    const t = setInterval(() => setNowTick((n) => n + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
-
   // When the sync queue empties — meaning every tag write the agent just clicked has
   // landed in Shopify — refetch the queue + team stats. The backend's breakdown cache
   // was already invalidated by the tag mutation, so this returns fresh N1..N4/Nowtp/
@@ -611,7 +767,7 @@ function AgentView({ me }) {
       if (!item || item.action !== "add" || item.silentSuccess) return;
       const rawTag = String(item.tag || "");
       const label = isCodTag(rawTag) ? "Confirmation" : rawTag.toUpperCase();
-      pushToast(`✓ ${label} saved and counted`, "success", 2600);
+      pushToast(`${label} saved and counted`, "success", 2600);
     }
     window.addEventListener("confirmationActionSynced", onSynced);
     return () => window.removeEventListener("confirmationActionSynced", onSynced);
@@ -630,11 +786,11 @@ function AgentView({ me }) {
   const hasPrevPage = pageIndex > 0;
 
   // Orders for the current page, with pending sync-queue writes layered on top.
+  // `syncState` changes on every enqueue/ack, which is exactly when this can change.
   const ordersForView = useMemo(
     () => applyPendingQueueWrites(currentOrders, store),
-    // recomputes on each `nowTick` so newly enqueued writes are picked up promptly
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [currentOrders, store, syncCount, nowTick]
+    [currentOrders, store, syncState]
   );
   const pendingOrderIds = useMemo(
     () => new Set(
@@ -656,6 +812,19 @@ function AgentView({ me }) {
       return { ...p, orders: p.orders.filter((o) => o.id !== orderId) };
     }));
     setMeta((prev) => ({ ...prev, assigned_total: Math.max(0, (prev.assigned_total || 0) - 1) }));
+    // A confirmed/cancelled order must not stay selected for a later bulk action.
+    setSelected((prev) => {
+      if (!prev.has(orderId)) return prev;
+      const next = new Set(prev);
+      next.delete(orderId);
+      return next;
+    });
+    setExpanded((prev) => {
+      if (!prev.has(orderId)) return prev;
+      const next = new Set(prev);
+      next.delete(orderId);
+      return next;
+    });
   }
 
   function dedupTags(tags) {
@@ -699,7 +868,7 @@ function AgentView({ me }) {
     const next = cyclePhone(order, PHONE_TAGS);
     if (!next) return;
     pushToast(
-      ok ? `📞 Copied ${order.phone} · saving ${next.toUpperCase()}…` : `📞 Saving ${next.toUpperCase()} · phone copy blocked`,
+      ok ? `Copied ${order.phone} · saving ${next.toUpperCase()}…` : `Saving ${next.toUpperCase()} · phone copy blocked`,
       ok ? "info" : "warn",
     );
   }
@@ -707,14 +876,14 @@ function AgentView({ me }) {
   function handleNowtp(order) {
     // Cycles nowtp1 → nowtp2 → nowtp3 → nowtp4 (locks at nowtp4).
     const next = cyclePhone(order, NOWTP_TAGS);
-    if (next) pushToast(`🚫 Saving No-WhatsApp · ${next}…`, "info");
+    if (next) pushToast(`Saving No WhatsApp · ${next}…`, "info");
   }
 
   function handleEnatt(order) {
     // Cycles enatt1 → enatt2 → enatt3 → enatt4 (locks at enatt4). Use for "en attente"
     // (order pending follow-up).
     const next = cyclePhone(order, ENATT_TAGS);
-    if (next) pushToast(`⏳ Saving En attente · ${next}…`, "info");
+    if (next) pushToast(`Saving En attente · ${next}…`, "info");
   }
 
   async function handleCopyPhone(order) {
@@ -723,7 +892,7 @@ function AgentView({ me }) {
     const intl = moroccoInternational(order.phone || "");
     const ok = await copyToClipboard(intl);
     pushToast(
-      ok ? `📋 Copied ${intl}` : "📋 Clipboard blocked",
+      ok ? `Copied ${intl}` : "Clipboard blocked",
       ok ? "success" : "warn",
     );
   }
@@ -860,205 +1029,315 @@ function AgentView({ me }) {
     return mine?.confirmed_today || 0;
   }, [teamStats, me?.id]);
 
-  const updatedAgoSec = useMemo(() => {
-    if (!lastLoadedAt) return null;
-    return Math.max(0, Math.floor((Date.now() - lastLoadedAt) / 1000));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lastLoadedAt, nowTick]);
-
   const tagsAssigned = agentInfo?.tags || me?.tags || [];
+
+  // ---------- Motion: rows slide into place, leave in place, new ones flash ----------
+  const listResetKey = `${store}|${filterLevel}|${pageIndex}`;
+  const displayRows = useDepartingList(ordersForView, (o) => o.id, { resetKey: listResetKey });
+  const flipSignature = displayRows.map((r) => r.item.id).join(",");
+  const tableBodyRef = useRef(null);
+  const cardListRef = useRef(null);
+  useFlipList(tableBodyRef, flipSignature, listResetKey);
+  useFlipList(cardListRef, flipSignature, listResetKey);
+
+  const searchInputRef = useRef(null);
+  const refreshAll = useCallback(() => { loadFirst(); loadTeam(); }, [loadFirst, loadTeam]);
+
+  // Keyboard helpers for agents who live on this page: "/" jumps to search,
+  // "r" refreshes. Ignored while typing in a field or when a dialog is open.
+  useEffect(() => {
+    function onKey(e) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const tag = (e.target?.tagName || "").toLowerCase();
+      if (["input", "textarea", "select"].includes(tag) || e.target?.isContentEditable) return;
+      if (pullMode || cancelModalFor) return;
+      if (e.key === "/") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      } else if (e.key === "r" || e.key === "R") {
+        refreshAll();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pullMode, cancelModalFor, refreshAll]);
+
+  function openPull(mode, opts = {}) {
+    setPullMode({ mode, includeAssigned: !!opts.includeAssigned });
+  }
+
+  // Team ranking for the "Confirmed today" card — a little friendly motivation.
+  const myRank = useMemo(() => {
+    const ranked = [...teamStats].sort((a, b) => Number(b.confirmed_today || 0) - Number(a.confirmed_today || 0));
+    const idx = ranked.findIndex((a) => a.id === me.id);
+    return idx >= 0 ? { rank: idx + 1, of: ranked.length } : null;
+  }, [teamStats, me?.id]);
+  const sortedTeam = useMemo(
+    () => [...teamStats].sort((a, b) => Number(b.confirmed_today || 0) - Number(a.confirmed_today || 0)),
+    [teamStats],
+  );
+  const teamMaxConfirmed = useMemo(
+    () => Math.max(1, ...teamStats.map((a) => Number(a.confirmed_today || 0))),
+    [teamStats],
+  );
+
+  const levelCounts = meta.level_counts || {};
+  const activeLevel = LEVELS.find((l) => l.key === filterLevel) || LEVELS[0];
+  const firstLoad = loading && pages.length === 0;
+  const isAdmin = me?.role === "admin";
+
+  function renderTags(o, isSyncing, { size = "sm" } = {}) {
+    const tags = o.tags || [];
+    if (tags.length === 0) return null;
+    return (
+      <div className="flex flex-wrap gap-1">
+        {tags.map((t) => {
+          const tone = TONES[tagTone(t)] || TONES.slate;
+          return (
+            <span
+              key={t}
+              className={`group inline-flex items-center rounded-md ring-1 ring-inset ${tone.soft} ${size === "xs" ? "text-[10.5px] px-1.5 py-0.5" : "text-[11px] px-1.5 py-0.5"} font-medium`}
+            >
+              {t}
+              <button
+                type="button"
+                disabled={isSyncing}
+                onClick={(ev) => { ev.stopPropagation(); removeTagOptimistic(o, t); }}
+                className="ml-0.5 -mr-0.5 rounded px-0.5 opacity-50 hover:opacity-100 hover:text-rose-600 disabled:cursor-wait"
+                title={`Remove tag ${t}`}
+                aria-label={`Remove tag ${t}`}
+              >×</button>
+            </span>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function renderActions(o, isSyncing, { stretch = false } = {}) {
+    const phoneLevel = (tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "").toUpperCase();
+    const nowtp = tagsInCycle(o.tags || [], NOWTP_TAGS).slice(-1)[0];
+    const enatt = tagsInCycle(o.tags || [], ENATT_TAGS).slice(-1)[0];
+    const menuOpen = actionsDropdownFor === o.id;
+    const grow = stretch ? "flex-1" : "";
+    return (
+      <div className={`flex items-center gap-1.5 ${stretch ? "w-full" : ""}`}>
+        <button
+          type="button"
+          disabled={isSyncing}
+          onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
+          className={`${ACTION_BTN} ${ACTION_THEMES.call} ${grow} min-w-[64px]`}
+          title="Copy phone + record the next call attempt (N1 → N4)"
+        >
+          <Phone className="h-3.5 w-3.5" aria-hidden />
+          <span>{phoneLevel || "Call"}</span>
+        </button>
+        <button
+          type="button"
+          disabled={isSyncing}
+          onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
+          className={`${ACTION_BTN} ${ACTION_THEMES.nowtp} ${grow}`}
+          title="No WhatsApp — cycles nowtp1 → nowtp4"
+        >
+          <MessageCircleOff className="h-3.5 w-3.5" aria-hidden />
+          <span>{nowtp ? nowtp.replace("nowtp", "NW") .toUpperCase() : "NW"}</span>
+        </button>
+        <button
+          type="button"
+          disabled={isSyncing}
+          onClick={(ev) => { ev.stopPropagation(); handleEnatt(o); }}
+          className={`${ACTION_BTN} ${ACTION_THEMES.enatt} ${grow}`}
+          title="En attente — cycles enatt1 → enatt4"
+        >
+          <Hourglass className="h-3.5 w-3.5" aria-hidden />
+          <span>{enatt ? enatt.replace("enatt", "EA").toUpperCase() : "EA"}</span>
+        </button>
+        <button
+          type="button"
+          disabled={isSyncing}
+          onClick={(ev) => { ev.stopPropagation(); openDatePicker(o); }}
+          className={`${ACTION_BTN} ${ACTION_THEMES.confirm} ${grow}`}
+          title="Confirm for a delivery date"
+        >
+          <Check className="h-4 w-4" aria-hidden />
+          <span className={stretch ? "" : "hidden 2xl:inline"}>Confirm</span>
+        </button>
+        <div className="relative">
+          <button
+            type="button"
+            onClick={(ev) => { ev.stopPropagation(); setActionsDropdownFor((p) => (p === o.id ? null : o.id)); }}
+            className={`${ACTION_BTN} ${ACTION_THEMES.more} w-8 !px-0`}
+            title="More actions"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            aria-label="More actions"
+          >
+            <Ellipsis className="h-4 w-4" aria-hidden />
+          </button>
+          {menuOpen && (
+            <div
+              role="menu"
+              onClick={(ev) => ev.stopPropagation()}
+              className="cf-pop-in absolute right-0 top-full z-20 mt-1.5 w-48 overflow-hidden rounded-xl bg-white py-1 shadow-lg shadow-slate-900/10 ring-1 ring-slate-900/10"
+            >
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => { handleCopyPhone(o); setActionsDropdownFor(null); }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+              ><Copy className="h-4 w-4 text-slate-400" aria-hidden /> Copy phone (intl.)</button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => { setCancelModalFor(o); setActionsDropdownFor(null); }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-rose-700 hover:bg-rose-50"
+              ><Ban className="h-4 w-4" aria-hidden /> Cancel order…</button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function renderConfirmPicker(o, isSyncing) {
+    const today = todayISO();
+    const tomorrow = todayISO(new Date(Date.now() + 86_400_000));
+    const quick = [
+      { label: "Today", value: today },
+      { label: "Tomorrow", value: tomorrow },
+    ];
+    return (
+      <div
+        className="cf-collapse-in flex flex-wrap items-center gap-2 rounded-xl bg-emerald-50/70 px-3 py-2.5 ring-1 ring-inset ring-emerald-200"
+        onClick={(ev) => ev.stopPropagation()}
+      >
+        <CalendarCheck className="h-4 w-4 text-emerald-600" aria-hidden />
+        <span className="text-xs font-semibold text-emerald-900">Deliver on</span>
+        {quick.map((q) => (
+          <button
+            key={q.label}
+            type="button"
+            onClick={() => setChosenDate(q.value)}
+            className={`h-8 rounded-lg px-2.5 text-xs font-semibold ring-1 ring-inset transition ${
+              chosenDate === q.value
+                ? "bg-emerald-600 text-white ring-emerald-600"
+                : "bg-white text-emerald-800 ring-emerald-200 hover:bg-emerald-100"
+            }`}
+          >{q.label}</button>
+        ))}
+        <input
+          type="date"
+          value={chosenDate}
+          onChange={(e) => setChosenDate(e.target.value)}
+          className="h-8 rounded-lg border-0 bg-white px-2 text-sm text-slate-800 ring-1 ring-inset ring-emerald-200 focus:ring-2 focus:ring-emerald-500"
+        />
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setDatePickerFor(null)}
+            className={`${BTN.ghost} h-8 text-xs`}
+          >Cancel</button>
+          <button
+            type="button"
+            disabled={isSyncing || !chosenDate}
+            onClick={() => submitConfirm(o)}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-emerald-600 px-3 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 active:scale-[0.97] transition disabled:opacity-50"
+          ><Check className="h-3.5 w-3.5" aria-hidden /> Confirm {isoToDDMMYY(chosenDate) || ""}</button>
+        </div>
+      </div>
+    );
+  }
+
+  function toggleExpanded(orderId) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(orderId)) next.delete(orderId); else next.add(orderId);
+      return next;
+    });
+  }
+
+  function renderPhone(o, { big = false } = {}) {
+    if (!o.phone) return <span className="text-xs text-slate-400">No phone</span>;
+    return (
+      <span className="inline-flex items-center gap-1 rounded-lg bg-sky-50 py-0.5 pl-2 pr-0.5 ring-1 ring-inset ring-sky-200">
+        <span className={`font-mono font-semibold tracking-tight text-sky-900 ${big ? "text-[15px]" : "text-[13px]"}`}>{o.phone}</span>
+        <button
+          type="button"
+          onClick={(ev) => { ev.stopPropagation(); handleCopyPhone(o); }}
+          title={`Copy ${moroccoInternational(o.phone)} (international, no +)`}
+          aria-label="Copy phone number"
+          className="rounded-md p-1 text-sky-500 hover:bg-sky-100 hover:text-sky-700 active:scale-90 transition"
+        ><Copy className="h-3.5 w-3.5" aria-hidden /></button>
+      </span>
+    );
+  }
 
   // Reusable order card — same look and behaviour for the queue (mobile), the global
   // search results, and the expanded customer's order list. Closes over every action
   // handler and piece of state so callers don't need to pass anything beyond the order.
-  function renderOrderCard(o) {
+  function renderOrderCard(o, { leaving = false } = {}) {
     const isOpen = expanded.has(o.id);
     const pickerOpen = datePickerFor === o.id;
     const isSelected = selected.has(o.id);
-    const isActive = isOpen || pickerOpen;
     const isSyncing = pendingOrderIds.has(o.id);
     const url = shopifyOrderUrl(o, meta.shop_domain);
     const label = o.name || `#${o.number}`;
     return (
       <div
         key={o.id}
-        className={`p-3 transition-colors ${
-          isActive
-            ? "bg-indigo-50/80 border-l-4 border-indigo-500 shadow-inner"
-            : isSelected
-              ? "bg-indigo-50/40 border-l-4 border-indigo-200"
-              : "border-l-4 border-transparent"
+        data-flip-key={o.id}
+        className={`relative p-3.5 transition-colors ${leaving ? "cf-leave" : ""} ${
+          isOpen || pickerOpen ? "bg-indigo-50/60" : isSelected ? "bg-indigo-50/40" : "bg-white"
         }`}
-        onClick={(e) => {
-          const tag = (e.target?.tagName || "").toLowerCase();
-          if (["button", "input", "select", "a", "svg", "path", "label", "textarea"].includes(tag)) return;
-          setExpanded((prev) => {
-            const next = new Set(prev);
-            if (next.has(o.id)) next.delete(o.id); else next.add(o.id);
-            return next;
-          });
-        }}
+        onClick={(e) => { if (!leaving && !isInteractiveTarget(e)) toggleExpanded(o.id); }}
       >
-        {/* Row 1: select + order # + total + created */}
-        <div className="flex items-center gap-2">
+        {(isOpen || pickerOpen || isSelected) && (
+          <span aria-hidden className={`absolute left-0 inset-y-0 w-1 ${isOpen || pickerOpen ? "bg-indigo-500" : "bg-indigo-200"}`} />
+        )}
+        <div className="flex items-center gap-2.5">
           <input
             type="checkbox"
             checked={isSelected}
             onChange={() => toggleRowSelected(o.id)}
-            onClick={(ev) => ev.stopPropagation()}
             aria-label={`Select order ${label}`}
-            className="w-4 h-4"
+            className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
           />
           {url ? (
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(ev) => ev.stopPropagation()}
-              className="text-base font-bold text-indigo-700 hover:underline"
-            >{label}</a>
+            <a href={url} target="_blank" rel="noopener noreferrer" className="text-[15px] font-bold text-indigo-700 hover:underline">{label}</a>
           ) : (
-            <span className="text-base font-bold">{label}</span>
+            <span className="text-[15px] font-bold">{label}</span>
           )}
-          <span className="ml-auto text-base font-bold text-gray-900 tabular-nums whitespace-nowrap">
-            {o.total_price} <span className="text-xs font-medium text-gray-500">{o.currency}</span>
+          <span className="text-[11px] text-slate-400" title={o.created_at ? new Date(o.created_at).toLocaleString() : ""}>{timeAgo(o.created_at)}</span>
+          <span className="ml-auto whitespace-nowrap text-[15px] font-bold tabular-nums text-slate-900">
+            {o.total_price} <span className="text-[11px] font-medium text-slate-500">{o.currency}</span>
           </span>
         </div>
-        <div className="text-[11px] text-gray-500 mt-0.5">
-          {o.created_at ? new Date(o.created_at).toLocaleString() : ""}
-          {isSyncing && <span className="ml-2 font-semibold text-amber-700">Saving action…</span>}
+
+        <div className="mt-2 flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="truncate text-[15px] font-semibold text-slate-900">
+              {o.customer_name || <span className="font-normal text-slate-400">No name</span>}
+            </div>
+            <div className="truncate text-xs text-slate-500">
+              {[o.shipping_address1, o.shipping_city].filter(Boolean).join(", ") || "No address"}
+            </div>
+          </div>
+          {isSyncing && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">
+              <Spinner className="h-3 w-3" /> Saving
+            </span>
+          )}
         </div>
 
-        {/* Customer + phone (highlighted) */}
-        <div className="mt-2 flex items-start gap-2 flex-wrap">
-          <div className="text-base font-bold text-gray-900 flex-1 min-w-0 truncate">
-            {o.customer_name || <span className="text-gray-400 font-medium">—</span>}
-          </div>
-        </div>
-        {o.phone ? (
-          <div className="mt-1.5 inline-flex items-center gap-2 bg-sky-50 border border-sky-200 rounded-lg px-2.5 py-1">
-            <span className="font-mono font-bold text-base text-sky-900 tracking-tight">{o.phone}</span>
-            <button
-              type="button"
-              onClick={(ev) => { ev.stopPropagation(); handleCopyPhone(o); }}
-              title={`Copy ${moroccoInternational(o.phone)}`}
-              className={`text-sky-500 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
-            >📋</button>
-          </div>
-        ) : (
-          <div className="mt-1.5 text-xs text-gray-400">no phone</div>
-        )}
+        <div className="mt-2">{renderPhone(o, { big: true })}</div>
+        {(o.tags || []).length > 0 && <div className="mt-2">{renderTags(o, isSyncing)}</div>}
 
-        {/* Address */}
-        <div className="mt-1.5 text-sm font-medium text-gray-700">
-          {[o.shipping_address1, o.shipping_city].filter(Boolean).join(", ") || <span className="text-gray-400">—</span>}
-        </div>
+        <div className="mt-3">{renderActions(o, isSyncing, { stretch: true })}</div>
 
-        {/* Tags */}
-        {(o.tags || []).length > 0 && (
-          <div className="mt-1.5 flex flex-wrap gap-1">
-            {(o.tags || []).map((t) => (
-              <span key={t} className={`inline-flex items-center text-[11px] px-2 py-0.5 rounded-full border ${isCodTag(t) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-50 text-gray-700 border-gray-200"}`}>
-                {t}
-                <button
-                  disabled={isSyncing}
-                  onClick={(ev) => { ev.stopPropagation(); removeTagOptimistic(o, t); }}
-                  className={`ml-1 text-gray-400 hover:text-rose-600 hover:scale-110 ${BTN_TAP}`}
-                  title="Remove tag"
-                >×</button>
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* Action row */}
-        <div className="mt-2.5 grid grid-cols-5 gap-1.5">
-          <button
-            disabled={isSyncing}
-            onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
-            className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky} !min-w-0 col-span-1`}
-            title="Copy phone + advance n1/n2/n3/n4"
-          >
-            <span aria-hidden className="text-sm">📞</span>
-            <span>{(tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "").toUpperCase() || "Call"}</span>
-          </button>
-          <button
-            disabled={isSyncing}
-            onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
-            className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.violet} !min-w-0 col-span-1`}
-            title="No-WhatsApp — cycles nowtp1 → nowtp4"
-          >
-            <span aria-hidden className="text-sm">🚫</span>
-            <span>{(() => {
-              const t = tagsInCycle(o.tags || [], NOWTP_TAGS).slice(-1)[0];
-              return t ? t.replace("nowtp", "NW").toUpperCase() : "NW";
-            })()}</span>
-          </button>
-          <button
-            disabled={isSyncing}
-            onClick={(ev) => { ev.stopPropagation(); handleEnatt(o); }}
-            className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.fuchsia} !min-w-0 col-span-1`}
-            title="En attente — cycles enatt1 → enatt4"
-          >
-            <span aria-hidden className="text-sm">⏳</span>
-            <span>{(() => {
-              const t = tagsInCycle(o.tags || [], ENATT_TAGS).slice(-1)[0];
-              return t ? t.replace("enatt", "EA").toUpperCase() : "EA";
-            })()}</span>
-          </button>
-          <button
-            disabled={isSyncing}
-            onClick={(ev) => { ev.stopPropagation(); openDatePicker(o); }}
-            className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.emerald} !min-w-0 col-span-1`}
-            title="Confirm for a delivery date"
-          >
-            <span aria-hidden className="text-base">✅</span>
-          </button>
-          <button
-            onClick={(ev) => { ev.stopPropagation(); setActionsDropdownFor((p) => (p === o.id ? null : o.id)); }}
-            className={`inline-flex items-center justify-center px-2 py-1.5 rounded-xl border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 ${BTN_TAP} col-span-1`}
-            title="More actions"
-            aria-haspopup="menu"
-            aria-expanded={actionsDropdownFor === o.id}
-          >⋯</button>
-        </div>
-
-        {actionsDropdownFor === o.id && (
-          <div
-            className="mt-2 border border-gray-200 rounded-lg shadow-sm bg-white overflow-hidden"
-            onClick={(ev) => ev.stopPropagation()}
-          >
-            <button
-              onClick={() => { setCancelModalFor(o); setActionsDropdownFor(null); }}
-              className="block w-full text-left text-sm px-3 py-2 text-rose-700 hover:bg-rose-50"
-            >🚫 Cancel order…</button>
-          </div>
-        )}
-
-        {pickerOpen && (
-          <div className="mt-2 rounded-lg bg-indigo-50/50 border border-indigo-200 p-2 flex items-center gap-2 flex-wrap">
-            <span className="text-xs font-medium text-indigo-900">Confirm for:</span>
-            <input
-              type="date"
-              value={chosenDate}
-              onChange={(e) => setChosenDate(e.target.value)}
-              onClick={(ev) => ev.stopPropagation()}
-              className="text-sm border border-gray-300 rounded px-2 py-1"
-            />
-            <button
-              disabled={isSyncing}
-              onClick={(ev) => { ev.stopPropagation(); submitConfirm(o); }}
-              className={`text-xs px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm ${BTN_TAP}`}
-            >Confirm</button>
-            <button
-              onClick={(ev) => { ev.stopPropagation(); setDatePickerFor(null); }}
-              className={`text-xs px-3 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
-            >Cancel</button>
-          </div>
-        )}
+        {pickerOpen && <div className="mt-2.5">{renderConfirmPicker(o, isSyncing)}</div>}
 
         {isOpen && (
-          <div className="mt-3" onClick={(ev) => ev.stopPropagation()}>
+          <div className="cf-collapse-in mt-3" onClick={(ev) => ev.stopPropagation()}>
             <OrderExpanded
               order={o}
               store={store}
@@ -1072,41 +1351,146 @@ function AgentView({ me }) {
     );
   }
 
-  return (
-    <div className="min-h-screen w-full bg-gray-50 text-gray-900">
-      <ToastStack toasts={toasts} onDismiss={dismissToast} />
-      <Header
-        title="Confirmation"
-        me={me}
-        rightSlot={
-          <div className="flex items-center gap-2">
-            <button onClick={() => { try { history.pushState(null, "", "/inventory-helper"); window.dispatchEvent(new PopStateEvent("popstate")); } catch { location.href = "/inventory-helper"; } }} className={`text-xs px-3 py-1 rounded-full border border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 ${BTN_TAP}`}>
-              Inventory
-            </button>
-            {syncCount > 0 && (
-              <button
-                type="button"
-                onClick={retrySyncQueueNow}
-                className={`text-xs px-2 py-1 rounded-full border ${
-                  syncState.blockedCount > 0
-                    ? "bg-rose-100 text-rose-800 border-rose-300"
-                    : "bg-amber-100 text-amber-800 border-amber-200"
-                }`}
-                title={syncState.lastError || "Actions are being saved"}
-              >
-                {syncState.blockedCount > 0 ? `Not saved yet ${syncCount} · Retry` : `Saving ${syncCount}`}
-              </button>
+  function renderTableRow({ item: o, leaving }) {
+    const isOpen = expanded.has(o.id);
+    const pickerOpen = datePickerFor === o.id;
+    const isSelected = selected.has(o.id);
+    const isSyncing = pendingOrderIds.has(o.id);
+    const url = shopifyOrderUrl(o, meta.shop_domain);
+    const label = o.name || `#${o.number}`;
+    const active = isOpen || pickerOpen;
+    const rowBg = active ? "bg-indigo-50/70" : isSelected ? "bg-indigo-50/40" : "bg-white";
+    return (
+      <React.Fragment key={o.id}>
+        <tr
+          data-flip-key={o.id}
+          className={`group border-t border-slate-100 cursor-pointer transition-colors ${rowBg} ${active ? "" : "hover:bg-slate-50/80"} ${leaving ? "cf-leave" : ""}`}
+          onClick={(e) => { if (!leaving && !isInteractiveTarget(e)) toggleExpanded(o.id); }}
+        >
+          <td className={`relative w-10 pl-4 pr-1 py-3 ${active ? "shadow-[inset_3px_0_0_rgb(99_102_241)]" : ""}`}>
+            <input
+              type="checkbox"
+              checked={isSelected}
+              onChange={() => toggleRowSelected(o.id)}
+              aria-label={`Select order ${label}`}
+              className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+            />
+          </td>
+          <td className="px-2 py-3 whitespace-nowrap">
+            {url ? (
+              <a href={url} target="_blank" rel="noopener noreferrer" className="font-semibold text-indigo-700 hover:text-indigo-900 hover:underline" title="Open in Shopify admin">{label}</a>
+            ) : (
+              <span className="font-semibold">{label}</span>
             )}
-            <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700 border border-gray-200">
-              {updatedAgoSec == null ? "Updating…" : `Updated ${updatedAgoSec}s ago`}
-            </span>
-            <button onClick={() => { loadFirst(); loadTeam(); pushToast("Refreshed", "info", 1200); }} className={`text-xs px-3 py-1 rounded-full border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}>
-              Refresh
+            <div className="text-[11px] text-slate-400" title={o.created_at ? new Date(o.created_at).toLocaleString() : ""}>
+              {timeAgo(o.created_at)}
+            </div>
+          </td>
+          <td className="px-2 py-3 max-w-[240px]">
+            <div className="truncate font-medium text-slate-900">{o.customer_name || <span className="text-slate-400">—</span>}</div>
+            <div className="truncate text-xs text-slate-500">
+              {[o.shipping_address1, o.shipping_city].filter(Boolean).join(", ") || "—"}
+            </div>
+          </td>
+          <td className="px-2 py-3 whitespace-nowrap">{renderPhone(o)}</td>
+          <td className="px-2 py-3 whitespace-nowrap text-right font-semibold tabular-nums text-slate-900">
+            {o.total_price} <span className="text-[11px] font-medium text-slate-500">{o.currency}</span>
+          </td>
+          <td className="px-3 py-3">
+            <div className="flex items-center gap-2 max-w-[260px]">
+              {renderTags(o, isSyncing, { size: "xs" })}
+              {isSyncing && <Spinner className="h-3.5 w-3.5 shrink-0 text-amber-500" />}
+            </div>
+          </td>
+          {/* The open "more" menu overflows into the next rows, so its sticky cell must stack above theirs. */}
+          <td className={`sticky right-0 px-3 py-3 ${actionsDropdownFor === o.id ? "z-20" : "z-[1]"} ${rowBg} ${active ? "" : "group-hover:bg-slate-50"} shadow-[-8px_0_12px_-10px_rgba(15,23,42,0.18)]`}>
+            <div className="flex justify-end">{renderActions(o, isSyncing)}</div>
+          </td>
+        </tr>
+        {pickerOpen && !leaving && (
+          <tr className="bg-indigo-50/40">
+            <td colSpan={7} className="px-4 py-2.5">{renderConfirmPicker(o, isSyncing)}</td>
+          </tr>
+        )}
+        {isOpen && !leaving && (
+          <tr className="bg-slate-50/70">
+            <td colSpan={7} className="px-4 py-4">
+              <div className="cf-collapse-in">
+                <OrderExpanded
+                  order={o}
+                  store={store}
+                  shopDomain={meta.shop_domain}
+                  onToast={pushToast}
+                  onOrderUpdated={(updatedOrder) => patchOrderInPlace(o.id, () => updatedOrder)}
+                />
+              </div>
+            </td>
+          </tr>
+        )}
+      </React.Fragment>
+    );
+  }
+
+  const emptyState = !loading && displayRows.length === 0 && (
+    <div className="cf-fade-in flex flex-col items-center px-6 py-14 text-center">
+      <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-400">
+        <Inbox className="h-6 w-6" aria-hidden />
+      </div>
+      {filterLevel ? (
+        <>
+          <div className="text-sm font-semibold text-slate-900">No {activeLevel.label} orders right now</div>
+          <div className="mt-1 text-xs text-slate-500">Everything at this level has been handled.</div>
+          <button type="button" onClick={() => setFilterLevel("")} className={`${BTN.secondary} mt-4 h-9`}>Show all orders</button>
+        </>
+      ) : (
+        <>
+          <div className="text-sm font-semibold text-slate-900">Your queue is clear</div>
+          <div className="mt-1 text-xs text-slate-500">Nice work. Pull more orders to keep going.</div>
+          {tagsAssigned.length > 0 && (
+            <button type="button" onClick={() => openPull("new")} className={`${BTN.primary} mt-4 h-9`}>
+              <Sparkles className="h-4 w-4" aria-hidden /> Get new orders
             </button>
-          </div>
-        }
+          )}
+        </>
+      )}
+    </div>
+  );
+
+  const pagerControls = (
+    <div className="flex items-center gap-1">
+      <button
+        type="button"
+        onClick={() => goToPage(pageIndex - 1)}
+        disabled={!hasPrevPage || pageBusy}
+        className={`${BTN.secondary} h-8 w-8 !px-0`}
+        aria-label="Previous page"
+      ><ChevronLeft className="h-4 w-4" aria-hidden /></button>
+      <span className="min-w-[64px] text-center text-xs font-medium text-slate-600 tabular-nums">
+        Page {pageIndex + 1}{pages.length > 1 ? ` / ${pages.length}${pages[pages.length - 1]?.nextCursor ? "+" : ""}` : ""}
+      </span>
+      <button
+        type="button"
+        onClick={() => goToPage(pageIndex + 1)}
+        disabled={!hasNextPage || pageBusy}
+        className={`${BTN.secondary} h-8 w-8 !px-0`}
+        aria-label="Next page"
+      >{pageBusy ? <Spinner className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" aria-hidden />}</button>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen w-full bg-slate-50 text-slate-900">
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      <TopBar
+        me={me}
+        store={store}
+        loading={loading}
+        lastLoadedAt={lastLoadedAt}
+        syncState={syncState}
+        onRefresh={() => { refreshAll(); pushToast("Refreshing…", "info", 1200); }}
+        onInventory={() => goto("/inventory-helper", store)}
       />
-      <main className="w-full px-3 sm:px-4 xl:px-6 py-4 space-y-4">
+      <main className={`mx-auto w-full max-w-[1600px] px-3 sm:px-5 lg:px-8 py-4 sm:py-6 space-y-4 sm:space-y-5 ${selected.size > 0 ? "pb-28" : ""}`}>
         {/* Global Shopify search */}
         <GlobalSearch
           query={searchQuery}
@@ -1123,125 +1507,176 @@ function AgentView({ me }) {
           expandedCustomerId={expandedCustomerId}
           customerOrdersById={customerOrdersById}
           onToggleCustomer={toggleSearchCustomerExpand}
+          inputRef={searchInputRef}
         />
 
-        {/* Stats pills */}
-        <div className="flex flex-wrap gap-2">
-          <StatPill label="Assigned" value={meta.assigned_total} color="sky" icon="📦" />
-          <StatPill label="In view" value={ordersForView.length} color="slate" icon="👁" />
-          <StatPill
-            label="New"
-            value={stats.fresh}
-            color="indigo"
-            icon="✨"
-            active={filterLevel === "new"}
-            onClick={() => setFilterLevel((p) => (p === "new" ? "" : "new"))}
-          />
-          <StatPill
-            label="N1"
-            value={stats.n1}
-            color="amber"
-            icon="📞"
-            active={filterLevel === "n1"}
-            onClick={() => setFilterLevel((p) => (p === "n1" ? "" : "n1"))}
-          />
-          <StatPill
-            label="N2"
-            value={stats.n2}
-            color="orange"
-            icon="📞"
-            active={filterLevel === "n2"}
-            onClick={() => setFilterLevel((p) => (p === "n2" ? "" : "n2"))}
-          />
-          <StatPill
-            label="N3"
-            value={stats.n3}
-            color="rose"
-            icon="📞"
-            active={filterLevel === "n3"}
-            onClick={() => setFilterLevel((p) => (p === "n3" ? "" : "n3"))}
-          />
-          <StatPill
-            label="N4"
-            value={stats.n4}
-            color="red"
-            icon="📞"
-            active={filterLevel === "n4"}
-            onClick={() => setFilterLevel((p) => (p === "n4" ? "" : "n4"))}
-          />
-          <StatPill
-            label="Nowtp"
-            value={stats.nowtp}
-            color="violet"
-            icon="🚫"
-            active={filterLevel === "nowtp"}
-            onClick={() => setFilterLevel((p) => (p === "nowtp" ? "" : "nowtp"))}
-          />
-          <StatPill
-            label="Enatt"
-            value={stats.enatt}
-            color="fuchsia"
-            icon="⏳"
-            active={filterLevel === "enatt"}
-            onClick={() => setFilterLevel((p) => (p === "enatt" ? "" : "enatt"))}
-          />
-          <StatPill label="Contacted" value={stats.contacted} color="teal" icon="💬" />
-          <StatPill label="Confirmed today" value={confirmedToday} color="emerald" icon="✅" />
-        </div>
-        {meta.assigned_total > ordersForView.length && (
-          <div className="text-xs text-gray-500">
-            Showing {ordersForView.length} of {meta.assigned_total} on page {pageIndex + 1} — use the pager below to see the rest.
-          </div>
-        )}
         {tagsAssigned.length === 0 && (
-          <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-            No tags assigned to your account yet. Ask your admin to add at least one Shopify tag.
+          <div className="flex items-start gap-2.5 rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-900 ring-1 ring-inset ring-amber-200">
+            <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden />
+            <span>No tags are assigned to your account yet, so your queue is empty. Ask your admin to add at least one Shopify tag.</span>
           </div>
         )}
-        {error && <div className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</div>}
-        {syncCount > 0 && (
-          <div className={`rounded-xl border px-3 py-2 text-sm flex flex-wrap items-center gap-2 ${
-            syncState.blockedCount > 0
-              ? "border-rose-300 bg-rose-50 text-rose-900"
-              : "border-amber-300 bg-amber-50 text-amber-900"
-          }`} role="status" aria-live="polite">
-            <span className="font-semibold">
-              {syncState.blockedCount > 0
-                ? `${syncCount} action${syncCount === 1 ? "" : "s"} not saved yet`
-                : `Saving ${syncCount} action${syncCount === 1 ? "" : "s"}…`}
-            </span>
+        {error && (
+          <div className="cf-fade-in flex items-start gap-2.5 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-900 ring-1 ring-inset ring-rose-200">
+            <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" aria-hidden />
+            <span className="flex-1">{error}</span>
+            <button type="button" onClick={refreshAll} className="text-xs font-semibold underline">Try again</button>
+          </div>
+        )}
+        {syncState.blockedCount > 0 && (
+          <div className="cf-fade-in flex flex-wrap items-center gap-2 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-900 ring-1 ring-inset ring-rose-200" role="status" aria-live="polite">
+            <CircleAlert className="h-4 w-4 shrink-0 text-rose-600" aria-hidden />
+            <span className="font-semibold">{syncCount} action{syncCount === 1 ? "" : "s"} not saved yet</span>
             <span className="text-xs opacity-80">
               {syncState.lastError || "Keep this page open; every action is queued safely and will be counted after confirmation."}
             </span>
-            {syncState.items?.[0] && (
-              <span className="rounded-md bg-white/70 px-2 py-1 text-xs font-medium">
-                Next: {syncState.items[0].orderLabel || "order"} · {String(syncState.items[0].tag || "").toUpperCase()}
-              </span>
-            )}
-            <button
-              type="button"
-              onClick={retrySyncQueueNow}
-              className="ml-auto rounded-lg border border-current bg-white/70 px-3 py-1 text-xs font-semibold hover:bg-white"
-            >Retry now</button>
+            <button type="button" onClick={retrySyncQueueNow} className={`${BTN.secondary} ml-auto h-8 text-xs`}>Retry now</button>
           </div>
         )}
 
-        {/* Bulk-action bar */}
-        <section className="bg-white border border-gray-200 rounded-2xl p-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="text-xs text-gray-600 inline-flex items-center gap-2 select-none">
+        {/* Overview + get more orders */}
+        <section className="grid gap-3 sm:gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,440px)]">
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-2 sm:gap-4">
+            <KpiCard icon={Inbox} tone="sky" label="In my queue" value={Number(levelCounts.total || 0)} loading={firstLoad} />
+            <KpiCard
+              icon={Sparkles}
+              tone="indigo"
+              label="Not called yet"
+              value={stats.fresh}
+              loading={firstLoad}
+              active={filterLevel === "new"}
+              onClick={() => setFilterLevel((p) => (p === "new" ? "" : "new"))}
+            />
+            <KpiCard icon={Phone} tone="amber" label="Contacted" value={stats.contacted} loading={firstLoad} />
+            <KpiCard
+              icon={CalendarCheck}
+              tone="emerald"
+              label="Confirmed today"
+              value={confirmedToday}
+              hint={myRank && myRank.of > 1 ? `#${myRank.rank} of ${myRank.of} in team` : null}
+            />
+          </div>
+          <GetMoreOrdersCard
+            disabled={tagsAssigned.length === 0 && !isAdmin}
+            isAdmin={isAdmin}
+            onPull={openPull}
+          />
+        </section>
+
+        {/* Queue */}
+        <section className={`${CARD} overflow-hidden`}>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 pt-4 sm:px-5">
+            <div className="min-w-0">
+              <h2 className="text-base font-semibold text-slate-900">My queue</h2>
+              <p className="text-xs text-slate-500">
+                {firstLoad ? "Loading orders…" : (
+                  <>
+                    {ordersForView.length} shown
+                    {meta.assigned_total > ordersForView.length && <> of <AnimatedNumber value={meta.assigned_total} /></>}
+                    {filterLevel ? <> · {activeLevel.label}</> : null}
+                    {" "}· tap a row for details
+                  </>
+                )}
+              </p>
+            </div>
+            <div className="ml-auto hidden sm:block">{pagerControls}</div>
+          </div>
+
+          <LevelTabs value={filterLevel} counts={levelCounts} onChange={setFilterLevel} />
+
+          <div className="flex items-center gap-2 border-y border-slate-100 bg-slate-50/70 px-4 py-2 sm:px-5 xl:hidden">
+            <label className="inline-flex select-none items-center gap-2 text-xs font-medium text-slate-600">
               <input
                 type="checkbox"
                 checked={allSelected}
                 onChange={toggleSelectAll}
-                ref={(el) => {
-                  if (!el) return;
-                  el.indeterminate = selected.size > 0 && !allSelected;
-                }}
+                ref={(el) => { if (el) el.indeterminate = selected.size > 0 && !allSelected; }}
+                className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
               />
-              {selected.size > 0 ? `${selected.size} selected` : "Select all visible"}
+              {selected.size > 0 ? `${selected.size} selected` : "Select all"}
             </label>
-            <div className="relative flex-1 min-w-[220px] max-w-md">
+          </div>
+
+          {/* Desktop table only at xl+ (≥1280px effective width). At anything narrower
+              (including a zoomed-in desktop) the scroll-free card list takes over so
+              the action buttons can never end up clipped. */}
+          <div className="hidden xl:block overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="border-t border-slate-100 bg-slate-50/70 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th className="w-10 pl-4 pr-1 py-2.5">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={toggleSelectAll}
+                      ref={(el) => { if (el) el.indeterminate = selected.size > 0 && !allSelected; }}
+                      aria-label="Select all visible orders"
+                      className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                  </th>
+                  <th className="px-2 py-2.5">Order</th>
+                  <th className="px-2 py-2.5">Customer</th>
+                  <th className="px-2 py-2.5">Phone</th>
+                  <th className="px-2 py-2.5 text-right">Total</th>
+                  <th className="px-3 py-2.5">Tags</th>
+                  <th className="sticky right-0 bg-slate-50 px-3 py-2.5 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody ref={tableBodyRef}>
+                {firstLoad && <SkeletonRows columns={7} />}
+                {displayRows.map(renderTableRow)}
+              </tbody>
+            </table>
+            {emptyState}
+          </div>
+
+          {/* Card list — used on anything narrower than xl (≤1280px), including
+              zoomed-in desktops, so the action buttons never get clipped. */}
+          <div className="xl:hidden">
+            {firstLoad && <SkeletonCards />}
+            <div ref={cardListRef} className="divide-y divide-slate-100">
+              {displayRows.map(({ item, leaving }) => renderOrderCard(item, { leaving }))}
+            </div>
+            {emptyState}
+          </div>
+
+          <div className="flex items-center gap-2 border-t border-slate-100 bg-slate-50/70 px-4 py-2.5 sm:px-5">
+            <span className="text-xs text-slate-500">
+              <span className="font-semibold text-slate-700">{ordersForView.length}</span> on this page ·{" "}
+              <span className="font-semibold text-slate-700"><AnimatedNumber value={meta.assigned_total} /></span> {filterLevel ? activeLevel.label : "total"}
+            </span>
+            <div className="ml-auto">{pagerControls}</div>
+          </div>
+        </section>
+
+        {/* Team performance */}
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Trophy className="h-4 w-4 text-amber-500" aria-hidden />
+            <h2 className="text-sm font-semibold text-slate-900">Team today</h2>
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600">all stores</span>
+            {meta.today_label && (
+              <span className="ml-auto text-[11px] text-slate-500">{meta.today_label} · confirmations counted by clicks today</span>
+            )}
+          </div>
+          {sortedTeam.length === 0 ? (
+            <div className={`${CARD} px-4 py-6 text-center text-xs text-slate-500`}>No team data yet.</div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              {sortedTeam.map((a, idx) => (
+                <AgentCard key={a.id} agent={a} rank={idx + 1} isMe={a.id === me.id} maxConfirmed={teamMaxConfirmed} />
+              ))}
+            </div>
+          )}
+        </section>
+      </main>
+
+      {/* Floating bulk-action bar — only while something is selected. */}
+      {selected.size > 0 && (
+        <div className="cf-slide-up fixed bottom-3 left-1/2 z-40 w-[min(760px,calc(100vw-1.5rem))] -translate-x-1/2 sm:bottom-5">
+          <div className="flex flex-wrap items-center gap-2 rounded-2xl bg-slate-900 p-2 pl-4 text-white shadow-2xl shadow-slate-900/30 ring-1 ring-white/10">
+            <span className="text-sm font-semibold tabular-nums">{selected.size} selected</span>
+            <div className="relative min-w-[180px] flex-1">
               <input
                 type="text"
                 value={bulkTag}
@@ -1249,387 +1684,40 @@ function AgentView({ me }) {
                 onFocus={() => setShowBulkSuggestions(true)}
                 onBlur={() => setTimeout(() => setShowBulkSuggestions(false), 120)}
                 onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); applyBulkTag(); } }}
-                placeholder="Tag to add (e.g. agent_yasmine, cod 18/05/26)"
-                className="w-full text-sm border border-gray-300 rounded-lg px-3 py-1.5"
+                placeholder="Tag to add, e.g. cod 18/05/26"
+                className="h-9 w-full rounded-xl border-0 bg-white/10 px-3 text-sm text-white placeholder:text-slate-400 focus:bg-white/15 focus:ring-2 focus:ring-indigo-400"
               />
               {showBulkSuggestions && tagSuggestions.length > 0 && (
-                <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-56 overflow-auto">
+                <div className="cf-pop-in absolute bottom-full z-20 mb-2 max-h-56 w-full overflow-auto rounded-xl bg-white py-1 text-slate-800 shadow-xl ring-1 ring-slate-900/10">
                   {tagSuggestions.map((t) => (
                     <button
                       key={t}
                       type="button"
                       onMouseDown={(ev) => { ev.preventDefault(); setBulkTag(t); setShowBulkSuggestions(false); }}
-                      className="block w-full text-left text-xs px-3 py-1.5 hover:bg-indigo-50"
+                      className="block w-full px-3 py-1.5 text-left text-xs hover:bg-indigo-50"
                     >{t}</button>
                   ))}
                 </div>
               )}
             </div>
             <button
+              type="button"
               onClick={applyBulkTag}
-              disabled={bulkBusy || selected.size === 0 || !bulkTag.trim()}
-              className={`text-xs px-4 py-1.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-50 shadow-sm ${BTN_TAP}`}
-              title="Add the chosen tag to every selected order"
-            >
-              {bulkBusy ? (
-                <span className="inline-flex items-center gap-1.5">
-                  <span className="inline-block w-3 h-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
-                  Applying…
-                </span>
-              ) : `Apply to ${selected.size || "…"}`}
-            </button>
-            {selected.size > 0 && (
-              <button
-                onClick={clearSelection}
-                className={`text-xs px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
-              >Clear</button>
-            )}
-            <div className="text-[11px] text-gray-500 ml-auto">
-              Tip: a <code className="bg-gray-100 px-1 rounded">cod dd/mm/yy</code> tag removes the order from your queue.
-            </div>
+              disabled={bulkBusy || !bulkTag.trim()}
+              className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-indigo-500 px-3.5 text-sm font-semibold text-white hover:bg-indigo-400 disabled:opacity-40 active:scale-[0.97] transition"
+              title="Add the tag to every selected order (a cod dd/mm/yy tag removes them from your queue)"
+            >{bulkBusy ? <Spinner /> : <Check className="h-4 w-4" aria-hidden />} Apply</button>
+            <button
+              type="button"
+              onClick={clearSelection}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-xl text-slate-300 hover:bg-white/10 hover:text-white"
+              aria-label="Clear selection"
+              title="Clear selection"
+            ><X className="h-4 w-4" aria-hidden /></button>
           </div>
-        </section>
+        </div>
+      )}
 
-        {/* Pull-orders panel — claim unassigned orders or yank level-tagged
-            orders away from other agents. Each button opens a modal that
-            previews the available count and lets the agent choose how many to
-            take. After approve, those orders are tagged with the agent's own
-            tag and every other active agent's tag is stripped off them. */}
-        <section className="bg-gradient-to-br from-indigo-50 to-violet-50 border border-indigo-200 rounded-2xl p-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="text-xs font-semibold text-indigo-900 mr-2">
-              ➕ Get more orders
-            </div>
-            <button
-              type="button"
-              onClick={() => setPullMode("new")}
-              className={`text-xs px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 shadow-sm ${BTN_TAP}`}
-              title="Pull unassigned new orders into your queue"
-            >✨ New</button>
-            <button
-              type="button"
-              onClick={() => setPullMode("n1")}
-              className={`text-xs px-3 py-1.5 rounded-lg bg-amber-500 text-white font-medium hover:bg-amber-600 shadow-sm ${BTN_TAP}`}
-              title="Pull N1 orders (with optional exclusion tags) into your queue"
-            >📞 N1</button>
-            <button
-              type="button"
-              onClick={() => setPullMode("n2")}
-              className={`text-xs px-3 py-1.5 rounded-lg bg-orange-500 text-white font-medium hover:bg-orange-600 shadow-sm ${BTN_TAP}`}
-            >📞 N2</button>
-            <button
-              type="button"
-              onClick={() => setPullMode("n3")}
-              className={`text-xs px-3 py-1.5 rounded-lg bg-rose-500 text-white font-medium hover:bg-rose-600 shadow-sm ${BTN_TAP}`}
-            >📞 N3</button>
-            <button
-              type="button"
-              onClick={() => setPullMode("n4")}
-              className={`text-xs px-3 py-1.5 rounded-lg bg-red-500 text-white font-medium hover:bg-red-600 shadow-sm ${BTN_TAP}`}
-            >📞 N4</button>
-            <button
-              type="button"
-              onClick={() => setPullMode("nowtp")}
-              className={`text-xs px-3 py-1.5 rounded-lg bg-violet-500 text-white font-medium hover:bg-violet-600 shadow-sm ${BTN_TAP}`}
-            >🚫 Nowtp</button>
-            <button
-              type="button"
-              onClick={() => setPullMode("enatt")}
-              className={`text-xs px-3 py-1.5 rounded-lg bg-fuchsia-500 text-white font-medium hover:bg-fuchsia-600 shadow-sm ${BTN_TAP}`}
-            >⏳ Enatt</button>
-            <div className="text-[11px] text-indigo-700/80 ml-auto">
-              Pulled orders are tagged with your tag and any other agent's tag is removed.
-            </div>
-          </div>
-        </section>
-
-        {/* Orders — desktop table only at xl+ (≥1280px effective width). At anything
-            narrower (including a zoomed-in desktop) the scroll-free card list below
-            takes over so the action buttons can never end up clipped. */}
-        <section className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
-          <div className="hidden xl:block overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
-                <tr>
-                  <th className="px-3 py-2 w-8">
-                    <input
-                      type="checkbox"
-                      checked={allSelected}
-                      onChange={toggleSelectAll}
-                      ref={(el) => { if (el) el.indeterminate = selected.size > 0 && !allSelected; }}
-                      aria-label="Select all visible orders"
-                    />
-                  </th>
-                  <th className="px-2 py-2">Order</th>
-                  <th className="px-2 py-2">Customer</th>
-                  <th className="px-2 py-2">Phone</th>
-                  <th className="px-2 py-2 hidden 2xl:table-cell">Address</th>
-                  <th className="px-2 py-2">Total</th>
-                  <th className="px-2 py-2 hidden 2xl:table-cell">Created</th>
-                  <th className="px-2 py-2">Tags</th>
-                  <th className="px-2 py-2 text-right sticky right-0 bg-gray-50 shadow-[-6px_0_8px_-6px_rgba(0,0,0,0.08)]">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {ordersForView.length === 0 && !loading && (
-                  <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-500">No orders in your queue.</td></tr>
-                )}
-                {ordersForView.map((o) => {
-                  const isOpen = expanded.has(o.id);
-                  const pickerOpen = datePickerFor === o.id;
-                  const isSyncing = pendingOrderIds.has(o.id);
-                  return (
-                    <React.Fragment key={o.id}>
-                      <tr
-                        className={`border-t border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors ${
-                          isOpen || pickerOpen
-                            ? "bg-indigo-50/80 ring-1 ring-indigo-200 shadow-inner border-l-4 border-l-indigo-500"
-                            : selected.has(o.id)
-                              ? "bg-indigo-50/40"
-                              : ""
-                        }`}
-                        onClick={(e) => {
-                          const tag = (e.target?.tagName || "").toLowerCase();
-                          if (["button", "input", "select", "a", "svg", "path", "label"].includes(tag)) return;
-                          setExpanded((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(o.id)) next.delete(o.id); else next.add(o.id);
-                            return next;
-                          });
-                        }}
-                      >
-                        <td className="px-3 py-2 w-8" onClick={(ev) => ev.stopPropagation()}>
-                          <input
-                            type="checkbox"
-                            checked={selected.has(o.id)}
-                            onChange={() => toggleRowSelected(o.id)}
-                            aria-label={`Select order ${o.name || o.number}`}
-                          />
-                        </td>
-                        <td className="px-3 py-2 font-medium">
-                          {(() => {
-                            const url = shopifyOrderUrl(o, meta.shop_domain);
-                            const label = o.name || `#${o.number}`;
-                            return url ? (
-                              <a
-                                href={url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(ev) => ev.stopPropagation()}
-                                className="text-indigo-700 hover:text-indigo-900 hover:underline"
-                                title="Open in Shopify admin"
-                              >{label}</a>
-                            ) : (
-                              <span>{label}</span>
-                            );
-                          })()}
-                        </td>
-                        <td className="px-3 py-2">{o.customer_name || <span className="text-gray-400">—</span>}</td>
-                        <td className="px-3 py-2">
-                          {o.phone ? (
-                            <div className="inline-flex items-center gap-1.5 bg-sky-50 border border-sky-200 rounded-lg px-2 py-1">
-                              <span className="font-mono font-bold text-sm text-sky-900 tracking-tight">{o.phone}</span>
-                              <button
-                                type="button"
-                                onClick={(ev) => { ev.stopPropagation(); handleCopyPhone(o); }}
-                                title={`Copy ${moroccoInternational(o.phone)} (international, no +)`}
-                                className={`text-sky-500 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
-                              >📋</button>
-                            </div>
-                          ) : (
-                            <span className="text-gray-400 text-xs">—</span>
-                          )}
-                        </td>
-                        <td className="px-2 py-2 text-xs text-gray-700 hidden 2xl:table-cell">
-                          {[o.shipping_address1, o.shipping_city].filter(Boolean).join(", ") || <span className="text-gray-400">—</span>}
-                        </td>
-                        <td className="px-2 py-2 whitespace-nowrap font-semibold tabular-nums">{o.total_price} <span className="text-[11px] font-medium text-gray-500">{o.currency}</span></td>
-                        <td className="px-2 py-2 text-xs text-gray-500 whitespace-nowrap hidden 2xl:table-cell">
-                          {o.created_at ? new Date(o.created_at).toLocaleString() : ""}
-                        </td>
-                        <td className="px-3 py-2">
-                          <div className="flex flex-wrap gap-1 max-w-xs">
-                            {(o.tags || []).map((t) => (
-                              <span key={t} className={`inline-flex items-center text-xs px-2 py-0.5 rounded-full border ${isCodTag(t) ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-50 text-gray-700 border-gray-200"}`}>
-                                {t}
-                                <button
-                                  disabled={isSyncing}
-                                  onClick={(ev) => { ev.stopPropagation(); removeTagOptimistic(o, t); }}
-                                  className={`ml-1 text-gray-400 hover:text-rose-600 hover:scale-110 ${BTN_TAP}`}
-                                  title="Remove tag"
-                                >×</button>
-                              </span>
-                            ))}
-                          </div>
-                        </td>
-                        <td className="px-2 py-2 text-right whitespace-nowrap sticky right-0 bg-white shadow-[-6px_0_8px_-6px_rgba(0,0,0,0.08)]">
-                          <div className="inline-flex items-center gap-1">
-                            <button
-                              disabled={isSyncing}
-                              onClick={(ev) => { ev.stopPropagation(); handlePhone(o); }}
-                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.sky} !min-w-[44px] !px-2`}
-                              title="Copy phone + advance n1/n2/n3/n4"
-                            >
-                              <span aria-hidden className="text-sm">📞</span>
-                              <span>{(tagsInCycle(o.tags || [], PHONE_TAGS).slice(-1)[0] || "").toUpperCase() || "Call"}</span>
-                            </button>
-                            <button
-                              disabled={isSyncing}
-                              onClick={(ev) => { ev.stopPropagation(); handleNowtp(o); }}
-                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.violet} !min-w-[44px] !px-2`}
-                              title="No-WhatsApp attempt — cycles nowtp1 → nowtp2 → nowtp3 → nowtp4"
-                            >
-                              <span aria-hidden className="text-sm">🚫</span>
-                              <span>{(() => {
-                                const t = tagsInCycle(o.tags || [], NOWTP_TAGS).slice(-1)[0];
-                                return t ? t.replace("nowtp", "NW").toUpperCase() : "NW";
-                              })()}</span>
-                            </button>
-                            <button
-                              disabled={isSyncing}
-                              onClick={(ev) => { ev.stopPropagation(); handleEnatt(o); }}
-                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.fuchsia} !min-w-[44px] !px-2`}
-                              title="En attente — cycles enatt1 → enatt2 → enatt3 → enatt4"
-                            >
-                              <span aria-hidden className="text-sm">⏳</span>
-                              <span>{(() => {
-                                const t = tagsInCycle(o.tags || [], ENATT_TAGS).slice(-1)[0];
-                                return t ? t.replace("enatt", "EA").toUpperCase() : "EA";
-                              })()}</span>
-                            </button>
-                            <button
-                              disabled={isSyncing}
-                              onClick={(ev) => { ev.stopPropagation(); openDatePicker(o); }}
-                              className={`${ACTION_BTN_BASE} ${ACTION_BTN_THEMES.emerald} !min-w-[36px] !px-2`}
-                              title="Confirm for a delivery date"
-                            >
-                              <span aria-hidden className="text-base">✅</span>
-                            </button>
-                            <div className="relative">
-                              <button
-                                onClick={(ev) => {
-                                  ev.stopPropagation();
-                                  setActionsDropdownFor((prev) => (prev === o.id ? null : o.id));
-                                }}
-                                className="text-xs px-2 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 text-gray-700"
-                                title="More actions"
-                                aria-haspopup="menu"
-                                aria-expanded={actionsDropdownFor === o.id}
-                              >⋯</button>
-                              {actionsDropdownFor === o.id && (
-                                <div
-                                  role="menu"
-                                  onClick={(ev) => ev.stopPropagation()}
-                                  className="absolute right-0 mt-1 w-44 bg-white border border-gray-200 rounded-lg shadow-lg z-20 overflow-hidden"
-                                >
-                                  <button
-                                    role="menuitem"
-                                    onClick={() => { setCancelModalFor(o); setActionsDropdownFor(null); }}
-                                    className="block w-full text-left text-xs px-3 py-2 hover:bg-rose-50 text-rose-700"
-                                  >Cancel order…</button>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                      {pickerOpen && (
-                        <tr className="bg-indigo-50/40">
-                          <td colSpan={9} className="px-3 py-2">
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs text-gray-700">Confirm delivery for:</span>
-                              <input
-                                type="date"
-                                value={chosenDate}
-                                onChange={(e) => setChosenDate(e.target.value)}
-                                className="text-sm border border-gray-300 rounded px-2 py-1"
-                              />
-                              <button
-                                disabled={isSyncing}
-                                onClick={(ev) => { ev.stopPropagation(); submitConfirm(o); }}
-                                className={`text-xs px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm ${BTN_TAP}`}
-                              >Confirm</button>
-                              <button
-                                onClick={(ev) => { ev.stopPropagation(); setDatePickerFor(null); }}
-                                className={`text-xs px-3 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
-                              >Cancel</button>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                      {isOpen && (
-                        <tr className="bg-gray-50/60">
-                          <td colSpan={9} className="px-3 py-3">
-                            <OrderExpanded
-                              order={o}
-                              store={store}
-                              shopDomain={meta.shop_domain}
-                              onToast={pushToast}
-                              onOrderUpdated={(updatedOrder) => patchOrderInPlace(o.id, () => updatedOrder)}
-                            />
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Card list — used on anything narrower than xl (≤1280px), including
-              zoomed-in desktops, so the action buttons never get clipped. */}
-          <div className="xl:hidden divide-y divide-gray-100">
-            {ordersForView.length === 0 && !loading && (
-              <div className="px-3 py-6 text-center text-gray-500">No orders in your queue.</div>
-            )}
-            {ordersForView.map(renderOrderCard)}
-          </div>
-
-          {/* Pagination */}
-          <div className="flex items-center gap-2 px-3 py-2 border-t border-gray-100 bg-gray-50">
-            <button
-              onClick={() => goToPage(pageIndex - 1)}
-              disabled={!hasPrevPage || pageBusy}
-              className={`text-xs px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed ${BTN_TAP}`}
-            >← Prev</button>
-            <span className="text-xs text-gray-700">
-              Page {pageIndex + 1}{pages.length > 1 ? ` of ${pages.length}${hasNextPage && pages[pageIndex]?.nextCursor && pageIndex + 1 === pages.length ? "+" : ""}` : ""}
-            </span>
-            <button
-              onClick={() => goToPage(pageIndex + 1)}
-              disabled={!hasNextPage || pageBusy}
-              className={`text-xs px-3 py-1 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed ${BTN_TAP}`}
-            >{pageBusy ? "Loading…" : "Next →"}</button>
-            <span className="ml-auto text-[11px] text-gray-500">
-              {ordersForView.length} visible · {meta.assigned_total} total
-            </span>
-          </div>
-        </section>
-
-        {/* Team performance */}
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold flex items-center gap-2">
-              <span>🏆</span>
-              <span>Team performance today</span>
-              <span className="text-[10px] uppercase tracking-wide font-semibold bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-full px-2 py-0.5">all stores</span>
-            </div>
-            <div className="text-[11px] text-gray-500">
-              {meta.today_label && <span>{meta.today_label} · confirmations counted by clicks today</span>}
-            </div>
-          </div>
-          {teamStats.length === 0 ? (
-            <div className="text-xs text-gray-500">No team data yet.</div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {teamStats.map((a) => (
-                <AgentCard key={a.id} agent={a} isMe={a.id === me.id} />
-              ))}
-            </div>
-          )}
-        </section>
-      </main>
       {cancelModalFor && (
         <CancelOrderModal
           order={cancelModalFor}
@@ -1648,32 +1736,248 @@ function AgentView({ me }) {
       )}
       {pullMode && (
         <PullOrdersModal
-          mode={pullMode}
+          initialMode={pullMode.mode}
+          initialIncludeAssigned={pullMode.includeAssigned}
           store={store}
-          myTags={agentInfo?.tags || me?.tags || []}
+          me={{ ...me, tags: tagsAssigned }}
+          isAdmin={isAdmin}
+          team={teamStats}
           onClose={() => setPullMode(null)}
-          onSuccess={(result) => {
+          onSuccess={(result, summary) => {
             setPullMode(null);
-            const took = Number(result.reassigned || 0);
-            pushToast(
-              `✅ Pulled ${result.pulled} order${result.pulled === 1 ? "" : "s"} into your queue`
-              + (took ? ` (${took} taken over from another agent)` : ""),
-              "success",
-            );
+            const pulled = Number(result.pulled || 0);
+            if (pulled === 0) {
+              pushToast("No orders were left to pull — someone may have just taken them.", "warn", 5000);
+            } else {
+              const took = Number(result.reassigned || 0);
+              pushToast(
+                summary?.message
+                  || (`Pulled ${pulled} order${pulled === 1 ? "" : "s"} into your queue`
+                    + (took ? ` (${took} taken over from another agent)` : "")),
+                "success",
+                4500,
+              );
+            }
             // A tag removal that failed leaves the order owned by two agents.
             if (result.reassign_failed) {
               pushToast(
-                `⚠️ ${result.reassign_failed} order${result.reassign_failed === 1 ? "" : "s"} kept the previous agent's tag — remove it by hand`,
+                `${result.reassign_failed} order${result.reassign_failed === 1 ? "" : "s"} kept the previous agent's tag — remove it by hand`,
                 "error",
                 7000,
               );
             }
             // The agent's queue + every other agent's queue changed — refresh both.
-            loadFirst();
+            if (filterLevel && pulled > 0 && (!result.target_agent_id || result.target_agent_id === me.id)) {
+              setFilterLevel("");
+            } else {
+              loadFirst();
+            }
             loadTeam();
           }}
         />
       )}
+    </div>
+  );
+}
+
+// ---------- Overview widgets ----------
+
+function KpiCard({ icon: Icon, tone = "slate", label, value, hint, loading = false, onClick, active = false }) {
+  const t = TONES[tone] || TONES.slate;
+  const interactive = typeof onClick === "function";
+  const Tag = interactive ? "button" : "div";
+  return (
+    <Tag
+      type={interactive ? "button" : undefined}
+      onClick={onClick}
+      aria-pressed={interactive ? active : undefined}
+      className={`${CARD} group relative flex items-center gap-3 p-3 text-left sm:flex-col sm:items-start sm:gap-0 sm:p-4 ${
+        interactive ? "cursor-pointer transition hover:-translate-y-0.5 hover:shadow-md active:translate-y-0" : ""
+      } ${active ? "ring-2 ring-indigo-500 border-transparent" : ""}`}
+    >
+      <div className="flex items-center gap-2 sm:w-full">
+        <span className={`flex h-9 w-9 sm:h-8 sm:w-8 shrink-0 items-center justify-center rounded-xl ring-1 ring-inset ${t.soft}`}>
+          <Icon className="h-4 w-4" aria-hidden />
+        </span>
+        {active && <span className="ml-auto hidden rounded-full bg-indigo-600 px-2 py-0.5 text-[10px] font-semibold text-white sm:inline">Filtering</span>}
+      </div>
+      <div className="min-w-0">
+        <div className="text-[22px] sm:mt-3 sm:text-[28px] font-bold leading-none tracking-tight text-slate-900">
+          {loading ? <span className="cf-shimmer inline-block h-6 w-10 sm:h-7 sm:w-12 rounded-md align-middle" /> : <AnimatedNumber value={value} />}
+        </div>
+        <div className="mt-1 sm:mt-1.5 truncate text-[11px] sm:text-xs font-medium text-slate-500">{label}</div>
+        {hint && <div className={`mt-0.5 sm:mt-1 truncate text-[10px] sm:text-[11px] font-semibold ${t.text}`}>{hint}</div>}
+      </div>
+    </Tag>
+  );
+}
+
+const PULL_BUTTONS = [
+  { mode: "n1", label: "N1", tone: "amber" },
+  { mode: "n2", label: "N2", tone: "orange" },
+  { mode: "n3", label: "N3", tone: "rose" },
+  { mode: "n4", label: "N4", tone: "red" },
+  { mode: "nowtp", label: "No WA", tone: "violet" },
+  { mode: "enatt", label: "En att.", tone: "fuchsia" },
+];
+
+function GetMoreOrdersCard({ onPull, isAdmin, disabled }) {
+  return (
+    <div className={`${CARD} relative overflow-hidden p-4`}>
+      <div aria-hidden className="pointer-events-none absolute -right-10 -top-12 h-36 w-36 rounded-full bg-gradient-to-br from-indigo-200/50 to-violet-200/40 blur-2xl" />
+      <div className="relative flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-sm font-semibold text-slate-900">Get more orders</h2>
+          <p className="mt-0.5 hidden text-xs text-slate-500 sm:block">Pulled orders get your tag and leave everyone else's queue.</p>
+        </div>
+      </div>
+      <div className="relative mt-3 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          data-testid="pull-new"
+          disabled={disabled}
+          onClick={() => onPull("new")}
+          className={`${BTN.primary} h-10`}
+        >
+          <Sparkles className="h-4 w-4" aria-hidden /> New orders
+        </button>
+        <button
+          type="button"
+          disabled={disabled && !isAdmin}
+          onClick={() => onPull("new", { includeAssigned: true })}
+          className={`${BTN.secondary} h-10`}
+          title="Move orders that currently sit in another agent's queue"
+        >
+          <ArrowRightLeft className="h-4 w-4 text-indigo-600" aria-hidden /> {isAdmin ? "Move orders" : "From an agent"}
+        </button>
+      </div>
+      <div className="cf-scroll-x relative -mx-4 mt-2 flex gap-1.5 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0">
+        {PULL_BUTTONS.map((b) => (
+          <button
+            key={b.mode}
+            type="button"
+            disabled={disabled}
+            onClick={() => onPull(b.mode)}
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-white px-2.5 text-xs font-semibold text-slate-700 ring-1 ring-inset ring-slate-200 hover:bg-slate-50 hover:ring-slate-300 active:scale-[0.96] transition disabled:opacity-50"
+            title={`Pull ${b.label} orders into your queue`}
+          >
+            <span aria-hidden className={`h-2 w-2 rounded-full ${TONES[b.tone].dot}`} />
+            {b.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Level filter for the queue. Doubles as the per-level counter, so agents see where
+// their work is at a glance. Scrolls sideways on phones instead of wrapping.
+function LevelTabs({ value, counts, onChange }) {
+  return (
+    <div className="cf-scroll-x mt-3 flex gap-1.5 overflow-x-auto px-4 pb-3 sm:px-5" role="tablist" aria-label="Filter by call level">
+      {LEVELS.map((lv) => {
+        const active = value === lv.key;
+        const tone = TONES[lv.tone];
+        const n = Number(counts?.[lv.count] || 0);
+        return (
+          <button
+            key={lv.key || "all"}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => onChange(active && lv.key ? "" : lv.key)}
+            className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full pl-2.5 pr-1.5 text-xs font-semibold transition duration-200 active:scale-[0.96] ${
+              active ? `${tone.solid} shadow-sm` : "bg-white text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50 hover:text-slate-900"
+            }`}
+          >
+            {!active && <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${tone.dot}`} />}
+            {lv.label}
+            <span className={`min-w-[22px] rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${active ? "bg-white/25" : n > 0 ? "bg-slate-100 text-slate-700" : "bg-slate-50 text-slate-400"}`}>
+              <AnimatedNumber value={n} />
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function SkeletonRows({ columns = 7, rows = 6 }) {
+  return Array.from({ length: rows }).map((_, i) => (
+    <tr key={`sk-${i}`} className="border-t border-slate-100">
+      {Array.from({ length: columns }).map((__, j) => (
+        <td key={j} className="px-3 py-4">
+          <div className="cf-shimmer h-3.5 rounded" style={{ width: `${[16, 60, 120, 110, 60, 90, 180][j] || 80}px` }} />
+        </td>
+      ))}
+    </tr>
+  ));
+}
+
+function SkeletonCards({ rows = 4 }) {
+  return (
+    <div className="divide-y divide-slate-100">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} className="space-y-2.5 p-4">
+          <div className="flex justify-between"><div className="cf-shimmer h-4 w-24 rounded" /><div className="cf-shimmer h-4 w-16 rounded" /></div>
+          <div className="cf-shimmer h-4 w-40 rounded" />
+          <div className="cf-shimmer h-7 w-36 rounded-lg" />
+          <div className="cf-shimmer h-8 w-full rounded-lg" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Shared dialog shell: fades in, pops the panel, closes on Esc / backdrop, locks page
+// scroll, and becomes a bottom sheet on phones.
+function Modal({ onClose, busy = false, labelledBy, maxWidth = "max-w-md", children }) {
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    function onKey(e) { if (e.key === "Escape" && !busy) onClose?.(); }
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [busy, onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={labelledBy}
+      className="cf-fade-in fixed inset-0 z-50 flex items-end justify-center bg-slate-900/40 backdrop-blur-[2px] sm:items-center sm:p-4"
+      onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onClose?.(); }}
+    >
+      <div className={`cf-pop-in flex max-h-[92vh] w-full ${maxWidth} flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl ring-1 ring-slate-900/10 sm:rounded-2xl`}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ModalHeader({ id, icon: Icon, tone = "indigo", title, subtitle, onClose, busy }) {
+  const t = TONES[tone] || TONES.indigo;
+  return (
+    <div className="flex items-start gap-3 border-b border-slate-100 px-5 py-4">
+      {Icon && (
+        <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ring-1 ring-inset ${t.soft}`}>
+          <Icon className="h-5 w-5" aria-hidden />
+        </span>
+      )}
+      <div className="min-w-0 flex-1">
+        <h2 id={id} className="text-base font-semibold text-slate-900">{title}</h2>
+        {subtitle && <div className="mt-0.5 text-xs text-slate-500">{subtitle}</div>}
+      </div>
+      <button
+        type="button"
+        onClick={onClose}
+        disabled={busy}
+        className={`${BTN.ghost} h-8 w-8 !px-0 -mr-1.5`}
+        aria-label="Close"
+      ><X className="h-4 w-4" aria-hidden /></button>
     </div>
   );
 }
@@ -1706,35 +2010,27 @@ function CancelOrderModal({ order, store, onClose, onSuccess }) {
     }
   }
 
-  // Esc to close
-  useEffect(() => {
-    function onKey(e) { if (e.key === "Escape" && !busy) onClose?.(); }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
-
+  const fieldLabel = "mb-1.5 block text-xs font-semibold text-slate-700";
+  const checkRow = "flex cursor-pointer items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm text-slate-700 ring-1 ring-inset ring-slate-200 hover:bg-slate-50";
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 px-4" onClick={() => { if (!busy) onClose?.(); }}>
-      <div
-        className="bg-white border border-gray-200 rounded-2xl p-5 w-full max-w-md shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="text-base font-semibold mb-4">Cancel order {orderLabel}?</div>
-
-        <div className="mb-3">
-          <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">Cancel transactions</div>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={refund} onChange={(e) => setRefund(e.target.checked)} />
-            Cancel {amount} pending
-          </label>
-        </div>
-
-        <div className="mb-3">
-          <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">Reason for cancellation</label>
+    <Modal onClose={onClose} busy={busy} labelledBy="cancel-order-title">
+      <ModalHeader
+        id="cancel-order-title"
+        icon={Ban}
+        tone="rose"
+        title={`Cancel order ${orderLabel}?`}
+        subtitle={order?.customer_name ? `${order.customer_name} · ${amount}` : amount}
+        onClose={onClose}
+        busy={busy}
+      />
+      <div className="space-y-4 overflow-y-auto px-5 py-4">
+        <div>
+          <label className={fieldLabel} htmlFor="cancel-reason">Reason for cancellation</label>
           <select
+            id="cancel-reason"
             value={reason}
             onChange={(e) => setReason(e.target.value)}
-            className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm bg-white"
+            className="h-10 w-full rounded-xl border-0 bg-white px-3 text-sm ring-1 ring-inset ring-slate-200 focus:ring-2 focus:ring-rose-500"
           >
             <option value="CUSTOMER">Customer changed or canceled order</option>
             <option value="INVENTORY">Items unavailable</option>
@@ -1745,44 +2041,41 @@ function CancelOrderModal({ order, store, onClose, onSuccess }) {
           </select>
         </div>
 
-        <div className="mb-3">
-          <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">Staff note</label>
-          <div className="text-[11px] text-gray-500 mb-1">Only you and other staff can see this note.</div>
+        <div>
+          <label className={fieldLabel} htmlFor="cancel-note">Staff note <span className="font-normal text-slate-400">· only staff can see it</span></label>
           <textarea
+            id="cancel-note"
             value={staffNote}
             onChange={(e) => setStaffNote(e.target.value)}
             rows={2}
-            className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+            className="w-full rounded-xl border-0 px-3 py-2 text-sm ring-1 ring-inset ring-slate-200 focus:ring-2 focus:ring-rose-500"
             placeholder="Optional"
           />
         </div>
 
-        <label className="flex items-center gap-2 text-sm mb-4">
-          <input type="checkbox" checked={restock} onChange={(e) => setRestock(e.target.checked)} />
-          Restock inventory
-        </label>
-
-        {err && <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 mb-3">{err}</div>}
-
-        <div className="flex justify-end gap-2">
-          <button
-            onClick={onClose}
-            disabled={busy}
-            className="text-sm px-4 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50 active:scale-[0.96] transition-transform duration-75"
-          >Cancel</button>
-          <button
-            onClick={submit}
-            disabled={busy}
-            className="text-sm px-4 py-1.5 rounded-lg bg-rose-600 text-white font-medium hover:bg-rose-700 disabled:opacity-50 active:scale-[0.96] transition-transform duration-75 shadow-sm"
-          >{busy ? (
-            <span className="inline-flex items-center gap-1.5">
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
-              Cancelling…
-            </span>
-          ) : "Cancel order"}</button>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <label className={checkRow}>
+            <input type="checkbox" checked={refund} onChange={(e) => setRefund(e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-rose-600 focus:ring-rose-500" />
+            Cancel {amount} pending
+          </label>
+          <label className={checkRow}>
+            <input type="checkbox" checked={restock} onChange={(e) => setRestock(e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-rose-600 focus:ring-rose-500" />
+            Restock inventory
+          </label>
         </div>
+
+        {err && <div className="rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-700 ring-1 ring-inset ring-rose-200">{err}</div>}
       </div>
-    </div>
+      <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-3">
+        <button type="button" onClick={onClose} disabled={busy} className={`${BTN.secondary} h-10`}>Keep order</button>
+        <button
+          type="button"
+          onClick={submit}
+          disabled={busy}
+          className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-rose-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-rose-700 disabled:opacity-50 active:scale-[0.97] transition"
+        >{busy ? <><Spinner /> Cancelling…</> : "Cancel order"}</button>
+      </div>
+    </Modal>
   );
 }
 
@@ -1800,35 +2093,67 @@ function CancelOrderModal({ order, store, onClose, onSuccess }) {
 //             other agents' queues; the execute call strips those tags so the
 //             pulled order becomes exclusively this agent's.
 //
-// The modal previews the available count as the agent edits the exclude
-// inputs (debounced), then lets them pick how many to actually pull via
-// preset chips (10/20/50/100/All) or a free-form number.
-const PULL_LABELS = {
-  new:   { title: "Pull new (unassigned) orders", icon: "✨", color: "indigo" },
-  n1:    { title: "Pull N1 orders", icon: "📞", color: "amber" },
-  n2:    { title: "Pull N2 orders", icon: "📞", color: "orange" },
-  n3:    { title: "Pull N3 orders", icon: "📞", color: "rose" },
-  n4:    { title: "Pull N4 orders", icon: "📞", color: "red" },
-  nowtp: { title: "Pull Nowtp orders", icon: "🚫", color: "violet" },
-  enatt: { title: "Pull Enatt orders", icon: "⏳", color: "fuchsia" },
-};
+// Whenever other agents' orders are in the pool, the modal lists who owns how
+// many, and the agent can take from just one of them ("move Zineb's orders to
+// me"). Admins can also pick whose queue the orders go to.
+//
+// The count refreshes as filters change (debounced) and every 20 seconds while the
+// modal is open, so it never goes stale while the agent is deciding.
+const PULL_MODES = [
+  { mode: "new",   label: "New",         title: "Pull new orders",         tone: "indigo",  icon: Sparkles },
+  { mode: "n1",    label: "N1",          title: "Pull N1 orders",          tone: "amber",   icon: Phone },
+  { mode: "n2",    label: "N2",          title: "Pull N2 orders",          tone: "orange",  icon: Phone },
+  { mode: "n3",    label: "N3",          title: "Pull N3 orders",          tone: "rose",    icon: Phone },
+  { mode: "n4",    label: "N4",          title: "Pull N4 orders",          tone: "red",     icon: Phone },
+  { mode: "nowtp", label: "No WhatsApp", title: "Pull No-WhatsApp orders", tone: "violet",  icon: MessageCircleOff },
+  { mode: "enatt", label: "En attente",  title: "Pull En-attente orders",  tone: "fuchsia", icon: Hourglass },
+];
+const SOURCE_UNASSIGNED = "__unassigned__";
+const PULL_REFRESH_MS = 20_000;
 
-function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
-  const cfg = PULL_LABELS[mode] || PULL_LABELS.new;
+function agentLabel(a) {
+  return a?.name || a?.email || "agent";
+}
+
+function PullOrdersModal({ initialMode = "new", initialIncludeAssigned = false, store, me, isAdmin, team, onClose, onSuccess }) {
+  const [mode, setMode] = useState(initialMode);
+  const cfg = PULL_MODES.find((m) => m.mode === mode) || PULL_MODES[0];
   const isLevelMode = mode !== "new";
   const [excludeA, setExcludeA] = useState("");
   const [excludeB, setExcludeB] = useState("");
+  const [showFilters, setShowFilters] = useState(false);
   // "new" mode only: drop the other-agent exclusions so already-assigned orders
   // show up in the pool and can be taken over.
-  const [includeAssigned, setIncludeAssigned] = useState(false);
-  // Server-reported count for the current (mode, exclude_tags) combo.
-  const [available, setAvailable] = useState(null);
-  // How many of `available` currently belong to another agent.
-  const [assignedAvailable, setAssignedAvailable] = useState(0);
+  const [includeAssigned, setIncludeAssigned] = useState(!!initialIncludeAssigned);
+  // Whose orders to take: "" = anyone in the pool, SOURCE_UNASSIGNED, or an agent id.
+  const [sourceId, setSourceId] = useState("");
+
+  // Whose queue the orders go to. Admins can pick any tagged agent; everyone else
+  // always pulls into their own queue.
+  const targetOptions = useMemo(() => {
+    const list = [];
+    const seen = new Set();
+    if ((me?.tags || []).length > 0 || !isAdmin) { list.push({ id: me.id, name: me.name, email: me.email, tags: me.tags || [], isMe: true }); seen.add(me.id); }
+    if (isAdmin) {
+      for (const a of team || []) {
+        if (!a?.id || seen.has(a.id) || !(a.tags || []).length) continue;
+        seen.add(a.id);
+        list.push({ id: a.id, name: a.name, email: a.email, tags: a.tags || [], isMe: a.id === me.id });
+      }
+    }
+    return list;
+  }, [me, isAdmin, team]);
+  const [targetId, setTargetId] = useState(() => targetOptions[0]?.id || me.id);
+  const target = targetOptions.find((t) => t.id === targetId) || targetOptions[0] || { id: me.id, name: me.name, isMe: true };
+  const targetIsMe = target.id === me.id;
+
+  const [preview, setPreview] = useState(null);
   const [previewing, setPreviewing] = useState(false);
   const [previewErr, setPreviewErr] = useState(null);
-  // Which of the user's agent_tags to apply on pull. Defaults to first.
-  const [agentTag, setAgentTag] = useState(() => (myTags && myTags[0]) || "");
+  const [previewAt, setPreviewAt] = useState(null);
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  // Which of the owner's agent_tags to apply on pull. Defaults to the first.
+  const [agentTag, setAgentTag] = useState(() => (target.tags || [])[0] || "");
   // How many orders to pull. `takeAll` overrides the number with the full pool.
   const [takeAll, setTakeAll] = useState(false);
   const [amount, setAmount] = useState(20);
@@ -1840,8 +2165,10 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
     () => [excludeA, excludeB].map((t) => String(t || "").trim()).filter(Boolean),
     [excludeA, excludeB],
   );
+  const showOwners = isLevelMode || includeAssigned;
+  const effectiveSource = showOwners ? sourceId : "";
 
-  // Debounced preview. Re-fetches the count whenever the exclude inputs settle.
+  // Debounced preview. Re-fetches whenever a filter settles, and on each refresh tick.
   useEffect(() => {
     const handle = setTimeout(async () => {
       const reqId = ++previewReqRef.current;
@@ -1849,35 +2176,57 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
       try {
         const js = await API.pullPreview({
           store, level: mode, exclude_tags: excludeTags, include_assigned: includeAssigned,
+          source_agent_id: effectiveSource || null,
+          target_agent_id: targetIsMe ? null : target.id,
         });
         if (reqId !== previewReqRef.current) return;
-        setAvailable(Number(js.available || 0));
-        setAssignedAvailable(Number(js.assigned_available || 0));
-        // If the server reports a different "default agent tag" and the user
-        // hasn't picked one yet, pre-fill it.
-        if (!agentTag && js.agent_tag) setAgentTag(js.agent_tag);
+        setPreview(js);
+        setPreviewAt(Date.now());
+        const ownerTags = js.agent_tags || [];
+        setAgentTag((cur) => (cur && ownerTags.some((t) => t.toLowerCase() === cur.toLowerCase()) ? cur : (js.agent_tag || ownerTags[0] || "")));
       } catch (e) {
         if (reqId !== previewReqRef.current) return;
         setPreviewErr(e?.message || "Preview failed");
-        setAvailable(0);
-        setAssignedAvailable(0);
+        setPreview(null);
       } finally {
         if (reqId === previewReqRef.current) setPreviewing(false);
       }
-    }, 350);
+    }, 300);
     return () => clearTimeout(handle);
-    // We intentionally ignore agentTag in the deps — it doesn't affect the count.
+    // agentTag doesn't affect the count.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store, mode, excludeA, excludeB, includeAssigned]);
+  }, [store, mode, excludeA, excludeB, includeAssigned, effectiveSource, target.id, refreshNonce]);
+
+  // Keep the number live while the modal stays open.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (!busy && document.visibilityState === "visible") setRefreshNonce((n) => n + 1);
+    }, PULL_REFRESH_MS);
+    return () => clearInterval(t);
+  }, [busy]);
+
+  const available = preview ? Number(preview.available || 0) : null;
+
+  // Never leave "How many" asking for more than exists (a stale 20 when only 18 remain).
+  useEffect(() => {
+    if (available != null && available > 0 && !takeAll && Number(amount) > available) setAmount(available);
+  }, [available, takeAll, amount]);
+  const assignedAvailable = preview ? Number(preview.assigned_available || 0) : 0;
+  const byAgent = preview?.by_agent || [];
+  const sourceAgent = byAgent.find((a) => a.id === effectiveSource) || null;
+  const wanted = takeAll ? available : Math.max(0, Number(amount) || 0);
+  const willPull = available == null ? wanted : Math.min(wanted || 0, available);
 
   async function submit() {
     const limit = takeAll ? 0 : Math.max(0, Number(amount) || 0);
     if (!takeAll && limit <= 0) {
-      setErr("Enter a number greater than 0 (or tick Take all).");
+      setErr("Enter a number greater than 0 (or pick Take all).");
       return;
     }
     if (!agentTag) {
-      setErr("No agent tag selected. Ask admin to assign one to your account.");
+      setErr(targetIsMe
+        ? "No agent tag selected. Ask admin to assign one to your account."
+        : `${agentLabel(target)} has no tag yet.`);
       return;
     }
     setBusy(true); setErr(null);
@@ -1885,8 +2234,17 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
       const js = await API.pullExecute({
         store, level: mode, exclude_tags: excludeTags, limit, agent_tag: agentTag,
         include_assigned: includeAssigned,
+        source_agent_id: effectiveSource || null,
+        target_agent_id: targetIsMe ? null : target.id,
       });
-      onSuccess?.(js);
+      const n = Number(js.pulled || 0);
+      const orders = `${n} order${n === 1 ? "" : "s"}`;
+      const from = effectiveSource === SOURCE_UNASSIGNED ? " unassigned" : "";
+      const fromAgent = sourceAgent ? ` from ${agentLabel(sourceAgent)}` : "";
+      const message = targetIsMe
+        ? (sourceAgent ? `Moved ${orders}${fromAgent} to your queue` : null)
+        : `Moved ${n}${from} order${n === 1 ? "" : "s"}${fromAgent} to ${agentLabel(target)}`;
+      onSuccess?.(js, { message });
     } catch (e) {
       setErr(e?.message || "Pull failed");
     } finally {
@@ -1894,38 +2252,53 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
     }
   }
 
-  // Esc to close (when not busy).
-  useEffect(() => {
-    function onKey(e) { if (e.key === "Escape" && !busy) onClose?.(); }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
-
   const presets = [10, 20, 50, 100];
-  const submitDisabled = busy || previewing || (available != null && available === 0);
+  const submitDisabled = busy || previewing || !preview || available === 0 || (!takeAll && !(Number(amount) > 0));
+  const title = !isLevelMode && includeAssigned
+    ? (isAdmin ? "Move orders between agents" : "Take orders from an agent")
+    : cfg.title;
+  const inputCls = "h-10 w-full rounded-xl border-0 bg-white px-3 text-sm ring-1 ring-inset ring-slate-200 placeholder:text-slate-400 focus:ring-2 focus:ring-indigo-500";
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 px-4"
-      onClick={() => { if (!busy) onClose?.(); }}
-    >
-      <div
-        className="bg-white border border-gray-200 rounded-2xl p-5 w-full max-w-md shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="text-base font-semibold mb-1">
-          {cfg.icon} {!isLevelMode && includeAssigned ? "Pull orders (including other agents')" : cfg.title}
-        </div>
-        <div className="text-[11px] text-gray-500 mb-4">
-          Store: <span className="font-medium">{store}</span>
+    <Modal onClose={onClose} busy={busy} labelledBy="pull-title" maxWidth="max-w-lg">
+      <ModalHeader
+        id="pull-title"
+        icon={!isLevelMode && includeAssigned ? ArrowRightLeft : cfg.icon}
+        tone={cfg.tone}
+        title={title}
+        subtitle={<>Store <span className="font-semibold text-slate-700">{store}</span></>}
+        onClose={onClose}
+        busy={busy}
+      />
+
+      <div className="space-y-4 overflow-y-auto px-5 py-4">
+        {/* Which pool */}
+        <div className="cf-scroll-x -mx-5 flex gap-1.5 overflow-x-auto px-5 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0" role="tablist" aria-label="Which orders">
+          {PULL_MODES.map((m) => {
+            const active = m.mode === mode;
+            return (
+              <button
+                key={m.mode}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                disabled={busy}
+                onClick={() => { setMode(m.mode); setSourceId(""); }}
+                className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-semibold transition active:scale-[0.96] ${
+                  active ? `${TONES[m.tone].solid} shadow-sm` : "bg-white text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+                }`}
+              >
+                {!active && <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${TONES[m.tone].dot}`} />}
+                {m.label}
+              </button>
+            );
+          })}
         </div>
 
         {!isLevelMode && (
           <label
-            className={`mb-3 flex items-start gap-3 rounded-xl border px-3 py-2 cursor-pointer select-none ${
-              includeAssigned
-                ? "border-amber-300 bg-amber-50"
-                : "border-gray-200 bg-gray-50 hover:bg-gray-100"
+            className={`flex cursor-pointer select-none items-start gap-3 rounded-xl px-3.5 py-3 ring-1 ring-inset transition-colors ${
+              includeAssigned ? "bg-amber-50 ring-amber-200" : "bg-slate-50 ring-slate-200 hover:bg-slate-100"
             }`}
           >
             <input
@@ -1935,6 +2308,7 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
               disabled={busy}
               onChange={(e) => {
                 setIncludeAssigned(e.target.checked);
+                setSourceId("");
                 // Switching off hides the exclude inputs — don't keep filtering
                 // the pool by values the agent can no longer see.
                 if (!e.target.checked) { setExcludeA(""); setExcludeB(""); }
@@ -1942,156 +2316,272 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
             />
             <span
               aria-hidden="true"
-              className={`mt-0.5 shrink-0 w-9 h-5 rounded-full p-0.5 transition-colors duration-150 ${
-                includeAssigned ? "bg-amber-500" : "bg-gray-300"
-              }`}
+              className={`mt-0.5 h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors duration-200 ${includeAssigned ? "bg-amber-500" : "bg-slate-300"}`}
             >
-              <span
-                className={`block w-4 h-4 rounded-full bg-white shadow transition-transform duration-150 ${
-                  includeAssigned ? "translate-x-4" : "translate-x-0"
-                }`}
-              />
+              <span className={`block h-4 w-4 rounded-full bg-white shadow transition-transform duration-200 ${includeAssigned ? "translate-x-4" : "translate-x-0"}`} />
             </span>
             <span className="min-w-0">
-              <span className="block text-xs font-semibold text-gray-800">
-                Include orders already assigned to another agent
-              </span>
-              <span className="block text-[11px] text-gray-500 mt-0.5">
+              <span className="block text-sm font-semibold text-slate-800">Include orders already assigned to another agent</span>
+              <span className="mt-0.5 block text-xs text-slate-500">
                 {includeAssigned
-                  ? "Showing other agents' orders too. Pulling one takes it off them — their tag is removed."
+                  ? "Pick an agent below to move only their orders. Their tag is removed from every order taken."
                   : "Off: only orders nobody is working on right now."}
               </span>
             </span>
           </label>
         )}
 
-        {(isLevelMode || includeAssigned) && (
-          <div className="mb-3 grid grid-cols-2 gap-2">
-            <div>
-              <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">Exclude tag #1</label>
-              <input
-                type="text"
-                value={excludeA}
-                onChange={(e) => setExcludeA(e.target.value)}
-                placeholder="e.g. fz"
-                className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
-              />
+        {/* Who currently owns the pool */}
+        {showOwners && (
+          <div className="cf-collapse-in">
+            <div className="mb-2 flex items-center gap-2">
+              <Users className="h-4 w-4 text-slate-400" aria-hidden />
+              <span className="text-xs font-semibold text-slate-700">Take orders from</span>
+              {previewing && preview && <Spinner className="h-3.5 w-3.5 text-slate-400" />}
             </div>
-            <div>
-              <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">Exclude tag #2</label>
-              <input
-                type="text"
-                value={excludeB}
-                onChange={(e) => setExcludeB(e.target.value)}
-                placeholder="e.g. zineb"
-                className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
-              />
-            </div>
+            {!preview && previewing ? (
+              <div className="grid grid-cols-2 gap-2">
+                {[0, 1, 2, 3].map((i) => <div key={i} className="cf-shimmer h-12 rounded-xl" />)}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Take orders from">
+                <SourceOption
+                  testId="source-all"
+                  active={!effectiveSource}
+                  onClick={() => setSourceId("")}
+                  title="Everyone"
+                  subtitle="Anyone in this pool"
+                  count={preview?.pool_total ?? preview?.available ?? 0}
+                  disabled={busy}
+                />
+                <SourceOption
+                  testId="source-unassigned"
+                  active={effectiveSource === SOURCE_UNASSIGNED}
+                  onClick={() => setSourceId(SOURCE_UNASSIGNED)}
+                  title="Unassigned"
+                  subtitle="Nobody is working on them"
+                  count={preview?.unassigned_available ?? 0}
+                  disabled={busy}
+                />
+                {byAgent.map((a) => (
+                  <SourceOption
+                    key={a.id}
+                    testId={`source-${a.id}`}
+                    active={effectiveSource === a.id}
+                    onClick={() => setSourceId(a.id)}
+                    title={agentLabel(a)}
+                    subtitle={`${(a.tags || []).join(", ")}${a.is_active === false ? " · inactive" : ""}`}
+                    count={a.count}
+                    avatar={initialOf(agentLabel(a))}
+                    disabled={busy}
+                  />
+                ))}
+              </div>
+            )}
+            {preview && byAgent.length === 0 && (
+              <div className="mt-2 text-xs text-slate-500">No other agent owns orders in this pool right now.</div>
+            )}
           </div>
         )}
 
-        <div className="mb-4 rounded-xl bg-indigo-50 border border-indigo-200 px-3 py-2">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-indigo-700">Available now</span>
-            <span className="text-xl font-bold tabular-nums text-indigo-900 ml-auto">
-              {previewing ? "…" : (available != null ? available : "—")}
-            </span>
-          </div>
-          {!previewing && assignedAvailable > 0 && (
-            <div className="text-[11px] text-amber-800 mt-1 pt-1 border-t border-indigo-200">
-              {assignedAvailable} of these currently belong to another agent and will be
-              taken over.
-            </div>
-          )}
-        </div>
-        {previewErr && (
-          <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 mb-3">
-            {previewErr}
-          </div>
-        )}
-
-        {(myTags || []).length > 1 && (
-          <div className="mb-3">
-            <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">Apply tag</label>
+        {/* Where the orders go (admins) */}
+        {isAdmin && targetOptions.length > 0 && (
+          <div>
+            <label className="mb-1.5 block text-xs font-semibold text-slate-700" htmlFor="pull-target">Assign to</label>
             <select
-              value={agentTag}
-              onChange={(e) => setAgentTag(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm bg-white"
+              id="pull-target"
+              value={target.id}
+              disabled={busy}
+              onChange={(e) => {
+                const next = e.target.value;
+                setTargetId(next);
+                if (next === effectiveSource) setSourceId("");
+                const t = targetOptions.find((o) => o.id === next);
+                setAgentTag((t?.tags || [])[0] || "");
+              }}
+              className={inputCls}
             >
-              {(myTags || []).map((t) => (
-                <option key={t} value={t}>{t}</option>
+              {targetOptions.map((t) => (
+                <option key={t.id} value={t.id}>{t.isMe ? `Me (${agentLabel(t)})` : agentLabel(t)} — {(t.tags || []).join(", ")}</option>
               ))}
             </select>
           </div>
         )}
 
-        <div className="mb-3">
-          <label className="text-xs uppercase tracking-wide text-gray-500 block mb-1">How many</label>
-          <div className="flex items-center gap-2 flex-wrap">
+        {(isLevelMode || includeAssigned) && (
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowFilters((v) => !v)}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900"
+              aria-expanded={showFilters || excludeTags.length > 0}
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />
+              Exclude tags{excludeTags.length ? ` (${excludeTags.length})` : ""}
+              <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showFilters || excludeTags.length ? "rotate-90" : ""}`} aria-hidden />
+            </button>
+            {(showFilters || excludeTags.length > 0) && (
+              <div className="cf-collapse-in mt-2 grid grid-cols-2 gap-2">
+                <input type="text" value={excludeA} onChange={(e) => setExcludeA(e.target.value)} placeholder="e.g. fz" aria-label="Exclude tag 1" className={inputCls} />
+                <input type="text" value={excludeB} onChange={(e) => setExcludeB(e.target.value)} placeholder="e.g. zineb" aria-label="Exclude tag 2" className={inputCls} />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Live count */}
+        <div className="rounded-2xl bg-gradient-to-br from-indigo-50 to-violet-50 px-4 py-3 ring-1 ring-inset ring-indigo-100">
+          <div className="flex items-center gap-3">
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-indigo-900">Available now</div>
+              <div className="mt-0.5 text-[11px] text-indigo-700/80">
+                {previewErr ? "Couldn't load the count" : previewAt ? <PreviewAge at={previewAt} busy={previewing} /> : "Counting…"}
+              </div>
+            </div>
+            <div className="ml-auto text-3xl font-bold leading-none tracking-tight text-indigo-950">
+              {available == null ? (previewing ? <Spinner className="h-6 w-6 text-indigo-400" /> : "—") : <AnimatedNumber value={available} />}
+            </div>
+            <button
+              type="button"
+              onClick={() => setRefreshNonce((n) => n + 1)}
+              disabled={previewing || busy}
+              className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/80 text-indigo-600 ring-1 ring-inset ring-indigo-200 hover:bg-white disabled:opacity-60"
+              title="Recount now"
+              aria-label="Recount now"
+            ><RefreshCw className={`h-4 w-4 ${previewing ? "animate-spin" : ""}`} aria-hidden /></button>
+          </div>
+          {!previewing && assignedAvailable > 0 && (
+            <div className="mt-2 border-t border-indigo-100 pt-2 text-[11px] text-amber-800">
+              {sourceAgent
+                ? <>All {assignedAvailable} belong to <b>{agentLabel(sourceAgent)}</b> and will leave their queue.</>
+                : <>{assignedAvailable} of these currently belong to another agent and will be taken over.</>}
+            </div>
+          )}
+        </div>
+        {previewErr && (
+          <div className="rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-700 ring-1 ring-inset ring-rose-200">{previewErr}</div>
+        )}
+
+        {(preview?.agent_tags || target.tags || []).length > 1 && (
+          <div>
+            <label className="mb-1.5 block text-xs font-semibold text-slate-700" htmlFor="pull-tag">Apply tag</label>
+            <select id="pull-tag" value={agentTag} onChange={(e) => setAgentTag(e.target.value)} className={inputCls}>
+              {(preview?.agent_tags || target.tags || []).map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+        )}
+
+        <div>
+          <div className="mb-1.5 text-xs font-semibold text-slate-700">How many</div>
+          <div className="flex flex-wrap items-center gap-1.5">
             {presets.map((n) => (
               <button
                 key={n}
                 type="button"
                 onClick={() => { setAmount(n); setTakeAll(false); }}
-                disabled={busy || (available != null && n > available)}
-                className={`text-xs px-3 py-1 rounded-full border font-medium ${BTN_TAP} ${
+                disabled={busy || (available != null && n > available && Number(amount) !== n)}
+                className={`h-9 min-w-[48px] rounded-xl px-3 text-sm font-semibold transition active:scale-[0.96] disabled:opacity-35 ${
                   !takeAll && Number(amount) === n
-                    ? "border-indigo-500 bg-indigo-600 text-white"
-                    : "border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+                    ? "bg-indigo-600 text-white shadow-sm"
+                    : "bg-white text-slate-700 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
                 }`}
               >{n}</button>
             ))}
             <button
               type="button"
               onClick={() => setTakeAll((p) => !p)}
-              disabled={busy}
-              className={`text-xs px-3 py-1 rounded-full border font-medium ${BTN_TAP} ${
-                takeAll
-                  ? "border-indigo-500 bg-indigo-600 text-white"
-                  : "border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+              disabled={busy || available === 0}
+              className={`h-9 rounded-xl px-3 text-sm font-semibold transition active:scale-[0.96] disabled:opacity-35 ${
+                takeAll ? "bg-indigo-600 text-white shadow-sm" : "bg-white text-slate-700 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
               }`}
-            >Take all{available != null ? ` (${available})` : ""}</button>
+            >All{available != null ? ` (${available})` : ""}</button>
             <input
               type="number"
               min={1}
               max={available || 9999}
-              value={amount}
+              value={takeAll ? (available ?? "") : amount}
               onChange={(e) => { setAmount(e.target.value); setTakeAll(false); }}
               disabled={busy || takeAll}
-              className="w-24 border border-gray-300 rounded-lg px-2 py-1.5 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+              aria-label="Number of orders"
+              className="h-9 w-20 rounded-xl border-0 px-3 text-sm ring-1 ring-inset ring-slate-200 focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-50 disabled:text-slate-400"
             />
           </div>
         </div>
 
-        {err && (
-          <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 mb-3">{err}</div>
-        )}
+        {err && <div className="rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-700 ring-1 ring-inset ring-rose-200">{err}</div>}
+      </div>
 
-        <div className="text-[11px] text-gray-500 mb-3">
-          Pulled orders get tagged{agentTag ? <> with <code className="bg-gray-100 px-1 rounded">{agentTag}</code></> : ""} and every other agent's tag is removed, so each order
-          is owned by exactly one agent — the last one to pull it.
+      <div className="border-t border-slate-100 bg-slate-50/70 px-5 py-3">
+        <div className="mb-2.5 text-[11px] leading-relaxed text-slate-500">
+          {agentTag ? <>Orders get <code className="rounded bg-white px-1 py-px font-semibold text-slate-700 ring-1 ring-slate-200">{agentTag}</code></> : "Orders get the agent's tag"}
+          {" "}and every other agent's tag is removed — each order belongs to exactly one agent
+          {targetIsMe ? " (you)." : <> (<b>{agentLabel(target)}</b>).</>}
         </div>
-
         <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} disabled={busy} className={`${BTN.secondary} h-10`}>Cancel</button>
           <button
-            onClick={onClose}
-            disabled={busy}
-            className="text-sm px-4 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50 active:scale-[0.96] transition-transform duration-75"
-          >Cancel</button>
-          <button
+            type="button"
+            data-testid="pull-submit"
             onClick={submit}
             disabled={submitDisabled}
-            className="text-sm px-4 py-1.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-50 active:scale-[0.96] transition-transform duration-75 shadow-sm"
-          >{busy ? (
-            <span className="inline-flex items-center gap-1.5">
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
-              Pulling…
-            </span>
-          ) : `Approve & pull${takeAll ? " all" : (amount ? ` ${amount}` : "")}`}</button>
+            className={`${BTN.primary} h-10 px-4`}
+          >
+            {busy ? <><Spinner /> Moving orders…</> : (
+              <>
+                {targetIsMe ? <Sparkles className="h-4 w-4" aria-hidden /> : <ArrowRightLeft className="h-4 w-4" aria-hidden />}
+                {targetIsMe ? "Pull" : "Move"} {takeAll ? "all" : ""} {willPull > 0 ? willPull : ""} {!takeAll && willPull > 0 ? `order${willPull === 1 ? "" : "s"}` : takeAll ? "" : "orders"}
+                {!targetIsMe && <span className="hidden sm:inline"> to {agentLabel(target)}</span>}
+              </>
+            )}
+          </button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
+}
+
+function SourceOption({ active, onClick, title, subtitle, count, avatar, disabled, testId }) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      data-testid={testId}
+      onClick={onClick}
+      disabled={disabled}
+      className={`flex items-center gap-2.5 rounded-xl px-3 py-2 text-left transition duration-150 active:scale-[0.98] ${
+        active
+          ? "bg-indigo-50 ring-2 ring-indigo-500"
+          : "bg-white ring-1 ring-inset ring-slate-200 hover:bg-slate-50 hover:ring-slate-300"
+      }`}
+    >
+      {avatar ? (
+        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${active ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}>{avatar}</span>
+      ) : (
+        <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full ring-2 ${active ? "ring-indigo-600" : "ring-slate-300"}`}>
+          {active && <span className="h-2 w-2 rounded-full bg-indigo-600" />}
+        </span>
+      )}
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-semibold text-slate-800">{title}</span>
+        {subtitle && <span className="block truncate text-[11px] text-slate-500">{subtitle}</span>}
+      </span>
+      <span className={`rounded-full px-2 py-0.5 text-xs font-bold tabular-nums ${active ? "bg-indigo-600 text-white" : count > 0 ? "bg-slate-100 text-slate-700" : "bg-slate-50 text-slate-400"}`}>
+        <AnimatedNumber value={count} />
+      </span>
+    </button>
+  );
+}
+
+function PreviewAge({ at, busy }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (busy) return <span>Recounting…</span>;
+  const sec = Math.max(0, Math.floor((Date.now() - at) / 1000));
+  return <span>{sec < 3 ? "Live from Shopify" : `Counted ${sec}s ago · auto-refreshes`}</span>;
 }
 
 // Global Shopify search panel — orders + customers in the selected store. Independent
@@ -2099,7 +2589,7 @@ function PullOrdersModal({ mode, store, myTags, onClose, onSuccess }) {
 // `+212 614 162-654`, `0614162654`, and `614162654` all match the same record.
 function GlobalSearch({
   query, onQueryChange, onSearchNow, onClear, loading, error, results, store, onStoreChange, pushToast,
-  renderOrderCard, expandedCustomerId, customerOrdersById, onToggleCustomer,
+  renderOrderCard, expandedCustomerId, customerOrdersById, onToggleCustomer, inputRef,
 }) {
   const orders = results?.orders || [];
   const customers = results?.customers || [];
@@ -2111,52 +2601,52 @@ function GlobalSearch({
   async function copyText(text, label) {
     try {
       if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
-      pushToast(`📋 Copied ${label}`, "success");
+      pushToast(`Copied ${label}`, "success");
     } catch {
       pushToast(`Clipboard blocked`, "warn");
     }
   }
 
   return (
-    <section className="bg-white border border-gray-200 rounded-2xl shadow-sm p-3">
-      <div className="flex flex-col sm:flex-row sm:items-stretch gap-2">
-        <div className="h-11 shrink-0 inline-flex items-center gap-1.5 rounded-xl border border-gray-300 bg-slate-50 px-2">
-          <span className="text-sm" aria-hidden>🏪</span>
-          <span className="hidden xl:inline text-[9px] uppercase tracking-wider font-semibold text-gray-500">
-            Store
-          </span>
+    <section className={`${CARD} p-2.5 sm:p-3`}>
+      <div className="flex items-center gap-2">
+        <div className="flex h-11 max-w-[42%] shrink-0 items-center gap-1.5 rounded-xl bg-slate-50 pl-3 pr-1 ring-1 ring-inset ring-slate-200 sm:max-w-none">
+          <span className="hidden text-[10px] font-semibold uppercase tracking-wider text-slate-500 sm:inline">Store</span>
           <StorePicker
             value={store}
             onChange={onStoreChange}
             allowCustom={false}
-            className="h-full !rounded-none !border-0 !bg-transparent !p-0 text-slate-900 shadow-none"
+            className="h-full !rounded-none !border-0 !bg-transparent !p-0 !pr-1 text-sm font-semibold text-slate-900 shadow-none focus:!ring-0"
           />
         </div>
         <form
-          className="flex flex-1 min-w-0 items-center gap-2"
+          className="flex min-w-0 flex-1 items-center gap-2"
           onSubmit={(event) => {
             event.preventDefault();
             onSearchNow?.();
           }}
         >
-          <span aria-hidden className="hidden sm:inline text-base">🔎</span>
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => onQueryChange(e.target.value)}
-            placeholder="Paste phone or enter order number"
-            className="h-11 flex-1 min-w-0 text-sm border border-gray-300 rounded-xl px-3 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400"
-          />
-          {loading && (
-            <span className="hidden lg:inline-flex items-center text-xs text-gray-500 gap-1.5">
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-gray-300 border-t-indigo-600 animate-spin" />
-              Searching…
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden />
+            <input
+              ref={inputRef}
+              type="search"
+              value={query}
+              onChange={(e) => onQueryChange(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Escape" && query) { e.preventDefault(); onClear?.(); } }}
+              placeholder="Phone or order #"
+              className="h-11 w-full rounded-xl border-0 bg-white pl-9 pr-10 text-sm text-slate-900 ring-1 ring-inset ring-slate-200 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-indigo-500"
+            />
+            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2">
+              {loading
+                ? <Spinner className="h-4 w-4 text-indigo-500" />
+                : !query && <kbd className="hidden sm:inline rounded border border-slate-200 bg-slate-50 px-1.5 text-[10px] font-semibold text-slate-400">/</kbd>}
             </span>
-          )}
+          </div>
           <button
             type="submit"
             disabled={(query || "").trim().length < 2}
-            className={`h-11 text-xs px-4 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-40 ${BTN_TAP}`}
+            className={`${BTN.primary} hidden h-11 px-4 sm:inline-flex`}
           >
             Search
           </button>
@@ -2164,46 +2654,44 @@ function GlobalSearch({
             <button
               type="button"
               onClick={onClear}
-              className={`h-11 text-xs px-3 rounded-xl border border-gray-300 bg-white hover:bg-gray-50 ${BTN_TAP}`}
-            >Clear</button>
+              className={`${BTN.secondary} h-11 w-11 !px-0`}
+              aria-label="Clear search"
+            ><X className="h-4 w-4" aria-hidden /></button>
           )}
         </form>
       </div>
-      <div className="mt-1.5 text-[11px] text-gray-500">
-        Searching <span className="font-mono font-semibold text-gray-700">{store}</span> · phone formatting is normalized automatically.
-      </div>
 
-          {hasQuery && searchKind && !loading && (
-            <div className="mt-2 flex flex-wrap gap-2">
-              <span className="inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-700">
-                {searchKind === "phone" ? "Phone match" : searchKind === "order" ? "Order-number match" : "Customer / order search"}
-              </span>
-              {normalizedPhone && (
-                <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-mono font-semibold text-emerald-700">
-                  Normalized: {normalizedPhone}
-                </span>
-              )}
-            </div>
+      {hasQuery && searchKind && !loading && (
+        <div className="mt-2 flex flex-wrap gap-2 px-1">
+          <span className="inline-flex rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200">
+            {searchKind === "phone" ? "Phone match" : searchKind === "order" ? "Order-number match" : "Customer / order search"}
+          </span>
+          {normalizedPhone && (
+            <span className="inline-flex rounded-full bg-emerald-50 px-2.5 py-1 font-mono text-[11px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200">
+              Normalized: {normalizedPhone}
+            </span>
           )}
+        </div>
+      )}
 
-          {error && (
-            <div className="mt-2 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-800">{error}</div>
-          )}
+      {error && (
+        <div className="mt-2 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-800 ring-1 ring-inset ring-rose-200">{error}</div>
+      )}
 
-      {hasQuery && !loading && !error && !hasResults && (
-        <div className="mt-3 text-sm text-gray-500 italic">No orders or customers match "{query}" in {store}.</div>
+      {hasQuery && !loading && !error && !hasResults && results && (
+        <div className="mt-3 px-1 text-sm text-slate-500">No orders or customers match "{query}" in {store}.</div>
       )}
 
       {hasResults && (
-        <div className="mt-3 space-y-4">
+        <div className="cf-fade-in mt-3 space-y-4">
           {orders.length > 0 && (
             <div>
-              <div className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600 mb-1.5">
+              <div className="text-[11px] uppercase tracking-wider font-semibold text-slate-500 mb-1.5 px-1">
                 {searchKind === "phone"
                   ? `Customer orders (${orders.length}) · newest first`
                   : `Orders (${orders.length})`}
               </div>
-              <div className="rounded-xl border border-gray-200 bg-white overflow-hidden divide-y divide-gray-100">
+              <div className="rounded-xl border border-slate-200 bg-white overflow-hidden divide-y divide-slate-100">
                 {orders.map((o) => (
                   <React.Fragment key={o.id}>{renderOrderCard(o)}</React.Fragment>
                 ))}
@@ -2213,7 +2701,7 @@ function GlobalSearch({
 
           {customers.length > 0 && (
             <div>
-              <div className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600 mb-1.5">
+              <div className="text-[11px] uppercase tracking-wider font-semibold text-slate-500 mb-1.5 px-1">
                 Customers ({customers.length}) — tap a card to see their orders
               </div>
               <div className="space-y-2">
@@ -2249,7 +2737,7 @@ function GlobalSearch({
                                 onClick={() => copyText(moroccoInternational(c.phone), c.phone)}
                                 className={`text-sky-500 hover:text-emerald-600 hover:scale-110 ${BTN_TAP}`}
                                 title="Copy international format"
-                              >📋</button>
+                              ><Copy className="h-3.5 w-3.5" aria-hidden /></button>
                             </div>
                           )}
                           <span className="inline-flex items-center gap-1 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full px-2 py-0.5 font-semibold text-[11px]">
@@ -2296,126 +2784,76 @@ function GlobalSearch({
   );
 }
 
-// Color themes for the summary pills. Each pill has its own palette so the bar reads
-// like a dashboard at a glance — the active state inverts to a saturated background.
-const PILL_THEMES = {
-  sky:     { idle: "bg-sky-50 text-sky-700 border-sky-200",       active: "bg-sky-600 text-white border-sky-700" },
-  slate:   { idle: "bg-slate-50 text-slate-700 border-slate-200", active: "bg-slate-700 text-white border-slate-800" },
-  indigo:  { idle: "bg-indigo-50 text-indigo-700 border-indigo-200", active: "bg-indigo-600 text-white border-indigo-700" },
-  amber:   { idle: "bg-amber-50 text-amber-800 border-amber-200", active: "bg-amber-500 text-white border-amber-600" },
-  orange:  { idle: "bg-orange-50 text-orange-700 border-orange-200", active: "bg-orange-500 text-white border-orange-600" },
-  rose:    { idle: "bg-rose-50 text-rose-700 border-rose-200",    active: "bg-rose-500 text-white border-rose-600" },
-  red:     { idle: "bg-red-50 text-red-700 border-red-200",       active: "bg-red-600 text-white border-red-700" },
-  violet:  { idle: "bg-violet-50 text-violet-700 border-violet-200", active: "bg-violet-600 text-white border-violet-700" },
-  fuchsia: { idle: "bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200", active: "bg-fuchsia-600 text-white border-fuchsia-700" },
-  teal:    { idle: "bg-teal-50 text-teal-700 border-teal-200",    active: "bg-teal-600 text-white border-teal-700" },
-  emerald: { idle: "bg-emerald-50 text-emerald-700 border-emerald-200", active: "bg-emerald-600 text-white border-emerald-700" },
-};
+const TEAM_LEVELS = [
+  { key: "new", label: "New", tone: "indigo" },
+  { key: "n1", label: "N1", tone: "amber" },
+  { key: "n2", label: "N2", tone: "orange" },
+  { key: "n3", label: "N3", tone: "rose" },
+  { key: "n4", label: "N4", tone: "red" },
+  { key: "nowtp", label: "NoWA", tone: "violet" },
+  { key: "enatt", label: "Enatt", tone: "fuchsia" },
+];
 
-function StatPill({ label, value, color = "slate", onClick, active = false, icon = null }) {
-  const theme = PILL_THEMES[color] || PILL_THEMES.slate;
-  const palette = active ? theme.active : theme.idle;
-  const interactive = typeof onClick === "function";
-  const clickable = interactive ? "cursor-pointer hover:shadow-md hover:-translate-y-0.5 transition" : "";
-  return (
-    <div
-      role={interactive ? "button" : undefined}
-      tabIndex={interactive ? 0 : undefined}
-      onClick={onClick}
-      onKeyDown={interactive ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(e); } } : undefined}
-      className={`rounded-xl border px-3 py-2 min-w-[96px] shadow-sm ${palette} ${clickable}`}
-    >
-      <div className="text-[10px] uppercase tracking-wide font-semibold opacity-80 flex items-center gap-1">
-        {icon && <span aria-hidden>{icon}</span>}
-        {label}
-        {active && <span aria-hidden className="ml-auto">✕</span>}
-      </div>
-      <div className="text-xl font-bold leading-tight tabular-nums">{value}</div>
-    </div>
-  );
-}
-
-// Tiny color-coded count chip used inside the team agent cards.
-const MINI_THEMES = {
-  indigo:  { bg: "bg-indigo-50",  text: "text-indigo-700",  border: "border-indigo-200" },
-  amber:   { bg: "bg-amber-50",   text: "text-amber-700",   border: "border-amber-200" },
-  orange:  { bg: "bg-orange-50",  text: "text-orange-700",  border: "border-orange-200" },
-  rose:    { bg: "bg-rose-50",    text: "text-rose-700",    border: "border-rose-200" },
-  red:     { bg: "bg-red-50",     text: "text-red-700",     border: "border-red-200" },
-  violet:  { bg: "bg-violet-50",  text: "text-violet-700",  border: "border-violet-200" },
-  fuchsia: { bg: "bg-fuchsia-50", text: "text-fuchsia-700", border: "border-fuchsia-200" },
-  sky:     { bg: "bg-sky-50",     text: "text-sky-700",     border: "border-sky-200" },
-  emerald: { bg: "bg-emerald-50", text: "text-emerald-700", border: "border-emerald-200" },
-};
-
-function MiniStat({ label, value, color = "indigo", title }) {
-  const theme = MINI_THEMES[color] || MINI_THEMES.indigo;
-  return (
-    <div
-      className={`rounded-lg border ${theme.bg} ${theme.text} ${theme.border} px-1.5 py-1 text-center`}
-      title={title || label}
-    >
-      <div className="text-[9px] uppercase tracking-wide font-semibold opacity-80 leading-tight">{label}</div>
-      <div className="text-sm font-bold tabular-nums leading-tight">{value}</div>
-    </div>
-  );
-}
-
-function AgentCard({ agent, isMe }) {
-  const initial = ((agent.name || agent.email || "?").trim().charAt(0) || "?").toUpperCase();
+function AgentCard({ agent, isMe, rank, maxConfirmed = 1 }) {
   const b = agent.breakdown || {};
   const confirmed = Number(agent.confirmed_today || 0);
+  const pending = Number(b.total || 0);
+  const medal = confirmed > 0 ? ["bg-amber-400 text-amber-950", "bg-slate-300 text-slate-800", "bg-orange-300 text-orange-950"][rank - 1] : null;
   return (
-    <div className={`relative bg-white border rounded-2xl p-3 shadow-sm transition hover:shadow-md ${isMe ? "border-indigo-300 ring-1 ring-indigo-200" : "border-gray-200"}`}>
-      {/* Header: avatar + name + chips */}
-      <div className="flex items-center gap-2 mb-2.5">
-        <div className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-sm shrink-0 ${isMe ? "bg-indigo-600 text-white" : "bg-indigo-100 text-indigo-700"}`}>
-          {initial}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-semibold truncate" title={agent.name || agent.email}>
-            {agent.name || agent.email}
+    <div className={`${CARD} p-4 transition hover:shadow-md ${isMe ? "ring-2 ring-indigo-500/70 border-transparent" : ""}`}>
+      <div className="flex items-center gap-3">
+        <div className="relative">
+          <div className={`flex h-10 w-10 items-center justify-center rounded-xl text-sm font-bold ${isMe ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}>
+            {initialOf(agent.name || agent.email)}
           </div>
-          <div className="text-[10px] text-gray-500 truncate" title={agent.email}>{agent.email}</div>
+          {medal && (
+            <span className={`absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold ring-2 ring-white ${medal}`}>{rank}</span>
+          )}
         </div>
-        <div className="flex flex-col items-end gap-0.5">
-          {isMe && (
-            <span className="text-[9px] uppercase tracking-wide bg-indigo-100 text-indigo-700 border border-indigo-200 rounded px-1 py-0.5">you</span>
-          )}
-          {agent.is_catchall && (
-            <span className="text-[9px] uppercase tracking-wide bg-amber-100 text-amber-700 border border-amber-200 rounded px-1 py-0.5">catch-all</span>
-          )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className="truncate text-sm font-semibold text-slate-900" title={agent.name || agent.email}>{agent.name || agent.email}</span>
+            {isMe && <span className="rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200">You</span>}
+            {agent.is_catchall && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">Catch-all</span>}
+          </div>
+          <div className="mt-0.5 flex flex-wrap gap-1">
+            {(agent.tags || []).map((t) => (
+              <span key={t} className="rounded bg-slate-100 px-1.5 py-px text-[10px] font-medium text-slate-600">{t}</span>
+            ))}
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-2xl font-bold leading-none tabular-nums text-emerald-600"><AnimatedNumber value={confirmed} /></div>
+          <div className="mt-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">confirmed</div>
         </div>
       </div>
 
-      {/* Tags row */}
-      {(agent.tags || []).length > 0 && (
-        <div className="flex flex-wrap gap-1 mb-2">
-          {(agent.tags || []).map((t) => (
-            <span key={t} className="text-[10px] bg-gray-100 text-gray-700 border border-gray-200 rounded-full px-1.5 py-0.5">{t}</span>
-          ))}
-        </div>
-      )}
-
-      {/* Per-level breakdown */}
-      <div className="grid grid-cols-4 gap-1.5">
-        <MiniStat label="New"   value={Number(b.new   || 0)} color="indigo"  />
-        <MiniStat label="N1"    value={Number(b.n1    || 0)} color="amber"   />
-        <MiniStat label="N2"    value={Number(b.n2    || 0)} color="orange"  />
-        <MiniStat label="N3"    value={Number(b.n3    || 0)} color="rose"    />
-        <MiniStat label="N4"    value={Number(b.n4    || 0)} color="red"     />
-        <MiniStat label="NoWTP" value={Number(b.nowtp || 0)} color="violet"  />
-        <MiniStat label="Enatt" value={Number(b.enatt || 0)} color="fuchsia" />
-        <MiniStat label="Pending" value={Number(b.total || 0)} color="sky" title="Total open + unshipped in this agent's queue" />
+      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-100" aria-hidden>
+        <div
+          className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-emerald-600 transition-[width] duration-700 ease-out"
+          style={{ width: `${Math.round((confirmed / Math.max(1, maxConfirmed)) * 100)}%` }}
+        />
       </div>
 
-      {/* Confirmed today */}
-      <div className="mt-2.5 pt-2.5 border-t border-gray-100 flex items-center justify-between">
-        <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wide font-semibold text-emerald-700">
-          <span>✅</span>
-          <span>Confirmed today</span>
-        </div>
-        <div className="text-xl font-bold tabular-nums text-emerald-700">{confirmed}</div>
+      <div className="mt-3 flex items-center justify-between text-xs">
+        <span className="text-slate-500">In queue</span>
+        <span className="font-semibold tabular-nums text-slate-800"><AnimatedNumber value={pending} /></span>
+      </div>
+      <div className="mt-2 grid grid-cols-7 gap-1">
+        {TEAM_LEVELS.map((lv) => {
+          const n = Number(b[lv.key] || 0);
+          const tone = TONES[lv.tone];
+          return (
+            <div
+              key={lv.key}
+              className={`rounded-lg px-1 py-1 text-center ring-1 ring-inset ${n > 0 ? tone.soft : "bg-slate-50 text-slate-400 ring-slate-100"}`}
+              title={`${lv.label}: ${n}`}
+            >
+              <div className="text-[9px] font-semibold uppercase leading-tight opacity-80">{lv.label}</div>
+              <div className="text-sm font-bold leading-tight tabular-nums">{n}</div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

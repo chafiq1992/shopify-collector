@@ -37,47 +37,39 @@ export function useToasts() {
   return [toasts, push, dismiss];
 }
 
-function paletteFor(type) {
-  switch (type) {
-    case "success": return "bg-emerald-600 border-emerald-700";
-    case "error":   return "bg-rose-600 border-rose-700";
-    case "warn":    return "bg-amber-500 border-amber-600";
-    default:        return "bg-slate-800 border-slate-900";
-  }
-}
-
-function iconFor(type) {
-  switch (type) {
-    case "success": return "✓";
-    case "error":   return "!";
-    case "warn":    return "!";
-    default:        return "•";
-  }
-}
+const TOAST_STYLES = {
+  success: { accent: "bg-emerald-500", icon: "bg-emerald-100 text-emerald-700", glyph: "✓" },
+  error:   { accent: "bg-rose-500",    icon: "bg-rose-100 text-rose-700",       glyph: "!" },
+  warn:    { accent: "bg-amber-500",   icon: "bg-amber-100 text-amber-700",     glyph: "!" },
+  info:    { accent: "bg-indigo-500",  icon: "bg-indigo-100 text-indigo-700",   glyph: "i" },
+};
 
 export function ToastStack({ toasts, onDismiss }) {
   return (
     <div
       aria-live="polite"
       aria-atomic="true"
-      className="fixed top-4 right-4 z-[60] flex flex-col gap-2 pointer-events-none max-w-[calc(100vw-2rem)]"
+      className="fixed top-3 right-3 sm:top-4 sm:right-4 z-[80] flex flex-col items-end gap-2 pointer-events-none w-[min(24rem,calc(100vw-1.5rem))]"
     >
-      <style>{`@keyframes toastIn{from{opacity:0;transform:translateY(-6px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}.confirmation-toast{animation:toastIn .18s ease-out both}`}</style>
-      {toasts.map((t) => (
-        <button
-          key={t.id}
-          type="button"
-          onClick={() => onDismiss?.(t.id)}
-          className={`confirmation-toast pointer-events-auto cursor-pointer text-left text-white text-sm px-3 py-2 rounded-lg shadow-lg border ${paletteFor(t.type)} max-w-sm flex items-center gap-2 active:scale-[0.98] transition-transform`}
-          title="Click to dismiss"
-        >
-          <span
-            aria-hidden
-            className={`inline-flex items-center justify-center w-5 h-5 rounded-full bg-white/20 text-[11px] font-bold shrink-0`}
-          >{iconFor(t.type)}</span>
-          <span className="flex-1 leading-tight">{t.message}</span>
-        </button>
-      ))}
+      {toasts.map((t) => {
+        const style = TOAST_STYLES[t.type] || TOAST_STYLES.info;
+        return (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => onDismiss?.(t.id)}
+            className="cf-toast pointer-events-auto relative w-full overflow-hidden text-left text-sm text-slate-800 bg-white/95 backdrop-blur rounded-xl shadow-lg shadow-slate-900/10 ring-1 ring-slate-900/5 pl-4 pr-3 py-2.5 flex items-center gap-2.5 active:scale-[0.98] transition-transform"
+            title="Click to dismiss"
+          >
+            <span aria-hidden className={`absolute left-0 inset-y-0 w-1 ${style.accent}`} />
+            <span
+              aria-hidden
+              className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold shrink-0 ${style.icon}`}
+            >{style.glyph}</span>
+            <span className="flex-1 leading-snug font-medium">{t.message}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }

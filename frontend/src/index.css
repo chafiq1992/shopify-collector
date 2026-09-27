@@ -155,3 +155,59 @@ html, body { overflow-x: hidden; overflow-y: auto; }
   }
 }
 
+
+/* ── Confirmation page motion ─────────────── */
+.cf-toast { animation: cfToastIn 260ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+@keyframes cfToastIn {
+  from { opacity: 0; transform: translateX(16px) scale(0.98); }
+  to   { opacity: 1; transform: none; }
+}
+
+.cf-leave { animation: cfLeave 260ms ease-in forwards; pointer-events: none; }
+@keyframes cfLeave {
+  to { opacity: 0; transform: translateX(24px); }
+}
+
+.cf-fade-in { animation: cfFadeIn 180ms ease-out both; }
+@keyframes cfFadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.cf-pop-in { animation: cfPopIn 240ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+@keyframes cfPopIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to   { opacity: 1; transform: none; }
+}
+
+.cf-slide-up { animation: cfSlideUp 280ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+@keyframes cfSlideUp {
+  from { opacity: 0; transform: translate(-50%, 20px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.cf-collapse-in { animation: cfCollapseIn 220ms cubic-bezier(0.22, 1, 0.36, 1) both; transform-origin: top; }
+@keyframes cfCollapseIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.cf-shimmer {
+  background: linear-gradient(90deg, rgb(241 245 249) 0%, rgb(226 232 240) 50%, rgb(241 245 249) 100%);
+  background-size: 200% 100%;
+  animation: cfShimmer 1.3s ease-in-out infinite;
+}
+@keyframes cfShimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+.cf-live-dot { position: relative; }
+.cf-live-dot::after {
+  content: ""; position: absolute; inset: -3px; border-radius: 9999px;
+  background: currentColor; opacity: 0.35; animation: cfPing 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+@keyframes cfPing { 75%, 100% { transform: scale(2.2); opacity: 0; } }
+
+.cf-scroll-x { scrollbar-width: none; }
+.cf-scroll-x::-webkit-scrollbar { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cf-toast, .cf-leave, .cf-fade-in, .cf-pop-in, .cf-slide-up, .cf-collapse-in, .cf-shimmer, .cf-live-dot::after {
+    animation-duration: 1ms !important; animation-iteration-count: 1 !important;
+  }
+}
