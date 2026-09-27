@@ -55,41 +55,37 @@ class PullReassignmentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_new_pool_excludes_other_agents_by_default(self):
         async with self.sessions() as session:
-            q, default_tag, other_active, strip_tags = await build_pull_query(
-                session, self.me, level="new",
-            )
-        self.assertIn('-tag:"zineb"', q)
-        self.assertIn('-tag:"fz"', q)          # never re-claim my own
-        self.assertEqual(default_tag, "fz")
-        self.assertEqual(other_active, ["zineb"])
+            plan = await build_pull_query(session, self.me, level="new")
+        self.assertIn('-tag:"zineb"', plan.query)
+        self.assertIn('-tag:"fz"', plan.query)          # never re-claim my own
+        self.assertEqual(plan.agent_tag_default, "fz")
+        self.assertEqual(plan.other_agent_tags, ["zineb"])
 
     async def test_include_assigned_opens_the_pool_to_other_agents(self):
         async with self.sessions() as session:
-            q, _tag, _other, _strip = await build_pull_query(
+            plan = await build_pull_query(
                 session, self.me, level="new", include_assigned=True,
             )
-        self.assertNotIn('-tag:"zineb"', q)
-        self.assertIn('-tag:"fz"', q)          # still not my own orders
-        self.assertIn("status:open", q)
+        self.assertNotIn('-tag:"zineb"', plan.query)
+        self.assertIn('-tag:"fz"', plan.query)          # still not my own orders
+        self.assertIn("status:open", plan.query)
 
     async def test_include_assigned_still_honours_explicit_exclusions(self):
         async with self.sessions() as session:
-            q, _tag, _other, _strip = await build_pull_query(
+            plan = await build_pull_query(
                 session, self.me, level="new",
                 exclude_tags=["zineb"], include_assigned=True,
             )
-        self.assertIn('-tag:"zineb"', q)
+        self.assertIn('-tag:"zineb"', plan.query)
 
     async def test_strip_list_covers_deactivated_agents(self):
         """A stale tag from someone who left would otherwise survive the pull."""
         async with self.sessions() as session:
-            _q, _tag, other_active, strip_tags = await build_pull_query(
-                session, self.me, level="new",
-            )
-        self.assertNotIn("laila", other_active)   # doesn't define "unassigned"
-        self.assertIn("laila", strip_tags)        # but does get removed
-        self.assertIn("zineb", strip_tags)
-        self.assertNotIn("fz", strip_tags)        # never strip the puller's own
+            plan = await build_pull_query(session, self.me, level="new")
+        self.assertNotIn("laila", plan.other_agent_tags)   # doesn't define "unassigned"
+        self.assertIn("laila", plan.strip_tags)            # but does get removed
+        self.assertIn("zineb", plan.strip_tags)
+        self.assertNotIn("fz", plan.strip_tags)            # never strip the puller's own
 
     async def _run_execute(self, orders, body, remove_side_effect=None):
         page = {"orders": {"edges": orders, "pageInfo": {"hasNextPage": False}}}

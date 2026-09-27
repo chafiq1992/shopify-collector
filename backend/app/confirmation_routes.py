@@ -18,7 +18,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -292,6 +292,17 @@ async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
     return None
 
 
+async def queue_filter_for_user(db: AsyncSession, user: User) -> "LiveTagFilter":
+    """Live-tag restatement of :func:`query_for_user` (see :class:`LiveTagFilter`)."""
+    tags = list(user.agent_tags or [])
+    if tags:
+        return LiveTagFilter(require=(_lower_tags(tags),))
+    if user.role == "agent":
+        other = await _other_agents_active_tags(db, exclude_user_id=user.id)
+        return LiveTagFilter(forbid=_lower_tags(other))
+    return LiveTagFilter()
+
+
 _VALID_LEVELS = {"n1", "n2", "n3", "n4", "nowtp", "enatt", "new"}
 _NOWTP_TAGS = ("nowtp1", "nowtp2", "nowtp3", "nowtp4")
 _ENATT_TAGS = ("enatt1", "enatt2", "enatt3", "enatt4")
@@ -359,6 +370,154 @@ def has_cod_tag(tags: List[str]) -> bool:
     return False
 
 
+def _lower_tags(tags: Any) -> FrozenSet[str]:
+    return frozenset(str(t or "").strip().lower() for t in (tags or []) if str(t or "").strip())
+
+
+# ---------- Live-tag re-validation ----------
+#
+# Shopify's order *search index* trails tag writes by seconds to minutes, but the
+# `tags` field on each returned node is always live. Without re-checking, an order
+# that was just pulled away from an agent keeps matching their old query (and the
+# "unassigned" pool keeps counting orders that were assigned a minute ago), which
+# is exactly the "the number never changes after I assign orders" bug. Every scan
+# below therefore re-validates each hit against the query's intent using the live
+# tags, so counts move the moment the tag write lands.
+
+class LiveTagFilter(NamedTuple):
+    """Tag-level restatement of a Shopify search query.
+
+    ``require``: every group must share at least one tag with the order.
+    ``forbid``: the order must carry none of these tags.
+    """
+    require: Tuple[FrozenSet[str], ...] = ()
+    forbid: FrozenSet[str] = frozenset()
+
+    def matches(self, tags: Any) -> bool:
+        tl = _lower_tags(tags)
+        if self.forbid and (tl & self.forbid):
+            return False
+        for group in self.require:
+            if group and not (tl & group):
+                return False
+        return True
+
+
+_PHONE_LEVELS = ("n1", "n2", "n3", "n4")
+
+
+def _matches_level(tags: Any, level: Optional[str]) -> bool:
+    """Python mirror of :func:`apply_level_filter` for live-tag re-validation."""
+    lv = (level or "").lower().strip()
+    if not lv or lv not in _VALID_LEVELS:
+        return True
+    tl = _lower_tags(tags)
+    if lv in _PHONE_LEVELS:
+        return lv in tl
+    if lv == "nowtp":
+        return any(t in tl for t in _NOWTP_TAGS)
+    if lv == "enatt":
+        return any(t in tl for t in _ENATT_TAGS)
+    if lv == "new":
+        return not any(t in tl for t in (*_PHONE_LEVELS, *_NOWTP_TAGS, *_ENATT_TAGS))
+    return True
+
+
+# (store, order_gid) -> (timestamp, lowercased tags added). Filled whenever this app
+# adds a tag, so an order that was just assigned to an agent shows up in their queue
+# (and counts) immediately instead of waiting for Shopify to re-index it. In-process
+# on purpose: the app runs a single uvicorn worker (see deploy/collector/compose.yaml).
+_RECENT_TAG_ADDS: Dict[Tuple[str, str], Tuple[float, FrozenSet[str]]] = {}
+_RECENT_TAG_ADDS_TTL_SECONDS = 15 * 60
+_RECENT_TAG_ADDS_MAX = 5000
+_RECENT_OVERLAY_MAX_IDS = 100
+
+
+def _store_key(store: Optional[str]) -> str:
+    return str(store or "").strip().lower()
+
+
+def note_recent_tag_add(store: Optional[str], order_gid: Optional[str], tags: Any) -> None:
+    gid = str(order_gid or "").strip()
+    added = _lower_tags(tags if isinstance(tags, (list, tuple, set, frozenset)) else [tags])
+    if not gid or not added:
+        return
+    key = (_store_key(store), gid)
+    prev = _RECENT_TAG_ADDS.get(key)
+    if prev and (time.time() - prev[0]) < _RECENT_TAG_ADDS_TTL_SECONDS:
+        added = added | prev[1]
+    _RECENT_TAG_ADDS[key] = (time.time(), added)
+    if len(_RECENT_TAG_ADDS) > _RECENT_TAG_ADDS_MAX:
+        _prune_recent_tag_adds(force=True)
+
+
+def _prune_recent_tag_adds(force: bool = False) -> None:
+    cutoff = time.time() - _RECENT_TAG_ADDS_TTL_SECONDS
+    for key, (ts, _tags) in list(_RECENT_TAG_ADDS.items()):
+        if ts < cutoff:
+            _RECENT_TAG_ADDS.pop(key, None)
+    if force and len(_RECENT_TAG_ADDS) > _RECENT_TAG_ADDS_MAX:
+        oldest = sorted(_RECENT_TAG_ADDS.items(), key=lambda kv: kv[1][0])
+        for key, _v in oldest[: len(_RECENT_TAG_ADDS) - _RECENT_TAG_ADDS_MAX]:
+            _RECENT_TAG_ADDS.pop(key, None)
+
+
+def recent_orders_tagged_with(store: Optional[str], tags: Any) -> List[str]:
+    """Order GIDs in ``store`` that this app tagged with any of ``tags`` recently,
+    newest first."""
+    wanted = _lower_tags(tags)
+    if not wanted:
+        return []
+    _prune_recent_tag_adds()
+    sk = _store_key(store)
+    hits = [
+        (ts, gid)
+        for (s, gid), (ts, added) in _RECENT_TAG_ADDS.items()
+        if s == sk and (added & wanted)
+    ]
+    hits.sort(reverse=True)
+    return [gid for _ts, gid in hits[:_RECENT_OVERLAY_MAX_IDS]]
+
+
+_FULFILLED_STATUSES = {"FULFILLED", "PARTIALLY_FULFILLED", "RESTOCKED"}
+
+
+def _node_is_open_unshipped(node: Dict[str, Any]) -> bool:
+    """Python mirror of ``status:open fulfillment_status:unshipped`` for nodes
+    fetched by ID (which bypasses the search query)."""
+    if not node:
+        return False
+    if node.get("cancelledAt") or node.get("closed"):
+        return False
+    status = str(node.get("displayFulfillmentStatus") or "").upper()
+    return status not in _FULFILLED_STATUSES
+
+
+async def _fetch_nodes_by_id(store: str, gids: List[str], fields: str) -> List[Dict[str, Any]]:
+    """Fetch orders by GID (live data, no search index involved)."""
+    if not gids:
+        return []
+    from .main import shopify_graphql  # type: ignore
+
+    gql = f"""
+    query Nodes($ids: [ID!]!) {{
+      nodes(ids: $ids) {{ ... on Order {{ {fields} }} }}
+    }}
+    """
+    out: List[Dict[str, Any]] = []
+    for i in range(0, len(gids), 50):
+        chunk = gids[i:i + 50]
+        try:
+            data = await shopify_graphql(gql, {"ids": chunk}, store=store)
+        except Exception:
+            logger.exception("recent-order overlay fetch failed (store=%s)", store)
+            continue
+        for node in ((data or {}).get("nodes") or []):
+            if node and node.get("id"):
+                out.append(node)
+    return out
+
+
 # (key=(user_id, store, base_query)) → (timestamp_seconds, breakdown_dict). One full
 # pagination scan produces the total count AND the per-level (n1/n2/n3/n4/new) counts;
 # the queue endpoint and team-stats both read from this cache so the 15-second polling
@@ -381,11 +540,30 @@ def _empty_breakdown() -> Dict[str, int]:
     return {"total": 0, "n1": 0, "n2": 0, "n3": 0, "n4": 0, "nowtp": 0, "enatt": 0, "new": 0}
 
 
+def _count_into_breakdown(counts: Dict[str, int], tags_list: List[str]) -> None:
+    counts["total"] += 1
+    tlower = _lower_tags(tags_list)
+    has_any = False
+    for lv in _PHONE_LEVELS:
+        if lv in tlower:
+            counts[lv] += 1
+            has_any = True
+    if any(t in tlower for t in _NOWTP_TAGS):
+        counts["nowtp"] += 1
+        has_any = True
+    if any(t in tlower for t in _ENATT_TAGS):
+        counts["enatt"] += 1
+        has_any = True
+    if not has_any:
+        counts["new"] += 1
+
+
 async def _compute_assigned_breakdown(
     store: str,
     user_id: str,
     base_q: str,
     generation: int,
+    live_filter: Optional[LiveTagFilter] = None,
 ) -> Dict[str, int]:
     key = (user_id, store, base_q)
     from .main import shopify_graphql  # type: ignore
@@ -393,12 +571,13 @@ async def _compute_assigned_breakdown(
     gql = """
     query Q($first: Int!, $after: String, $q: String) {
       orders(first: $first, after: $after, query: $q, sortKey: CREATED_AT, reverse: true) {
-        edges { cursor node { tags } }
+        edges { cursor node { id tags } }
         pageInfo { hasNextPage }
       }
     }
     """
     counts = _empty_breakdown()
+    seen: set = set()
     cursor: Optional[str] = None
     while counts["total"] < _BREAKDOWN_HARD_CAP:
         try:
@@ -409,28 +588,36 @@ async def _compute_assigned_breakdown(
         if not edges:
             break
         for e in edges:
-            tags_list = list((e.get("node") or {}).get("tags") or [])
+            node = e.get("node") or {}
+            tags_list = list(node.get("tags") or [])
+            if node.get("id"):
+                seen.add(node["id"])
             if has_cod_tag(tags_list):
                 continue
-            counts["total"] += 1
-            tlower = {str(t or "").strip().lower() for t in tags_list}
-            has_any = False
-            for lv in ("n1", "n2", "n3", "n4"):
-                if lv in tlower:
-                    counts[lv] += 1
-                    has_any = True
-            if any(t in tlower for t in _NOWTP_TAGS):
-                counts["nowtp"] += 1
-                has_any = True
-            if any(t in tlower for t in _ENATT_TAGS):
-                counts["enatt"] += 1
-                has_any = True
-            if not has_any:
-                counts["new"] += 1
+            # The search index can lag a tag removal; the node's tags cannot.
+            if live_filter is not None and not live_filter.matches(tags_list):
+                continue
+            _count_into_breakdown(counts, tags_list)
         page_info = ((data or {}).get("orders") or {}).get("pageInfo") or {}
         if not page_info.get("hasNextPage"):
             break
         cursor = edges[-1].get("cursor")
+
+    # Orders this app just assigned to the agent that Shopify hasn't indexed yet.
+    owner_tags = live_filter.require[0] if (live_filter and live_filter.require) else frozenset()
+    missing = [g for g in recent_orders_tagged_with(store, owner_tags) if g not in seen]
+    if missing:
+        nodes = await _fetch_nodes_by_id(
+            store, missing, "id tags cancelledAt closed displayFulfillmentStatus",
+        )
+        for node in nodes:
+            tags_list = list(node.get("tags") or [])
+            if (
+                _node_is_open_unshipped(node)
+                and not has_cod_tag(tags_list)
+                and live_filter.matches(tags_list)
+            ):
+                _count_into_breakdown(counts, tags_list)
 
     # A tag mutation may invalidate the cache while this scan is running. Return the
     # result to its original caller, but never repopulate the cache with that stale scan.
@@ -439,7 +626,12 @@ async def _compute_assigned_breakdown(
     return counts
 
 
-async def accurate_assigned_breakdown(store: str, user_id: str, base_q: str) -> Dict[str, int]:
+async def accurate_assigned_breakdown(
+    store: str,
+    user_id: str,
+    base_q: str,
+    live_filter: Optional[LiveTagFilter] = None,
+) -> Dict[str, int]:
     """Return an accurate queue breakdown with TTL caching and request coalescing.
 
     When several tabs miss the same cache key simultaneously, only one Shopify
@@ -454,7 +646,9 @@ async def accurate_assigned_breakdown(store: str, user_id: str, base_q: str) -> 
     task = _BREAKDOWN_INFLIGHT.get(key)
     if task is None:
         task = asyncio.create_task(
-            _compute_assigned_breakdown(store, user_id, base_q, _BREAKDOWN_CACHE_GENERATION)
+            _compute_assigned_breakdown(
+                store, user_id, base_q, _BREAKDOWN_CACHE_GENERATION, live_filter,
+            )
         )
         _BREAKDOWN_INFLIGHT[key] = task
     try:
@@ -697,6 +891,16 @@ async def agent_queue(
             "today_label": today_label, "shop_domain": shop_domain,
         }
     q = apply_level_filter(base_q, level)
+    live_filter = await queue_filter_for_user(db, user)
+
+    def _still_mine(tags_list: List[str]) -> bool:
+        # Re-validate against live tags: the search index may still list an order
+        # that was just pulled away or moved to another level.
+        return (
+            not has_cod_tag(tags_list)
+            and live_filter.matches(tags_list)
+            and _matches_level(tags_list, level)
+        )
 
     # Import lazily to avoid a circular import with main.py at module load time.
     from .main import shopify_graphql  # type: ignore
@@ -735,7 +939,7 @@ async def agent_queue(
         for idx, e in enumerate(edges):
             node = e.get("node") or {}
             tags_list = list(node.get("tags") or [])
-            if has_cod_tag(tags_list):
+            if not _still_mine(tags_list):
                 continue
             orders.append(_flatten_order(node))
             if len(orders) >= page_size:
@@ -754,13 +958,36 @@ async def agent_queue(
         inner_cursor = edges[-1].get("cursor")
     data = last_data or {}
 
+    # Page 1 also shows orders that were just assigned to this agent but that
+    # Shopify's search index doesn't return yet, so a pull lands instantly.
+    if cursor is None and live_filter.require:
+        present = {o.get("id") for o in orders}
+        missing = [
+            g for g in recent_orders_tagged_with(store, live_filter.require[0])
+            if g not in present
+        ]
+        if missing:
+            extra_nodes = await _fetch_nodes_by_id(
+                store, missing, f"closed\n{_ORDER_NODE_FIELDS}",
+            )
+            extra = [
+                _flatten_order(n) for n in extra_nodes
+                if _node_is_open_unshipped(n) and _still_mine(list(n.get("tags") or []))
+            ]
+            if extra:
+                orders = sorted(
+                    orders + extra,
+                    key=lambda o: str(o.get("created_at") or ""),
+                    reverse=True,
+                )
+
     # Compute the per-level breakdown ONCE on page 1 (or use a fresh cache hit on follow-up
     # pages). The breakdown is derived from `base_q` — i.e. the agent's full tag-criteria
     # query WITHOUT any active level filter — so the N1/N2/N3/N4/New pills always show
     # the same totals regardless of which pill is currently selected.
     if cursor is None:
         try:
-            breakdown = await accurate_assigned_breakdown(store, user.id, base_q)
+            breakdown = await accurate_assigned_breakdown(store, user.id, base_q, live_filter)
         except Exception:
             breakdown = _empty_breakdown()
             breakdown["total"] = int(((data or {}).get("ordersCount") or {}).get("count") or 0)
@@ -967,6 +1194,7 @@ async def agent_tag_action(
     try:
         if op == "add":
             await _shopify_add_tag(order_id, tag, store)
+            note_recent_tag_add(store, order_id, [tag])
         else:
             await _shopify_remove_tag(order_id, tag, store)
     except HTTPException:
@@ -1993,6 +2221,7 @@ async def bulk_tag(
         async with sem:
             try:
                 await _shopify_add_tag(oid, tag, store)
+                note_recent_tag_add(store, oid, [tag])
                 audit_records.append({"order_gid": oid})
                 return True
             except Exception:
@@ -2047,6 +2276,11 @@ async def bulk_tag(
             try: await db.rollback()
             except Exception: pass
 
+    # A bulk tag can move orders between queues (agent tags) or out of every queue
+    # (cod tags), so no cached count survives it.
+    if tagged:
+        invalidate_all_breakdown_caches()
+
     return {"ok": True, "tagged": tagged, "total": len(order_ids), "tag": tag, "audited": audited}
 
 
@@ -2067,11 +2301,48 @@ async def bulk_tag(
 #
 # On execute we also exclude the agent's OWN existing tags from the search, so the
 # pull never re-claims something that's already in their queue.
+#
+# Both flows can be narrowed to one current owner (``source_agent_id``: a specific
+# agent, or PULL_SOURCE_UNASSIGNED), which is how orders move from one agent to
+# another. An admin can also fill someone else's queue (``target_agent_id``).
 
 _PULL_LEVEL_NEW = "new"
 _PULL_LEVELS_SINGLE = {"n1", "n2", "n3", "n4"}
 _PULL_LEVELS_GROUP = {"nowtp", "enatt"}
 _PULL_VALID_LEVELS = {_PULL_LEVEL_NEW} | _PULL_LEVELS_SINGLE | _PULL_LEVELS_GROUP
+
+# `source_agent_id` value meaning "only orders nobody owns".
+PULL_SOURCE_UNASSIGNED = "__unassigned__"
+
+
+class PullPlan(NamedTuple):
+    """Everything a pull needs to know about its pool.
+
+    - ``query``: Shopify search query for the pool (None = invalid level).
+    - ``agent_tag_default``: first of the owner's tags (the tag the frontend
+      proposes to apply; the execute body can pick another of the owner's tags).
+    - ``other_agent_tags``: tags claimed by some OTHER active confirmation user.
+    - ``strip_tags``: every tag belonging to anyone else (active or not), i.e.
+      what execute takes *off* a pulled order so it ends up carrying exactly one
+      agent tag: the owner's.
+    - ``live_filter``: the same pool restated over live tags, to drop hits the
+      lagging search index still returns.
+    """
+    query: Optional[str]
+    agent_tag_default: str
+    other_agent_tags: List[str]
+    strip_tags: List[str]
+    live_filter: LiveTagFilter
+
+
+def _level_tag_group(lv: str) -> Tuple[str, ...]:
+    if lv in _PULL_LEVELS_SINGLE:
+        return (lv,)
+    if lv == "nowtp":
+        return _NOWTP_TAGS
+    if lv == "enatt":
+        return _ENATT_TAGS
+    return ()
 
 
 async def build_pull_query(
@@ -2081,70 +2352,90 @@ async def build_pull_query(
     level: Optional[str],
     exclude_tags: Optional[List[str]] = None,
     include_assigned: bool = False,
-) -> Tuple[Optional[str], str, List[str], List[str]]:
-    """Build the Shopify search query for the agent's pull pool.
+    source_tags: Optional[List[str]] = None,
+    source_unassigned: bool = False,
+) -> PullPlan:
+    """Build the Shopify search query for a pull into ``user``'s queue.
 
-    Returns ``(query, agent_tag_default, other_agent_tags, strip_tags)``.
+    ``user`` is the order's future owner — normally the puller, or the agent an
+    admin is assigning to.
 
-    - ``agent_tag_default`` = first of ``user.agent_tags`` (the tag the frontend
-      proposes to apply; can be overridden in the execute body if the user has
-      multiple tags).
-    - ``other_agent_tags`` = every Shopify tag currently claimed by some OTHER
-      active confirmation user. In "new" mode these are excluded from the search
-      so the pool really means unassigned — unless ``include_assigned`` is set.
-    - ``strip_tags`` = every tag belonging to anyone else (active or not), i.e.
-      what execute takes *off* a pulled order so it ends up carrying exactly one
-      agent tag: the puller's.
+    ``include_assigned`` only affects "new": without it the pool is orders no
+    other active agent owns. The level pools (n1…n4, nowtp, enatt) already reach
+    into other agents' queues by design.
 
-    ``include_assigned`` only affects "new". The level pools (n1…n4, nowtp,
-    enatt) already reach into other agents' queues by design.
+    ``source_tags`` narrows the pool to orders carrying one of those tags (one
+    specific agent's orders — implies ``include_assigned``). ``source_unassigned``
+    narrows it to orders carrying nobody else's tag at all.
     """
     lv = (level or _PULL_LEVEL_NEW).lower().strip()
     if lv not in _PULL_VALID_LEVELS:
-        return None, "", [], []
+        return PullPlan(None, "", [], [], LiveTagFilter())
 
     my_tags = list(user.agent_tags or [])
     other_active = await _other_agents_active_tags(db, exclude_user_id=user.id)
     strip_tags = await _other_agents_all_tags(db, exclude_user_id=user.id)
+    source_tags = [t for t in (source_tags or []) if t]
 
     parts: List[str] = ["status:open", "fulfillment_status:unshipped", _COD_EXCLUSION]
+    require: List[FrozenSet[str]] = []
+    forbid = set(_lower_tags(my_tags)) | set(_lower_tags(exclude_tags))
 
     if lv == _PULL_LEVEL_NEW:
         # Unassigned pool: no other agent tag, no own tag. With include_assigned
-        # the other-agent exclusions drop away, so the pool becomes "anything not
-        # already mine" — including orders sitting in someone else's queue, which
-        # the execute step then re-assigns by stripping their tag.
-        if not include_assigned:
+        # (or a source agent) the other-agent exclusions drop away, so the pool
+        # becomes "anything not already mine" — including orders sitting in
+        # someone else's queue, which execute re-assigns by stripping their tag.
+        if not (include_assigned or source_tags or source_unassigned):
             for t in other_active:
-                if t:
-                    parts.append(f"-tag:{_escape_tag(t)}")
-        # Free-form extra exclusions if the agent wants them.
-        for t in (exclude_tags or []):
-            if t:
                 parts.append(f"-tag:{_escape_tag(t)}")
+            forbid |= _lower_tags(other_active)
     else:
-        # Level-scoped pool. Add the level tag(s), then apply user-supplied
-        # exclusions. We do NOT exclude other agents' tags here — the whole
-        # point is to be able to pull n1/n2/... orders that currently sit in
-        # another agent's queue.
-        if lv in _PULL_LEVELS_SINGLE:
-            parts.append(f"tag:{_escape_tag(lv)}")
-        elif lv == "nowtp":
-            tag_or = " OR ".join(f"tag:{_escape_tag(t)}" for t in _NOWTP_TAGS)
-            parts.append(f"({tag_or})")
-        elif lv == "enatt":
-            tag_or = " OR ".join(f"tag:{_escape_tag(t)}" for t in _ENATT_TAGS)
-            parts.append(f"({tag_or})")
-        for t in (exclude_tags or []):
-            if t:
-                parts.append(f"-tag:{_escape_tag(t)}")
+        # Level-scoped pool. We do NOT exclude other agents' tags here — the
+        # whole point is to be able to pull n1/n2/... orders that currently sit
+        # in another agent's queue.
+        group = _level_tag_group(lv)
+        if len(group) == 1:
+            parts.append(f"tag:{_escape_tag(group[0])}")
+        else:
+            parts.append("(" + " OR ".join(f"tag:{_escape_tag(t)}" for t in group) + ")")
+        require.append(frozenset(group))
 
-    # Always keep orders already in the agent's queue out of the pull pool.
+    if source_unassigned:
+        # Nobody's order: carries no tag of any other user, active or not.
+        for t in strip_tags:
+            parts.append(f"-tag:{_escape_tag(t)}")
+        forbid |= _lower_tags(strip_tags)
+    elif source_tags:
+        parts.append("(" + " OR ".join(f"tag:{_escape_tag(t)}" for t in source_tags) + ")")
+        require.append(_lower_tags(source_tags))
+
+    # Free-form extra exclusions if the agent wants them.
+    for t in (exclude_tags or []):
+        if t:
+            parts.append(f"-tag:{_escape_tag(t)}")
+
+    # Always keep orders already in the owner's queue out of the pull pool.
     for t in my_tags:
         if t:
             parts.append(f"-tag:{_escape_tag(t)}")
 
-    return " ".join(parts), (my_tags[0] if my_tags else ""), other_active, strip_tags
+    return PullPlan(
+        " ".join(parts),
+        my_tags[0] if my_tags else "",
+        other_active,
+        strip_tags,
+        LiveTagFilter(require=tuple(require), forbid=frozenset(forbid)),
+    )
+
+
+class PoolScan(NamedTuple):
+    total: int
+    orders: List[Dict[str, Any]]
+    # How many orders carry one of the ``assigned_tags`` (someone else owns them).
+    assigned_total: int
+    # owner user id -> how many pool orders carry one of that user's tags.
+    by_owner: Dict[str, int]
 
 
 async def _scan_pull_pool(
@@ -2154,27 +2445,19 @@ async def _scan_pull_pool(
     limit: int,
     collect_orders: bool,
     assigned_tags: Optional[List[str]] = None,
-) -> Tuple[int, List[Dict[str, Any]], int]:
+    live_filter: Optional[LiveTagFilter] = None,
+    owner_of_tag: Optional[Dict[str, str]] = None,
+) -> PoolScan:
     """Walk Shopify pages for ``query``, dropping cod-tagged stragglers in Python
-    (Shopify's tag-wildcard exclusion can't match multi-word ``cod dd/mm/yy``).
+    (Shopify's tag-wildcard exclusion can't match multi-word ``cod dd/mm/yy``)
+    and hits whose live tags no longer match ``live_filter``.
 
-    Returns ``(total, orders, assigned_total)``. ``orders`` is up to ``limit``
-    ``{id, tags}`` dicts when ``collect_orders`` is True (used by execute) and
-    empty otherwise (preview only needs the counts). ``assigned_total`` counts how
-    many of the scanned orders carry one of ``assigned_tags`` — i.e. how much of
-    the pool would be taken away from another agent.
+    ``orders`` is up to ``limit`` ``{id, tags}`` dicts when ``collect_orders`` is
+    True (used by execute) and empty otherwise (preview only needs the counts).
     """
     from .main import shopify_graphql  # type: ignore
 
-    gql_count = """
-    query Q($first: Int!, $after: String, $q: String) {
-      orders(first: $first, after: $after, query: $q, sortKey: CREATED_AT, reverse: true) {
-        edges { cursor node { tags } }
-        pageInfo { hasNextPage }
-      }
-    }
-    """
-    gql_collect = """
+    gql = """
     query Q($first: Int!, $after: String, $q: String) {
       orders(first: $first, after: $after, query: $q, sortKey: CREATED_AT, reverse: true) {
         edges { cursor node { id tags } }
@@ -2182,12 +2465,13 @@ async def _scan_pull_pool(
       }
     }
     """
-    gql = gql_collect if collect_orders else gql_count
     cursor: Optional[str] = None
     total = 0
     assigned_total = 0
+    by_owner: Dict[str, int] = {}
     out: List[Dict[str, Any]] = []
-    assigned_lower = {str(t or "").strip().lower() for t in (assigned_tags or []) if t}
+    assigned_lower = _lower_tags(assigned_tags)
+    owner_of_tag = owner_of_tag or {}
     cap = max(0, int(limit))
     while True:
         if collect_orders and len(out) >= cap:
@@ -2207,11 +2491,14 @@ async def _scan_pull_pool(
             tags_list = list(node.get("tags") or [])
             if has_cod_tag(tags_list):
                 continue
+            if live_filter is not None and not live_filter.matches(tags_list):
+                continue
             total += 1
-            if assigned_lower and any(
-                str(t or "").strip().lower() in assigned_lower for t in tags_list
-            ):
+            tl = _lower_tags(tags_list)
+            if assigned_lower and (tl & assigned_lower):
                 assigned_total += 1
+            for owner_id in {owner_of_tag[t] for t in tl if t in owner_of_tag}:
+                by_owner[owner_id] = by_owner.get(owner_id, 0) + 1
             if collect_orders:
                 gid = node.get("id")
                 if gid:
@@ -2227,7 +2514,67 @@ async def _scan_pull_pool(
         # Safety net on counting paths: don't walk forever on a runaway query.
         if not collect_orders and total >= _BREAKDOWN_HARD_CAP:
             break
-    return total, out, assigned_total
+    return PoolScan(total, out, assigned_total, by_owner)
+
+
+async def _tag_owners(db: AsyncSession, exclude_user_id: Optional[str]) -> Tuple[Dict[str, str], Dict[str, User]]:
+    """Map each lowercased agent tag to the user who owns it (active users win
+    when two users share a tag), skipping ``exclude_user_id``."""
+    res = await db.execute(select(User))
+    users = [
+        u for u in res.scalars().all()
+        if (u.agent_tags or []) and u.id != exclude_user_id
+    ]
+    users.sort(key=lambda u: (not bool(u.is_active), str(u.created_at or ""), u.id))
+    owner_of_tag: Dict[str, str] = {}
+    for u in users:
+        for t in _lower_tags(u.agent_tags):
+            owner_of_tag.setdefault(t, u.id)
+    return owner_of_tag, {u.id: u for u in users}
+
+
+async def _resolve_pull_owner(db: AsyncSession, user: User, target_agent_id: Optional[str]) -> User:
+    """Whose queue the pull fills: the caller's, or — for admins — another agent's."""
+    tid = (target_agent_id or "").strip()
+    if not tid or tid == user.id:
+        return user
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="only an admin can assign orders to another agent")
+    target = await db.get(User, tid)
+    if target is None or not target.is_active:
+        raise HTTPException(status_code=404, detail="target agent not found")
+    if not (target.agent_tags or []):
+        raise HTTPException(status_code=400, detail="that agent has no tag yet; give them one in /admin first")
+    return target
+
+
+async def _resolve_pull_source(
+    db: AsyncSession, owner: User, source_agent_id: Optional[str],
+) -> Tuple[Optional[List[str]], bool]:
+    """``(source_tags, source_unassigned)`` for a ``source_agent_id``."""
+    sid = (source_agent_id or "").strip()
+    if not sid:
+        return None, False
+    if sid == PULL_SOURCE_UNASSIGNED:
+        return None, True
+    if sid == owner.id:
+        raise HTTPException(status_code=400, detail="those orders are already in this queue")
+    source = await db.get(User, sid)
+    tags = list((source.agent_tags if source else None) or [])
+    if not tags:
+        raise HTTPException(status_code=404, detail="source agent has no tagged orders")
+    return tags, False
+
+
+def _agent_summary(u: User, count: int) -> Dict[str, Any]:
+    return {
+        "id": u.id,
+        "name": u.name,
+        "email": u.email,
+        "tags": list(u.agent_tags or []),
+        "is_active": bool(u.is_active),
+        "count": int(count),
+    }
 
 
 class PullPreviewBody(BaseModel):
@@ -2235,6 +2582,8 @@ class PullPreviewBody(BaseModel):
     level: Optional[str] = None          # "new" | "n1".."n4" | "nowtp" | "enatt"
     exclude_tags: Optional[List[str]] = None
     include_assigned: bool = False       # "new" mode: also show other agents' orders
+    source_agent_id: Optional[str] = None  # only this agent's orders (or PULL_SOURCE_UNASSIGNED)
+    target_agent_id: Optional[str] = None  # admin: fill this agent's queue instead of mine
 
 
 @router.post("/api/agent/pull/preview")
@@ -2243,22 +2592,45 @@ async def pull_preview(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    """Count how many orders the agent could pull right now under the given
-    level + exclude-tag filters. Cheap to call — used to populate the count
-    inside the pull modal as the agent edits the exclude inputs."""
+    """Count how many orders could be pulled right now under the given filters,
+    plus who currently owns them. Cheap to call — used to populate the pull
+    modal as the agent edits the filters."""
     store = (body.store or "").strip()
     if not store:
         raise HTTPException(status_code=400, detail="store is required")
-    q, default_tag, other_active, strip_tags = await build_pull_query(
-        db, user,
+    owner = await _resolve_pull_owner(db, user, body.target_agent_id)
+    source_tags, source_unassigned = await _resolve_pull_source(db, owner, body.source_agent_id)
+    source_id = (body.source_agent_id or "").strip()
+    # Scan the pool WITHOUT the source narrowing so every owner's chip keeps its
+    # count while one of them is selected; the selected count is derived below.
+    plan = await build_pull_query(
+        db, owner,
         level=body.level,
         exclude_tags=body.exclude_tags,
-        include_assigned=body.include_assigned,
+        include_assigned=body.include_assigned or bool(source_id),
     )
-    if not q:
+    if not plan.query:
         raise HTTPException(status_code=400, detail=f"invalid level: {body.level!r}")
-    available, _, assigned = await _scan_pull_pool(
-        store=store, query=q, limit=0, collect_orders=False, assigned_tags=strip_tags,
+    owner_of_tag, users_by_id = await _tag_owners(db, exclude_user_id=owner.id)
+    scan = await _scan_pull_pool(
+        store=store, query=plan.query, limit=0, collect_orders=False,
+        assigned_tags=plan.strip_tags, live_filter=plan.live_filter,
+        owner_of_tag=owner_of_tag,
+    )
+    unassigned = max(0, scan.total - scan.assigned_total)
+    if source_unassigned:
+        available, assigned_available = unassigned, 0
+    elif source_tags:
+        available = assigned_available = int(scan.by_owner.get(source_id, 0))
+    else:
+        available, assigned_available = scan.total, scan.assigned_total
+
+    by_agent = sorted(
+        (
+            _agent_summary(users_by_id[uid], n)
+            for uid, n in scan.by_owner.items() if uid in users_by_id
+        ),
+        key=lambda a: (-a["count"], (a["name"] or a["email"] or "").lower()),
     )
     return {
         "ok": True,
@@ -2266,12 +2638,18 @@ async def pull_preview(
         "level": (body.level or _PULL_LEVEL_NEW).lower().strip(),
         "exclude_tags": [t for t in (body.exclude_tags or []) if t],
         "include_assigned": bool(body.include_assigned),
+        "source_agent_id": source_id or None,
+        "target_agent_id": owner.id,
         "available": int(available),
         # How many of `available` would be taken off another agent.
-        "assigned_available": int(assigned),
-        "agent_tag": default_tag,
-        "agent_tags": list(user.agent_tags or []),
-        "other_agent_tags": other_active,
+        "assigned_available": int(assigned_available),
+        # Whole pool, split by current owner (independent of source_agent_id).
+        "pool_total": int(scan.total),
+        "unassigned_available": int(unassigned),
+        "by_agent": by_agent,
+        "agent_tag": plan.agent_tag_default,
+        "agent_tags": list(owner.agent_tags or []),
+        "other_agent_tags": plan.other_agent_tags,
     }
 
 
@@ -2280,8 +2658,10 @@ class PullExecuteBody(BaseModel):
     level: Optional[str] = None
     exclude_tags: Optional[List[str]] = None
     limit: Optional[int] = None          # how many to pull; 0 / None = take everything
-    agent_tag: Optional[str] = None      # which of the user's own tags to apply
+    agent_tag: Optional[str] = None      # which of the owner's tags to apply
     include_assigned: bool = False       # "new" mode: also claim other agents' orders
+    source_agent_id: Optional[str] = None  # only take this agent's orders (or PULL_SOURCE_UNASSIGNED)
+    target_agent_id: Optional[str] = None  # admin: move the orders to this agent
 
 
 _PULL_HARD_CAP = 2000
@@ -2293,46 +2673,51 @@ async def pull_execute(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ):
-    """Claim up to ``limit`` orders into this agent's queue.
+    """Claim up to ``limit`` orders into the caller's queue (or, for an admin,
+    into ``target_agent_id``'s queue).
 
     For every order pulled we:
-      - Add the agent's tag (defaults to the first of their assigned tags;
-        ``agent_tag`` body field can override, but must be one the user owns).
+      - Add the owner's tag (defaults to the first of their assigned tags;
+        ``agent_tag`` body field can override, but must be one the owner has).
       - Remove every OTHER agent's tag that's currently on the order — active or
         not. That's what makes the assignment exclusive — Laila's "laila" tag,
         ndcon's "ndcon" tag, etc. all come off so the order shows up only in the
-        pulling agent's queue, and an order never carries two agent tags at once.
+        owner's queue, and an order never carries two agent tags at once.
     """
     store = (body.store or "").strip()
     if not store:
         raise HTTPException(status_code=400, detail="store is required")
 
-    q, default_tag, _other_active, strip_tags = await build_pull_query(
-        db, user,
+    owner = await _resolve_pull_owner(db, user, body.target_agent_id)
+    source_tags, source_unassigned = await _resolve_pull_source(db, owner, body.source_agent_id)
+    plan = await build_pull_query(
+        db, owner,
         level=body.level,
         exclude_tags=body.exclude_tags,
         include_assigned=body.include_assigned,
+        source_tags=source_tags,
+        source_unassigned=source_unassigned,
     )
-    if not q:
+    if not plan.query:
         raise HTTPException(status_code=400, detail=f"invalid level: {body.level!r}")
 
-    my_tags = list(user.agent_tags or [])
-    chosen_tag = (body.agent_tag or default_tag or "").strip()
+    my_tags = list(owner.agent_tags or [])
+    chosen_tag = (body.agent_tag or plan.agent_tag_default or "").strip()
     if not chosen_tag:
         raise HTTPException(
             status_code=400,
             detail="no agent tag available; ask admin to assign at least one tag to your account",
         )
-    if my_tags and chosen_tag.lower() not in {t.lower() for t in my_tags if t}:
-        raise HTTPException(status_code=400, detail="agent_tag must be one of your assigned tags")
+    if my_tags and chosen_tag.lower() not in _lower_tags(my_tags):
+        raise HTTPException(status_code=400, detail="agent_tag must be one of the agent's assigned tags")
 
-    # Never strip a tag we're about to apply, nor any of the puller's own tags:
+    # Never strip a tag we're about to apply, nor any of the owner's own tags:
     # if "chosen_tag" overlaps with somebody else's claimed tag (shouldn't happen
     # in a well-configured roster, but be defensive) the order still has to end up
     # tagged for this pull.
-    keep_lower = {chosen_tag.lower()} | {t.lower() for t in my_tags if t}
-    strip_tags = [t for t in strip_tags if (t or "").lower() not in keep_lower]
-    strip_lower = {t.lower() for t in strip_tags}
+    keep_lower = {chosen_tag.lower()} | set(_lower_tags(my_tags))
+    strip_tags = [t for t in plan.strip_tags if (t or "").lower() not in keep_lower]
+    strip_lower = _lower_tags(strip_tags)
 
     # Resolve how many to take.
     raw_limit = int(body.limit or 0)
@@ -2341,15 +2726,19 @@ async def pull_execute(
     else:
         target = min(raw_limit, _PULL_HARD_CAP)
 
-    _total, candidates, _assigned = await _scan_pull_pool(
-        store=store, query=q, limit=target, collect_orders=True, assigned_tags=strip_tags,
+    level_norm = (body.level or _PULL_LEVEL_NEW).lower().strip()
+    scan = await _scan_pull_pool(
+        store=store, query=plan.query, limit=target, collect_orders=True,
+        assigned_tags=strip_tags, live_filter=plan.live_filter,
     )
+    candidates = scan.orders
     if not candidates:
         return {
             "ok": True, "pulled": 0, "audited": 0,
             "requested": raw_limit, "available_seen": 0,
             "agent_tag": chosen_tag, "store": store,
-            "level": (body.level or _PULL_LEVEL_NEW).lower().strip(),
+            "level": level_norm, "target_agent_id": owner.id,
+            "order_ids": [], "reassigned": 0, "reassign_failed": 0,
         }
 
     from .main import (  # type: ignore
@@ -2363,7 +2752,7 @@ async def pull_execute(
     sem = asyncio.Semaphore(_BULK_CONCURRENCY)
 
     async def _claim_one(item: Dict[str, Any]) -> Optional[Tuple[str, List[str], List[str]]]:
-        """Tag one order for this agent and take every other agent's tag off it.
+        """Tag one order for the owner and take every other agent's tag off it.
 
         Returns ``(order_gid, removed, stuck)`` — ``stuck`` being other agents'
         tags Shopify refused to remove, which would leave the order double-owned.
@@ -2375,7 +2764,8 @@ async def pull_execute(
             except Exception:
                 logger.exception("pull add-tag failed (order=%s tag=%s)", oid, chosen_tag)
                 return None
-            # Strip the other agents' tags so this order becomes exclusively ours.
+            note_recent_tag_add(store, oid, [chosen_tag])
+            # Strip the other agents' tags so this order becomes exclusively the owner's.
             removed: List[str] = []
             stuck: List[str] = []
             for t in (item.get("tags") or []):
@@ -2398,37 +2788,42 @@ async def pull_execute(
     stuck_orders = {oid: stuck for oid, _removed, stuck in claims if stuck}
     reassigned = sum(1 for _oid, removed, _stuck in claims if removed)
 
-    # Audit log each successful pull.
+    # Audit log each successful pull. The event belongs to the order's new owner
+    # (intake analytics follow it); an admin assignment records who did it.
     store_key_norm = _normalize_store(store)
     audited = 0
-    level_norm = (body.level or _PULL_LEVEL_NEW).lower().strip()
     for oid in pulled_ids:
         try:
             if await _already_logged_today(
                 db,
-                user_id=user.id,
+                user_id=owner.id,
                 order_gid=oid,
                 store_key=store_key_norm,
                 action="confirmation_pulled",
             ):
                 continue
+            metadata = {
+                "tag": chosen_tag,
+                "level": level_norm,
+                "exclude_tags": [t for t in (body.exclude_tags or []) if t],
+                "include_assigned": bool(body.include_assigned),
+                "removed_other_agent_tags": removed_by_order.get(oid, []),
+                "role": getattr(owner, "role", None),
+                "source": "confirmation",
+                "confirmation_actor": True,
+            }
+            if body.source_agent_id:
+                metadata["source_agent_id"] = body.source_agent_id
+            if owner.id != user.id:
+                metadata["assigned_by"] = user.id
             await _record_user_action(
                 db,
-                user_id=user.id,
+                user_id=owner.id,
                 order_number=None,
                 order_gid=oid,
                 store_key=store_key_norm,
                 action="confirmation_pulled",
-                metadata={
-                    "tag": chosen_tag,
-                    "level": level_norm,
-                    "exclude_tags": [t for t in (body.exclude_tags or []) if t],
-                    "include_assigned": bool(body.include_assigned),
-                    "removed_other_agent_tags": removed_by_order.get(oid, []),
-                    "role": getattr(user, "role", None),
-                    "source": "confirmation",
-                    "confirmation_actor": True,
-                },
+                metadata=metadata,
             )
             await db.commit()
             audited += 1
@@ -2449,7 +2844,9 @@ async def pull_execute(
         "store": store,
         "level": level_norm,
         "agent_tag": chosen_tag,
+        "target_agent_id": owner.id,
         "pulled": len(pulled_ids),
+        "order_ids": pulled_ids,
         "audited": audited,
         "requested": raw_limit,
         "available_seen": len(candidates),
@@ -2532,8 +2929,10 @@ async def _team_stats_uncached(
     from .main import known_store_labels  # type: ignore
 
     queries_by_agent: Dict[str, Optional[str]] = {}
+    filters_by_agent: Dict[str, LiveTagFilter] = {}
     for a in agents:
         queries_by_agent[a.id] = await query_for_user(db, a)
+        filters_by_agent[a.id] = await queue_filter_for_user(db, a)
 
     try:
         stores: List[str] = await known_store_labels()
@@ -2547,7 +2946,9 @@ async def _team_stats_uncached(
             if not q:
                 return (agent_id, _empty_breakdown())
             try:
-                bd = await accurate_assigned_breakdown(store_key, agent_id, q)
+                bd = await accurate_assigned_breakdown(
+                    store_key, agent_id, q, filters_by_agent.get(agent_id),
+                )
                 return (agent_id, bd)
             except Exception:
                 return (agent_id, _empty_breakdown())
