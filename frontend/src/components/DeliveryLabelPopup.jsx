@@ -200,6 +200,12 @@ async function loadDeliveryBootstrap() {
   return deliveryBootstrapPromise;
 }
 
+/* Warm the shared Delivery bootstrap (config + merchants + companies/cities)
+   before the first fulfillment so the first queued order does not pay for it. */
+export function prewarmDeliveryBootstrap() {
+  return loadDeliveryBootstrap().catch(() => null);
+}
+
 /* Custom searchable city dropdown — only shows cities from the list, no browser autocomplete */
 function CityDropdown({ value, onChange, options, placeholder = "City", className = "", inputClassName = "" }) {
   const [open, setOpen] = useState(false);
@@ -857,8 +863,11 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
   async function searchQueue(mid, options = {}) {
     const isWarmOnly = options?.warmOnly === true;
     const retryAttempt = options?._retryAttempt || 0;
-    const MAX_BG_RETRIES = 5;
-    const RETRY_DELAYS = [3000, 6000, 10000, 15000, 20000];
+    // Fulfill now replays the order into Delivery before it returns, so the row
+    // is normally there on the first search. Poll tightly at first for the
+    // rare late row instead of making the operator wait 3s, then 6s, then 10s.
+    const RETRY_DELAYS = [700, 1000, 1500, 2000, 3000, 4000, 5000, 7000, 10000, 15000];
+    const MAX_BG_RETRIES = RETRY_DELAYS.length;
 
     if (retryAttempt === 0) setPhase("searching");
     addLog(retryAttempt > 0 ? `Retry #${retryAttempt}: searching queue for ${orderName}...` : `Searching queue for ${orderName}...`);

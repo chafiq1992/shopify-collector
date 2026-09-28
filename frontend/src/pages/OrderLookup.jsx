@@ -3,7 +3,19 @@ import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import { persistStoreSelection, readCurrentStore, titleStore } from "../lib/stores";
 
-const DeliveryLabelPopup = lazy(() => import("../components/DeliveryLabelPopup"));
+const loadDeliveryLabelPopup = () => import("../components/DeliveryLabelPopup");
+const DeliveryLabelPopup = lazy(loadDeliveryLabelPopup);
+
+function fulfillNotCompletedMessage(reason) {
+  if (reason === "no_remaining") return "Nothing to fulfill — order may be cancelled or already fulfilled.";
+  if (reason === "missing_read_fulfillment_scope") {
+    return "The connected Shopify app is missing a read fulfillment-order scope. Reconnect the store with read_assigned_fulfillment_orders or the matching fulfillment read scope.";
+  }
+  if (reason === "no_fulfillment_orders") {
+    return "Shopify returned no fulfillment orders for this order. The store connection may be missing fulfillment permissions, or the order is not fulfillable yet.";
+  }
+  return reason || "Fulfillment was not completed.";
+}
 const RECENT_TAG_CACHE_TTL_MS = 60 * 1000;
 const recentTagsCache = new Map();
 
@@ -323,8 +335,6 @@ export default function OrderLookup(){
   const [noteAppend, setNoteAppend] = useState("");
   const [message, setMessage] = useState(null);
   const [overrideInfo, setOverrideInfo] = useState(null);
-  const [fulfillBusy, setFulfillBusy] = useState(false);
-  const [fulfillSuccess, setFulfillSuccess] = useState(false);
   const [tagSuggestions, setTagSuggestions] = useState([]);
   const [tagQuery, setTagQuery] = useState("");
   const [showTagDropdown, setShowTagDropdown] = useState(false);
@@ -374,7 +384,8 @@ export default function OrderLookup(){
   );
   const activeLabelQueueItems = useMemo(() => {
     return [...labelQueueItems]
-      .filter((item) => item && item.statusKey !== "printed")
+      // The label flow starts only once Shopify has accepted the fulfillment.
+      .filter((item) => item && item.statusKey !== "printed" && (!item.fulfillState || item.fulfillState === "done"))
       .sort((a, b) => Number(a?.createdAt || 0) - Number(b?.createdAt || 0));
   }, [labelQueueItems]);
   const registerSection = useCallback((key) => (el) => {
@@ -383,6 +394,13 @@ export default function OrderLookup(){
   }, []);
 
   useEffect(() => { try { inputRef.current?.focus(); } catch {} }, []);
+  useEffect(() => {
+    // Fetch the label-flow code and Delivery settings while the agent is still
+    // looking at the order, not after they press Fulfill.
+    loadDeliveryLabelPopup()
+      .then((mod) => mod?.prewarmDeliveryBootstrap?.())
+      .catch(() => {});
+  }, []);
   useEffect(() => () => {
     try { if (queuePulseTimerRef.current) clearTimeout(queuePulseTimerRef.current); } catch {}
     try { if (queueFlightTimerRef.current) clearTimeout(queueFlightTimerRef.current); } catch {}
@@ -490,8 +508,6 @@ export default function OrderLookup(){
     setError(null);
     setMessage(nextMessage);
     setOverrideInfo(null);
-    setFulfillBusy(false);
-    setFulfillSuccess(false);
     setNewTag("");
     setNoteAppend("");
     setTagQuery("");
@@ -592,8 +608,61 @@ export default function OrderLookup(){
         : item
     )));
   }, [handlePrintedQueued]);
-  const enqueueFulfilledOrder = useCallback((queuedOrder) => {
-    if (!queuedOrder?.id) return;
+  const pendingFulfillOrderIds = useMemo(() => new Set(
+    labelQueueItems
+      .filter((item) => item?.fulfillState === "pending")
+      .map((item) => String(item.order?.id || ""))
+  ), [labelQueueItems]);
+  // An order re-opened while its fulfillment is still in flight must not be
+  // fulfilled a second time.
+  const fulfillBusy = !!order && pendingFulfillOrderIds.has(String(order.id || ""));
+  const updateLabelQueueItem = useCallback((queueId, patch) => {
+    setLabelQueueItems(prev => prev.map((item) => (item.queueId === queueId ? { ...item, ...patch } : item)));
+  }, []);
+  const dismissLabelQueueItem = useCallback((queueId) => {
+    setLabelQueueItems(prev => prev.filter((item) => item.queueId !== queueId));
+  }, []);
+  // Fulfillment runs inside its side-queue card, so the agent can look up the
+  // next order immediately instead of waiting on Shopify and Delivery intake.
+  const runQueuedFulfillment = useCallback(async (queueId, job) => {
+    updateLabelQueueItem(queueId, {
+      fulfillState: "pending",
+      statusKey: "fulfilling",
+      statusLabel: "Fulfilling…",
+      error: "",
+      actions: null,
+    });
+    try {
+      const res = job.groups
+        ? await API.fulfillWithSelection(job.orderId, job.store, job.groups, job.orderNumber)
+        : await API.fulfill(job.orderId, job.store, job.orderNumber);
+      if (res && res.fulfilled === false) throw new Error(fulfillNotCompletedMessage(res.reason));
+      if (!res || res.ok === false) {
+        throw new Error(`Fulfillment failed: ${(res?.errors?.[0]?.message) || "Unknown error"}`);
+      }
+      updateLabelQueueItem(queueId, {
+        fulfillState: "done",
+        statusKey: "preparing",
+        statusLabel: "Preparing",
+        error: "",
+        actions: null,
+      });
+      setAgentTodayReloadKey((value) => value + 1);
+    } catch (e) {
+      updateLabelQueueItem(queueId, {
+        fulfillState: "failed",
+        statusKey: "information_error",
+        statusLabel: "Fulfill failed",
+        error: e?.message || "Failed to fulfill",
+        actions: {
+          handleRetry: () => runQueuedFulfillment(queueId, job),
+          handleDismiss: () => dismissLabelQueueItem(queueId),
+        },
+      });
+    }
+  }, [updateLabelQueueItem, dismissLabelQueueItem]);
+  const enqueueFulfilledOrder = useCallback((queuedOrder, extra = {}) => {
+    if (!queuedOrder?.id) return null;
     const queueId = `${queuedOrder.id}-${Date.now()}`;
     setLabelQueueItems(prev => [
       {
@@ -610,9 +679,11 @@ export default function OrderLookup(){
         open: false,
         jobId: null,
         createdAt: Date.now(),
+        ...extra,
       },
       ...prev,
     ].slice(0, 12));
+    return queueId;
   }, [store]);
   async function doSearch(number){
     const token = searchTokenRef.current + 1;
@@ -625,7 +696,6 @@ export default function OrderLookup(){
     setOverrideInfo(null);
     setFoData(createEmptyFoData());
     setTagSuggestions([]);
-    setFulfillSuccess(false);
     setGuideActive(false);
     setActiveGuideSection(null);
     try {
@@ -1125,6 +1195,7 @@ export default function OrderLookup(){
     if (statusKey === "ready_to_print") return "bg-indigo-100 text-indigo-800 border border-indigo-200";
     if (statusKey === "waiting_partner") return "bg-amber-100 text-amber-800 border border-amber-200";
     if (statusKey === "information_error") return "bg-red-100 text-red-800 border border-red-200";
+    if (statusKey === "fulfilling") return "bg-blue-100 text-blue-800 border border-blue-200";
     return "bg-gray-100 text-gray-700 border border-gray-200";
   };
   const queueStepIndex = (item) => {
@@ -2341,90 +2412,51 @@ export default function OrderLookup(){
                 className="flex-1 px-4 py-2.5 rounded-xl border border-gray-300 text-sm font-semibold text-gray-700 hover:bg-gray-50"
               >Cancel</button>
               <button
-                onClick={async () => {
+                onClick={() => {
                   setFulfillConfirm(false);
-                  if (fulfillBusy || isOrderFulfilled) return;
-                  setFulfillBusy(true);
-                  setError(null);
-                  try {
-                    let res;
-                    if (foData.orders && foData.orders.length > 0) {
-                      const selIds = foData.selectedLineItemIds;
-                      const groups = [];
-                      foData.orders.forEach(g => {
-                        const items = [];
-                        (g.lineItems || []).forEach(li => {
-                          if (selIds.has(li.id) && li.remainingQuantity > 0){
-                            items.push({ id: li.id, quantity: li.remainingQuantity });
-                          }
-                        });
-                        if (items.length > 0){
-                          groups.push({ fulfillmentOrderId: g.id, fulfillmentOrderLineItems: items });
-                        }
-                      });
-                      if (groups.length === 0){
-                        setError("Select at least one line item to fulfill.");
-                        setFulfillBusy(false);
-                        return;
-                      }
-                      res = await API.fulfillWithSelection(order.id, store, groups, order.number);
-                    } else {
-                      res = await API.fulfill(order.id, store, order.number);
-                    }
-                    if (res && res.fulfilled === false) {
-                      const reason = res.reason === "no_remaining"
-                        ? "Nothing to fulfill — order may be cancelled or already fulfilled."
-                        : res.reason === "missing_read_fulfillment_scope"
-                          ? "The connected Shopify app is missing a read fulfillment-order scope. Reconnect the store with read_assigned_fulfillment_orders or the matching fulfillment read scope."
-                        : res.reason === "no_fulfillment_orders"
-                          ? "Shopify returned no fulfillment orders for this order. The store connection may be missing fulfillment permissions, or the order is not fulfillable yet."
-                          : (res.reason || "Fulfillment was not completed.");
-                      setError(reason);
-                    } else if (res && res.ok !== false){
-                      setOrder(prev => {
-                        if (!prev) return prev;
-                        if (!foData.orders || foData.orders.length === 0){
-                          const next = { ...prev, variants: (prev.variants || []).map(v => ({ ...v, status: "fulfilled", unfulfilled_qty: 0 })), fulfillment_status: "FULFILLED" };
-                          return next;
-                        }
-                        const variantIds = new Set();
-                        foData.orders.forEach(g => {
-                          (g.lineItems || []).forEach(li => {
-                            if (foData.selectedLineItemIds.has(li.id)){
-                              const vid = (li.variantId || "").trim();
-                              if (vid) variantIds.add(vid);
-                            }
-                          });
-                        });
-                        const next = { ...prev, variants: (prev.variants || []).map(v => (variantIds.has(v.id) ? ({ ...v, status: "fulfilled", unfulfilled_qty: 0 }) : v)), fulfillment_status: "FULFILLED" };
-                        return next;
-                      });
-                      setFoData(prev => {
-                        try {
-                          const sel = new Set(prev.selectedLineItemIds);
-                          const updatedOrders = (prev.orders || []).map(grp => ({
-                            ...grp,
-                            lineItems: (grp.lineItems || []).map(li => sel.has(li.id) ? ({ ...li, remainingQuantity: 0 }) : li)
-                          }));
-                          return { ...prev, orders: updatedOrders, selectedLineItemIds: new Set() };
-                        } catch {
-                          return prev;
-                        }
-                      });
-                      const queuedOrder = buildFulfilledQueueOrder(order, foData);
-                      setFulfillSuccess(true);
-                      setAgentTodayReloadKey((value) => value + 1);
-                      try { setTimeout(()=>setFulfillSuccess(false), 2200); } catch {}
-                      enqueueFulfilledOrder(queuedOrder);
-                      resetLookupForNextOrder(`Order #${order?.number || "—"} fulfilled and added to the side queue.`);
-                    } else {
-                      setError(`Fulfillment failed: ${((res && res.errors && res.errors[0] && res.errors[0].message) || "Unknown error")}`);
-                    }
-                  } catch (e){
-                    setError(e?.message || "Failed to fulfill");
-                  } finally {
-                    setFulfillBusy(false);
+                  if (!order || isOrderFulfilled) return;
+                  if (fulfillBusy) {
+                    setError(`Order #${order.number || "—"} is already being fulfilled — see the side queue.`);
+                    return;
                   }
+                  setError(null);
+                  let groups = null;
+                  if (foData.orders && foData.orders.length > 0) {
+                    const selIds = foData.selectedLineItemIds;
+                    groups = [];
+                    foData.orders.forEach(g => {
+                      const items = [];
+                      (g.lineItems || []).forEach(li => {
+                        if (selIds.has(li.id) && li.remainingQuantity > 0){
+                          items.push({ id: li.id, quantity: li.remainingQuantity });
+                        }
+                      });
+                      if (items.length > 0){
+                        groups.push({ fulfillmentOrderId: g.id, fulfillmentOrderLineItems: items });
+                      }
+                    });
+                    if (groups.length === 0){
+                      setError("Select at least one line item to fulfill.");
+                      return;
+                    }
+                  }
+                  const queuedOrder = buildFulfilledQueueOrder(order, foData);
+                  const queueId = enqueueFulfilledOrder(queuedOrder, {
+                    fulfillState: "pending",
+                    statusKey: "fulfilling",
+                    statusLabel: "Fulfilling…",
+                  });
+                  if (!queueId) {
+                    setError("Could not queue this order for fulfillment.");
+                    return;
+                  }
+                  runQueuedFulfillment(queueId, {
+                    orderId: order.id,
+                    orderNumber: order.number,
+                    store,
+                    groups,
+                  });
+                  resetLookupForNextOrder(`Order #${order?.number || "—"} is fulfilling in the side queue. Type the next order.`);
                 }}
                 className="flex-1 px-4 py-2.5 rounded-xl bg-green-600 text-white text-sm font-bold hover:bg-green-700 shadow-md active:scale-[.98]"
               >Confirm Fulfill</button>
@@ -2462,9 +2494,6 @@ export default function OrderLookup(){
                   <span>&#128424;</span> Label
                 </button>
               </div>
-              {fulfillSuccess && (
-                <div className="text-xs text-green-700 text-center">Success: order fulfilled and saved to analytics.</div>
-              )}
             </div>
           </div>
         </div>
@@ -2565,6 +2594,12 @@ export default function OrderLookup(){
                           className="ml-2 px-2 py-0.5 rounded bg-red-600 text-white text-[10px] font-bold hover:bg-red-700"
                         >Retry</button>
                       )}
+                      {item.actions?.handleDismiss && (
+                        <button
+                          onClick={() => item.actions.handleDismiss()}
+                          className="ml-1 px-2 py-0.5 rounded border border-red-300 bg-white text-red-700 text-[10px] font-bold hover:bg-red-50"
+                        >Dismiss</button>
+                      )}
                     </div>
                   )}
 
@@ -2589,6 +2624,14 @@ export default function OrderLookup(){
                   <div className="mt-1 flex justify-between text-[9px] text-gray-400">
                     <span>Create</span><span>Company</span><span>Send</span><span>Print</span>
                   </div>
+
+                  {/* Fulfilling spinner */}
+                  {item.fulfillState === "pending" && (
+                    <div className="mt-2 text-[11px] text-blue-600 animate-pulse flex items-center gap-1.5">
+                      <span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                      Fulfilling on Shopify…
+                    </div>
+                  )}
 
                   {/* Preparing spinner */}
                   {item.busy && item.statusKey === "preparing" && (

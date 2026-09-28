@@ -1199,6 +1199,44 @@ async def _close_shopify_http_client():
         await client.aclose()
 
 
+# ---------- Delivery app HTTP client ----------
+# The label flow makes ~10 sequential calls to the Delivery app per fulfilled
+# order. A fresh AsyncClient per call paid a full TCP + TLS handshake every
+# time; one keep-alive pool pays it once per instance.
+_DELIVERY_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
+_DELIVERY_HTTP_CLIENT_LOCK = asyncio.Lock()
+
+
+async def _get_delivery_http_client() -> httpx.AsyncClient:
+    global _DELIVERY_HTTP_CLIENT
+    client = _DELIVERY_HTTP_CLIENT
+    if client is not None and not client.is_closed:
+        return client
+    async with _DELIVERY_HTTP_CLIENT_LOCK:
+        client = _DELIVERY_HTTP_CLIENT
+        if client is None or client.is_closed:
+            _DELIVERY_HTTP_CLIENT = httpx.AsyncClient(
+                timeout=30.0,
+                limits=httpx.Limits(max_connections=50, max_keepalive_connections=20, keepalive_expiry=60.0),
+            )
+        return _DELIVERY_HTTP_CLIENT
+
+
+@asynccontextmanager
+async def _shared_delivery_http_client(**_ignored):
+    # Same shape as `httpx.AsyncClient(...)` in an `async with`, without
+    # closing the shared pool on exit.
+    yield await _get_delivery_http_client()
+
+
+@app.on_event("shutdown")
+async def _close_delivery_http_client():
+    global _DELIVERY_HTTP_CLIENT
+    client, _DELIVERY_HTTP_CLIENT = _DELIVERY_HTTP_CLIENT, None
+    if client is not None and not client.is_closed:
+        await client.aclose()
+
+
 def _shopify_graphql_url(
     domain: str,
     password: str,
@@ -3887,12 +3925,26 @@ if HAVE_AUTH_DB:
     async def fulfill_order_tracked(
         order_gid: str,
         body: FulfillRequest,
+        response: Response,
         store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
         user: User = Depends(get_current_user),  # type: ignore
         session: AsyncSession = Depends(get_session),  # type: ignore
     ):
+        # Server-Timing makes each step visible in the browser's Network tab,
+        # so a slow fulfill can be attributed without server log access.
+        timings: List[tuple[str, float]] = []
+        mark = _time_mod.perf_counter()
+
+        def _lap(name: str) -> None:
+            nonlocal mark
+            now = _time_mod.perf_counter()
+            timings.append((name, (now - mark) * 1000.0))
+            mark = now
+            response.headers["Server-Timing"] = ", ".join(f"{n};dur={d:.0f}" for n, d in timings)
+
         store_key = _normalize_store(store)
         result = await fulfill_order(order_gid=order_gid, body=body, store=store_key)
+        _lap("shopify")
         if not bool((result or {}).get("ok")):
             return result
         if (result or {}).get("fulfilled") is False:
@@ -3918,6 +3970,7 @@ if HAVE_AUTH_DB:
             except Exception:
                 pass
             return {"ok": False, "errors": [{"message": "Failed to persist fulfillment analytics"}], "result": (result or {}).get("result")}
+        _lap("analytics")
 
         # Do not wait for Shopify's webhook delivery, which can take minutes.
         # Delivery's backfill path is idempotent and reads the authoritative
@@ -3931,12 +3984,23 @@ if HAVE_AUTH_DB:
                 admin_token=DELVERY_ADMIN_TOKEN,
                 store_key=store_key,
                 order_number=getattr(body, "order_number", None),
+                client_factory=_shared_delivery_http_client,
             )
         except Exception as exc:
             logger.warning(
                 "Immediate Delivery intake failed after Shopify fulfillment",
                 extra={"store": store_key, "error_type": type(exc).__name__},
             )
+        _lap("delivery")
+        print(
+            "[FULFILL] timings order=%s store=%s %s delivery_ok=%s"
+            % (
+                (getattr(body, "order_number", None) or "").lstrip("#") or "-",
+                store_key,
+                " ".join(f"{n}={d:.0f}ms" for n, d in timings),
+                bool((delivery_sync or {}).get("ok")),
+            )
+        )
 
         return {
             "ok": True,
@@ -4985,7 +5049,7 @@ async def delivery_proxy(path: str, request: Request, _user: User = Depends(get_
         headers["X-Admin-Token"] = DELVERY_ADMIN_TOKEN
     body = await request.body()
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with _shared_delivery_http_client() as client:
             resp = await client.request(method=request.method, url=target_url, content=body if body else None, headers=headers)
     except httpx.ConnectError as e:
         print(f"[DELIVERY] Connection error to {target_url}: {e}")
@@ -5049,7 +5113,7 @@ async def delivery_label_proxy(
         headers["X-Admin-Token"] = DELVERY_ADMIN_TOKEN
     url = f"{DELVERY_BACKEND_URL}/admin/orders/{order_id}/label"
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with _shared_delivery_http_client() as client:
             resp = await client.get(url, params=params, headers=headers)
     except httpx.ConnectError as e:
         return JSONResponse(status_code=502, content={"detail": f"Cannot reach delivery backend: {e}"})
@@ -5064,7 +5128,7 @@ async def delivery_label_proxy(
     # preserves the same QR/image generation used by the delivery app.
     if resp.status_code == 200 and envoy_code and "text/html" in media_type.lower():
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with _shared_delivery_http_client() as client:
                 env_resp = await client.get(
                     f"{DELVERY_BACKEND_URL}/admin/envoy-notes/{envoy_code}",
                     headers=headers,
