@@ -1,0 +1,94 @@
+name: Deploy to Netcup
+
+# Every push to main is tested, then released to the Netcup box that serves
+# shopify-collector.chattbase.site — the same shape as delvery-app-v3's
+# deploy-netcup.yml.
+#
+# The box builds the image itself (see deploy/README.md, "Releasing"): the
+# Vite build args live in /opt/collector/.env there, and pulling from a
+# registry would mean GCP credentials on the box. So the release job does what
+# deploy/push-source.sh does from a laptop — send the committed source over
+# SSH — and then runs /opt/collector/deploy.sh, which builds, gates on
+# `python -m backend.migrate` and restarts health-gated. A failed migration
+# leaves the running container untouched.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   NETCUP_HOST      the box's address
+#   NETCUP_SSH_KEY   private key whose public half is in deploy's authorized_keys
+#
+# workflows/deploy.yml (outside .github/) is the old Cloud Run pipeline and is
+# not run by GitHub.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-netcup-collector
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      # pytest and pytest-asyncio are test-only, so they are installed here
+      # rather than added to requirements.txt, which is what the image ships.
+      - name: Backend tests
+        run: |
+          pip install -r requirements.txt pytest pytest-asyncio
+          python -m pytest backend/tests -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # node_modules is committed for another platform; npm ci replaces it
+      # with a clean install, as the Dockerfile does.
+      - name: Frontend tests and build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          node node_modules/vite/bin/vite.js build
+
+  release:
+    needs: [gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          NETCUP_HOST: ${{ secrets.NETCUP_HOST }}
+          NETCUP_SSH_KEY: ${{ secrets.NETCUP_SSH_KEY }}
+        run: |
+          if [ -z "$NETCUP_HOST" ] || [ -z "$NETCUP_SSH_KEY" ]; then
+            echo "::error::Set the NETCUP_HOST and NETCUP_SSH_KEY repository secrets"
+            exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$NETCUP_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$NETCUP_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          cat > ~/.ssh/config <<EOF
+          Host netcup
+            HostName $NETCUP_HOST
+            User deploy
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            ServerAliveInterval 30
+          EOF
+
+      - name: Send source to the box
+        run: bash deploy/push-source.sh netcup HEAD
+
+      - name: Build, migrate and release on the box
+        run: ssh netcup "/opt/collector/deploy.sh $(git rev-parse --short HEAD)"

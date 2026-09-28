@@ -125,6 +125,13 @@ itself from pushed source:
 ssh deploy@159.195.204.91 '/opt/collector/deploy.sh <tag>'
 ```
 
+Every push to `main` does exactly this automatically:
+`.github/workflows/deploy-netcup.yml` runs the backend and frontend tests,
+then sends the committed source and runs `deploy.sh <short sha>`. It needs
+the `NETCUP_HOST` and `NETCUP_SSH_KEY` repository secrets, and can be re-run
+by hand from the Actions tab (`workflow_dispatch`). The manual commands above
+remain the way to release an uncommitted working tree.
+
 `deploy.sh` builds, gates on `python -m backend.migrate`, then restarts with
 `--wait`.
 
