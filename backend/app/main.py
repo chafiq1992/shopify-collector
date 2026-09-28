@@ -3976,8 +3976,9 @@ if HAVE_AUTH_DB:
         # Delivery's backfill path is idempotent and reads the authoritative
         # Shopify order, so overlapping webhooks remain safe.
         delivery_sync = None
+        delivery_label = None
         try:
-            from .delivery_sync import sync_fulfilled_order_to_delivery
+            from .delivery_sync import prepare_delivery_label, sync_fulfilled_order_to_delivery
 
             delivery_sync = await sync_fulfilled_order_to_delivery(
                 delivery_url=DELVERY_BACKEND_URL,
@@ -3986,19 +3987,31 @@ if HAVE_AUTH_DB:
                 order_number=getattr(body, "order_number", None),
                 client_factory=_shared_delivery_http_client,
             )
+            _lap("delivery")
+            # Create the delivery order and attach its envoy note here, next to
+            # Delivery, instead of from the browser one round trip at a time.
+            if (delivery_sync or {}).get("ok"):
+                delivery_label = await prepare_delivery_label(
+                    delivery_url=DELVERY_BACKEND_URL,
+                    admin_token=DELVERY_ADMIN_TOKEN,
+                    store_key=store_key,
+                    order_number=getattr(body, "order_number", None),
+                    client_factory=_shared_delivery_http_client,
+                )
+                _lap("label")
         except Exception as exc:
             logger.warning(
                 "Immediate Delivery intake failed after Shopify fulfillment",
                 extra={"store": store_key, "error_type": type(exc).__name__},
             )
-        _lap("delivery")
         print(
-            "[FULFILL] timings order=%s store=%s %s delivery_ok=%s"
+            "[FULFILL] timings order=%s store=%s %s delivery_ok=%s label=%s"
             % (
                 (getattr(body, "order_number", None) or "").lstrip("#") or "-",
                 store_key,
                 " ".join(f"{n}={d:.0f}ms" for n, d in timings),
                 bool((delivery_sync or {}).get("ok")),
+                "ok" if (delivery_label or {}).get("ok") else ((delivery_label or {}).get("reason") or "skipped"),
             )
         )
 
@@ -4006,6 +4019,7 @@ if HAVE_AUTH_DB:
             "ok": True,
             "result": (result or {}).get("result"),
             "delivery_sync": delivery_sync,
+            "delivery_label": delivery_label,
         }
 
 @app.get("/api/orders/{order_gid:path}/fulfillment-orders")

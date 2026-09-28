@@ -646,6 +646,7 @@ export default function OrderLookup(){
         statusLabel: "Preparing",
         error: "",
         actions: null,
+        prepared: res?.delivery_label || null,
       });
       setAgentTodayReloadKey((value) => value + 1);
     } catch (e) {
@@ -2808,6 +2809,7 @@ export default function OrderLookup(){
               store={queueItem.store || store}
               open={false}
               autoRunWhenHidden={true}
+              prepared={queueItem.prepared || null}
               onClose={() => {}}
               onQueued={(payload) => handleQueueItemQueued(queueItem.queueId, payload)}
               onStateChange={(nextState) => handleQueueItemStateChange(queueItem.queueId, nextState)}

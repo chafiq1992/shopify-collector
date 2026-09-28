@@ -273,7 +273,7 @@ function CityDropdown({ value, onChange, options, placeholder = "City", classNam
   );
 }
 
-export default function DeliveryLabelPopup({ order, store, open = false, autoRunWhenHidden = false, onClose, onQueued, onStateChange }) {
+export default function DeliveryLabelPopup({ order, store, open = false, autoRunWhenHidden = false, prepared = null, onClose, onQueued, onStateChange }) {
   const orderNum = String(order?.number || "").replace(/^#/, "").trim();
   const orderName = `#${orderNum}`;
   const shouldRunLiveFlow = open || autoRunWhenHidden;
@@ -301,6 +301,9 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
   const initRan = useRef(false);
   const printButtonRef = useRef(null);
   const recoveryInFlightRef = useRef(false);
+  // The fulfill request already created the delivery order and attached its
+  // envoy note server-side. Use it once; Retry runs the full browser flow.
+  const preparedRef = useRef(prepared);
 
   const [editFields, setEditFields] = useState({
     orderName: "",
@@ -817,6 +820,26 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
 
       if (!mid) { setPhase("merchant_select"); setBusy(false); return; }
       populateEditFromOrder();
+      const ready = preparedRef.current;
+      preparedRef.current = null;
+      if (
+        !warmOnly && ready?.ok && ready.deliveryOrderId && ready.envoyCode &&
+        (!ready.merchantId || Number(ready.merchantId) === Number(mid))
+      ) {
+        const row = normalizeDeliveryQueueRow(ready.queueRow);
+        if (row) {
+          setQueueRow(row);
+          populateEditFromRow(row);
+        }
+        const oid = Number(ready.deliveryOrderId);
+        setDeliveryOrderId(oid);
+        setOrderMap(orderNum, oid, store, mid);
+        setEnvoyCode(ready.envoyCode);
+        applyResolvedCompany(ready.company);
+        addLog(`Delivery order ${oid} created with the fulfillment. Envoy: ${ready.envoyCode} (${ready.company || "unassigned"})`);
+        setPhase("company_select");
+        return;
+      }
       if (warmOnly) {
         addLog("Delivery refs are ready. The order lookup starts when the popup opens.");
         setPhase("prefetched");
