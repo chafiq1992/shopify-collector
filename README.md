@@ -298,3 +298,28 @@ Acceptance checks:
 - Arabic-only or partial addresses should still geocode when within the polygon.
 - Invalid HMAC → HTTP 401; no processing is performed.
 - Replaying the same webhook does not duplicate tags.
+
+## 9) Chat confirmation (call-back requests instead of WhatsApp chat)
+
+The Confirmation page has a second tab, **Chat confirmation**
+(`/confirmation?store=irrakids&tab=chat`). Customers who want to chat leave their
+phone number on the store instead of opening WhatsApp, and agents call them back.
+
+- **Storefront**: `shopify/chat-request-widget.liquid` adds a "call me back" button and
+  form. Add it as a snippet named `chat-request-widget` and render it in `theme.liquid`
+  just before `</body>`:
+  `{% render 'chat-request-widget', store_key: 'irrakids' %}`.
+  While the old WhatsApp button is still installed, clicks on WhatsApp links open this
+  form instead. Options (texts, colour, hiding a chat app's bubble) are listed at the top
+  of the file.
+- **Intake**: `POST /api/public/chat-requests` (no login, rate-limited per IP). A customer
+  who asks again while their request is still open updates that request instead of
+  creating a duplicate.
+- **Agents**: the tab works like the Orders queue: **Call** copies the phone and records
+  N1 → N4, **EA** records en attente, **Ordered** closes the request (optionally with the
+  Shopify order number). **Not interested** and **Wrong number** are in the "…" menu.
+  Unassigned requests are taken with **Take new requests** or by acting on one; admins
+  can reassign. The Orders tab shows a red badge with the number of requests nobody has
+  picked up yet.
+- Data is stored in the `chat_requests` and `chat_request_events` tables, created
+  automatically at startup.

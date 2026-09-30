@@ -184,6 +184,73 @@ class InventoryReceipt(Base):
     photos = relationship("InventoryReceiptPhoto", back_populates="receipt", cascade="all,delete-orphan")
 
 
+class ChatRequest(Base):
+    """A storefront "call me back" request, replacing the WhatsApp chat button.
+
+    The customer leaves a phone number on the Shopify store; agents work the
+    request from the Chat confirmation tab exactly like an order: call attempts
+    N1..N4, en attente, then close it as ordered / not interested / wrong number.
+    """
+
+    __tablename__ = "chat_requests"
+    __table_args__ = (
+        Index("ix_chat_requests_store_status_created", "store_key", "status", "created_at"),
+        Index("ix_chat_requests_store_phone", "store_key", "phone"),
+        Index("ix_chat_requests_assigned_status", "assigned_to_id", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    store_key = Column(String(63), nullable=False, index=True)
+    # E.164-ish ("+2126...") so the same customer is recognised across formats.
+    phone = Column(String(32), nullable=False)
+    phone_raw = Column(String(64), nullable=True)
+    customer_name = Column(String(255), nullable=True)
+    message = Column(Text, nullable=True)
+    product_title = Column(String(512), nullable=True)
+    product_url = Column(String(1024), nullable=True)
+    product_image = Column(String(1024), nullable=True)
+    variant_title = Column(String(255), nullable=True)
+    page_url = Column(String(1024), nullable=True)
+    # open: new | calling | enatt ; closed: ordered | not_interested | wrong_number
+    status = Column(String(24), nullable=False, default="new", index=True)
+    # Unanswered call attempts (N1..N4) and en-attente follow-ups (EA1..EA4).
+    attempts = Column(Integer, nullable=False, default=0)
+    enatt = Column(Integer, nullable=False, default=0)
+    # A customer who asks again while their request is still open bumps this
+    # instead of creating a duplicate row.
+    request_count = Column(Integer, nullable=False, default=1)
+    assigned_to_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    note = Column(Text, nullable=True)
+    order_ref = Column(String(64), nullable=True)
+    last_action_at = Column(DateTime(timezone=True), nullable=True)
+    closed_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    closed_by_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    assigned_to = relationship("User", foreign_keys=[assigned_to_id])
+    closed_by = relationship("User", foreign_keys=[closed_by_id])
+
+
+class ChatRequestEvent(Base):
+    """Audit trail for chat requests: the request history and the team counters."""
+
+    __tablename__ = "chat_request_events"
+    __table_args__ = (
+        Index("ix_chat_request_events_user_action_created", "user_id", "action", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    request_id = Column(Integer, ForeignKey("chat_requests.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Null for events the storefront created (the request itself, a repeat ask).
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    action = Column(String(32), nullable=False)
+    detail = Column(_json_type(), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+
+    user = relationship("User")
+
+
 class InventoryReceiptPhoto(Base):
     """Crate photo bytes stored with the receipt so they survive app restarts."""
 

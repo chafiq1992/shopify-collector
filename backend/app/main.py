@@ -44,6 +44,7 @@ try:
     )
     from .return_scan_routes import router as return_scan_router
     from .confirmation_routes import router as confirmation_router
+    from .chat_request_routes import router as chat_request_router
     from .inventory_helper_routes import router as inventory_helper_router
 except Exception:
     HAVE_AUTH_DB = False
@@ -242,6 +243,8 @@ if HAVE_AUTH_DB and "return_scan_router" in globals() and return_scan_router is 
     app.include_router(return_scan_router)  # type: ignore[arg-type]
 if HAVE_AUTH_DB and "confirmation_router" in globals() and confirmation_router is not None:  # type: ignore[name-defined]
     app.include_router(confirmation_router)  # type: ignore[arg-type]
+if HAVE_AUTH_DB and "chat_request_router" in globals() and chat_request_router is not None:  # type: ignore[name-defined]
+    app.include_router(chat_request_router)  # type: ignore[arg-type]
 if HAVE_AUTH_DB and "inventory_helper_router" in globals() and inventory_helper_router is not None:  # type: ignore[name-defined]
     app.include_router(inventory_helper_router)  # type: ignore[arg-type]
 if delivery_rate_router is not None:

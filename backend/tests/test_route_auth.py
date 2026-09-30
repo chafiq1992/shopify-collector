@@ -21,6 +21,9 @@ PROTECTED_GETS = [
     "/api/delivery-config",
     "/api/shopify/stores",
     "/api/shopify/oauth/status?store=irrakids",
+    "/api/chat-requests?store=irrakids",
+    "/api/chat-requests/summary?store=irrakids",
+    "/api/chat-requests/team-stats",
 ]
 
 

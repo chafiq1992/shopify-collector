@@ -1,0 +1,333 @@
+{% comment %}
+  Chat request widget — "we call you back" instead of a WhatsApp chat.
+
+  The customer leaves a phone number; the request lands in the Confirmation app
+  (/confirmation?tab=chat) where an agent calls them.
+
+  Install (Online Store → Themes → Edit code):
+    1. Snippets → Add a new snippet → "chat-request-widget", paste this file.
+    2. Layout → theme.liquid, just before </body>:
+         {% render 'chat-request-widget', store_key: 'irrakids' %}
+    3. Remove / disable the old WhatsApp chat button or app. While it is still
+       there, clicks on WhatsApp links (wa.me, api.whatsapp.com) open this form
+       instead, so nothing is lost during the switch.
+
+  Optional parameters (all have defaults):
+    store_key           our store key ("irrakids"); defaults to the shop's myshopify domain
+    api_url             backend base URL (default https://shopify-collector.chattbase.site)
+    show_button         false = no floating button; open it from your own button with
+                        data-chat-request or window.ChatRequest.open()
+    intercept_whatsapp  false = leave WhatsApp links alone
+    hide_selector       CSS selector of a third-party chat bubble to hide, e.g. '.whatsapp-float'
+    button_label, title, subtitle, subtitle_ar, submit_label, success_text
+    accent              button colour (default #16a34a)
+{% endcomment %}
+
+{%- liquid
+  assign crw_store = store_key | default: ''
+  assign crw_api = api_url | default: 'https://shopify-collector.chattbase.site'
+  assign crw_show_button = true
+  if show_button == false
+    assign crw_show_button = false
+  endif
+  assign crw_intercept = true
+  if intercept_whatsapp == false
+    assign crw_intercept = false
+  endif
+  assign crw_accent = accent | default: '#16a34a'
+  assign crw_button_label = button_label | default: 'Une question ? On vous appelle'
+  assign crw_title = title | default: 'On vous rappelle gratuitement'
+  assign crw_subtitle = subtitle | default: 'Laissez votre numéro, un conseiller vous appelle très vite.'
+  assign crw_subtitle_ar = subtitle_ar | default: 'اترك رقم هاتفك وسنتصل بك في أقرب وقت'
+  assign crw_submit = submit_label | default: 'Rappelez-moi'
+  assign crw_success = success_text | default: 'Merci ! Un conseiller va vous appeler très bientôt.'
+-%}
+
+<style>
+  .crw-root { --crw-accent: {{ crw_accent }}; font-family: inherit; }
+  .crw-fab {
+    position: fixed; right: 16px; bottom: 16px; z-index: 2147483000;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 12px 16px; border: 0; border-radius: 999px; cursor: pointer;
+    background: var(--crw-accent); color: #fff; font-family: inherit; font-size: 14px; font-weight: 600; line-height: 1.2;
+    box-shadow: 0 10px 25px -8px rgba(0,0,0,.35);
+    transition: transform .15s ease, box-shadow .15s ease;
+  }
+  .crw-fab:hover { transform: translateY(-1px); box-shadow: 0 14px 30px -10px rgba(0,0,0,.4); }
+  .crw-fab:active { transform: scale(.97); }
+  .crw-fab svg { width: 20px; height: 20px; flex: none; }
+  @media (max-width: 480px) { .crw-fab .crw-fab-label { display: none; } .crw-fab { padding: 14px; } }
+
+  .crw-overlay {
+    position: fixed; inset: 0; z-index: 2147483001; display: none;
+    align-items: flex-end; justify-content: center;
+    background: rgba(15,23,42,.45); padding: 0;
+  }
+  .crw-overlay.crw-open { display: flex; }
+  @media (min-width: 600px) { .crw-overlay { align-items: center; padding: 16px; } }
+  .crw-panel {
+    width: 100%; max-width: 420px; max-height: 92vh; overflow: auto;
+    background: #fff; color: #0f172a; border-radius: 18px 18px 0 0;
+    box-shadow: 0 25px 60px -15px rgba(0,0,0,.45); padding: 20px;
+    animation: crw-pop .18s ease-out;
+  }
+  @media (min-width: 600px) { .crw-panel { border-radius: 18px; } }
+  @keyframes crw-pop { from { transform: translateY(12px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .crw-head { display: flex; align-items: flex-start; gap: 12px; }
+  .crw-icon { flex: none; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: color-mix(in srgb, var(--crw-accent) 12%, #fff); color: var(--crw-accent); }
+  .crw-icon svg { width: 20px; height: 20px; }
+  .crw-title { margin: 0; font-size: 17px; font-weight: 700; line-height: 1.3; }
+  .crw-sub { margin: 4px 0 0; font-size: 13px; color: #475569; line-height: 1.45; }
+  .crw-sub-ar { margin: 2px 0 0; font-size: 13px; color: #475569; }
+  .crw-close { margin-left: auto; border: 0; background: transparent; font-size: 22px; line-height: 1; color: #64748b; cursor: pointer; padding: 2px 6px; border-radius: 8px; }
+  .crw-close:hover { background: #f1f5f9; color: #0f172a; }
+  .crw-product { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 8px; border-radius: 12px; background: #f8fafc; border: 1px solid #e2e8f0; font-size: 13px; }
+  .crw-product img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; }
+  .crw-product-title { font-weight: 600; }
+  .crw-product-variant { color: #64748b; font-size: 12px; }
+  .crw-form { margin-top: 14px; display: grid; gap: 10px; }
+  .crw-label { display: grid; gap: 4px; font-size: 12px; font-weight: 600; color: #334155; }
+  .crw-input {
+    width: 100%; box-sizing: border-box; padding: 11px 12px; font-family: inherit; font-size: 15px; line-height: 1.3;
+    color: #0f172a; background: #fff; border: 1px solid #cbd5e1; border-radius: 12px; outline: none;
+  }
+  .crw-input:focus { border-color: var(--crw-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--crw-accent) 20%, transparent); }
+  .crw-input[aria-invalid="true"] { border-color: #e11d48; }
+  textarea.crw-input { min-height: 64px; resize: vertical; }
+  .crw-hp { position: absolute !important; left: -9999px !important; width: 1px; height: 1px; overflow: hidden; }
+  .crw-error { margin: 0; font-size: 12px; color: #be123c; }
+  .crw-submit {
+    margin-top: 2px; padding: 13px 16px; border: 0; border-radius: 12px; cursor: pointer;
+    background: var(--crw-accent); color: #fff; font-family: inherit; font-size: 15px; font-weight: 700; line-height: 1.2;
+  }
+  .crw-submit[disabled] { opacity: .6; cursor: wait; }
+  .crw-note { margin: 0; font-size: 11px; color: #94a3b8; text-align: center; }
+  .crw-done { text-align: center; padding: 10px 4px 4px; }
+  .crw-done-icon { width: 52px; height: 52px; margin: 0 auto 10px; border-radius: 999px; display: grid; place-items: center; background: #dcfce7; color: #16a34a; }
+  .crw-done-icon svg { width: 26px; height: 26px; }
+  .crw-done p { margin: 0; font-size: 15px; font-weight: 600; }
+  .crw-done small { display: block; margin-top: 6px; color: #64748b; font-size: 13px; }
+  {%- if hide_selector != blank %}
+  {{ hide_selector }} { display: none !important; }
+  {%- endif %}
+</style>
+
+<div class="crw-root" id="crw-root">
+  {%- if crw_show_button -%}
+  <button type="button" class="crw-fab" data-chat-request aria-haspopup="dialog">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+    <span class="crw-fab-label">{{ crw_button_label | escape }}</span>
+  </button>
+  {%- endif -%}
+
+  <div class="crw-overlay" id="crw-overlay" role="dialog" aria-modal="true" aria-labelledby="crw-title">
+    <div class="crw-panel">
+      <div class="crw-head">
+        <span class="crw-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+        </span>
+        <div>
+          <h2 class="crw-title" id="crw-title">{{ crw_title | escape }}</h2>
+          <p class="crw-sub">{{ crw_subtitle | escape }}</p>
+          {%- if crw_subtitle_ar != blank -%}<p class="crw-sub-ar" dir="rtl" lang="ar">{{ crw_subtitle_ar | escape }}</p>{%- endif -%}
+        </div>
+        <button type="button" class="crw-close" data-crw-close aria-label="Fermer">&times;</button>
+      </div>
+
+      <div id="crw-body">
+        {%- if product -%}
+        <div class="crw-product">
+          {%- if product.featured_image -%}<img src="{{ product.featured_image | image_url: width: 120 }}" alt="" loading="lazy">{%- endif -%}
+          <div>
+            <div class="crw-product-title">{{ product.title | escape }}</div>
+            <div class="crw-product-variant" id="crw-variant"></div>
+          </div>
+        </div>
+        {%- endif -%}
+
+        <form class="crw-form" id="crw-form" novalidate>
+          <label class="crw-label">
+            Votre numéro de téléphone *
+            <input class="crw-input" id="crw-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="06 12 34 56 78" required>
+          </label>
+          <p class="crw-error" id="crw-phone-error" hidden>Merci d'entrer un numéro valide (ex. 06 12 34 56 78).</p>
+          <label class="crw-label">
+            Votre prénom
+            <input class="crw-input" id="crw-name" name="name" type="text" autocomplete="given-name" placeholder="Facultatif">
+          </label>
+          <label class="crw-label">
+            Votre question
+            <textarea class="crw-input" id="crw-message" name="message" maxlength="1000" placeholder="Taille, couleur, livraison… (facultatif)"></textarea>
+          </label>
+          <label class="crw-hp" aria-hidden="true">Website <input type="text" name="website" tabindex="-1" autocomplete="off"></label>
+          <p class="crw-error" id="crw-error" hidden></p>
+          <button type="submit" class="crw-submit" id="crw-submit">{{ crw_submit | escape }}</button>
+          <p class="crw-note">Appel gratuit · nous ne partageons jamais votre numéro.</p>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  (function () {
+    if (window.ChatRequest) return;
+    var cfg = {
+      api: {{ crw_api | json }}.replace(/\/+$/, ''),
+      store: {{ crw_store | json }},
+      shop: {{ shop.permanent_domain | json }},
+      intercept: {{ crw_intercept | json }},
+      success: {{ crw_success | json }},
+      submitLabel: {{ crw_submit | json }},
+      product: {%- if product -%}{
+        title: {{ product.title | json }},
+        url: {{ shop.url | append: product.url | json }},
+        image: {%- if product.featured_image -%}{{ product.featured_image | image_url: width: 400 | prepend: 'https:' | json }}{%- else -%}null{%- endif -%},
+        variants: { {%- for v in product.variants -%}{{ v.id | json }}: {{ v.title | json }}{%- unless forloop.last -%},{%- endunless -%}{%- endfor -%} },
+        selected: {{ product.selected_or_first_available_variant.id | json }}
+      }{%- else -%}null{%- endif -%}
+    };
+    var STORAGE_KEY = 'chatRequestContact';
+    var overlay = document.getElementById('crw-overlay');
+    var form = document.getElementById('crw-form');
+    var phoneEl = document.getElementById('crw-phone');
+    var nameEl = document.getElementById('crw-name');
+    var messageEl = document.getElementById('crw-message');
+    var errorEl = document.getElementById('crw-error');
+    var phoneErrorEl = document.getElementById('crw-phone-error');
+    var submitEl = document.getElementById('crw-submit');
+    var variantEl = document.getElementById('crw-variant');
+    var lastFocus = null;
+
+    function currentVariantTitle() {
+      if (!cfg.product) return '';
+      var id = null;
+      try { id = new URLSearchParams(location.search).get('variant'); } catch (e) {}
+      if (!id) {
+        var input = document.querySelector('form[action*="/cart/add"] [name="id"]');
+        if (input && input.value) id = input.value;
+      }
+      id = id || cfg.product.selected;
+      var title = cfg.product.variants[String(id)] || '';
+      return title === 'Default Title' ? '' : title;
+    }
+
+    function digits(v) { return String(v || '').replace(/\D/g, ''); }
+    function validPhone(v) {
+      var d = digits(v);
+      if (d.indexOf('00') === 0) d = d.slice(2);
+      if (d.indexOf('212') === 0) return d.length === 12;
+      if (d.charAt(0) === '0') return d.length === 10;
+      return d.length >= 9 && d.length <= 15;
+    }
+
+    function open() {
+      lastFocus = document.activeElement;
+      try {
+        var saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+        if (saved) {
+          if (!phoneEl.value && saved.phone) phoneEl.value = saved.phone;
+          if (!nameEl.value && saved.name) nameEl.value = saved.name;
+        }
+      } catch (e) {}
+      if (variantEl) variantEl.textContent = currentVariantTitle();
+      overlay.classList.add('crw-open');
+      document.documentElement.style.overflow = 'hidden';
+      setTimeout(function () { (phoneEl || overlay).focus(); }, 30);
+    }
+    function close() {
+      overlay.classList.remove('crw-open');
+      document.documentElement.style.overflow = '';
+      if (lastFocus && lastFocus.focus) try { lastFocus.focus(); } catch (e) {}
+    }
+
+    function showError(msg) {
+      errorEl.textContent = msg;
+      errorEl.hidden = !msg;
+    }
+
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      showError('');
+      var phone = phoneEl.value.trim();
+      var ok = validPhone(phone);
+      phoneEl.setAttribute('aria-invalid', ok ? 'false' : 'true');
+      phoneErrorEl.hidden = ok;
+      if (!ok) { phoneEl.focus(); return; }
+
+      var payload = {
+        store: cfg.store || null,
+        shop: cfg.shop,
+        phone: phone,
+        name: nameEl.value.trim() || null,
+        message: messageEl.value.trim() || null,
+        page_url: location.href,
+        website: form.elements.website.value || null
+      };
+      if (cfg.product) {
+        payload.product_title = cfg.product.title;
+        payload.product_url = cfg.product.url;
+        payload.product_image = cfg.product.image;
+        payload.variant_title = currentVariantTitle() || null;
+      }
+
+      submitEl.disabled = true;
+      submitEl.textContent = '…';
+      fetch(cfg.api + '/api/public/chat-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (js) {
+          if (!res.ok) {
+            var detail = js && js.detail;
+            if (res.status === 422) throw new Error("Ce numéro ne semble pas valide. Vérifiez-le et réessayez.");
+            if (res.status === 429) throw new Error('Trop de demandes. Merci de réessayer dans quelques minutes.');
+            throw new Error(typeof detail === 'string' ? detail : 'Une erreur est survenue. Merci de réessayer.');
+          }
+          return js;
+        });
+      }).then(function () {
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ phone: phone, name: payload.name })); } catch (e) {}
+        var body = document.getElementById('crw-body');
+        body.innerHTML = '';
+        var done = document.createElement('div');
+        done.className = 'crw-done';
+        done.innerHTML = '<div class="crw-done-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>';
+        var p = document.createElement('p');
+        p.textContent = cfg.success;
+        var small = document.createElement('small');
+        small.textContent = phone;
+        done.appendChild(p);
+        done.appendChild(small);
+        body.appendChild(done);
+        try { window.dispatchEvent(new CustomEvent('chat-request:sent', { detail: payload })); } catch (e) {}
+      }).catch(function (err) {
+        showError((err && err.message) || 'Une erreur est survenue. Merci de réessayer.');
+        submitEl.disabled = false;
+        submitEl.textContent = cfg.submitLabel;
+      });
+    });
+
+    overlay.addEventListener('mousedown', function (ev) { if (ev.target === overlay) close(); });
+    document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && overlay.classList.contains('crw-open')) close(); });
+    document.querySelectorAll('[data-crw-close]').forEach(function (b) { b.addEventListener('click', close); });
+
+    // Any element marked data-chat-request opens the form. With intercept on,
+    // WhatsApp chat links on the store open it too, so the old chat buttons
+    // keep working while they are being removed.
+    var WA = /(^|\/\/)(wa\.me|api\.whatsapp\.com|web\.whatsapp\.com|chat\.whatsapp\.com)\b|^whatsapp:/i;
+    document.addEventListener('click', function (ev) {
+      var el = ev.target && ev.target.closest ? ev.target.closest('[data-chat-request], a[href]') : null;
+      if (!el) return;
+      var isTrigger = el.hasAttribute('data-chat-request');
+      var isWhatsApp = cfg.intercept && el.tagName === 'A' && WA.test(el.getAttribute('href') || '');
+      if (!isTrigger && !isWhatsApp) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      open();
+    }, true);
+
+    window.ChatRequest = { open: open, close: close };
+  })();
+</script>
