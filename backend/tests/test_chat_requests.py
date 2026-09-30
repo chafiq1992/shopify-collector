@@ -1,4 +1,5 @@
 import unittest
+import os
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -71,6 +72,58 @@ class ChatRequestTests(unittest.IsolatedAsyncioTestCase):
             return await chat_request_action(
                 request_id=rid, body=ChatActionBody(action=action, **kw), db=session, user=user or self.agent,
             )
+
+    async def test_signed_intake_preserves_history_and_retry_is_idempotent(self):
+        request = _FakeRequest()
+        request.headers['x-chat-intake-key'] = 'shared-test-key'
+        body = ChatRequestIntakeBody(store='irrakids', phone='0612345678', message='Customer: details\n' * 1000, source_id='storefront:session:2', order_ref='12345')
+        with patch.dict(os.environ, {'CHAT_INTAKE_SECRET': 'shared-test-key'}):
+            async with self.sessions() as db:
+                first = await routes.integration_chat_request(body, request, db)
+            async with self.sessions() as db:
+                second = await routes.integration_chat_request(body, request, db)
+                saved = await db.get(ChatRequest, first['id'])
+                self.assertEqual(saved.message, body.message.strip())
+                self.assertEqual(saved.order_ref, '12345')
+                self.assertEqual(saved.request_count, 1)
+                self.assertEqual(second['id'], first['id'])
+            # An HTTP retry after an agent closes a request must not recreate it.
+            await self._act(first['id'], 'wrong_number')
+            async with self.sessions() as db:
+                retry = await routes.integration_chat_request(body, request, db)
+                self.assertEqual(retry['id'], first['id'])
+
+    async def test_signed_intake_requires_key_and_bypasses_public_ip_limit(self):
+        body = ChatRequestIntakeBody(store='irranova', phone='0612345678', source_id='storefront:session:1')
+        request = _FakeRequest()
+        with patch.dict(os.environ, {'CHAT_INTAKE_SECRET': 'shared-test-key'}):
+            async with self.sessions() as db:
+                with self.assertRaises(HTTPException) as exc:
+                    await routes.integration_chat_request(body, request, db)
+                self.assertEqual(exc.exception.status_code, 401)
+            for _ in range(8):
+                routes._intake_allowed('203.0.113.7')
+            request.headers['x-chat-intake-key'] = 'shared-test-key'
+            async with self.sessions() as db:
+                result = await routes.integration_chat_request(body, request, db)
+                self.assertTrue(result['ok'])
+
+    async def test_completed_order_closes_only_its_source_chat(self):
+        request = _FakeRequest()
+        request.headers['x-chat-intake-key'] = 'shared-test-key'
+        sid = 'a' * 32
+        with patch.dict(os.environ, {'CHAT_INTAKE_SECRET': 'shared-test-key'}):
+            async with self.sessions() as db:
+                lead = await routes.integration_chat_request(ChatRequestIntakeBody(store='irrakids', phone='0612345678', source_id='storefront:' + sid + ':1'), request, db)
+            async with self.sessions() as db:
+                wrong = await routes.integration_chat_complete(routes.ChatRequestCompleteBody(store='irrakids', phone='0612345678', session_id='b'*32, order_ref='98765'), request, db)
+                self.assertFalse(wrong['closed'])
+            async with self.sessions() as db:
+                completed = await routes.integration_chat_complete(routes.ChatRequestCompleteBody(store='irrakids', phone='0612345678', session_id=sid, order_ref='98765'), request, db)
+                self.assertTrue(completed['closed'])
+                saved = await db.get(ChatRequest, lead['id'])
+                self.assertEqual(saved.status, 'ordered')
+                self.assertEqual(saved.order_ref, '98765')
 
     async def _list(self, user=None, **kw):
         async with self.sessions() as session:

@@ -18,6 +18,9 @@ Provides:
 """
 
 import logging
+import hashlib
+import hmac
+import os
 import re
 import time
 from collections import deque
@@ -26,7 +29,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth_routes import get_current_user
@@ -223,6 +226,8 @@ class ChatRequestIntakeBody(BaseModel):
     page_url: Optional[str] = None
     # Honeypot: hidden in the widget, so only bots fill it.
     website: Optional[str] = None
+    source_id: Optional[str] = None
+    order_ref: Optional[str] = None
 
 
 @router.post("/api/public/chat-requests")
@@ -231,6 +236,62 @@ async def create_chat_request(
     request: Request,
     db: AsyncSession = Depends(get_session),
 ):
+    return await _create_chat_request(body, request, db, trusted=False)
+
+
+@router.post("/api/integrations/chat-requests")
+async def integration_chat_request(
+    body: ChatRequestIntakeBody, request: Request, db: AsyncSession = Depends(get_session),
+):
+    """Server-to-server intake. Never expose this shared key in storefront code."""
+    _require_integration_key(request)
+    if not body.source_id or not re.fullmatch(r"[a-zA-Z0-9:_-]{1,160}", body.source_id):
+        raise HTTPException(422, "Provide a stable source_id")
+    if len(body.message or "") > 2000000:
+        raise HTTPException(413, "Conversation is too large")
+    return await _create_chat_request(body, request, db, trusted=True)
+
+
+def _require_integration_key(request):
+    secret = os.getenv("CHAT_INTAKE_SECRET", "")
+    if not secret:
+        raise HTTPException(503, "Chat integration is not configured")
+    if not hmac.compare_digest(request.headers.get("x-chat-intake-key", "").encode(), secret.encode()):
+        raise HTTPException(401, "Invalid integration key")
+
+
+class ChatRequestCompleteBody(BaseModel):
+    store: str
+    phone: str
+    session_id: str
+    order_ref: str
+
+
+@router.post('/api/integrations/chat-requests/complete')
+async def integration_chat_complete(body: ChatRequestCompleteBody, request: Request, db: AsyncSession = Depends(get_session)):
+    _require_integration_key(request)
+    store = _normalize_store(body.store)
+    phone = normalize_phone(body.phone)
+    if not phone or not re.fullmatch(r'[a-f0-9]{32}', body.session_id) or not re.fullmatch(r'[a-zA-Z0-9#_-]{1,64}', body.order_ref):
+        raise HTTPException(422, 'Invalid completed chat details')
+    if db.bind.dialect.name == 'postgresql':
+        lock = int.from_bytes(hashlib.sha256(f'chat:{store}:{phone}'.encode()).digest()[:8], 'big', signed=True)
+        await db.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': lock})
+    row = await db.scalar(select(ChatRequest).join(ChatRequestEvent).where(
+        ChatRequest.store_key == store, ChatRequest.phone == phone, ChatRequest.status.in_(OPEN_STATUSES),
+        ChatRequestEvent.detail['source_id'].as_string().startswith('storefront:' + body.session_id + ':'),
+    ).distinct().limit(1))
+    if row:
+        row.status = 'ordered'
+        row.order_ref = body.order_ref
+        row.closed_at = datetime.now(timezone.utc)
+        row.updated_at = row.closed_at
+        db.add(ChatRequestEvent(request_id=row.id, action='ordered', detail={'source': 'storefront-ai', 'order_ref': body.order_ref}))
+        await db.commit()
+    return {'ok': True, 'closed': bool(row)}
+
+
+async def _create_chat_request(body, request, db, *, trusted):
     if (body.website or "").strip():
         # Pretend success so the bot does not adapt.
         return {"ok": True}
@@ -250,12 +311,12 @@ async def create_chat_request(
     if not phone:
         raise HTTPException(status_code=422, detail="invalid phone number")
 
-    if not _intake_allowed(_client_ip(request)):
+    if not trusted and not _intake_allowed(_client_ip(request)):
         raise HTTPException(status_code=429, detail="too many requests, please try again later")
 
     fields = {
         "customer_name": _clean(body.name, 255),
-        "message": _clean_multiline(body.message, 2000),
+        "message": _clean_multiline(body.message, 2000000 if trusted else 2000),
         "product_title": _clean(body.product_title, 512),
         "product_url": _clean_url(body.product_url),
         "product_image": _clean_url(body.product_image),
@@ -263,6 +324,18 @@ async def create_chat_request(
         "page_url": _clean_url(body.page_url),
     }
     now = datetime.now(timezone.utc)
+    # Serialise this phone across app workers, including public storefront intake.
+    if db.bind.dialect.name == "postgresql":
+        lock = int.from_bytes(hashlib.sha256(f"chat:{store_key}:{phone}".encode()).digest()[:8], "big", signed=True)
+        await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock})
+    if trusted:
+        previous = await db.scalar(select(ChatRequestEvent).join(ChatRequest).where(
+            ChatRequest.store_key == store_key,
+            ChatRequestEvent.detail["source_id"].as_string() == body.source_id,
+        ).limit(1))
+        if previous:
+            return {"ok": True, "id": previous.request_id, "repeat": True, "idempotent": True}
+        fields["order_ref"] = _clean(body.order_ref, 64)
 
     # Same customer asking again while we have not closed their request yet:
     # refresh it rather than queueing a duplicate call.
@@ -285,7 +358,7 @@ async def create_chat_request(
         db.add(ChatRequestEvent(
             request_id=existing.id,
             action="requested_again",
-            detail={k: v for k, v in fields.items() if v},
+            detail={**{k: v for k, v in fields.items() if v}, **({"source_id": body.source_id} if trusted else {})},
         ))
         await db.commit()
         return {"ok": True, "id": existing.id, "repeat": True}
@@ -302,7 +375,7 @@ async def create_chat_request(
     )
     db.add(req)
     await db.flush()
-    db.add(ChatRequestEvent(request_id=req.id, action="requested", detail={"page_url": fields["page_url"]}))
+    db.add(ChatRequestEvent(request_id=req.id, action="requested", detail={"page_url": fields["page_url"], **({"source_id": body.source_id} if trusted else {})}))
     await db.commit()
     return {"ok": True, "id": req.id, "repeat": False}
 
