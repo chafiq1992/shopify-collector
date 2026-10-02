@@ -14,6 +14,7 @@ Provides:
   - POST /api/chat-requests/pull              -> claim the newest unassigned requests
   - POST /api/chat-requests/{id}/action       -> call / enatt / close / reopen / claim / note ...
   - GET  /api/chat-requests/{id}/history      -> audit trail of one request
+  - GET  /api/chat-requests/{id}/conversation -> signed link to the read-only website chat
   - GET  /api/chat-requests/team-stats        -> per-agent calls / orders today
 """
 
@@ -730,6 +731,47 @@ async def chat_request_history(
             for e in events
         ],
     }
+
+
+CHAT_VIEW_TTL_SECONDS = 12 * 3600
+
+
+def chat_view_url(session_id: str, now: Optional[float] = None) -> Tuple[str, int]:
+    """A short-lived link to the read-only copy of a website chat, signed with the shared intake key.
+
+    The chat backend checks `chat-view:<session>:<expiry>` with the same key and only shows the
+    page inside this app (frame-ancestors)."""
+    secret = os.getenv("CHAT_INTAKE_SECRET", "")
+    if not secret:
+        raise HTTPException(503, "Chat integration is not configured")
+    expires = int((now or time.time()) + CHAT_VIEW_TTL_SECONDS)
+    signature = hmac.new(secret.encode(), f"chat-view:{session_id}:{expires}".encode(), hashlib.sha256).hexdigest()
+    base = os.getenv("CHAT_VIEW_BASE_URL", "https://wtp.chattbase.site").rstrip("/")
+    return f"{base}/storefront/chat-view/{session_id}?token={expires}.{signature}", expires
+
+
+@router.get("/api/chat-requests/{request_id}/conversation")
+async def chat_request_conversation(
+    request_id: int,
+    db: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
+):
+    """The website chat behind this request, as the customer saw it (newest chat first)."""
+    exists = await db.scalar(select(ChatRequest.id).where(ChatRequest.id == request_id))
+    if not exists:
+        raise HTTPException(status_code=404, detail="chat request not found")
+    rows = await db.execute(
+        select(ChatRequestEvent.detail)
+        .where(ChatRequestEvent.request_id == request_id)
+        .order_by(ChatRequestEvent.created_at.desc(), ChatRequestEvent.id.desc())
+        .limit(200)
+    )
+    for detail in rows.scalars():
+        match = re.fullmatch(r"storefront:([a-f0-9]{32}):[a-z0-9:]*", str((detail or {}).get("source_id") or ""))
+        if match:
+            url, expires = chat_view_url(match[1])
+            return {"ok": True, "url": url, "expires_at": expires}
+    raise HTTPException(status_code=404, detail="This request has no website chat")
 
 
 @router.get("/api/chat-requests/team-stats")

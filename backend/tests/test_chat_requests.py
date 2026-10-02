@@ -12,6 +12,7 @@ from backend.app.chat_request_routes import (
     ChatPullBody,
     ChatRequestIntakeBody,
     chat_request_action,
+    chat_request_conversation,
     chat_request_history,
     chat_team_stats,
     create_chat_request,
@@ -298,3 +299,38 @@ class ChatRequestTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Website chat viewer links (added to the shared fixture class).
+async def test_website_chat_link_is_signed_short_lived_and_only_for_storefront_chats(self):
+    import hashlib, hmac, re, time
+    request = _FakeRequest()
+    request.headers['x-chat-intake-key'] = 'shared-test-key'
+    sid = 'a' * 32
+    body = ChatRequestIntakeBody(store='irrakids', phone='0612345678', message='Customer: hi', source_id=f'storefront:{sid}:3')
+    with patch.dict(os.environ, {'CHAT_INTAKE_SECRET': 'shared-test-key', 'CHAT_VIEW_BASE_URL': 'https://chat.example'}):
+        async with self.sessions() as session:
+            created = await routes.integration_chat_request(body=body, request=request, db=session)
+        rid = created['request']['id'] if 'request' in created else created['id']
+        async with self.sessions() as session:
+            result = await chat_request_conversation(request_id=rid, db=session, user=self.agent)
+    match = re.fullmatch(r'https://chat\.example/storefront/chat-view/' + sid + r'\?token=(\d+)\.([a-f0-9]{64})', result['url'])
+    self.assertIsNotNone(match)
+    expires = int(match[1])
+    self.assertTrue(time.time() < expires <= time.time() + 12 * 3600 + 5)
+    expected = hmac.new(b'shared-test-key', f'chat-view:{sid}:{expires}'.encode(), hashlib.sha256).hexdigest()
+    self.assertEqual(match[2], expected)
+
+async def test_requests_without_a_website_chat_have_no_link(self):
+    await self._intake()
+    async with self.sessions() as session:
+        rid = (await session.scalar(select(ChatRequest.id)))
+        with patch.dict(os.environ, {'CHAT_INTAKE_SECRET': 'shared-test-key'}):
+            with self.assertRaises(HTTPException) as caught:
+                await chat_request_conversation(request_id=rid, db=session, user=self.agent)
+    self.assertEqual(caught.exception.status_code, 404)
+
+
+ChatRequestTests.test_website_chat_link_is_signed_short_lived_and_only_for_storefront_chats = test_website_chat_link_is_signed_short_lived_and_only_for_storefront_chats
+ChatRequestTests.test_requests_without_a_website_chat_have_no_link = test_requests_without_a_website_chat_have_no_link
+del test_website_chat_link_is_signed_short_lived_and_only_for_storefront_chats, test_requests_without_a_website_chat_have_no_link

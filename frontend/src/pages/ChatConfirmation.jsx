@@ -109,6 +109,12 @@ const CHAT_API = {
   async history(id) {
     return jsonOrThrow(await authFetch(`/api/chat-requests/${encodeURIComponent(id)}/history`, { headers: authHeaders() }), "Failed to load history");
   },
+  // Signed, short-lived link to the read-only website chat (null when the request has none).
+  async conversation(id) {
+    const res = await authFetch(`/api/chat-requests/${encodeURIComponent(id)}/conversation`, { headers: authHeaders() });
+    if (res.status === 404) return null;
+    return jsonOrThrow(res, "Failed to load the conversation");
+  },
   async teamStats(store) {
     const qs = new URLSearchParams({ store });
     return jsonOrThrow(await authFetch(`/api/chat-requests/team-stats?${qs}`, { headers: authHeaders() }), "Failed to load team stats");
@@ -1216,6 +1222,49 @@ const HISTORY_LABELS = {
   note: (d) => `Note: ${d.note || ""}`,
 };
 
+// The customer's website chat exactly as they saw it: scrollable, with photos, collections and
+// voice notes. Falls back to the saved transcript text for requests that did not come from the chat.
+function ConversationView({ request: r }) {
+  const [view, setView] = useState({ loading: true });
+  useEffect(() => {
+    let cancelled = false;
+    setView({ loading: true });
+    CHAT_API.conversation(r.id)
+      .then((js) => { if (!cancelled) setView({ url: js && /^https:\/\//.test(js.url || "") ? js.url : null }); })
+      .catch((e) => { if (!cancelled) setView({ error: e?.message || "Failed to load the conversation" }); });
+    return () => { cancelled = true; };
+  }, [r.id, r.request_count]);
+
+  if (view.loading) return <div className="flex h-24 items-center justify-center"><Spinner /></div>;
+  if (view.url) {
+    return (
+      <div className="space-y-1.5">
+        <iframe
+          src={view.url}
+          title="Website chat"
+          className="h-[600px] w-full rounded-xl bg-[#efeae2] ring-1 ring-inset ring-slate-200"
+          sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+          referrerPolicy="no-referrer"
+          loading="lazy"
+        />
+        <a href={view.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-700 hover:underline">
+          <ExternalLink className="h-3 w-3" aria-hidden /> Open the chat in a new tab
+        </a>
+      </div>
+    );
+  }
+  return (
+    <>
+      {view.error && <p className="text-xs text-rose-600">{view.error}</p>}
+      {r.message ? (
+        <p className="max-h-80 overflow-auto whitespace-pre-wrap rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-800 ring-1 ring-inset ring-slate-200">{r.message}</p>
+      ) : (
+        <p className="text-xs text-slate-400">The customer did not write a message.</p>
+      )}
+    </>
+  );
+}
+
 function ChatRequestDetails({ request: r, store, shopDomain, isAdmin, agents, busy, onNote, onAssign }) {
   const [note, setNote] = useState("");
   const [events, setEvents] = useState(null);
@@ -1266,11 +1315,7 @@ function ChatRequestDetails({ request: r, store, shopDomain, isAdmin, agents, bu
         <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
           <MessageSquareText className="h-3.5 w-3.5" aria-hidden /> Request
         </div>
-        {r.message ? (
-          <p className="whitespace-pre-wrap rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-800 ring-1 ring-inset ring-slate-200">{r.message}</p>
-        ) : (
-          <p className="text-xs text-slate-400">The customer did not write a message.</p>
-        )}
+        <ConversationView request={r} />
         {(r.product_title || r.product_image) && (
           <div className="flex items-center gap-3 rounded-xl bg-white p-2 ring-1 ring-inset ring-slate-200">
             {r.product_image && <img src={r.product_image} alt="" className="h-14 w-14 rounded-lg object-cover" loading="lazy" />}
