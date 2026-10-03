@@ -47,7 +47,7 @@ _STORE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 OPEN_STATUSES = ("new", "calling", "enatt")
 CLOSED_STATUSES = ("ordered", "not_interested", "wrong_number")
 MAX_ATTEMPTS = 4
-_LEVELS = ("new", "n1", "n2", "n3", "n4", "enatt", "closed")
+_LEVELS = ("new", "n1", "n2", "n3", "n4", "enatt", "closed", "ordered")
 _SCOPES = ("mine", "unassigned", "all")
 
 
@@ -229,6 +229,8 @@ class ChatRequestIntakeBody(BaseModel):
     website: Optional[str] = None
     source_id: Optional[str] = None
     order_ref: Optional[str] = None
+    # Trusted integrations only: "ordered" when the website AI already placed the order.
+    outcome: Optional[str] = None
 
 
 @router.post("/api/public/chat-requests")
@@ -337,6 +339,8 @@ async def _create_chat_request(body, request, db, *, trusted):
         if previous:
             return {"ok": True, "id": previous.request_id, "repeat": True, "idempotent": True}
         fields["order_ref"] = _clean(body.order_ref, 64)
+        if body.outcome == "ordered":
+            return await _record_ordered_chat(db, store_key, phone, body, fields, now)
 
     # Same customer asking again while we have not closed their request yet:
     # refresh it rather than queueing a duplicate call.
@@ -381,6 +385,40 @@ async def _create_chat_request(body, request, db, *, trusted):
     return {"ok": True, "id": req.id, "repeat": False}
 
 
+async def _record_ordered_chat(db, store_key, phone, body, fields, now):
+    """The website AI placed this order: show the chat as ordered, closing any open call-back for it."""
+    if not fields.get("order_ref"):
+        raise HTTPException(422, "An ordered chat needs its order reference")
+    session = re.fullmatch(r"storefront:([a-f0-9]{32}):[a-z0-9:]*", body.source_id or "")
+    row = None
+    if session:
+        row = await db.scalar(select(ChatRequest).join(ChatRequestEvent).where(
+            ChatRequest.store_key == store_key,
+            ChatRequestEvent.detail["source_id"].as_string().startswith("storefront:" + session[1] + ":"),
+        ).order_by(ChatRequest.created_at.desc()).limit(1))
+    if row is None:
+        row = await db.scalar(select(ChatRequest).where(
+            ChatRequest.store_key == store_key, ChatRequest.phone == phone, ChatRequest.status.in_(OPEN_STATUSES),
+        ).order_by(ChatRequest.created_at.desc()).limit(1))
+    if row is None:
+        row = ChatRequest(store_key=store_key, phone=phone, phone_raw=_clean(body.phone, 64), status="ordered",
+                          attempts=0, enatt=0, request_count=1, closed_at=now, **fields)
+        db.add(row)
+        await db.flush()
+    else:
+        for key, value in fields.items():
+            if value:
+                setattr(row, key, value)
+        if row.status != "ordered":
+            row.status = "ordered"
+            row.closed_at = now
+        row.updated_at = now
+    db.add(ChatRequestEvent(request_id=row.id, action="ordered",
+                            detail={"source": "storefront-ai", "order_ref": fields["order_ref"], "source_id": body.source_id}))
+    await db.commit()
+    return {"ok": True, "id": row.id, "ordered": True}
+
+
 # ---------- Agent queue ----------
 
 async def _shop_domain(store_key: str) -> str:
@@ -403,6 +441,8 @@ def _level_clause(level: str):
         return ChatRequest.status == "enatt"
     if level == "closed":
         return ChatRequest.status.in_(CLOSED_STATUSES)
+    if level == "ordered":
+        return ChatRequest.status == "ordered"
     return ChatRequest.status.in_(OPEN_STATUSES)
 
 
@@ -433,7 +473,7 @@ def _search_clause(q: str):
     return or_(*clauses)
 
 
-async def _level_counts(db: AsyncSession, base_filters: List[Any]) -> Dict[str, int]:
+async def _level_counts(db: AsyncSession, base_filters: List[Any], ordered_filters: Optional[List[Any]] = None) -> Dict[str, int]:
     rows = await db.execute(
         select(ChatRequest.status, ChatRequest.attempts, func.count(ChatRequest.id))
         .where(*base_filters, ChatRequest.status.in_(OPEN_STATUSES))
@@ -455,6 +495,13 @@ async def _level_counts(db: AsyncSession, base_filters: List[Any]) -> Dict[str, 
         select(func.count(ChatRequest.id)).where(
             *base_filters,
             ChatRequest.status.in_(CLOSED_STATUSES),
+            ChatRequest.closed_at >= closed_since,
+        )
+    ) or 0)
+    counts["ordered"] = int(await db.scalar(
+        select(func.count(ChatRequest.id)).where(
+            *(ordered_filters if ordered_filters is not None else base_filters),
+            ChatRequest.status == "ordered",
             ChatRequest.closed_at >= closed_since,
         )
     ) or 0)
@@ -495,16 +542,18 @@ async def list_chat_requests(
     offset = max(0, int(offset or 0))
 
     base_filters: List[Any] = [ChatRequest.store_key == store_key]
-    scope_filter = _scope_clause(scope, user)
-    if scope_filter is not None:
-        base_filters.append(scope_filter)
     search = _search_clause(q or "")
     if search is not None:
         base_filters.append(search)
+    # Ordered chats are shared by the whole team (the AI placed most of them), whatever the scope.
+    store_filters = list(base_filters)
+    scope_filter = _scope_clause(scope, user)
+    if scope_filter is not None:
+        base_filters.append(scope_filter)
 
-    filters = [*base_filters, _level_clause(level)]
+    filters = [*(store_filters if level == "ordered" else base_filters), _level_clause(level)]
     total = int(await db.scalar(select(func.count(ChatRequest.id)).where(*filters)) or 0)
-    order_col = ChatRequest.closed_at.desc() if level == "closed" else ChatRequest.created_at.desc()
+    order_col = ChatRequest.closed_at.desc() if level in ("closed", "ordered") else ChatRequest.created_at.desc()
     rows = await db.execute(
         select(ChatRequest).where(*filters).order_by(order_col, ChatRequest.id.desc()).offset(offset).limit(limit)
     )
@@ -517,7 +566,7 @@ async def list_chat_requests(
         "offset": offset,
         "limit": limit,
         "shop_domain": await _shop_domain(store_key),
-        "level_counts": await _level_counts(db, base_filters),
+        "level_counts": await _level_counts(db, base_filters, store_filters),
         "scope_counts": await _scope_counts(db, store_key, user),
     }
 

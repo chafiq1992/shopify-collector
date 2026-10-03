@@ -55,6 +55,7 @@ const CHAT_LEVELS = [
   { key: "n4",     label: "N4",         tone: "red",     count: "n4" },
   { key: "enatt",  label: "En attente", tone: "fuchsia", count: "enatt" },
   { key: "closed", label: "Closed",     tone: "emerald", count: "closed" },
+  { key: "ordered", label: "Ordered",   tone: "emerald", count: "ordered" },
 ];
 
 const SCOPES = [
@@ -174,6 +175,7 @@ function agentName(user) {
 }
 
 function matchesView(r, { scope, level, meId }) {
+  if (level === "ordered") return r.status === "ordered";
   if (scope === "mine" && r.assigned_to?.id !== meId) return false;
   if (scope === "unassigned" && r.assigned_to) return false;
   const closed = CLOSED.has(r.status);
@@ -1140,7 +1142,7 @@ function ChatLevelTabs({ value, counts, onChange }) {
             className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full pl-2.5 pr-1.5 text-xs font-semibold transition duration-200 active:scale-[0.96] ${
               active ? `${tone.solid} shadow-sm` : "bg-white text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50 hover:text-slate-900"
             }`}
-            title={lv.key === "closed" ? "Closed in the last 30 days" : undefined}
+            title={lv.key === "closed" ? "Closed in the last 30 days" : lv.key === "ordered" ? "Ordered in the last 30 days, including orders the website AI placed" : undefined}
           >
             {!active && <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${tone.dot}`} />}
             {lv.label}

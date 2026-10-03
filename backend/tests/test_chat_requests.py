@@ -334,3 +334,57 @@ async def test_requests_without_a_website_chat_have_no_link(self):
 ChatRequestTests.test_website_chat_link_is_signed_short_lived_and_only_for_storefront_chats = test_website_chat_link_is_signed_short_lived_and_only_for_storefront_chats
 ChatRequestTests.test_requests_without_a_website_chat_have_no_link = test_requests_without_a_website_chat_have_no_link
 del test_website_chat_link_is_signed_short_lived_and_only_for_storefront_chats, test_requests_without_a_website_chat_have_no_link
+
+
+# Chats where the website AI placed the order (added to the shared fixture class).
+async def test_ordered_website_chat_closes_its_callback_and_shows_under_ordered(self):
+    request = _FakeRequest()
+    request.headers['x-chat-intake-key'] = 'shared-test-key'
+    sid = 'c' * 32
+    with patch.dict(os.environ, {'CHAT_INTAKE_SECRET': 'shared-test-key'}):
+        async with self.sessions() as db:
+            lead = await routes.integration_chat_request(ChatRequestIntakeBody(store='irrakids', phone='0612345678', message='Customer: hi', source_id=f'storefront:{sid}:1'), request, db)
+        await self._act(lead['id'], 'claim')
+        body = ChatRequestIntakeBody(store='irrakids', phone='0612345678', message='Customer: hi\n\nStore: done', source_id=f'storefront:{sid}:order', order_ref='4455', outcome='ordered')
+        async with self.sessions() as db:
+            ordered = await routes.integration_chat_request(body, request, db)
+        async with self.sessions() as db:
+            again = await routes.integration_chat_request(body, request, db)
+            saved = await db.get(ChatRequest, lead['id'])
+    self.assertEqual((ordered['id'], again['id']), (lead['id'], lead['id']))
+    self.assertEqual((saved.status, saved.order_ref, saved.message), ('ordered', '4455', 'Customer: hi\n\nStore: done'))
+    listed = await self._list(user=self.other, scope='mine', level='ordered')
+    self.assertEqual([r['id'] for r in listed['requests']], [lead['id']])
+    self.assertEqual(listed['level_counts']['ordered'], 1)
+    self.assertEqual((await self._list(level=None))['total'], 0)
+
+
+async def test_ordered_chat_without_a_callback_is_created_closed_with_its_chat_link(self):
+    request = _FakeRequest()
+    request.headers['x-chat-intake-key'] = 'shared-test-key'
+    sid = 'd' * 32
+    body = ChatRequestIntakeBody(store='irrakids', phone='0699887766', name='Sara', message='Customer: bghit had sbbat', source_id=f'storefront:{sid}:order', order_ref='7788', outcome='ordered', product_title='Boots')
+    with patch.dict(os.environ, {'CHAT_INTAKE_SECRET': 'shared-test-key'}):
+        async with self.sessions() as db:
+            created = await routes.integration_chat_request(body, request, db)
+        async with self.sessions() as db:
+            saved = await db.get(ChatRequest, created['id'])
+            link = await chat_request_conversation(request_id=created['id'], db=db, user=self.agent)
+    self.assertEqual((saved.status, saved.order_ref, saved.customer_name, saved.product_title), ('ordered', '7788', 'Sara', 'Boots'))
+    self.assertIsNotNone(saved.closed_at)
+    self.assertIn('/storefront/chat-view/' + sid, link['url'])
+
+
+async def test_public_intake_cannot_mark_a_request_ordered(self):
+    await self._intake(outcome='ordered', order_ref='1')
+    async with self.sessions() as session:
+        saved = await session.scalar(select(ChatRequest))
+    self.assertEqual(saved.status, 'new')
+
+
+for _test in (test_ordered_website_chat_closes_its_callback_and_shows_under_ordered,
+              test_ordered_chat_without_a_callback_is_created_closed_with_its_chat_link,
+              test_public_intake_cannot_mark_a_request_ordered):
+    setattr(ChatRequestTests, _test.__name__, _test)
+del _test, test_ordered_website_chat_closes_its_callback_and_shows_under_ordered
+del test_ordered_chat_without_a_callback_is_created_closed_with_its_chat_link, test_public_intake_cannot_mark_a_request_ordered
