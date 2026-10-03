@@ -45,6 +45,7 @@ try:
     from .return_scan_routes import router as return_scan_router
     from .confirmation_routes import router as confirmation_router
     from .chat_request_routes import router as chat_request_router
+    from .chat_order_routes import router as chat_order_router
     from .inventory_helper_routes import router as inventory_helper_router
 except Exception:
     HAVE_AUTH_DB = False
@@ -245,6 +246,8 @@ if HAVE_AUTH_DB and "confirmation_router" in globals() and confirmation_router i
     app.include_router(confirmation_router)  # type: ignore[arg-type]
 if HAVE_AUTH_DB and "chat_request_router" in globals() and chat_request_router is not None:  # type: ignore[name-defined]
     app.include_router(chat_request_router)  # type: ignore[arg-type]
+if HAVE_AUTH_DB and "chat_order_router" in globals() and chat_order_router is not None:  # type: ignore[name-defined]
+    app.include_router(chat_order_router)  # type: ignore[arg-type]
 if HAVE_AUTH_DB and "inventory_helper_router" in globals() and inventory_helper_router is not None:  # type: ignore[name-defined]
     app.include_router(inventory_helper_router)  # type: ignore[arg-type]
 if delivery_rate_router is not None:
@@ -1271,7 +1274,12 @@ async def shopify_graphql(
     *,
     store: Optional[str],
     api_version: Optional[str] = None,
+    retry_transient: bool = True,
 ) -> Dict[str, Any]:
+    """Run an Admin GraphQL call. Throttling is always retried (Shopify ran
+    nothing). Pass retry_transient=False for a mutation that must not run twice,
+    such as orderCreate: a timeout or 5xx can arrive after Shopify already
+    applied it, so resending would duplicate it."""
     domain, access_token, api_key = await resolve_store_settings_effective(store)
     if not domain or not access_token:
         raise HTTPException(status_code=400, detail="Shopify credentials not configured for selected store")
@@ -1330,7 +1338,7 @@ async def shopify_graphql(
             except Exception as e:
                 last_exc = e
                 # Retry transient network failures with backoff
-                if attempt < max_retries - 1:
+                if retry_transient and attempt < max_retries - 1:
                     wait = base_delay * (2 ** attempt) + random.uniform(0, 0.15)
                     try:
                         await asyncio.sleep(wait)

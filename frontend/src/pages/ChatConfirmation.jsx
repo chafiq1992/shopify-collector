@@ -46,6 +46,7 @@ import {
   initialOf, isInteractiveTarget, timeAgo,
 } from "../components/ConfirmationUi";
 import { copyToClipboard, moroccoInternational } from "../lib/confirmationActions";
+import ChatCreateOrderModal from "../components/ChatCreateOrderModal";
 
 // Chat confirmation: customers who asked for a chat on the storefront leave a phone
 // number instead of opening WhatsApp, and agents call them back from here. Works
@@ -255,8 +256,8 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   const [expanded, setExpanded] = useState(() => new Set());
   const [busyIds, setBusyIds] = useState(() => new Set());
   const [menuFor, setMenuFor] = useState(null);
-  const [orderedFor, setOrderedFor] = useState(null);
-  const [orderRef, setOrderRef] = useState("");
+  // The request whose "Create order" window is open.
+  const [createOrderFor, setCreateOrderFor] = useState(null);
   // Reason labels (size, price, later, other...) chosen in the ⋯ popup.
   const [labels, setLabels] = useState([]);
   const [canManageLabels, setCanManageLabels] = useState(false);
@@ -360,7 +361,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const tag = (e.target?.tagName || "").toLowerCase();
       if (["input", "textarea", "select"].includes(tag) || e.target?.isContentEditable) return;
-      if (pullMode) return;
+      if (pullMode || createOrderFor) return;
       if (e.key === "/") {
         e.preventDefault();
         searchInputRef.current?.focus();
@@ -370,7 +371,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [refreshAll, pullMode]);
+  }, [refreshAll, pullMode, createOrderFor]);
 
   function changeStore(next) {
     if (!next || next === store) return;
@@ -437,17 +438,24 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     return runAction(r, { action: "enatt" }, { success: (u) => `En attente · EA${u.enatt} saved` });
   }
 
-  function openOrdered(r) {
-    setOrderRef("");
-    setOrderedFor(r.id);
+  function openCreateOrder(r) {
+    setCreateOrderFor(r);
   }
 
-  async function submitOrdered(r) {
-    const ref = orderRef.trim();
-    const done = await runAction(r, { action: "ordered", order_ref: ref || null }, {
-      success: `${r.customer_name || prettyPhone(r.phone)} marked as ordered${ref ? ` · ${ref}` : ""}`,
+  // The order was created in Shopify and the request closed as ordered.
+  function onOrderCreated(js) {
+    applyUpdated(js.request);
+    pushToast(`Order ${js.order?.name || ""} created in Shopify`, "success", 5000);
+    load();
+    loadTeam();
+    onWaitingChanged?.();
+  }
+
+  // The customer already ordered on the website: close the request with that order.
+  function linkExistingOrder(r, ref) {
+    return runAction(r, { action: "ordered", order_ref: ref }, {
+      success: `${r.customer_name || prettyPhone(r.phone)} linked to order ${ref}`,
     });
-    if (done) setOrderedFor(null);
   }
 
 
@@ -695,57 +703,15 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
         <button
           type="button"
           disabled={busy}
-          onClick={(ev) => { ev.stopPropagation(); openOrdered(r); }}
+          onClick={(ev) => { ev.stopPropagation(); openCreateOrder(r); }}
+          data-testid="create-order"
           className={`${ACTION_BTN} ${ACTION_THEMES.confirm} ${grow}`}
-          title="The customer ordered — close the request"
+          title="Create the customer's order in Shopify"
         >
           <ShoppingBag className="h-3.5 w-3.5" aria-hidden />
-          <span className={stretch ? "" : "hidden 2xl:inline"}>Ordered</span>
+          <span className={stretch ? "" : "hidden 2xl:inline"}>Create order</span>
         </button>
         {moreButton}
-      </div>
-    );
-  }
-
-  function renderOrderedPicker(r) {
-    const busy = busyIds.has(r.id);
-    const draftUrl = shopifyAdminUrl(data.shop_domain, "draft_orders/new");
-    return (
-      <div
-        className="cf-collapse-in flex flex-wrap items-center gap-2 rounded-xl bg-emerald-50/70 px-3 py-2.5 ring-1 ring-inset ring-emerald-200"
-        onClick={(ev) => ev.stopPropagation()}
-      >
-        <CalendarCheck className="h-4 w-4 text-emerald-600" aria-hidden />
-        <span className="text-xs font-semibold text-emerald-900">Order number</span>
-        <input
-          type="text"
-          value={orderRef}
-          autoFocus
-          onChange={(e) => setOrderRef(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") { e.preventDefault(); submitOrdered(r); }
-            if (e.key === "Escape") { e.preventDefault(); setOrderedFor(null); }
-          }}
-          placeholder="#1234 (optional)"
-          className="h-8 w-36 rounded-lg border-0 bg-white px-2 text-sm text-slate-800 ring-1 ring-inset ring-emerald-200 focus:ring-2 focus:ring-emerald-500"
-        />
-        {draftUrl && (
-          <a
-            href={draftUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-800 underline-offset-2 hover:underline"
-          ><ExternalLink className="h-3.5 w-3.5" aria-hidden /> New order in Shopify</a>
-        )}
-        <div className="ml-auto flex items-center gap-2">
-          <button type="button" onClick={() => setOrderedFor(null)} className={`${BTN.ghost} h-8 text-xs`}>Cancel</button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => submitOrdered(r)}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-emerald-600 px-3 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 active:scale-[0.97] transition disabled:opacity-50"
-          >{busy ? <Spinner className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" aria-hidden />} Mark ordered</button>
-        </div>
       </div>
     );
   }
@@ -769,7 +735,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
 
   function renderCard(r, { leaving = false } = {}) {
     const isOpen = expanded.has(r.id);
-    const pickerOpen = orderedFor === r.id;
+    const pickerOpen = createOrderFor?.id === r.id;
     const busy = busyIds.has(r.id);
     return (
       <div
@@ -798,7 +764,6 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
         <div className="mt-2">{renderProduct(r)}</div>
         <div className="mt-2">{renderStatus(r)}</div>
         <div className="mt-3">{renderActions(r, { stretch: true })}</div>
-        {pickerOpen && <div className="mt-2.5">{renderOrderedPicker(r)}</div>}
         {isOpen && (
           <div className="cf-collapse-in mt-3" onClick={(ev) => ev.stopPropagation()}>{renderDetails(r)}</div>
         )}
@@ -808,7 +773,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
 
   function renderRow({ item: r, leaving }) {
     const isOpen = expanded.has(r.id);
-    const pickerOpen = orderedFor === r.id;
+    const pickerOpen = createOrderFor?.id === r.id;
     const active = isOpen || pickerOpen;
     const rowBg = active ? "bg-indigo-50/70" : "bg-white";
     return (
@@ -840,11 +805,6 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
             <div className="flex justify-end">{renderActions(r)}</div>
           </td>
         </tr>
-        {pickerOpen && !leaving && (
-          <tr className="bg-indigo-50/40">
-            <td colSpan={6} className="px-4 py-2.5">{renderOrderedPicker(r)}</td>
-          </tr>
-        )}
         {isOpen && !leaving && (
           <tr className="bg-slate-50/70">
             <td colSpan={6} className="px-4 py-4"><div className="cf-collapse-in">{renderDetails(r)}</div></td>
@@ -1165,6 +1125,17 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
         </>)}
       </main>
 
+      {createOrderFor && (
+        <ChatCreateOrderModal
+          request={createOrderFor}
+          store={store}
+          shopDomain={data.shop_domain}
+          me={me}
+          onClose={() => setCreateOrderFor(null)}
+          onCreated={onOrderCreated}
+          onLinkExisting={(ref) => linkExistingOrder(createOrderFor, ref)}
+        />
+      )}
       {pullMode && (
         <ChatPullModal
           initialMode={pullMode.mode}
