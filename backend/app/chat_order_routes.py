@@ -16,7 +16,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -43,6 +43,23 @@ from .models import ChatRequest, ChatRequestEvent, User
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _readable(error: HTTPException) -> HTTPException:
+    """Cloudflare replaces any 502/504 body with its own error page, which hides
+    Shopify's message from the agent. Keep the message; use a status it passes."""
+    status = error.status_code if error.status_code in (400, 401, 403, 404, 409, 422, 429) else 422
+    detail = error.detail if isinstance(error.detail, dict) else f"Shopify: {error.detail}"
+    return HTTPException(status_code=status, detail=detail)
+
+
+async def _shopify(query: str, variables: Dict[str, Any], *, store: str, **kw) -> Dict[str, Any]:
+    from .main import shopify_graphql  # type: ignore
+
+    try:
+        return await shopify_graphql(query, variables, store=store, **kw)
+    except HTTPException as error:
+        raise _readable(error)
 
 
 # ---------- Customer lookup ----------
@@ -124,15 +141,13 @@ async def chat_customer_lookup(
     if not query:
         return {"ok": True, "customers": []}
 
-    from .main import shopify_graphql  # type: ignore
-
     variables = {"first": 5, "ordersFirst": 5, "query": query}
     try:
-        data = await shopify_graphql(CUSTOMER_LOOKUP_GQL, variables, store=store_key)
+        data = await _shopify(CUSTOMER_LOOKUP_GQL, variables, store=store_key)
     except HTTPException as exc:
         if "MAX_COST_EXCEEDED" not in str(getattr(exc, "detail", exc)):
             raise
-        data = await shopify_graphql(CUSTOMER_LOOKUP_GQL, {**variables, "first": 2}, store=store_key)
+        data = await _shopify(CUSTOMER_LOOKUP_GQL, {**variables, "first": 2}, store=store_key)
     nodes = ((data or {}).get("customers") or {}).get("nodes") or []
     return {"ok": True, "customers": [_customer_payload(n) for n in nodes]}
 
@@ -244,27 +259,24 @@ async def chat_product_options(
     _: User = Depends(get_current_user),
 ):
     store_key = _normalize_store(store)
-
-    from .main import shopify_graphql  # type: ignore
-
     node: Optional[Dict[str, Any]] = None
     pid = (product_id or "").strip()
     if pid:
         if not pid.startswith("gid://shopify/Product/"):
             raise HTTPException(status_code=400, detail="invalid product id")
-        data = await shopify_graphql(PRODUCT_BY_ID_GQL, {"id": pid}, store=store_key)
+        data = await _shopify(PRODUCT_BY_ID_GQL, {"id": pid}, store=store_key)
         node = (data or {}).get("product")
     else:
         handle = handle_from_url(product_url)
         if handle:
             safe = handle.replace("\\", "\\\\").replace("'", "\\'")
-            data = await shopify_graphql(PRODUCTS_SEARCH_GQL, {"query": f"handle:'{safe}'"}, store=store_key)
+            data = await _shopify(PRODUCTS_SEARCH_GQL, {"query": f"handle:'{safe}'"}, store=store_key)
             nodes = ((data or {}).get("products") or {}).get("nodes") or []
             node = next((n for n in nodes if _norm(n.get("handle")) == _norm(handle)), None)
         wanted_title = (title or "").strip()
         if node is None and wanted_title:
             safe = wanted_title.replace("\\", "\\\\").replace('"', '\\"')
-            data = await shopify_graphql(PRODUCTS_SEARCH_GQL, {"query": f'title:"{safe}"'}, store=store_key)
+            data = await _shopify(PRODUCTS_SEARCH_GQL, {"query": f'title:"{safe}"'}, store=store_key)
             nodes = ((data or {}).get("products") or {}).get("nodes") or []
             node = next((n for n in nodes if _norm(n.get("title")) == _norm(wanted_title)), nodes[0] if nodes else None)
     if not node:
@@ -319,6 +331,10 @@ class ChatCreateOrderBody(BaseModel):
     note: Optional[str] = None
     shipping_title: Optional[str] = None
     shipping_price: Optional[str] = None
+    # A reduction on the products: "percentage" (e.g. 10 = 10 %) or "amount" (in the shop currency).
+    discount_type: Optional[str] = None
+    discount_value: Optional[str] = None
+    discount_code: Optional[str] = None
     # Set after the agent was warned that a previous attempt may have created it.
     confirm_possible_duplicate: bool = False
     client_action_id: Optional[str] = None
@@ -352,8 +368,23 @@ def _is_unknown_outcome(error: HTTPException) -> bool:
     detail = str(getattr(error, "detail", "") or "")
     if error.status_code in (400, 401, 403, 404, 422, 429):
         return False
-    # GraphQL-level errors are returned before the mutation runs.
-    return not detail.startswith("Shopify GraphQL errors")
+    # GraphQL-level errors are returned before the mutation runs, and a 4xx
+    # HTTP answer means Shopify refused the request outright.
+    return not (detail.startswith("Shopify GraphQL errors") or "Client error '4" in detail)
+
+
+def _discount(body: "ChatCreateOrderBody") -> Tuple[Optional[str], Decimal, str]:
+    """(kind, value, code) of the agent's discount; kind is None when there is none."""
+    kind = (body.discount_type or "").strip().lower() or None
+    if kind not in (None, "percentage", "amount"):
+        raise HTTPException(status_code=422, detail="discount must be a percentage or an amount")
+    value = _money(body.discount_value, "discount") if kind else Decimal("0")
+    if value <= 0:
+        return None, Decimal("0"), ""
+    if kind == "percentage" and value > 100:
+        raise HTTPException(status_code=422, detail="a percentage discount cannot be more than 100 %")
+    code = _clean(body.discount_code, 50) or "REMISE"
+    return kind, value, code
 
 
 @router.post("/api/chat-requests/{request_id}/create-order")
@@ -406,6 +437,7 @@ async def chat_create_order(
     if len(lines) > 50:
         raise HTTPException(status_code=422, detail="too many products in one order")
     shipping_price = _money(body.shipping_price, "shipping price")
+    discount_kind, discount_value, discount_code = _discount(body)
     tags = clean_tags(body.tags)
     note = _clean_multiline(body.note, 5000)
 
@@ -425,12 +457,18 @@ async def chat_create_order(
 
     from .main import shopify_graphql  # type: ignore
 
-    data = await shopify_graphql(ORDER_VARIANTS_GQL, {"ids": list(lines)}, store=r.store_key)
+    data = await _shopify(ORDER_VARIANTS_GQL, {"ids": list(lines)}, store=r.store_key)
     currency = (((data or {}).get("shop") or {}).get("currencyCode")) or "MAD"
     variants = {n.get("id"): n for n in ((data or {}).get("nodes") or []) if n and n.get("id")}
     gone = [vid for vid in lines if vid not in variants]
     if gone:
         raise HTTPException(status_code=422, detail="a product in this order no longer exists in Shopify — remove it and pick again")
+    subtotal = sum(Decimal(str(variants[vid].get("price") or "0")) * qty for vid, qty in lines.items())
+    if discount_kind == "amount" and discount_value > subtotal:
+        raise HTTPException(status_code=422, detail="the discount is larger than the products total")
+    discount_amount = (
+        (subtotal * discount_value / 100).quantize(Decimal("0.01")) if discount_kind == "percentage" else discount_value
+    )
 
     def money(amount: Any) -> Dict[str, Any]:
         return {"shopMoney": {"amount": str(amount), "currencyCode": currency}}
@@ -475,6 +513,10 @@ async def chat_create_order(
             "title": _clean(body.shipping_title, 100) or "Livraison",
             "priceSet": money(shipping_price),
         }]
+    if discount_kind == "percentage":
+        order["discountCode"] = {"itemPercentageDiscountCode": {"code": discount_code, "percentage": float(discount_value)}}
+    elif discount_kind == "amount":
+        order["discountCode"] = {"itemFixedDiscountCode": {"code": discount_code, "amountSet": money(discount_value)}}
     options = {
         # Same stock rule as the website: never sell what is not there.
         "inventoryBehaviour": "DECREMENT_OBEYING_POLICY",
@@ -482,37 +524,45 @@ async def chat_create_order(
         "sendFulfillmentReceipt": False,
     }
 
+    async def send(order_input: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str], bool]:
+        """(created order, refusal message, outcome unknown). Sent exactly once."""
+        try:
+            result = await shopify_graphql(
+                ORDER_CREATE_GQL, {"order": order_input, "options": options}, store=r.store_key, retry_transient=False,
+            )
+        except HTTPException as error:
+            return {}, str(error.detail), _is_unknown_outcome(error)
+        payload = (result or {}).get("orderCreate") or {}
+        errors = [e.get("message") for e in (payload.get("userErrors") or []) if e.get("message")]
+        created_order = payload.get("order") or {}
+        if errors or not created_order.get("id"):
+            return {}, "; ".join(errors) or "Shopify did not create the order", False
+        return created_order, None, False
+
     client_action_id = (body.client_action_id or "").strip()[:128] or None
-    try:
-        result = await shopify_graphql(
-            ORDER_CREATE_GQL, {"order": order, "options": options}, store=r.store_key, retry_transient=False,
-        )
-    except HTTPException as error:
-        unknown = _is_unknown_outcome(error)
+    created, refusal, unknown = await send(order)
+    if refusal and not unknown and "toUpsert" in order.get("customer", {}) and re.search(r"customer", refusal, re.I):
+        # Shopify refused (so made nothing) because of the new-customer part, e.g. the
+        # app may not create customers. The order matters more: send it without that.
+        logger.warning("chat order %s: retrying without the customer upsert after: %s", r.id, refusal)
+        retry = {k: v for k, v in order.items() if k != "customer"}
+        created, refusal, unknown = await send(retry)
+
+    if not created:
+        logger.warning("chat order %s not created (unknown=%s): %s", r.id, unknown, refusal)
         db.add(ChatRequestEvent(
             request_id=r.id, user_id=user.id,
             action=UNKNOWN_EVENT if unknown else "order_create_failed",
-            detail={"error": str(error.detail)[:500], "client_action_id": client_action_id},
+            detail={"error": (refusal or "")[:500], "client_action_id": client_action_id},
         ))
         await db.commit()
         if unknown:
-            raise HTTPException(status_code=502, detail=(
-                "Shopify did not confirm the order. It may still have been created — "
-                "check the customer's recent orders before trying again."
-            ))
-        raise HTTPException(status_code=error.status_code if error.status_code < 500 else 502, detail=str(error.detail))
-
-    payload = (result or {}).get("orderCreate") or {}
-    errors = [e.get("message") for e in (payload.get("userErrors") or []) if e.get("message")]
-    created = payload.get("order") or {}
-    if errors or not created.get("id"):
-        message = "; ".join(errors) or "Shopify did not create the order"
-        db.add(ChatRequestEvent(
-            request_id=r.id, user_id=user.id, action="order_create_failed",
-            detail={"error": message[:500], "client_action_id": client_action_id},
-        ))
-        await db.commit()
-        raise HTTPException(status_code=422, detail=f"Shopify refused the order: {message}")
+            raise HTTPException(status_code=409, detail={
+                "code": "maybe_created",
+                "message": "Shopify did not confirm the order, so it may still have been created. "
+                           "Check the customer's recent orders; if it is not there, create it again.",
+            })
+        raise HTTPException(status_code=422, detail=f"Shopify refused the order: {refusal}")
 
     now = datetime.now(timezone.utc)
     name = created.get("name") or ""
@@ -524,14 +574,14 @@ async def chat_create_order(
     r.updated_at = now
     if not r.assigned_to_id:
         r.assigned_to_id = user.id
-    subtotal = sum(Decimal(str(variants[vid].get("price") or "0")) * qty for vid, qty in lines.items())
     db.add(ChatRequestEvent(
         request_id=r.id, user_id=user.id, action="ordered",
         detail={
             "order_ref": r.order_ref,
             "order_id": created.get("id"),
             "created": True,
-            "total": str(subtotal + shipping_price),
+            "total": str(subtotal - discount_amount + shipping_price),
+            "discount": str(discount_amount) if discount_kind else None,
             "currency": currency,
             "client_action_id": client_action_id,
         },

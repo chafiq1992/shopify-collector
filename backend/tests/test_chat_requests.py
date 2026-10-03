@@ -234,13 +234,41 @@ class ChatRequestTests(unittest.IsolatedAsyncioTestCase):
             await self._act(rid, "call")
         self.assertEqual(ctx.exception.status_code, 409)
 
+        # An ordered request is listed under Ordered only, never also under Closed.
+        ordered = await self._list(level="ordered")
+        self.assertEqual([r["id"] for r in ordered["requests"]], [rid])
         closed = await self._list(level="closed")
-        self.assertEqual([r["id"] for r in closed["requests"]], [rid])
-        self.assertEqual((await self._list())["level_counts"]["total"], 0)
+        self.assertEqual(closed["requests"], [])
+        counts = (await self._list())["level_counts"]
+        self.assertEqual((counts["total"], counts["closed"], counts["ordered"]), (0, 0, 1))
 
         res = await self._act(rid, "reopen")
         self.assertEqual(res["request"]["status"], "calling")
         self.assertIsNone(res["request"]["closed_at"])
+
+    async def test_cancelled_has_its_own_view(self):
+        lost = (await self._intake(phone="0611111111"))["id"]
+        await self._act(lost, "not_interested")
+        cancelled = (await self._intake(phone="0622222222"))["id"]
+        await self._act(cancelled, "cancelled")
+        # An ordered request can be cancelled later, and keeps its order number.
+        was_ordered = (await self._intake(phone="0633333333"))["id"]
+        await self._act(was_ordered, "ordered", order_ref="#1500")
+        res = await self._act(was_ordered, "cancelled")
+        self.assertEqual((res["request"]["status"], res["request"]["order_ref"]), ("cancelled", "#1500"))
+
+        view = await self._list(level="cancelled")
+        self.assertEqual(sorted(r["id"] for r in view["requests"]), sorted([cancelled, was_ordered]))
+        self.assertEqual([r["id"] for r in (await self._list(level="closed"))["requests"]], [lost])
+        self.assertEqual((await self._list(level="ordered"))["requests"], [])
+        counts = view["level_counts"]
+        self.assertEqual((counts["closed"], counts["cancelled"], counts["ordered"]), (1, 2, 0))
+
+        # Other closing actions still need a reopen first.
+        with self.assertRaises(HTTPException) as ctx:
+            await self._act(lost, "cancelled")
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual((await self._act(cancelled, "reopen"))["request"]["status"], "new")
 
     async def test_scopes_and_claiming(self):
         a = (await self._intake(phone="0611111111"))["id"]
@@ -476,3 +504,28 @@ for _test in (test_stores_start_with_the_usual_reasons_and_agents_can_add_more,
               test_labels_on_requests_filter_the_queue_and_explain_lost_customers):
     setattr(ChatRequestTests, _test.__name__, _test)
 del _test, test_stores_start_with_the_usual_reasons_and_agents_can_add_more, test_labels_on_requests_filter_the_queue_and_explain_lost_customers
+
+
+async def test_label_pills_count_requests_in_the_current_view(self):
+    async with self.sessions() as db:
+        labels = {l["key"]: l["id"] for l in (await routes.list_chat_labels(store="irrakids", db=db, user=self.agent))["labels"]}
+    a = (await self._intake(phone="0611111111"))["id"]
+    b = (await self._intake(phone="0622222222"))["id"]
+    c = (await self._intake(phone="0633333333"))["id"]
+    await self._act(a, "labels", labels=[labels["size"], labels["price"]])
+    await self._act(b, "labels", labels=[labels["size"]])
+    await self._act(c, "labels", labels=[labels["size"]])
+    await self._act(c, "not_interested")
+
+    open_view = await self._list()
+    self.assertEqual(open_view["label_counts"], {str(labels["size"]): 2, str(labels["price"]): 1})
+    # Filtering by one label keeps the other pills' counts for the same view.
+    by_price = await self._list(label=labels["price"])
+    self.assertEqual([r["id"] for r in by_price["requests"]], [a])
+    self.assertEqual(by_price["label_counts"][str(labels["size"])], 2)
+    closed = await self._list(level="closed")
+    self.assertEqual(closed["label_counts"], {str(labels["size"]): 1})
+
+
+setattr(ChatRequestTests, "test_label_pills_count_requests_in_the_current_view", test_label_pills_count_requests_in_the_current_view)
+del test_label_pills_count_requests_in_the_current_view

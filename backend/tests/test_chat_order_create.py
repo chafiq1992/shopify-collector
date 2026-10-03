@@ -212,8 +212,10 @@ class ChatOrderCreateTests(unittest.IsolatedAsyncioTestCase):
         timeout = FakeShopify(create_error=HTTPException(status_code=502, detail="Shopify request failed: ReadTimeout"))
         with self.assertRaises(HTTPException) as ctx:
             await self.create(timeout)
-        self.assertEqual(ctx.exception.status_code, 502)
-        self.assertIn("may still have been created", ctx.exception.detail)
+        # Never a 502: Cloudflare would replace the message with its own error page.
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.detail["code"], "maybe_created")
+        self.assertIn("may still have been created", ctx.exception.detail["message"])
         self.assertEqual((await self.request_row()).status, "calling")
 
         retry = FakeShopify()
@@ -228,11 +230,92 @@ class ChatOrderCreateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.request_row()).status, "ordered")
 
     async def test_graphql_validation_error_is_not_treated_as_unclear(self):
-        bad = FakeShopify(create_error=HTTPException(status_code=502, detail="Shopify GraphQL errors: [{'message': 'bad'}]"))
-        with self.assertRaises(HTTPException):
+        bad = FakeShopify(create_error=HTTPException(status_code=502, detail="Shopify GraphQL errors: [{'message': 'bad field'}]"))
+        with self.assertRaises(HTTPException) as ctx:
             await self.create(bad)
+        # Shopify's own words reach the agent, with a status Cloudflare passes through.
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertIn("bad field", ctx.exception.detail)
+        failed = [e for e in await self.events() if e.action == "order_create_failed"]
+        self.assertIn("bad field", failed[0].detail["error"])
         await self.create(FakeShopify())
         self.assertEqual((await self.request_row()).status, "ordered")
+
+    async def test_shopify_4xx_is_a_clear_refusal(self):
+        denied = FakeShopify(create_error=HTTPException(
+            status_code=502, detail="Shopify request failed: Client error '403 Forbidden' for url 'https://x'"))
+        with self.assertRaises(HTTPException) as ctx:
+            await self.create(denied)
+        self.assertEqual(ctx.exception.status_code, 422)
+        await self.create(FakeShopify())
+        self.assertEqual((await self.request_row()).status, "ordered")
+
+    async def test_failing_variant_lookup_is_readable(self):
+        class Broken(FakeShopify):
+            async def __call__(self, query, variables, **kw):
+                if "ChatOrderVariants" in query:
+                    raise HTTPException(status_code=502, detail="Shopify GraphQL errors: [{'message': 'Throttled?'}]")
+                return await super().__call__(query, variables, **kw)
+
+        with self.assertRaises(HTTPException) as ctx:
+            await self.create(Broken())
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertIn("Throttled?", ctx.exception.detail)
+
+    async def test_customer_refusal_retries_once_without_the_customer(self):
+        class NoCustomers(FakeShopify):
+            async def __call__(self, query, variables, **kw):
+                if "ChatOrderCreate" in query and "customer" in variables["order"]:
+                    self.calls.append({"query": query, "variables": variables, "retry_transient": kw.get("retry_transient")})
+                    raise HTTPException(status_code=502, detail="Shopify GraphQL errors: [{'message': 'Access denied for customer field. Required access: write_customers'}]")
+                return await super().__call__(query, variables, **kw)
+
+        fake = NoCustomers()
+        res = await self.create(fake)
+        self.assertEqual(res["order"]["name"], "#1001")
+        self.assertEqual(len(fake.creates), 2)
+        self.assertIn("customer", fake.creates[0]["variables"]["order"])
+        self.assertNotIn("customer", fake.creates[1]["variables"]["order"])
+        self.assertTrue(all(c["retry_transient"] is False for c in fake.creates))
+
+    async def test_linked_customer_refusal_is_not_retried(self):
+        refused = FakeShopify(create_result={"orderCreate": {"order": None, "userErrors": [{"message": "Customer is blocked"}]}})
+        with self.assertRaises(HTTPException):
+            await self.create(refused, customer_id="gid://shopify/Customer/77")
+        self.assertEqual(len(refused.creates), 1)
+
+    async def test_percentage_and_amount_discounts(self):
+        fake = FakeShopify()
+        await self.create(fake, discount_type="percentage", discount_value="10", discount_code="")
+        order = fake.creates[0]["variables"]["order"]
+        self.assertEqual(order["discountCode"], {"itemPercentageDiscountCode": {"code": "REMISE", "percentage": 10.0}})
+        ordered = [e for e in await self.events() if e.action == "ordered"][0]
+        self.assertEqual((ordered.detail["discount"], ordered.detail["total"]), ("30.00", "269.99"))
+
+        async with self.sessions() as session:
+            r = await session.get(ChatRequest, self.rid)
+            r.status, r.order_ref = "calling", None
+            await session.commit()
+        fake = FakeShopify()
+        await self.create(fake, discount_type="amount", discount_value="50", discount_code="FIDELITE")
+        self.assertEqual(
+            fake.creates[0]["variables"]["order"]["discountCode"],
+            {"itemFixedDiscountCode": {"code": "FIDELITE", "amountSet": {"shopMoney": {"amount": "50.00", "currencyCode": "MAD"}}}},
+        )
+
+    async def test_discount_limits(self):
+        fake = FakeShopify()
+        for kw in (dict(discount_type="percentage", discount_value="150"),
+                   dict(discount_type="amount", discount_value="500"),
+                   dict(discount_type="coupon", discount_value="5")):
+            with self.subTest(kw=kw):
+                with self.assertRaises(HTTPException) as ctx:
+                    await self.create(fake, **kw)
+                self.assertEqual(ctx.exception.status_code, 422)
+        self.assertEqual(fake.creates, [])
+        # A zero discount is simply no discount.
+        await self.create(fake, discount_type="amount", discount_value="0")
+        self.assertNotIn("discountCode", fake.creates[0]["variables"]["order"])
 
 
 class ChatOrderHelperTests(unittest.IsolatedAsyncioTestCase):

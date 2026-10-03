@@ -4,7 +4,6 @@ import {
   ArrowRightLeft,
   Ban,
   BarChart3,
-  CalendarCheck,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -62,8 +61,9 @@ const CHAT_LEVELS = [
   { key: "n3",     label: "N3",         tone: "rose",    count: "n3" },
   { key: "n4",     label: "N4",         tone: "red",     count: "n4" },
   { key: "enatt",  label: "En attente", tone: "fuchsia", count: "enatt" },
-  { key: "closed", label: "Closed",     tone: "emerald", count: "closed" },
+  { key: "closed", label: "Closed",     tone: "slate",   count: "closed" },
   { key: "ordered", label: "Ordered",   tone: "emerald", count: "ordered" },
+  { key: "cancelled", label: "Cancelled", tone: "red",   count: "cancelled" },
 ];
 
 const SCOPES = [
@@ -78,7 +78,10 @@ const OUTCOMES = {
   ordered:        { label: "Ordered",        tone: "emerald" },
   not_interested: { label: "Not interested", tone: "slate" },
   wrong_number:   { label: "Wrong number",   tone: "rose" },
+  cancelled:      { label: "Cancelled",      tone: "red" },
 };
+// "Closed" lists requests that ended without an order; ordered and cancelled ones have their own pill.
+const CLOSED_VIEW = new Set(["not_interested", "wrong_number"]);
 const CLOSED = new Set(Object.keys(OUTCOMES));
 
 const SCOPE_STORAGE_KEY = "chatConfirmationScope";
@@ -213,12 +216,14 @@ function agentName(user) {
   return user.name || String(user.email || "").split("@")[0] || "agent";
 }
 
-function matchesView(r, { scope, level, meId }) {
+function matchesView(r, { scope, level, meId, labelId }) {
+  if (labelId && !(r.labels || []).some((l) => l.id === labelId)) return false;
   if (level === "ordered") return r.status === "ordered";
   if (scope === "mine" && r.assigned_to?.id !== meId) return false;
   if (scope === "unassigned" && r.assigned_to) return false;
   const closed = CLOSED.has(r.status);
-  if (level === "closed") return closed;
+  if (level === "closed") return CLOSED_VIEW.has(r.status);
+  if (level === "cancelled") return r.status === "cancelled";
   if (closed) return false;
   if (level === "new") return r.status === "new";
   if (level === "enatt") return r.status === "enatt";
@@ -260,6 +265,8 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   const [createOrderFor, setCreateOrderFor] = useState(null);
   // Reason labels (size, price, later, other...) chosen in the ⋯ popup.
   const [labels, setLabels] = useState([]);
+  // Label pill filter (a label id), combined with the level pills.
+  const [labelFilter, setLabelFilter] = useState(null);
   const [canManageLabels, setCanManageLabels] = useState(false);
   const [subView, setSubView] = useState(() => { try { return localStorage.getItem(SUBVIEW_STORAGE_KEY) === "reasons" ? "reasons" : "queue"; } catch { return "queue"; } });
   // Get-more / move dialog: `{ mode, includeAssigned }`, null = closed.
@@ -281,6 +288,20 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   }, [store]);
   useEffect(() => { loadLabels(); }, [loadLabels]);
 
+  // Removing a label archives it: it disappears from the pills and the picker,
+  // and stays on past requests and in the Reasons analysis.
+  async function removeLabel(label) {
+    if (!window.confirm(`Remove the label “${label.name}”? Requests that already have it keep it.`)) return;
+    try {
+      await CHAT_API.updateLabel(label.id, { archived: true });
+      if (labelFilter === label.id) setLabelFilter(null);
+      await loadLabels();
+      pushToast(`Label “${label.name}” removed`, "success", 2400);
+    } catch (e) {
+      pushToast(e?.message || "Could not remove the label", "error", 5000);
+    }
+  }
+
   async function addLabel(name) {
     try {
       const js = await CHAT_API.createLabel(store, name);
@@ -299,19 +320,21 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   }, [query]);
 
   // A new filter, search or store starts again from the first page.
-  useEffect(() => { setPageIndex(0); }, [store, scope, level, debouncedQuery]);
+  useEffect(() => { setPageIndex(0); }, [store, scope, level, debouncedQuery, labelFilter]);
+  useEffect(() => { setLabelFilter(null); }, [store]);
 
   const load = useCallback(async () => {
     const reqId = ++requestIdRef.current;
     setLoading(true); setError(null);
     try {
-      const js = await CHAT_API.list(store, { scope, level, q: debouncedQuery, offset: pageIndex * PER_PAGE });
+      const js = await CHAT_API.list(store, { scope, level, q: debouncedQuery, offset: pageIndex * PER_PAGE, label: labelFilter });
       if (reqId !== requestIdRef.current) return;
       setData({
         requests: js.requests || [],
         total: Number(js.total || 0),
         level_counts: js.level_counts || null,
         scope_counts: js.scope_counts || null,
+        label_counts: js.label_counts || {},
         shop_domain: js.shop_domain || "",
       });
       setLoaded(true);
@@ -322,7 +345,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     } finally {
       if (reqId === requestIdRef.current) setLoading(false);
     }
-  }, [store, scope, level, debouncedQuery, pageIndex]);
+  }, [store, scope, level, debouncedQuery, pageIndex, labelFilter]);
 
   const loadTeam = useCallback(async () => {
     const reqId = ++teamRequestIdRef.current;
@@ -389,7 +412,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   }
 
   function applyUpdated(updated) {
-    const stillVisible = matchesView(updated, { scope, level, meId: me.id });
+    const stillVisible = matchesView(updated, { scope, level, meId: me.id, labelId: labelFilter });
     setData((prev) => {
       const requests = stillVisible
         ? prev.requests.map((r) => (r.id === updated.id ? updated : r))
@@ -548,7 +571,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   const hasPrevPage = pageIndex > 0;
   const hasNextPage = pageIndex + 1 < pageCount;
 
-  const listResetKey = `${store}|${scope}|${level}|${debouncedQuery}|${pageIndex}`;
+  const listResetKey = `${store}|${scope}|${level}|${debouncedQuery}|${pageIndex}|${labelFilter || ""}`;
   const displayRows = useDepartingList(data.requests, (r) => r.id, { resetKey: listResetKey });
   const flipSignature = displayRows.map((r) => r.item.id).join(",");
   const tableBodyRef = useRef(null);
@@ -590,7 +613,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     const chips = [];
     if (CLOSED.has(r.status)) {
       const o = OUTCOMES[r.status];
-      chips.push(chip(`${o.label}${r.status === "ordered" && r.order_ref ? ` · ${r.order_ref}` : ""}`, o.tone, "outcome"));
+      chips.push(chip(`${o.label}${(r.status === "ordered" || r.status === "cancelled") && r.order_ref ? ` · ${r.order_ref}` : ""}`, o.tone, "outcome"));
     } else if (r.status === "new") {
       chips.push(chip("New", "indigo", "new"));
     }
@@ -1067,6 +1090,14 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
           </div>
 
           <ChatLevelTabs value={level} counts={levelCounts} onChange={setLevel} />
+          <LabelPills
+            labels={labels.filter((l) => !l.archived)}
+            counts={data.label_counts || {}}
+            value={labelFilter}
+            onChange={setLabelFilter}
+            canRemove={canManageLabels}
+            onRemove={removeLabel}
+          />
 
           <div className="hidden xl:block overflow-x-auto border-t border-slate-100">
             <table className="min-w-full text-sm">
@@ -1604,6 +1635,46 @@ function ChatPullModal({ initialMode = "new", initialIncludeAssigned = false, st
   );
 }
 
+// One pill per reason label, with how many requests in the current view carry it.
+function LabelPills({ labels, counts, value, onChange, canRemove, onRemove }) {
+  if (!labels.length) return null;
+  return (
+    <div className="cf-scroll-x -mt-1 flex items-center gap-1.5 overflow-x-auto px-4 pb-3 sm:px-5" role="tablist" aria-label="Filter by label">
+      <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Labels</span>
+      {labels.map((l) => {
+        const active = value === l.id;
+        const tone = TONES[l.color] || TONES.slate;
+        const n = Number(counts?.[String(l.id)] || 0);
+        return (
+          <span key={l.id} className={`inline-flex h-8 shrink-0 items-center rounded-full text-xs font-semibold transition ${active ? `${tone.solid} shadow-sm` : "bg-white text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"}`}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={active}
+              data-testid={`label-pill-${l.key}`}
+              onClick={() => onChange(active ? null : l.id)}
+              className="inline-flex h-full items-center gap-1.5 rounded-full pl-2.5 pr-1.5"
+            >
+              {!active && <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${tone.dot}`} />}
+              {l.name}
+              <span className={`min-w-[20px] rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${active ? "bg-white/25" : n > 0 ? "bg-slate-100 text-slate-700" : "bg-slate-50 text-slate-400"}`}>{n}</span>
+            </button>
+            {canRemove && (
+              <button
+                type="button"
+                onClick={() => onRemove(l)}
+                className={`mr-1 flex h-5 w-5 items-center justify-center rounded-full text-[13px] leading-none ${active ? "hover:bg-white/25" : "text-slate-400 hover:bg-rose-50 hover:text-rose-600"}`}
+                title={`Remove the label “${l.name}”`}
+                aria-label={`Remove the label ${l.name}`}
+              >×</button>
+            )}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function ChatLevelTabs({ value, counts, onChange }) {
   return (
     <div className="cf-scroll-x mt-3 flex gap-1.5 overflow-x-auto px-4 pb-3 sm:px-5" role="tablist" aria-label="Filter by call level">
@@ -1621,7 +1692,7 @@ function ChatLevelTabs({ value, counts, onChange }) {
             className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full pl-2.5 pr-1.5 text-xs font-semibold transition duration-200 active:scale-[0.96] ${
               active ? `${tone.solid} shadow-sm` : "bg-white text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50 hover:text-slate-900"
             }`}
-            title={lv.key === "closed" ? "Closed in the last 30 days" : lv.key === "ordered" ? "Ordered in the last 30 days, including orders the website AI placed" : undefined}
+            title={lv.key === "closed" ? "Not interested or wrong number, last 30 days" : lv.key === "ordered" ? "Ordered in the last 30 days, including orders the website AI placed" : lv.key === "cancelled" ? "Cancelled in the last 30 days" : undefined}
           >
             {!active && <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${tone.dot}`} />}
             {lv.label}
@@ -1833,9 +1904,17 @@ function RequestPopup({ request: r, labels, me, isAdmin, busy, onClose, onCreate
 
         <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 bg-slate-50/70 px-4 py-3 sm:px-5">
           {closed ? (
-            <button type="button" disabled={busy} onClick={() => onAction("reopen", "Request reopened")} className={`${BTN.secondary} h-10`}>
-              <RotateCcw className="h-4 w-4" aria-hidden />Reopen
-            </button>
+            <>
+              <button type="button" disabled={busy} onClick={() => onAction("reopen", "Request reopened")} className={`${BTN.secondary} h-10`}>
+                <RotateCcw className="h-4 w-4" aria-hidden />Reopen
+              </button>
+              {r.status === "ordered" && (
+                <button type="button" disabled={busy} onClick={() => submit("cancelled")} data-testid="popup-cancelled"
+                  className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-white px-3.5 text-sm font-semibold text-red-700 ring-1 ring-inset ring-red-200 hover:bg-red-50 active:scale-[0.97] transition disabled:opacity-50">
+                  <X className="h-4 w-4" aria-hidden />Order cancelled
+                </button>
+              )}
+            </>
           ) : (
             <>
               <button type="button" disabled={busy} onClick={() => submit("not_interested")}
@@ -1845,6 +1924,10 @@ function RequestPopup({ request: r, labels, me, isAdmin, busy, onClose, onCreate
               <button type="button" disabled={busy} onClick={() => submit("wrong_number")}
                 className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-white px-3.5 text-sm font-semibold text-rose-700 ring-1 ring-inset ring-rose-200 hover:bg-rose-50 active:scale-[0.97] transition disabled:opacity-50">
                 <PhoneOff className="h-4 w-4" aria-hidden />Wrong number
+              </button>
+              <button type="button" disabled={busy} onClick={() => submit("cancelled")} data-testid="popup-cancelled"
+                className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-white px-3.5 text-sm font-semibold text-red-700 ring-1 ring-inset ring-red-200 hover:bg-red-50 active:scale-[0.97] transition disabled:opacity-50">
+                <X className="h-4 w-4" aria-hidden />Cancelled
               </button>
             </>
           )}
@@ -2050,6 +2133,9 @@ const HISTORY_LABELS = {
   labels: (d) => ["Labels", (d.added || []).length ? `+ ${d.added.join(", ")}` : "", (d.removed || []).length ? `− ${d.removed.join(", ")}` : ""].filter(Boolean).join(" · "),
   not_interested: () => "Closed · not interested",
   wrong_number: () => "Closed · wrong number",
+  cancelled: (d) => `Cancelled${d.order_ref ? ` · order ${d.order_ref}` : ""}`,
+  order_create_failed: (d) => `Order not created · ${d.error || "Shopify refused it"}`,
+  order_create_unknown: (d) => `Order attempt not confirmed by Shopify (check recent orders) · ${d.error || ""}`,
   reopen: () => "Reopened",
   claim: () => "Took the request",
   claimed: () => "Took the request (Get more)",

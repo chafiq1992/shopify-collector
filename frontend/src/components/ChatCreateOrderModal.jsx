@@ -10,7 +10,6 @@ import {
   Plus,
   Search,
   ShoppingBag,
-  StickyNote,
   Tag,
   Trash2,
   TriangleAlert,
@@ -200,6 +199,10 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
   const [note, setNote] = useState("");
   const [shippingTitle, setShippingTitle] = useState("Livraison");
   const [shippingPrice, setShippingPrice] = useState("0");
+  // Discount on the products: a percentage or an amount in MAD.
+  const [discountType, setDiscountType] = useState("percentage");
+  const [discountValue, setDiscountValue] = useState("");
+  const [discountCode, setDiscountCode] = useState("");
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -349,7 +352,12 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
 
   const subtotal = lines.reduce((sum, l) => sum + Number(variantOf(l)?.price || 0) * Number(l.quantity || 0), 0);
   const shipping = Math.max(0, Number(String(shippingPrice).replace(",", ".")) || 0);
-  const total = subtotal + shipping;
+  const discountInput = Math.max(0, Number(String(discountValue).replace(",", ".")) || 0);
+  const discountTooBig = discountType === "percentage" ? discountInput > 100 : discountInput > subtotal;
+  const discount = discountTooBig ? 0 : discountType === "percentage"
+    ? Math.round(subtotal * discountInput) / 100
+    : discountInput;
+  const total = Math.max(0, subtotal - discount) + shipping;
 
   const tagSuggestions = useMemo(() => {
     const tomorrow = isoToDDMMYY(todayISO(new Date(Date.now() + 86_400_000)));
@@ -372,6 +380,7 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
   if (lines.some((l) => l.loading)) problems.push("products still loading");
   if (lines.some((l) => !l.loading && l.product && !variantOf(l))) problems.push("size / colour for every product");
   if (lines.some((l) => !l.loading && !l.product)) problems.push("remove or replace the product not found");
+  if (discountTooBig) problems.push(discountType === "percentage" ? "a discount of 100 % or less" : "a discount no larger than the products total");
   const show = triedSubmit;
 
   async function submit(confirmDuplicate = false) {
@@ -397,6 +406,9 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
         note: note || null,
         shipping_title: shipping > 0 ? shippingTitle : null,
         shipping_price: String(shipping),
+        discount_type: discountInput > 0 ? discountType : null,
+        discount_value: discountInput > 0 ? String(discountInput) : null,
+        discount_code: discountInput > 0 ? (discountCode.trim() || null) : null,
         confirm_possible_duplicate: confirmDuplicate,
         client_action_id: newActionId(),
       });
@@ -404,8 +416,13 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
       setCreated(js.order);
       onCreated?.(js);
     } catch (e) {
-      if (e.code === "maybe_created") setMaybeCreated(true);
-      setError(e.message || "Could not create the order");
+      // A gateway error (502/504…) means the server's answer never arrived:
+      // the order may exist, so treat it like Shopify not confirming.
+      const lostAnswer = [502, 503, 504, 520, 521, 522, 523, 524].includes(e.status);
+      if (e.code === "maybe_created" || lostAnswer) setMaybeCreated(true);
+      setError(lostAnswer
+        ? "The server did not answer, so the order may or may not have been created. Check the customer's recent orders first."
+        : e.message || "Could not create the order");
     } finally {
       setBusy(false);
     }
@@ -676,7 +693,7 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
               <p className="mt-1 text-[11px] text-slate-400">Already ordered on the website? Link that order and no new one is created.</p>
             </Section>
 
-            <Section icon={Truck} title="Shipping and total">
+            <Section icon={Truck} title="Shipping, discount and total">
               <div className="grid grid-cols-[minmax(0,1fr)_110px] gap-2">
                 <Field label="Shipping">
                   <input value={shippingTitle} onChange={(e) => setShippingTitle(e.target.value)} className={INPUT} />
@@ -685,8 +702,56 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
                   <input value={shippingPrice} onChange={(e) => setShippingPrice(e.target.value)} inputMode="decimal" className={`${INPUT} tabular-nums`} />
                 </Field>
               </div>
+              <div className="mt-3">
+                <span className="mb-1 flex items-center gap-1 text-xs font-semibold text-slate-700">
+                  Discount
+                  <span className="ml-auto font-normal text-slate-400">optional</span>
+                </span>
+                <div className="flex gap-2">
+                  <div className="inline-flex h-10 shrink-0 rounded-xl bg-slate-100 p-1" role="radiogroup" aria-label="Discount type">
+                    {[["percentage", "%"], ["amount", CURRENCY]].map(([key, label]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        role="radio"
+                        aria-checked={discountType === key}
+                        data-testid={`order-discount-${key}`}
+                        onClick={() => setDiscountType(key)}
+                        className={`rounded-lg px-3 text-xs font-bold transition ${discountType === key ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-800"}`}
+                      >{label}</button>
+                    ))}
+                  </div>
+                  <input
+                    value={discountValue}
+                    onChange={(e) => setDiscountValue(e.target.value)}
+                    inputMode="decimal"
+                    data-testid="order-discount-value"
+                    placeholder={discountType === "percentage" ? "e.g. 10" : "e.g. 50"}
+                    className={`${INPUT} min-w-0 tabular-nums ${discountTooBig ? "ring-2 ring-rose-300" : ""}`}
+                  />
+                </div>
+                {discountInput > 0 && (
+                  <input
+                    value={discountCode}
+                    onChange={(e) => setDiscountCode(e.target.value)}
+                    placeholder="Discount name shown in Shopify (default REMISE)"
+                    className={`${INPUT} mt-2 h-9 text-xs`}
+                  />
+                )}
+                {discountTooBig && (
+                  <p className="mt-1 text-xs text-rose-600">
+                    {discountType === "percentage" ? "A percentage can't be more than 100." : "The discount is larger than the products total."}
+                  </p>
+                )}
+              </div>
               <dl className="mt-3 space-y-1.5 text-sm">
                 <div className="flex justify-between text-slate-600"><dt>Products</dt><dd className="tabular-nums">{money(subtotal)} {CURRENCY}</dd></div>
+                {discount > 0 && (
+                  <div className="flex justify-between font-medium text-emerald-700" data-testid="order-discount-line">
+                    <dt>Discount{discountType === "percentage" ? ` (${discountInput} %)` : ""}</dt>
+                    <dd className="tabular-nums">−{money(discount)} {CURRENCY}</dd>
+                  </div>
+                )}
                 <div className="flex justify-between text-slate-600"><dt>Shipping</dt><dd className="tabular-nums">{shipping ? `${money(shipping)} ${CURRENCY}` : "Free"}</dd></div>
                 <div className="flex justify-between border-t border-slate-100 pt-1.5 text-base font-bold text-slate-900"><dt>Total to collect</dt><dd className="tabular-nums" data-testid="order-total">{money(total)} {CURRENCY}</dd></div>
               </dl>
@@ -699,7 +764,7 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
         {maybeCreated && (
           <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-900 ring-1 ring-inset ring-amber-200">
             <TriangleAlert className="h-4 w-4 shrink-0 text-amber-600" aria-hidden />
-            <span className="flex-1">The last try may already have created this order in Shopify. Check the recent orders first.</span>
+            <span className="flex-1">{error || "The last try may already have created this order in Shopify. Check the customer's recent orders first."}</span>
             <button type="button" disabled={busy} onClick={() => submit(true)} className="rounded-lg bg-amber-600 px-2.5 py-1 font-semibold text-white hover:bg-amber-700 disabled:opacity-50">Create anyway</button>
           </div>
         )}

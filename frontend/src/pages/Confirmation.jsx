@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ArrowRightLeft,
   Ban,
-  Boxes,
   CalendarCheck,
   Check,
   ChevronLeft,
@@ -12,8 +11,6 @@ import {
   Ellipsis,
   Hourglass,
   Inbox,
-  LoaderCircle,
-  LogOut,
   MessageCircleOff,
   Minus,
   Package,
@@ -30,7 +27,7 @@ import {
   X,
   MapPin,
 } from "lucide-react";
-import { authFetch, authHeaders, clearAuth } from "../lib/auth";
+import { authFetch, authHeaders } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import OrderLabel from "../components/OrderLabel";
 import { useToasts, ToastStack } from "../components/Toast";

@@ -47,10 +47,13 @@ router = APIRouter()
 _STORE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 OPEN_STATUSES = ("new", "calling", "enatt")
-CLOSED_STATUSES = ("ordered", "not_interested", "wrong_number")
+CLOSED_STATUSES = ("ordered", "not_interested", "wrong_number", "cancelled")
 MAX_ATTEMPTS = 4
-_LEVELS = ("new", "n1", "n2", "n3", "n4", "enatt", "closed", "ordered", "lost", "any")
-LOST_STATUSES = ("not_interested", "wrong_number")
+_LEVELS = ("new", "n1", "n2", "n3", "n4", "enatt", "closed", "ordered", "cancelled", "lost", "any")
+LOST_STATUSES = ("not_interested", "wrong_number", "cancelled")
+# The "Closed" view: requests that ended without an order. Ordered and cancelled
+# requests each have their own view, so no request shows up in two of them.
+CLOSED_VIEW_STATUSES = ("not_interested", "wrong_number")
 # Reason labels every store starts with; agents add more from the label picker.
 DEFAULT_LABELS = (("size", "Size", "amber"), ("only_ask", "Only asking", "sky"), ("price", "Price", "rose"),
                   ("later", "Later", "fuchsia"), ("no_answer", "No answer", "slate"), ("other", "Other", "violet"))
@@ -472,9 +475,11 @@ def _level_clause(level: str):
     if level == "enatt":
         return ChatRequest.status == "enatt"
     if level == "closed":
-        return ChatRequest.status.in_(CLOSED_STATUSES)
+        return ChatRequest.status.in_(CLOSED_VIEW_STATUSES)
     if level == "ordered":
         return ChatRequest.status == "ordered"
+    if level == "cancelled":
+        return ChatRequest.status == "cancelled"
     if level == "lost":
         return ChatRequest.status.in_(LOST_STATUSES)
     if level == "any":
@@ -530,7 +535,14 @@ async def _level_counts(db: AsyncSession, base_filters: List[Any], ordered_filte
     counts["closed"] = int(await db.scalar(
         select(func.count(ChatRequest.id)).where(
             *base_filters,
-            ChatRequest.status.in_(CLOSED_STATUSES),
+            ChatRequest.status.in_(CLOSED_VIEW_STATUSES),
+            ChatRequest.closed_at >= closed_since,
+        )
+    ) or 0)
+    counts["cancelled"] = int(await db.scalar(
+        select(func.count(ChatRequest.id)).where(
+            *base_filters,
+            ChatRequest.status == "cancelled",
             ChatRequest.closed_at >= closed_since,
         )
     ) or 0)
@@ -582,8 +594,10 @@ async def list_chat_requests(
     search = _search_clause(q or "")
     if search is not None:
         base_filters.append(search)
+    label_filter = None
     if label:
-        base_filters.append(ChatRequest.id.in_(select(ChatRequestLabel.request_id).where(ChatRequestLabel.label_id == int(label))))
+        label_filter = ChatRequest.id.in_(select(ChatRequestLabel.request_id).where(ChatRequestLabel.label_id == int(label)))
+        base_filters.append(label_filter)
     # Ordered chats are shared by the whole team (the AI placed most of them), whatever the scope.
     store_filters = list(base_filters)
     scope_filter = _scope_clause(scope, user)
@@ -593,14 +607,22 @@ async def list_chat_requests(
     # Ordered, lost and labelled views are team analysis: every agent sees the whole store.
     filters = [*(store_filters if level in ("ordered", "lost", "any") else base_filters), _level_clause(level)]
     total = int(await db.scalar(select(func.count(ChatRequest.id)).where(*filters)) or 0)
-    order_col = ChatRequest.closed_at.desc() if level in ("closed", "ordered", "lost") else ChatRequest.created_at.desc()
+    order_col = ChatRequest.closed_at.desc() if level in ("closed", "ordered", "cancelled", "lost") else ChatRequest.created_at.desc()
     rows = await db.execute(
         select(ChatRequest).where(*filters).order_by(order_col, ChatRequest.id.desc()).offset(offset).limit(limit)
     )
     items = rows.scalars().all()
     users = await _users_by_id(db, [r.assigned_to_id for r in items] + [r.closed_by_id for r in items])
     labels = await _labels_for(db, [r.id for r in items])
+    # Per-label counts for the label pills: same view, any label.
+    unlabelled = [f for f in filters if f is not label_filter]
+    label_rows = await db.execute(
+        select(ChatRequestLabel.label_id, func.count(ChatRequestLabel.request_id))
+        .where(ChatRequestLabel.request_id.in_(select(ChatRequest.id).where(*unlabelled)))
+        .group_by(ChatRequestLabel.label_id)
+    )
     return {
+        "label_counts": {str(label_id): int(n or 0) for label_id, n in label_rows.all()},
         "ok": True,
         "requests": [serialize_request(r, users, labels.get(r.id)) for r in items],
         "total": total,
@@ -833,7 +855,7 @@ class ChatActionBody(BaseModel):
 
 
 _ACTIONS = {
-    "call", "enatt", "ordered", "not_interested", "wrong_number",
+    "call", "enatt", "ordered", "not_interested", "wrong_number", "cancelled",
     "reopen", "claim", "release", "assign", "note", "undo_call", "labels",
 }
 
@@ -881,7 +903,9 @@ async def chat_request_action(
         detail["client_action_id"] = client_action_id
 
     is_closed = r.status in CLOSED_STATUSES
-    if is_closed and action in ("call", "enatt", "undo_call", "ordered", "not_interested", "wrong_number"):
+    # An ordered request can still be cancelled (the customer changed their mind).
+    cancelling_order = action == "cancelled" and r.status == "ordered"
+    if is_closed and not cancelling_order and action in ("call", "enatt", "undo_call", *CLOSED_STATUSES):
         raise HTTPException(status_code=409, detail="this request is already closed — reopen it first")
 
     if action == "call":
@@ -897,6 +921,10 @@ async def chat_request_action(
         r.status = "enatt"
         detail["enatt"] = r.enatt
     elif action in CLOSED_STATUSES:
+        if cancelling_order:
+            # The order number stays, so the Cancelled view shows which order it was.
+            detail["previous_status"] = r.status
+            detail["order_ref"] = r.order_ref
         r.status = action
         r.closed_at = now
         r.closed_by_id = user.id
@@ -958,7 +986,7 @@ async def chat_request_action(
         detail["note"] = text
 
     # Whoever works an unassigned request owns it from then on.
-    if action in ("call", "enatt", "ordered", "not_interested", "wrong_number") and not r.assigned_to_id:
+    if action in ("call", "enatt", *CLOSED_STATUSES) and not r.assigned_to_id:
         r.assigned_to_id = user.id
         detail["auto_assigned"] = True
 
