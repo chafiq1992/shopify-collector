@@ -242,10 +242,9 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   const [orderedFor, setOrderedFor] = useState(null);
   const [orderRef, setOrderRef] = useState("");
   const [pullBusy, setPullBusy] = useState(false);
-  // Reason labels (size, price, later...) and the request whose label picker is open.
+  // Reason labels (size, price, later, other...) chosen in the ⋯ popup.
   const [labels, setLabels] = useState([]);
   const [canManageLabels, setCanManageLabels] = useState(false);
-  const [labelFor, setLabelFor] = useState(null);
   const [subView, setSubView] = useState(() => { try { return localStorage.getItem(SUBVIEW_STORAGE_KEY) === "reasons" ? "reasons" : "queue"; } catch { return "queue"; } });
   const requestIdRef = useRef(0);
   const teamRequestIdRef = useRef(0);
@@ -338,12 +337,6 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
 
   const refreshAll = useCallback(() => { load(); loadTeam(); onWaitingChanged?.(); }, [load, loadTeam, onWaitingChanged]);
 
-  useEffect(() => {
-    if (!menuFor) return undefined;
-    const close = () => setMenuFor(null);
-    window.addEventListener("click", close);
-    return () => window.removeEventListener("click", close);
-  }, [menuFor]);
 
   useEffect(() => {
     function onKey(e) {
@@ -427,7 +420,6 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   }
 
   function openOrdered(r) {
-    setLabelFor(null);
     setOrderRef("");
     setOrderedFor(r.id);
   }
@@ -440,24 +432,20 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     if (done) setOrderedFor(null);
   }
 
-  function closeAs(r, outcome) {
-    setMenuFor(null);
-    // Ask why first: the reason labels feed the Reasons analysis.
-    setOrderedFor(null);
-    setLabelFor({ id: r.id, closeAs: outcome });
-  }
 
-  async function saveLabels(r, ids, outcome) {
-    const same = ids.length === (r.labels || []).length && ids.every((id) => (r.labels || []).some((l) => l.id === id));
-    if (!same) {
-      const done = await runAction(r, { action: "labels", labels: ids }, { success: outcome ? null : "Labels saved", silent: Boolean(outcome) });
-      if (!done) return;
+  // The ⋯ popup: reasons, an optional note, and possibly closing the request, in that order.
+  async function submitPopup(r, { ids, note, outcome }) {
+    const current = (r.labels || []).map((l) => l.id);
+    const changed = ids.length !== current.length || ids.some((id) => !current.includes(id));
+    if (changed && !(await runAction(r, { action: "labels", labels: ids }, { silent: true }))) return false;
+    if (note) {
+      const names = labels.filter((l) => ids.includes(l.id)).map((l) => l.name);
+      if (!(await runAction(r, { action: "note", note: names.length ? `${names.join(", ")} — ${note}` : note }, { silent: true }))) return false;
     }
-    if (outcome) {
-      const closed = await runAction(r, { action: outcome }, { success: `Closed as ${OUTCOMES[outcome].label.toLowerCase()}` });
-      if (!closed) return;
-    }
-    setLabelFor(null);
+    if (outcome && !(await runAction(r, { action: outcome }, { silent: true }))) return false;
+    pushToast(outcome ? `Closed as ${OUTCOMES[outcome].label.toLowerCase()}` : changed || note ? "Saved" : "Nothing changed", "success", 2600);
+    setMenuFor(null);
+    return true;
   }
 
   async function handleCopyIntl(r) {
@@ -629,23 +617,22 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     const busy = busyIds.has(r.id);
     const grow = stretch ? "flex-1" : "";
     const menuOpen = menuFor === r.id;
-    const labelButton = (
+    const moreButton = (
       <button
         type="button"
-        disabled={busy}
-        onClick={(ev) => { ev.stopPropagation(); setOrderedFor(null); setLabelFor((p) => (p?.id === r.id && !p.closeAs ? null : { id: r.id })); }}
-        className={`${ACTION_BTN} ${ACTION_THEMES.more} ${stretch ? "" : "w-8 !px-0"}`}
-        title="Label this request with the customer's reason (size, price, later…)"
-        aria-label="Labels"
+        onClick={(ev) => { ev.stopPropagation(); setOrderedFor(null); setMenuFor(r.id); }}
+        className={`${ACTION_BTN} ${ACTION_THEMES.more} w-8 !px-0`}
+        title="Reason, note and more actions"
+        aria-haspopup="dialog"
+        aria-expanded={menuOpen}
+        aria-label="More actions"
       >
-        <Tag className="h-3.5 w-3.5" aria-hidden />
-        {stretch && <span>Label</span>}
+        <Ellipsis className="h-4 w-4" aria-hidden />
       </button>
     );
     if (CLOSED.has(r.status)) {
       return (
         <div className={`flex items-center gap-1.5 ${stretch ? "w-full" : "justify-end"}`}>
-          {labelButton}
           <button
             type="button"
             disabled={busy}
@@ -656,6 +643,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
             {busy ? <Spinner className="h-3.5 w-3.5" /> : <RotateCcw className="h-3.5 w-3.5" aria-hidden />}
             <span>Reopen</span>
           </button>
+          {moreButton}
         </div>
       );
     }
@@ -691,46 +679,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
           <ShoppingBag className="h-3.5 w-3.5" aria-hidden />
           <span className={stretch ? "" : "hidden 2xl:inline"}>Ordered</span>
         </button>
-        {labelButton}
-        <div className="relative">
-          <button
-            type="button"
-            onClick={(ev) => { ev.stopPropagation(); setMenuFor((p) => (p === r.id ? null : r.id)); }}
-            className={`${ACTION_BTN} ${ACTION_THEMES.more} w-8 !px-0`}
-            title="More actions"
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            aria-label="More actions"
-          >
-            <Ellipsis className="h-4 w-4" aria-hidden />
-          </button>
-          {menuOpen && (
-            <div
-              role="menu"
-              onClick={(ev) => ev.stopPropagation()}
-              className="cf-pop-in absolute right-0 top-full z-20 mt-1.5 w-56 overflow-hidden rounded-xl bg-white py-1 text-left shadow-lg shadow-slate-900/10 ring-1 ring-slate-900/10"
-            >
-              <MenuItem icon={PhoneCall} onClick={() => { setMenuFor(null); try { location.href = `tel:${localPhone(r.phone)}`; } catch {} }}>Call from this device</MenuItem>
-              <MenuItem icon={Copy} onClick={() => { handleCopyIntl(r); setMenuFor(null); }}>Copy phone (intl.)</MenuItem>
-              {Number(r.attempts) > 0 && (
-                <MenuItem icon={Undo2} onClick={() => { setMenuFor(null); runAction(r, { action: "undo_call" }, { success: "Last call attempt removed" }); }}>Undo last call (N{r.attempts})</MenuItem>
-              )}
-              <div className="my-1 border-t border-slate-100" />
-              {!r.assigned_to && (
-                <MenuItem icon={Hand} onClick={() => { setMenuFor(null); runAction(r, { action: "claim" }, { success: "Added to your requests" }); }}>Take this request</MenuItem>
-              )}
-              {r.assigned_to && r.assigned_to.id !== me.id && isAdmin && (
-                <MenuItem icon={UserPlus} onClick={() => { setMenuFor(null); runAction(r, { action: "claim" }, { success: "Moved to your requests" }); }}>Take over from {agentName(r.assigned_to)}</MenuItem>
-              )}
-              {r.assigned_to && (r.assigned_to.id === me.id || isAdmin) && (
-                <MenuItem icon={UserMinus} onClick={() => { setMenuFor(null); runAction(r, { action: "release" }, { success: "Released back to the team" }); }}>Release to the team</MenuItem>
-              )}
-              <div className="my-1 border-t border-slate-100" />
-              <MenuItem icon={Ban} tone="rose" onClick={() => closeAs(r, "not_interested")}>Not interested</MenuItem>
-              <MenuItem icon={PhoneOff} tone="rose" onClick={() => closeAs(r, "wrong_number")}>Wrong number</MenuItem>
-            </div>
-          )}
-        </div>
+        {moreButton}
       </div>
     );
   }
@@ -775,22 +724,6 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
           >{busy ? <Spinner className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" aria-hidden />} Mark ordered</button>
         </div>
       </div>
-    );
-  }
-
-  function renderLabelPicker(r) {
-    const mode = labelFor?.id === r.id ? labelFor : null;
-    return (
-      <LabelPicker
-        key={`${r.id}:${mode?.closeAs || ""}`}
-        request={r}
-        labels={labels}
-        outcome={mode?.closeAs ? OUTCOMES[mode.closeAs] : null}
-        busy={busyIds.has(r.id)}
-        onCreate={addLabel}
-        onCancel={() => setLabelFor(null)}
-        onSave={(ids) => saveLabels(r, ids, mode?.closeAs)}
-      />
     );
   }
 
@@ -843,7 +776,6 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
         <div className="mt-2">{renderStatus(r)}</div>
         <div className="mt-3">{renderActions(r, { stretch: true })}</div>
         {pickerOpen && <div className="mt-2.5">{renderOrderedPicker(r)}</div>}
-        {labelFor?.id === r.id && <div className="mt-2.5">{renderLabelPicker(r)}</div>}
         {isOpen && (
           <div className="cf-collapse-in mt-3" onClick={(ev) => ev.stopPropagation()}>{renderDetails(r)}</div>
         )}
@@ -888,11 +820,6 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
         {pickerOpen && !leaving && (
           <tr className="bg-indigo-50/40">
             <td colSpan={6} className="px-4 py-2.5">{renderOrderedPicker(r)}</td>
-          </tr>
-        )}
-        {labelFor?.id === r.id && !leaving && (
-          <tr className="bg-indigo-50/40">
-            <td colSpan={6} className="px-4 py-2.5">{renderLabelPicker(r)}</td>
           </tr>
         )}
         {isOpen && !leaving && (
@@ -966,6 +893,25 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   return (
     <div className="min-h-screen w-full bg-slate-50 text-slate-900">
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      {menuFor && data.requests.some((r) => r.id === menuFor) && (() => {
+        const r = data.requests.find((x) => x.id === menuFor);
+        return (
+          <RequestPopup
+            key={r.id}
+            request={r}
+            labels={labels}
+            me={me}
+            isAdmin={isAdmin}
+            busy={busyIds.has(r.id)}
+            onClose={() => setMenuFor(null)}
+            onCreateLabel={addLabel}
+            onSubmit={(choice) => submitPopup(r, choice)}
+            onCall={() => { setMenuFor(null); try { location.href = `tel:${localPhone(r.phone)}`; } catch {} }}
+            onCopyIntl={() => handleCopyIntl(r)}
+            onAction={(action, success) => { setMenuFor(null); runAction(r, { action }, { success }); }}
+          />
+        );
+      })()}
       <TopBar
         me={me}
         store={store}
@@ -1201,21 +1147,6 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
 
 // ---------- Pieces ----------
 
-function MenuItem({ icon: Icon, tone = "slate", disabled = false, onClick, children }) {
-  const color = tone === "rose" ? "text-rose-700 hover:bg-rose-50" : "text-slate-700 hover:bg-slate-50";
-  return (
-    <button
-      type="button"
-      role="menuitem"
-      disabled={disabled}
-      onClick={onClick}
-      className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm disabled:opacity-40 ${color}`}
-    >
-      <Icon className={`h-4 w-4 ${tone === "rose" ? "" : "text-slate-400"}`} aria-hidden /> {children}
-    </button>
-  );
-}
-
 const TAKE_AMOUNTS = [5, 10, 25, 50];
 
 function TakeRequestsCard({ waiting, busy, onTake }) {
@@ -1343,81 +1274,173 @@ function ChatAgentCard({ agent, isMe, rank, maxOrdered = 1 }) {
   );
 }
 
-function LabelPicker({ request: r, labels, outcome, busy, onCreate, onCancel, onSave }) {
+function RequestPopup({ request: r, labels, me, isAdmin, busy, onClose, onCreateLabel, onSubmit, onCall, onCopyIntl, onAction }) {
   const [chosen, setChosen] = useState(() => new Set((r.labels || []).map((l) => l.id)));
+  const [note, setNote] = useState("");
   const [newName, setNewName] = useState("");
   const [adding, setAdding] = useState(false);
+  const [problem, setProblem] = useState("");
+  const noteRef = useRef(null);
+  const closed = CLOSED.has(r.status);
   // Archived labels already on this request stay visible so they can be removed.
   const shown = [...labels, ...(r.labels || []).filter((l) => !labels.some((x) => x.id === l.id))];
-  function toggle(id) {
+  const other = shown.find((l) => l.key === "other");
+  const needsNote = Boolean(other && chosen.has(other.id));
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); onClose(); } };
+    window.addEventListener("keydown", onKey);
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = overflow; };
+  }, [onClose]);
+
+  function toggle(label) {
+    setProblem("");
     setChosen((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(label.id)) next.delete(label.id); else next.add(label.id);
       return next;
     });
+    if (label.key === "other" && !chosen.has(label.id)) setTimeout(() => noteRef.current?.focus(), 0);
   }
   async function create() {
     const name = newName.trim();
     if (!name || adding) return;
     setAdding(true);
-    const label = await onCreate(name);
+    const label = await onCreateLabel(name);
     setAdding(false);
     if (label) {
       setNewName("");
       setChosen((prev) => new Set(prev).add(label.id));
     }
   }
+  function submit(outcome) {
+    const text = note.trim();
+    if (needsNote && !text) {
+      setProblem("Write what the customer said for “Other”.");
+      noteRef.current?.focus();
+      return;
+    }
+    onSubmit({ ids: [...chosen], note: text, outcome });
+  }
+
+  const quick = "inline-flex h-9 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-slate-700 ring-1 ring-inset ring-slate-200 hover:bg-slate-50 active:scale-[0.97] transition";
   return (
-    <div className="cf-collapse-in rounded-xl bg-white px-3 py-3 ring-1 ring-inset ring-indigo-200 shadow-sm" onClick={(ev) => ev.stopPropagation()}>
-      <div className="flex items-center gap-2">
-        <Tag className="h-4 w-4 text-indigo-600" aria-hidden />
-        <span className="text-xs font-semibold text-slate-900">
-          {outcome ? `Why ${outcome.label.toLowerCase()}? Pick the reasons` : "What did the customer say? Pick the reasons"}
-        </span>
-      </div>
-      <div className="mt-2.5 flex flex-wrap gap-1.5" role="group" aria-label="Reason labels">
-        {shown.map((l) => {
-          const on = chosen.has(l.id);
-          const tone = TONES[l.color] || TONES.slate;
-          return (
-            <button
-              key={l.id}
-              type="button"
-              aria-pressed={on}
-              onClick={() => toggle(l.id)}
-              className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-xs font-semibold ring-1 ring-inset transition active:scale-95 ${on ? `${tone.solid} ring-transparent shadow-sm` : `${tone.soft} hover:brightness-95`}`}
-            >
-              {on ? <Check className="h-3.5 w-3.5" aria-hidden /> : <span className={`h-2 w-2 rounded-full ${tone.dot}`} aria-hidden />}
-              {l.name}
-            </button>
-          );
-        })}
-        <span className="inline-flex h-8 items-center gap-1 rounded-full bg-slate-50 pl-3 pr-1 border border-dashed border-slate-300">
-          <input
-            value={newName}
-            maxLength={60}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); create(); } if (e.key === "Escape") { e.preventDefault(); onCancel(); } }}
-            placeholder="New label…"
-            aria-label="New label name"
-            className="w-28 bg-transparent text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none"
-          />
-          <button type="button" disabled={!newName.trim() || adding} onClick={create} className="flex h-6 w-6 items-center justify-center rounded-full bg-white text-indigo-600 shadow-sm ring-1 ring-slate-200 disabled:opacity-40" aria-label="Add label">
-            {adding ? <Spinner className="h-3 w-3" /> : <Plus className="h-3.5 w-3.5" aria-hidden />}
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/40 p-0 backdrop-blur-[2px] sm:items-center sm:p-4" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`request-popup-${r.id}`}
+        onClick={(ev) => ev.stopPropagation()}
+        className="cf-pop-in flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl ring-1 ring-slate-900/10 sm:max-w-lg sm:rounded-2xl"
+      >
+        <div className="flex items-start gap-3 border-b border-slate-100 px-4 py-3.5 sm:px-5">
+          <div className="min-w-0 flex-1">
+            <div id={`request-popup-${r.id}`} className="truncate text-base font-semibold text-slate-900">
+              #{r.id} · {r.customer_name || prettyPhone(r.phone)}
+            </div>
+            <div className="truncate text-xs text-slate-500">{prettyPhone(r.phone)}{r.product_title ? ` · ${r.product_title}` : ""}</div>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700" aria-label="Close">
+            <X className="h-5 w-5" aria-hidden />
           </button>
-        </span>
-      </div>
-      <div className="mt-3 flex items-center justify-end gap-2">
-        <button type="button" onClick={onCancel} className={`${BTN.ghost} h-8 text-xs`}>Cancel</button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => onSave([...chosen])}
-          className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold text-white shadow-sm active:scale-[0.97] transition disabled:opacity-50 ${outcome ? "bg-rose-600 hover:bg-rose-700" : "bg-indigo-600 hover:bg-indigo-700"}`}
-        >
-          {busy ? <Spinner className="h-3.5 w-3.5" /> : outcome ? <Ban className="h-3.5 w-3.5" aria-hidden /> : <Check className="h-3.5 w-3.5" aria-hidden />}
-          {outcome ? `Close as ${outcome.label.toLowerCase()}` : "Save labels"}
-        </button>
+        </div>
+
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-5">
+          <div className="flex flex-wrap gap-1.5">
+            <button type="button" onClick={onCall} className={quick}><PhoneCall className="h-3.5 w-3.5" aria-hidden />Call from this device</button>
+            <button type="button" onClick={onCopyIntl} className={quick}><Copy className="h-3.5 w-3.5" aria-hidden />Copy phone (intl.)</button>
+            {!closed && Number(r.attempts) > 0 && (
+              <button type="button" onClick={() => onAction("undo_call", "Last call attempt removed")} className={quick}><Undo2 className="h-3.5 w-3.5" aria-hidden />Undo N{r.attempts}</button>
+            )}
+            {!r.assigned_to && (
+              <button type="button" onClick={() => onAction("claim", "Added to your requests")} className={quick}><Hand className="h-3.5 w-3.5" aria-hidden />Take this request</button>
+            )}
+            {r.assigned_to && r.assigned_to.id !== me.id && isAdmin && (
+              <button type="button" onClick={() => onAction("claim", "Moved to your requests")} className={quick}><UserPlus className="h-3.5 w-3.5" aria-hidden />Take over from {agentName(r.assigned_to)}</button>
+            )}
+            {r.assigned_to && (r.assigned_to.id === me.id || isAdmin) && (
+              <button type="button" onClick={() => onAction("release", "Released back to the team")} className={quick}><UserMinus className="h-3.5 w-3.5" aria-hidden />Release to the team</button>
+            )}
+          </div>
+
+          <div>
+            <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-900">
+              <Tag className="h-4 w-4 text-indigo-600" aria-hidden />What did the customer say?
+            </div>
+            <p className="mt-0.5 text-xs text-slate-500">Pick one or more reasons. They feed the Reasons analysis.</p>
+            <div className="mt-2.5 flex flex-wrap gap-1.5" role="group" aria-label="Reason labels">
+              {shown.map((l) => {
+                const on = chosen.has(l.id);
+                const tone = TONES[l.color] || TONES.slate;
+                return (
+                  <button
+                    key={l.id}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => toggle(l)}
+                    className={`inline-flex h-9 items-center gap-1.5 rounded-full px-3.5 text-[13px] font-semibold ring-1 ring-inset transition active:scale-95 ${on ? `${tone.solid} ring-transparent shadow-sm` : `${tone.soft} hover:brightness-95`}`}
+                  >
+                    {on ? <Check className="h-3.5 w-3.5" aria-hidden /> : <span className={`h-2 w-2 rounded-full ${tone.dot}`} aria-hidden />}
+                    {l.name}
+                  </button>
+                );
+              })}
+              <span className="inline-flex h-9 items-center gap-1 rounded-full border border-dashed border-slate-300 bg-slate-50 pl-3 pr-1">
+                <input
+                  value={newName}
+                  maxLength={60}
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); create(); } }}
+                  placeholder="New label…"
+                  aria-label="New label name"
+                  className="w-28 bg-transparent text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none"
+                />
+                <button type="button" disabled={!newName.trim() || adding} onClick={create} className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-indigo-600 shadow-sm ring-1 ring-slate-200 disabled:opacity-40" aria-label="Add label">
+                  {adding ? <Spinner className="h-3 w-3" /> : <Plus className="h-3.5 w-3.5" aria-hidden />}
+                </button>
+              </span>
+            </div>
+          </div>
+
+          <label className="block">
+            <span className="text-sm font-semibold text-slate-900">Note{needsNote ? " (required for Other)" : " (optional)"}</span>
+            <textarea
+              ref={noteRef}
+              value={note}
+              maxLength={900}
+              rows={3}
+              onChange={(e) => { setNote(e.target.value); setProblem(""); }}
+              placeholder={needsNote ? "What did the customer say?" : "e.g. wants size 30, call back after 18h"}
+              className={`mt-1.5 block w-full rounded-xl border-0 px-3 py-2 text-sm text-slate-800 ring-1 ring-inset placeholder:text-slate-400 focus:ring-2 focus:ring-indigo-500 ${problem ? "ring-rose-400" : "ring-slate-200"}`}
+            />
+            {problem && <span className="mt-1 block text-xs font-medium text-rose-600">{problem}</span>}
+          </label>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 bg-slate-50/70 px-4 py-3 sm:px-5">
+          {closed ? (
+            <button type="button" disabled={busy} onClick={() => onAction("reopen", "Request reopened")} className={`${BTN.secondary} h-10`}>
+              <RotateCcw className="h-4 w-4" aria-hidden />Reopen
+            </button>
+          ) : (
+            <>
+              <button type="button" disabled={busy} onClick={() => submit("not_interested")}
+                className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-rose-600 px-3.5 text-sm font-semibold text-white shadow-sm hover:bg-rose-700 active:scale-[0.97] transition disabled:opacity-50">
+                <Ban className="h-4 w-4" aria-hidden />Not interested
+              </button>
+              <button type="button" disabled={busy} onClick={() => submit("wrong_number")}
+                className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-white px-3.5 text-sm font-semibold text-rose-700 ring-1 ring-inset ring-rose-200 hover:bg-rose-50 active:scale-[0.97] transition disabled:opacity-50">
+                <PhoneOff className="h-4 w-4" aria-hidden />Wrong number
+              </button>
+            </>
+          )}
+          <button type="button" disabled={busy} onClick={() => submit(null)}
+            className="ml-auto inline-flex h-10 items-center gap-1.5 rounded-xl bg-indigo-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 active:scale-[0.97] transition disabled:opacity-50">
+            {busy ? <Spinner className="h-4 w-4" /> : <Check className="h-4 w-4" aria-hidden />}Save
+          </button>
+        </div>
       </div>
     </div>
   );

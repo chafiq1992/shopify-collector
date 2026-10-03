@@ -53,7 +53,7 @@ _LEVELS = ("new", "n1", "n2", "n3", "n4", "enatt", "closed", "ordered", "lost", 
 LOST_STATUSES = ("not_interested", "wrong_number")
 # Reason labels every store starts with; agents add more from the label picker.
 DEFAULT_LABELS = (("size", "Size", "amber"), ("only_ask", "Only asking", "sky"), ("price", "Price", "rose"),
-                  ("later", "Later", "fuchsia"), ("no_answer", "No answer", "slate"))
+                  ("later", "Later", "fuchsia"), ("no_answer", "No answer", "slate"), ("other", "Other", "violet"))
 LABEL_COLORS = ("slate", "indigo", "amber", "orange", "rose", "red", "violet", "fuchsia", "emerald", "sky")
 _SCOPES = ("mine", "unassigned", "all")
 
@@ -888,9 +888,13 @@ def _label_key(name: str) -> str:
 
 async def _store_labels(db: AsyncSession, store_key: str, *, include_archived: bool = False) -> List[ChatLabel]:
     labels = (await db.execute(select(ChatLabel).where(ChatLabel.store_key == store_key).order_by(ChatLabel.position, ChatLabel.id))).scalars().all()
-    if not labels:
-        # First use in this store: the usual reasons, which agents can extend.
-        for position, (key, name, color) in enumerate(DEFAULT_LABELS):
+    keys = {lab.key for lab in labels}
+    # First use in this store: the usual reasons, which agents can extend. "Other" (with a note)
+    # also reaches stores that were set up before it existed; it stays last.
+    missing = [(position if not labels else 1000, key, name, color) for position, (key, name, color) in enumerate(DEFAULT_LABELS)
+               if key not in keys and (not labels or key == "other")]
+    if missing:
+        for position, key, name, color in missing:
             db.add(ChatLabel(store_key=store_key, key=key, name=name, color=color, position=position))
         try:
             await db.commit()

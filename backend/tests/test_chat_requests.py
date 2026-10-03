@@ -21,7 +21,7 @@ from backend.app.chat_request_routes import (
     pull_chat_requests,
 )
 from backend.app.db import Base
-from backend.app.models import ChatRequest, ChatRequestEvent, User
+from backend.app.models import ChatLabel, ChatRequest, ChatRequestEvent, User
 
 
 class _FakeClient:
@@ -405,7 +405,7 @@ del test_ordered_chat_without_a_callback_is_created_closed_with_its_chat_link, t
 async def test_stores_start_with_the_usual_reasons_and_agents_can_add_more(self):
     async with self.sessions() as db:
         first = await routes.list_chat_labels(store="irrakids", db=db, user=self.agent)
-    self.assertEqual([l["key"] for l in first["labels"]], ["size", "only_ask", "price", "later", "no_answer"])
+    self.assertEqual([l["key"] for l in first["labels"]], ["size", "only_ask", "price", "later", "no_answer", "other"])
     async with self.sessions() as db:
         added = await routes.create_chat_label(routes.ChatLabelBody(store="irrakids", name="  Delivery   time "), db=db, user=self.agent)
         again = await routes.create_chat_label(routes.ChatLabelBody(store="irrakids", name="delivery time"), db=db, user=self.other)
@@ -423,7 +423,15 @@ async def test_stores_start_with_the_usual_reasons_and_agents_can_add_more(self)
         shown = await routes.list_chat_labels(store="irrakids", db=db, user=self.agent)
         other_store = await routes.list_chat_labels(store="irranova", db=db, user=self.agent)
     self.assertNotIn("Delivery time", [l["name"] for l in shown["labels"]])
-    self.assertEqual(len(other_store["labels"]), 5)
+    self.assertEqual(len(other_store["labels"]), 6)
+    # A store set up before "Other" existed gets it, last, without duplicates.
+    async with self.sessions() as db:
+        await db.execute(ChatLabel.__table__.delete().where(ChatLabel.store_key == "irranova", ChatLabel.key == "other"))
+        await db.commit()
+        again = await routes.list_chat_labels(store="irranova", db=db, user=self.agent)
+        twice = await routes.list_chat_labels(store="irranova", db=db, user=self.agent)
+    self.assertEqual([l["key"] for l in again["labels"]][-1], "other")
+    self.assertEqual(len(twice["labels"]), 6)
 
 
 async def test_labels_on_requests_filter_the_queue_and_explain_lost_customers(self):
