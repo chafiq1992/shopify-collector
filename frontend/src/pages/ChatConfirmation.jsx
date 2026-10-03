@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Archive,
   Ban,
+  BarChart3,
   CalendarCheck,
   Check,
   ChevronLeft,
@@ -23,6 +25,8 @@ import {
   ShoppingBag,
   Sparkles,
   StickyNote,
+  Plus,
+  Tag,
   Trophy,
   Undo2,
   UserMinus,
@@ -74,6 +78,7 @@ const OUTCOMES = {
 const CLOSED = new Set(Object.keys(OUTCOMES));
 
 const SCOPE_STORAGE_KEY = "chatConfirmationScope";
+const SUBVIEW_STORAGE_KEY = "chatConfirmationSubview";
 
 // ---------- API ----------
 async function jsonOrThrow(res, fallback) {
@@ -83,10 +88,11 @@ async function jsonOrThrow(res, fallback) {
 }
 
 const CHAT_API = {
-  async list(store, { scope, level, q, offset }) {
+  async list(store, { scope, level, q, offset, label }) {
     const qs = new URLSearchParams({ store, scope, limit: String(PER_PAGE), offset: String(offset || 0) });
     if (level) qs.set("level", level);
     if (q) qs.set("q", q);
+    if (label) qs.set("label", String(label));
     return jsonOrThrow(await authFetch(`/api/chat-requests?${qs}`, { headers: authHeaders() }), "Failed to load chat requests");
   },
   async summary(store) {
@@ -115,6 +121,22 @@ const CHAT_API = {
     const res = await authFetch(`/api/chat-requests/${encodeURIComponent(id)}/conversation`, { headers: authHeaders() });
     if (res.status === 404) return null;
     return jsonOrThrow(res, "Failed to load the conversation");
+  },
+  async labels(store) {
+    return jsonOrThrow(await authFetch(`/api/chat-labels?${new URLSearchParams({ store })}`, { headers: authHeaders() }), "Failed to load labels");
+  },
+  async createLabel(store, name) {
+    return jsonOrThrow(await authFetch(`/api/chat-labels`, {
+      method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ store, name }),
+    }), "Could not add the label");
+  },
+  async updateLabel(id, patch) {
+    return jsonOrThrow(await authFetch(`/api/chat-labels/${encodeURIComponent(id)}`, {
+      method: "PATCH", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(patch),
+    }), "Could not update the label");
+  },
+  async reasons(store, days) {
+    return jsonOrThrow(await authFetch(`/api/chat-requests/reasons?${new URLSearchParams({ store, days: String(days) })}`, { headers: authHeaders() }), "Failed to load reasons");
   },
   async teamStats(store) {
     const qs = new URLSearchParams({ store });
@@ -220,12 +242,39 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   const [orderedFor, setOrderedFor] = useState(null);
   const [orderRef, setOrderRef] = useState("");
   const [pullBusy, setPullBusy] = useState(false);
+  // Reason labels (size, price, later...) and the request whose label picker is open.
+  const [labels, setLabels] = useState([]);
+  const [canManageLabels, setCanManageLabels] = useState(false);
+  const [labelFor, setLabelFor] = useState(null);
+  const [subView, setSubView] = useState(() => { try { return localStorage.getItem(SUBVIEW_STORAGE_KEY) === "reasons" ? "reasons" : "queue"; } catch { return "queue"; } });
   const requestIdRef = useRef(0);
   const teamRequestIdRef = useRef(0);
   const searchInputRef = useRef(null);
   const isAdmin = me?.role === "admin";
 
   useEffect(() => { try { localStorage.setItem(SCOPE_STORAGE_KEY, scope); } catch {} }, [scope]);
+  useEffect(() => { try { localStorage.setItem(SUBVIEW_STORAGE_KEY, subView); } catch {} }, [subView]);
+
+  const loadLabels = useCallback(async () => {
+    try {
+      const js = await CHAT_API.labels(store);
+      setLabels(js.labels || []);
+      setCanManageLabels(Boolean(js.can_manage));
+    } catch {}
+  }, [store]);
+  useEffect(() => { loadLabels(); }, [loadLabels]);
+
+  async function addLabel(name) {
+    try {
+      const js = await CHAT_API.createLabel(store, name);
+      await loadLabels();
+      if (!js.existing) pushToast(`Label “${js.label.name}” added`, "success", 2400);
+      return js.label;
+    } catch (e) {
+      pushToast(e?.message || "Could not add the label", "error", 5000);
+      return null;
+    }
+  }
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(query.trim().length >= 2 ? query.trim() : ""), 250);
@@ -378,6 +427,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   }
 
   function openOrdered(r) {
+    setLabelFor(null);
     setOrderRef("");
     setOrderedFor(r.id);
   }
@@ -392,7 +442,22 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
 
   function closeAs(r, outcome) {
     setMenuFor(null);
-    return runAction(r, { action: outcome }, { success: `Closed as ${OUTCOMES[outcome].label.toLowerCase()}` });
+    // Ask why first: the reason labels feed the Reasons analysis.
+    setOrderedFor(null);
+    setLabelFor({ id: r.id, closeAs: outcome });
+  }
+
+  async function saveLabels(r, ids, outcome) {
+    const same = ids.length === (r.labels || []).length && ids.every((id) => (r.labels || []).some((l) => l.id === id));
+    if (!same) {
+      const done = await runAction(r, { action: "labels", labels: ids }, { success: outcome ? null : "Labels saved", silent: Boolean(outcome) });
+      if (!done) return;
+    }
+    if (outcome) {
+      const closed = await runAction(r, { action: outcome }, { success: `Closed as ${OUTCOMES[outcome].label.toLowerCase()}` });
+      if (!closed) return;
+    }
+    setLabelFor(null);
   }
 
   async function handleCopyIntl(r) {
@@ -513,6 +578,11 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     if (Number(r.attempts) > 0) chips.push(chip(`N${r.attempts}`, LEVEL_TONE[Math.min(4, Number(r.attempts))], "attempts"));
     if (Number(r.enatt) > 0) chips.push(chip(`EA${r.enatt}`, "fuchsia", "enatt"));
     if (Number(r.request_count) > 1) chips.push(chip(`Asked ×${r.request_count}`, "amber", "repeat"));
+    (r.labels || []).forEach((l) => chips.push(
+      <span key={`label-${l.id}`} className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${(TONES[l.color] || TONES.slate).soft}`}>
+        <Tag className="h-3 w-3" aria-hidden />{l.name}
+      </span>,
+    ));
     if (scope !== "mine") {
       chips.push(r.assigned_to
         ? chip(r.assigned_to.id === me.id ? "You" : agentName(r.assigned_to), "sky", "agent")
@@ -559,9 +629,23 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     const busy = busyIds.has(r.id);
     const grow = stretch ? "flex-1" : "";
     const menuOpen = menuFor === r.id;
+    const labelButton = (
+      <button
+        type="button"
+        disabled={busy}
+        onClick={(ev) => { ev.stopPropagation(); setOrderedFor(null); setLabelFor((p) => (p?.id === r.id && !p.closeAs ? null : { id: r.id })); }}
+        className={`${ACTION_BTN} ${ACTION_THEMES.more} ${stretch ? "" : "w-8 !px-0"}`}
+        title="Label this request with the customer's reason (size, price, later…)"
+        aria-label="Labels"
+      >
+        <Tag className="h-3.5 w-3.5" aria-hidden />
+        {stretch && <span>Label</span>}
+      </button>
+    );
     if (CLOSED.has(r.status)) {
       return (
         <div className={`flex items-center gap-1.5 ${stretch ? "w-full" : "justify-end"}`}>
+          {labelButton}
           <button
             type="button"
             disabled={busy}
@@ -607,6 +691,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
           <ShoppingBag className="h-3.5 w-3.5" aria-hidden />
           <span className={stretch ? "" : "hidden 2xl:inline"}>Ordered</span>
         </button>
+        {labelButton}
         <div className="relative">
           <button
             type="button"
@@ -693,6 +778,22 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     );
   }
 
+  function renderLabelPicker(r) {
+    const mode = labelFor?.id === r.id ? labelFor : null;
+    return (
+      <LabelPicker
+        key={`${r.id}:${mode?.closeAs || ""}`}
+        request={r}
+        labels={labels}
+        outcome={mode?.closeAs ? OUTCOMES[mode.closeAs] : null}
+        busy={busyIds.has(r.id)}
+        onCreate={addLabel}
+        onCancel={() => setLabelFor(null)}
+        onSave={(ids) => saveLabels(r, ids, mode?.closeAs)}
+      />
+    );
+  }
+
   function renderDetails(r) {
     return (
       <ChatRequestDetails
@@ -742,6 +843,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
         <div className="mt-2">{renderStatus(r)}</div>
         <div className="mt-3">{renderActions(r, { stretch: true })}</div>
         {pickerOpen && <div className="mt-2.5">{renderOrderedPicker(r)}</div>}
+        {labelFor?.id === r.id && <div className="mt-2.5">{renderLabelPicker(r)}</div>}
         {isOpen && (
           <div className="cf-collapse-in mt-3" onClick={(ev) => ev.stopPropagation()}>{renderDetails(r)}</div>
         )}
@@ -786,6 +888,11 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
         {pickerOpen && !leaving && (
           <tr className="bg-indigo-50/40">
             <td colSpan={6} className="px-4 py-2.5">{renderOrderedPicker(r)}</td>
+          </tr>
+        )}
+        {labelFor?.id === r.id && !leaving && (
+          <tr className="bg-indigo-50/40">
+            <td colSpan={6} className="px-4 py-2.5">{renderLabelPicker(r)}</td>
           </tr>
         )}
         {isOpen && !leaving && (
@@ -918,6 +1025,34 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
           )}
         </section>
 
+        <div className="flex items-center gap-1 rounded-xl bg-white p-1 shadow-sm ring-1 ring-slate-200 w-fit" role="tablist" aria-label="Chat confirmation views">
+          {[["queue", "Requests", Inbox], ["reasons", "Reasons", BarChart3]].map(([key, label, Icon]) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={subView === key}
+              onClick={() => setSubView(key)}
+              className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-3.5 text-sm font-semibold transition ${subView === key ? "bg-indigo-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"}`}
+            ><Icon className="h-4 w-4" aria-hidden />{label}</button>
+          ))}
+        </div>
+
+        {subView === "reasons" ? (
+          <ReasonsView
+            store={store}
+            labels={labels}
+            canManage={canManageLabels}
+            onLabelsChanged={loadLabels}
+            pushToast={pushToast}
+            onOpenRequest={(r) => {
+              setSubView("queue");
+              setScope("all");
+              setLevel(r.status === "ordered" ? "ordered" : CLOSED.has(r.status) ? "closed" : "");
+              setQuery(`#${r.id}`);
+            }}
+          />
+        ) : (<>
         {error && (
           <div className="cf-fade-in flex items-start gap-2.5 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-900 ring-1 ring-inset ring-rose-200">
             <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" aria-hidden />
@@ -1058,6 +1193,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
             </div>
           )}
         </section>
+        </>)}
       </main>
     </div>
   );
@@ -1207,6 +1343,267 @@ function ChatAgentCard({ agent, isMe, rank, maxOrdered = 1 }) {
   );
 }
 
+function LabelPicker({ request: r, labels, outcome, busy, onCreate, onCancel, onSave }) {
+  const [chosen, setChosen] = useState(() => new Set((r.labels || []).map((l) => l.id)));
+  const [newName, setNewName] = useState("");
+  const [adding, setAdding] = useState(false);
+  // Archived labels already on this request stay visible so they can be removed.
+  const shown = [...labels, ...(r.labels || []).filter((l) => !labels.some((x) => x.id === l.id))];
+  function toggle(id) {
+    setChosen((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  async function create() {
+    const name = newName.trim();
+    if (!name || adding) return;
+    setAdding(true);
+    const label = await onCreate(name);
+    setAdding(false);
+    if (label) {
+      setNewName("");
+      setChosen((prev) => new Set(prev).add(label.id));
+    }
+  }
+  return (
+    <div className="cf-collapse-in rounded-xl bg-white px-3 py-3 ring-1 ring-inset ring-indigo-200 shadow-sm" onClick={(ev) => ev.stopPropagation()}>
+      <div className="flex items-center gap-2">
+        <Tag className="h-4 w-4 text-indigo-600" aria-hidden />
+        <span className="text-xs font-semibold text-slate-900">
+          {outcome ? `Why ${outcome.label.toLowerCase()}? Pick the reasons` : "What did the customer say? Pick the reasons"}
+        </span>
+      </div>
+      <div className="mt-2.5 flex flex-wrap gap-1.5" role="group" aria-label="Reason labels">
+        {shown.map((l) => {
+          const on = chosen.has(l.id);
+          const tone = TONES[l.color] || TONES.slate;
+          return (
+            <button
+              key={l.id}
+              type="button"
+              aria-pressed={on}
+              onClick={() => toggle(l.id)}
+              className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-xs font-semibold ring-1 ring-inset transition active:scale-95 ${on ? `${tone.solid} ring-transparent shadow-sm` : `${tone.soft} hover:brightness-95`}`}
+            >
+              {on ? <Check className="h-3.5 w-3.5" aria-hidden /> : <span className={`h-2 w-2 rounded-full ${tone.dot}`} aria-hidden />}
+              {l.name}
+            </button>
+          );
+        })}
+        <span className="inline-flex h-8 items-center gap-1 rounded-full bg-slate-50 pl-3 pr-1 border border-dashed border-slate-300">
+          <input
+            value={newName}
+            maxLength={60}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); create(); } if (e.key === "Escape") { e.preventDefault(); onCancel(); } }}
+            placeholder="New label…"
+            aria-label="New label name"
+            className="w-28 bg-transparent text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none"
+          />
+          <button type="button" disabled={!newName.trim() || adding} onClick={create} className="flex h-6 w-6 items-center justify-center rounded-full bg-white text-indigo-600 shadow-sm ring-1 ring-slate-200 disabled:opacity-40" aria-label="Add label">
+            {adding ? <Spinner className="h-3 w-3" /> : <Plus className="h-3.5 w-3.5" aria-hidden />}
+          </button>
+        </span>
+      </div>
+      <div className="mt-3 flex items-center justify-end gap-2">
+        <button type="button" onClick={onCancel} className={`${BTN.ghost} h-8 text-xs`}>Cancel</button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onSave([...chosen])}
+          className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold text-white shadow-sm active:scale-[0.97] transition disabled:opacity-50 ${outcome ? "bg-rose-600 hover:bg-rose-700" : "bg-indigo-600 hover:bg-indigo-700"}`}
+        >
+          {busy ? <Spinner className="h-3.5 w-3.5" /> : outcome ? <Ban className="h-3.5 w-3.5" aria-hidden /> : <Check className="h-3.5 w-3.5" aria-hidden />}
+          {outcome ? `Close as ${outcome.label.toLowerCase()}` : "Save labels"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const REASON_PERIODS = [7, 30, 90];
+const REASON_STATUS = [
+  { key: "any", label: "All" },
+  { key: "lost", label: "Lost" },
+  { key: "ordered", label: "Ordered" },
+  { key: "", label: "Still open" },
+];
+
+function percent(part, whole) {
+  return whole ? `${Math.round((100 * part) / whole)}%` : "—";
+}
+
+function ReasonsView({ store, labels, canManage, onLabelsChanged, pushToast, onOpenRequest }) {
+  const [days, setDays] = useState(30);
+  const [report, setReport] = useState(null);
+  const [error, setError] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [status, setStatus] = useState("any");
+  const [rows, setRows] = useState({ requests: [], total: 0 });
+  const [rowsLoading, setRowsLoading] = useState(false);
+  const [managing, setManaging] = useState(false);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try { setReport(await CHAT_API.reasons(store, days)); } catch (e) { setError(e?.message || "Failed to load reasons"); }
+  }, [store, days]);
+  useEffect(() => { load(); }, [load, labels]);
+  useEffect(() => { setSelected(null); }, [store]);
+
+  useEffect(() => {
+    if (!selected) { setRows({ requests: [], total: 0 }); return; }
+    let alive = true;
+    setRowsLoading(true);
+    CHAT_API.list(store, { scope: "all", level: status, label: selected.id, offset: 0 })
+      .then((js) => { if (alive) setRows({ requests: js.requests || [], total: js.total || 0 }); })
+      .catch((e) => pushToast(e?.message || "Failed to load requests", "error", 5000))
+      .finally(() => { if (alive) setRowsLoading(false); });
+    return () => { alive = false; };
+  }, [store, selected, status, pushToast]);
+
+  async function updateLabel(label, patch) {
+    try {
+      await CHAT_API.updateLabel(label.id, patch);
+      onLabelsChanged();
+    } catch (e) {
+      pushToast(e?.message || "Could not update the label", "error", 5000);
+    }
+  }
+
+  const o = report?.outcomes || {};
+  const lost = Number(o.not_interested || 0) + Number(o.wrong_number || 0);
+  const maxTotal = Math.max(1, ...(report?.labels || []).map((l) => l.total));
+  return (
+    <div className="space-y-4">
+      <section className={`${CARD} p-4 sm:p-5`}>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold text-slate-900">Why customers don’t order</h2>
+            <p className="text-xs text-slate-500">Requests created in the last {days} days, by the reasons agents labelled after the call.</p>
+          </div>
+          <div className="ml-auto flex items-center gap-1 rounded-xl bg-slate-100 p-1">
+            {REASON_PERIODS.map((d) => (
+              <button key={d} type="button" onClick={() => setDays(d)} aria-pressed={days === d}
+                className={`h-7 rounded-lg px-2.5 text-xs font-semibold transition ${days === d ? "bg-white text-slate-900 shadow-sm ring-1 ring-slate-900/5" : "text-slate-600 hover:text-slate-900"}`}>{d} days</button>
+            ))}
+          </div>
+        </div>
+        {error && <div className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-800 ring-1 ring-inset ring-rose-200">{error}</div>}
+        <div className="mt-4 grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
+          <KpiCard icon={Inbox} tone="indigo" label="Requests" value={Number(report?.total || 0)} loading={!report} />
+          <KpiCard icon={ShoppingBag} tone="emerald" label="Ordered" value={Number(o.ordered || 0)} hint={`${percent(o.ordered || 0, report?.total)} of requests`} loading={!report} />
+          <KpiCard icon={Ban} tone="rose" label="Lost" value={lost} hint={`${o.not_interested || 0} not interested · ${o.wrong_number || 0} wrong number`} loading={!report} />
+          <KpiCard icon={Tag} tone="amber" label="Lost without a reason" value={Number(report?.lost_without_label || 0)} hint="label them to see why" loading={!report} />
+        </div>
+      </section>
+
+      <section className={`${CARD} p-4 sm:p-5`}>
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-sm font-semibold text-slate-900">Reasons</h3>
+          <span className="text-xs text-slate-500">most lost customers first · tap a reason to see its requests</span>
+          {canManage && (
+            <button type="button" onClick={() => setManaging((m) => !m)} className={`${BTN.secondary} ml-auto h-8 text-xs`}>
+              <Tag className="h-3.5 w-3.5" aria-hidden /> {managing ? "Done" : "Manage labels"}
+            </button>
+          )}
+        </div>
+        <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-slate-500">
+          <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-rose-500" />Lost</span>
+          <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-amber-400" />Still open</span>
+          <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-emerald-500" />Ordered</span>
+        </div>
+        <ul className="mt-3 space-y-1.5">
+          {(report?.labels || []).map((l) => {
+            const tone = TONES[l.color] || TONES.slate;
+            const active = selected?.id === l.id;
+            return (
+              <li key={l.id}>
+                <button
+                  type="button"
+                  onClick={() => setSelected(active ? null : l)}
+                  aria-pressed={active}
+                  className={`grid w-full grid-cols-[minmax(0,9rem)_1fr_auto] sm:grid-cols-[minmax(0,12rem)_1fr_10rem] items-center gap-3 rounded-xl px-2.5 py-2 text-left transition ${active ? "bg-indigo-50 ring-1 ring-inset ring-indigo-200" : "hover:bg-slate-50"}`}
+                >
+                  <span className={`inline-flex min-w-0 items-center gap-1.5 justify-self-start rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${tone.soft}`}>
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${tone.dot}`} /><span className="truncate">{l.name}</span>
+                    {l.archived && <Archive className="h-3 w-3 shrink-0" aria-label="archived" />}
+                  </span>
+                  <span className="flex h-6 overflow-hidden rounded-lg bg-slate-100" style={{ width: `${Math.max(4, (100 * l.total) / maxTotal)}%` }} title={`${l.lost} lost · ${l.open} open · ${l.ordered} ordered`}>
+                    {l.lost > 0 && <span className="h-full bg-rose-500 transition-all" style={{ width: `${(100 * l.lost) / l.total}%` }} />}
+                    {l.open > 0 && <span className="h-full bg-amber-400 transition-all" style={{ width: `${(100 * l.open) / l.total}%` }} />}
+                    {l.ordered > 0 && <span className="h-full bg-emerald-500 transition-all" style={{ width: `${(100 * l.ordered) / l.total}%` }} />}
+                  </span>
+                  <span className="text-right text-xs tabular-nums text-slate-600">
+                    <span className="font-semibold text-slate-900">{l.total}</span> · <span className="text-rose-700">{l.lost} lost</span>
+                    <span className="hidden sm:inline"> · {percent(l.ordered, l.total)} ordered</span>
+                  </span>
+                </button>
+                {managing && (
+                  <div className="mt-1 flex flex-wrap items-center gap-2 px-2.5 pb-1">
+                    <input defaultValue={l.name} maxLength={60} aria-label={`Rename ${l.name}`}
+                      onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== l.name) updateLabel(l, { name: v }); }}
+                      className="h-7 w-40 rounded-lg border-0 px-2 text-xs ring-1 ring-inset ring-slate-200 focus:ring-2 focus:ring-indigo-500" />
+                    <div className="flex gap-1">
+                      {Object.keys(TONES).map((c) => (
+                        <button key={c} type="button" onClick={() => updateLabel(l, { color: c })} aria-label={`Color ${c}`} aria-pressed={l.color === c}
+                          className={`h-5 w-5 rounded-full ${TONES[c].dot} ${l.color === c ? "ring-2 ring-offset-1 ring-slate-900" : ""}`} />
+                      ))}
+                    </div>
+                    <button type="button" onClick={() => updateLabel(l, { archived: !l.archived })} className={`${BTN.ghost} h-7 text-xs`}>
+                      <Archive className="h-3.5 w-3.5" aria-hidden /> {l.archived ? "Restore" : "Archive"}
+                    </button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+          {report && !(report.labels || []).length && <li className="px-2.5 py-4 text-sm text-slate-500">No labels yet.</li>}
+        </ul>
+        {report && report.total > 0 && (
+          <p className="mt-3 text-xs text-slate-500">{report.labelled} of {report.total} requests have at least one reason.</p>
+        )}
+      </section>
+
+      {selected && (
+        <section className={`${CARD} overflow-hidden`}>
+          <div className="flex flex-wrap items-center gap-2 px-4 pt-4 sm:px-5">
+            <h3 className="text-sm font-semibold text-slate-900">Requests labelled “{selected.name}”</h3>
+            <span className="text-xs text-slate-500">{rows.total}</span>
+            <div className="ml-auto flex items-center gap-1 rounded-xl bg-slate-100 p-1">
+              {REASON_STATUS.map((s) => (
+                <button key={s.key || "open"} type="button" onClick={() => setStatus(s.key)} aria-pressed={status === s.key}
+                  className={`h-7 rounded-lg px-2.5 text-xs font-semibold transition ${status === s.key ? "bg-white text-slate-900 shadow-sm ring-1 ring-slate-900/5" : "text-slate-600 hover:text-slate-900"}`}>{s.label}</button>
+              ))}
+            </div>
+          </div>
+          <div className="mt-3 divide-y divide-slate-100 border-t border-slate-100">
+            {rowsLoading && <div className="px-5 py-6 text-center"><Spinner className="h-5 w-5 text-indigo-500" /></div>}
+            {!rowsLoading && rows.requests.map((r) => {
+              const outcome = OUTCOMES[r.status];
+              return (
+                <button key={r.id} type="button" onClick={() => onOpenRequest(r)} className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-left hover:bg-slate-50 sm:px-5">
+                  <span className="font-semibold text-slate-900">#{r.id}</span>
+                  <span className="min-w-0 flex-1 truncate text-sm text-slate-800">{r.customer_name || prettyPhone(r.phone)}<span className="ml-2 text-xs text-slate-500">{r.product_title || ""}</span></span>
+                  <span className="flex flex-wrap gap-1">
+                    {(r.labels || []).map((l) => (
+                      <span key={l.id} className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${(TONES[l.color] || TONES.slate).soft}`}>{l.name}</span>
+                    ))}
+                  </span>
+                  <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset ${(TONES[outcome?.tone] || TONES.amber).soft}`}>{outcome ? outcome.label : "Open"}</span>
+                  <span className="text-[11px] text-slate-400">{timeAgo(r.closed_at || r.created_at)}</span>
+                </button>
+              );
+            })}
+            {!rowsLoading && rows.requests.length === 0 && <div className="px-5 py-6 text-center text-sm text-slate-500">No request with this label here.</div>}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
 const HISTORY_LABELS = {
   requested: () => "Asked for a call on the store",
   requested_again: () => "Asked again on the store",
@@ -1215,6 +1612,7 @@ const HISTORY_LABELS = {
   enatt: (d) => `En attente · EA${d.enatt ?? ""}`,
   ordered: (d) => `Ordered${d.order_ref ? ` · ${d.order_ref}` : ""}`,
   chat_updated: () => "Customer came back and wrote more in the website chat",
+  labels: (d) => ["Labels", (d.added || []).length ? `+ ${d.added.join(", ")}` : "", (d.removed || []).length ? `− ${d.removed.join(", ")}` : ""].filter(Boolean).join(" · "),
   not_interested: () => "Closed · not interested",
   wrong_number: () => "Closed · wrong number",
   reopen: () => "Reopened",

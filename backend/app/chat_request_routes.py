@@ -16,6 +16,8 @@ Provides:
   - GET  /api/chat-requests/{id}/history      -> audit trail of one request
   - GET  /api/chat-requests/{id}/conversation -> signed link to the read-only website chat
   - GET  /api/chat-requests/team-stats        -> per-agent calls / orders today
+  - GET/POST /api/chat-labels, PATCH /api/chat-labels/{id} -> reason labels (size, price, later...)
+  - GET  /api/chat-requests/reasons           -> outcomes by reason label over a period
 """
 
 import logging
@@ -36,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .auth_routes import get_current_user
 from .confirmation_routes import _confirmation_phone_variants, _tz
 from .db import get_session
-from .models import ChatRequest, ChatRequestEvent, User
+from .models import ChatLabel, ChatRequest, ChatRequestEvent, ChatRequestLabel, User
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +49,12 @@ _STORE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 OPEN_STATUSES = ("new", "calling", "enatt")
 CLOSED_STATUSES = ("ordered", "not_interested", "wrong_number")
 MAX_ATTEMPTS = 4
-_LEVELS = ("new", "n1", "n2", "n3", "n4", "enatt", "closed", "ordered")
+_LEVELS = ("new", "n1", "n2", "n3", "n4", "enatt", "closed", "ordered", "lost", "any")
+LOST_STATUSES = ("not_interested", "wrong_number")
+# Reason labels every store starts with; agents add more from the label picker.
+DEFAULT_LABELS = (("size", "Size", "amber"), ("only_ask", "Only asking", "sky"), ("price", "Price", "rose"),
+                  ("later", "Later", "fuchsia"), ("no_answer", "No answer", "slate"))
+LABEL_COLORS = ("slate", "indigo", "amber", "orange", "rose", "red", "violet", "fuchsia", "emerald", "sky")
 _SCOPES = ("mine", "unassigned", "all")
 
 
@@ -108,8 +115,29 @@ def _user_brief(u: Optional[User]) -> Optional[Dict[str, Any]]:
     return {"id": u.id, "name": u.name, "email": u.email}
 
 
-def serialize_request(r: ChatRequest, users: Dict[str, User]) -> Dict[str, Any]:
+def serialize_label(label: ChatLabel) -> Dict[str, Any]:
+    return {"id": label.id, "key": label.key, "name": label.name, "color": label.color, "archived": bool(label.archived)}
+
+
+async def _labels_for(db: AsyncSession, request_ids) -> Dict[int, List[Dict[str, Any]]]:
+    ids = sorted({int(i) for i in request_ids if i})
+    found: Dict[int, List[Dict[str, Any]]] = {i: [] for i in ids}
+    if not ids:
+        return found
+    rows = await db.execute(
+        select(ChatRequestLabel.request_id, ChatLabel)
+        .join(ChatLabel, ChatLabel.id == ChatRequestLabel.label_id)
+        .where(ChatRequestLabel.request_id.in_(ids))
+        .order_by(ChatLabel.position, ChatLabel.id)
+    )
+    for request_id, label in rows.all():
+        found[request_id].append(serialize_label(label))
+    return found
+
+
+def serialize_request(r: ChatRequest, users: Dict[str, User], labels: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     return {
+        "labels": labels or [],
         "id": r.id,
         "store": r.store_key,
         "phone": r.phone,
@@ -447,6 +475,10 @@ def _level_clause(level: str):
         return ChatRequest.status.in_(CLOSED_STATUSES)
     if level == "ordered":
         return ChatRequest.status == "ordered"
+    if level == "lost":
+        return ChatRequest.status.in_(LOST_STATUSES)
+    if level == "any":
+        return ChatRequest.id.is_not(None)
     return ChatRequest.status.in_(OPEN_STATUSES)
 
 
@@ -536,6 +568,7 @@ async def list_chat_requests(
     q: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    label: Optional[int] = None,
     db: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
@@ -549,23 +582,27 @@ async def list_chat_requests(
     search = _search_clause(q or "")
     if search is not None:
         base_filters.append(search)
+    if label:
+        base_filters.append(ChatRequest.id.in_(select(ChatRequestLabel.request_id).where(ChatRequestLabel.label_id == int(label))))
     # Ordered chats are shared by the whole team (the AI placed most of them), whatever the scope.
     store_filters = list(base_filters)
     scope_filter = _scope_clause(scope, user)
     if scope_filter is not None:
         base_filters.append(scope_filter)
 
-    filters = [*(store_filters if level == "ordered" else base_filters), _level_clause(level)]
+    # Ordered, lost and labelled views are team analysis: every agent sees the whole store.
+    filters = [*(store_filters if level in ("ordered", "lost", "any") else base_filters), _level_clause(level)]
     total = int(await db.scalar(select(func.count(ChatRequest.id)).where(*filters)) or 0)
-    order_col = ChatRequest.closed_at.desc() if level in ("closed", "ordered") else ChatRequest.created_at.desc()
+    order_col = ChatRequest.closed_at.desc() if level in ("closed", "ordered", "lost") else ChatRequest.created_at.desc()
     rows = await db.execute(
         select(ChatRequest).where(*filters).order_by(order_col, ChatRequest.id.desc()).offset(offset).limit(limit)
     )
     items = rows.scalars().all()
     users = await _users_by_id(db, [r.assigned_to_id for r in items] + [r.closed_by_id for r in items])
+    labels = await _labels_for(db, [r.id for r in items])
     return {
         "ok": True,
-        "requests": [serialize_request(r, users) for r in items],
+        "requests": [serialize_request(r, users, labels.get(r.id)) for r in items],
         "total": total,
         "offset": offset,
         "limit": limit,
@@ -622,6 +659,7 @@ async def pull_chat_requests(
 
 class ChatActionBody(BaseModel):
     action: str
+    labels: Optional[List[int]] = None
     order_ref: Optional[str] = None
     note: Optional[str] = None
     assign_to: Optional[str] = None
@@ -630,7 +668,7 @@ class ChatActionBody(BaseModel):
 
 _ACTIONS = {
     "call", "enatt", "ordered", "not_interested", "wrong_number",
-    "reopen", "claim", "release", "assign", "note", "undo_call",
+    "reopen", "claim", "release", "assign", "note", "undo_call", "labels",
 }
 
 
@@ -668,7 +706,7 @@ async def chat_request_action(
         )
         if seen:
             users = await _users_by_id(db, [r.assigned_to_id, r.closed_by_id])
-            return {"ok": True, "deduped": True, "request": serialize_request(r, users)}
+            return {"ok": True, "deduped": True, "request": serialize_request(r, users, (await _labels_for(db, [r.id]))[r.id])}
 
     is_admin = user.role == "admin"
     now = datetime.now(timezone.utc)
@@ -728,6 +766,20 @@ async def chat_request_action(
         detail["previous_agent_id"] = r.assigned_to_id
         detail["agent_id"] = target_id
         r.assigned_to_id = target_id
+    elif action == "labels":
+        # The reasons behind this request (size, price, later...): the exact set replaces the old one.
+        wanted = sorted({int(i) for i in (body.labels or [])})[:12]
+        current = {row.label_id for row in (await db.execute(select(ChatRequestLabel).where(ChatRequestLabel.request_id == r.id))).scalars()}
+        usable = {lab.id: lab for lab in (await db.execute(select(ChatLabel).where(ChatLabel.store_key == r.store_key, ChatLabel.id.in_(wanted or [0])))).scalars()}
+        if any(i not in usable or (usable[i].archived and i not in current) for i in wanted):
+            raise HTTPException(status_code=422, detail="unknown label for this store")
+        added, removed = [i for i in wanted if i not in current], [i for i in current if i not in wanted]
+        if removed:
+            await db.execute(ChatRequestLabel.__table__.delete().where(ChatRequestLabel.request_id == r.id, ChatRequestLabel.label_id.in_(removed)))
+        for i in added:
+            db.add(ChatRequestLabel(request_id=r.id, label_id=i, created_by_id=user.id))
+        names = {lab.id: lab.name for lab in (await db.execute(select(ChatLabel).where(ChatLabel.id.in_(added + removed or [0])))).scalars()}
+        detail.update(added=[names.get(i, "") for i in added], removed=[names.get(i, "") for i in removed])
     elif action == "note":
         text = _clean_multiline(body.note, 1000)
         if not text:
@@ -744,14 +796,14 @@ async def chat_request_action(
         r.assigned_to_id = user.id
         detail["auto_assigned"] = True
 
-    if action not in ("note", "claim", "release", "assign"):
+    if action not in ("note", "claim", "release", "assign", "labels"):
         r.last_action_at = now
     r.updated_at = now
     db.add(ChatRequestEvent(request_id=r.id, user_id=user.id, action=action, detail=detail or None))
     await db.commit()
     await db.refresh(r)
     users = await _users_by_id(db, [r.assigned_to_id, r.closed_by_id])
-    return {"ok": True, "deduped": False, "request": serialize_request(r, users)}
+    return {"ok": True, "deduped": False, "request": serialize_request(r, users, (await _labels_for(db, [r.id]))[r.id])}
 
 
 @router.get("/api/chat-requests/{request_id}/history")
@@ -825,6 +877,135 @@ async def chat_request_conversation(
             url, expires = chat_view_url(match[1])
             return {"ok": True, "url": url, "expires_at": expires}
     raise HTTPException(status_code=404, detail="This request has no website chat")
+
+
+# ---------- Reason labels ----------
+
+def _label_key(name: str) -> str:
+    key = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:40]
+    return key
+
+
+async def _store_labels(db: AsyncSession, store_key: str, *, include_archived: bool = False) -> List[ChatLabel]:
+    labels = (await db.execute(select(ChatLabel).where(ChatLabel.store_key == store_key).order_by(ChatLabel.position, ChatLabel.id))).scalars().all()
+    if not labels:
+        # First use in this store: the usual reasons, which agents can extend.
+        for position, (key, name, color) in enumerate(DEFAULT_LABELS):
+            db.add(ChatLabel(store_key=store_key, key=key, name=name, color=color, position=position))
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()  # another agent seeded them at the same moment
+        labels = (await db.execute(select(ChatLabel).where(ChatLabel.store_key == store_key).order_by(ChatLabel.position, ChatLabel.id))).scalars().all()
+    return [lab for lab in labels if include_archived or not lab.archived]
+
+
+@router.get("/api/chat-labels")
+async def list_chat_labels(store: str, db: AsyncSession = Depends(get_session), user: User = Depends(get_current_user)):
+    labels = await _store_labels(db, _normalize_store(store), include_archived=user.role == "admin")
+    return {"ok": True, "labels": [serialize_label(lab) for lab in labels], "colors": list(LABEL_COLORS), "can_manage": user.role == "admin"}
+
+
+class ChatLabelBody(BaseModel):
+    store: Optional[str] = None
+    name: Optional[str] = None
+    color: Optional[str] = None
+    archived: Optional[bool] = None
+
+
+@router.post("/api/chat-labels")
+async def create_chat_label(body: ChatLabelBody, db: AsyncSession = Depends(get_session), user: User = Depends(get_current_user)):
+    """Any agent can add a reason they keep hearing; the same name twice returns the existing label."""
+    store_key = _normalize_store(body.store or "")
+    name = " ".join(str(body.name or "").split())[:60]
+    if not name:
+        raise HTTPException(status_code=422, detail="give the label a name")
+    labels = await _store_labels(db, store_key, include_archived=True)
+    same = next((lab for lab in labels if lab.name.casefold() == name.casefold()), None)
+    if same:
+        if same.archived:
+            same.archived = False
+            await db.commit()
+        return {"ok": True, "label": serialize_label(same), "existing": True}
+    if len([lab for lab in labels if not lab.archived]) >= 40:
+        raise HTTPException(status_code=409, detail="this store already has 40 labels")
+    taken = {lab.key for lab in labels}
+    base = _label_key(name) or "label"
+    key, n = base, 2
+    while key in taken:
+        key, n = f"{base}_{n}", n + 1
+    color = body.color if body.color in LABEL_COLORS else LABEL_COLORS[len(labels) % len(LABEL_COLORS)]
+    label = ChatLabel(store_key=store_key, key=key, name=name, color=color,
+                      position=max([lab.position for lab in labels] or [0]) + 1, created_by_id=user.id)
+    db.add(label)
+    await db.commit()
+    await db.refresh(label)
+    return {"ok": True, "label": serialize_label(label), "existing": False}
+
+
+@router.patch("/api/chat-labels/{label_id}")
+async def update_chat_label(label_id: int, body: ChatLabelBody, db: AsyncSession = Depends(get_session), user: User = Depends(get_current_user)):
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="admin required")
+    label = await db.get(ChatLabel, label_id)
+    if label is None:
+        raise HTTPException(status_code=404, detail="label not found")
+    if body.name is not None:
+        name = " ".join(body.name.split())[:60]
+        if not name:
+            raise HTTPException(status_code=422, detail="give the label a name")
+        label.name = name
+    if body.color is not None:
+        if body.color not in LABEL_COLORS:
+            raise HTTPException(status_code=422, detail="unknown color")
+        label.color = body.color
+    if body.archived is not None:
+        # Archived labels stay on past requests (and in the analysis) but are no longer offered.
+        label.archived = bool(body.archived)
+    await db.commit()
+    return {"ok": True, "label": serialize_label(label)}
+
+
+@router.get("/api/chat-requests/reasons")
+async def chat_request_reasons(
+    store: str,
+    days: int = 30,
+    db: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
+):
+    """Where customers stop: outcomes of the requests created in the period, by reason label."""
+    store_key = _normalize_store(store)
+    days = max(1, min(int(days or 30), 365))
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    in_period = [ChatRequest.store_key == store_key, ChatRequest.created_at >= since]
+    outcomes = {"ordered": 0, "not_interested": 0, "wrong_number": 0, "open": 0}
+    for status, n in (await db.execute(select(ChatRequest.status, func.count(ChatRequest.id)).where(*in_period).group_by(ChatRequest.status))).all():
+        outcomes[status if status in outcomes else "open"] += int(n or 0)
+    labels = await _store_labels(db, store_key, include_archived=True)
+    by_label: Dict[int, Dict[str, int]] = {}
+    rows = await db.execute(
+        select(ChatRequestLabel.label_id, ChatRequest.status, func.count(ChatRequest.id))
+        .join(ChatRequest, ChatRequest.id == ChatRequestLabel.request_id)
+        .where(*in_period)
+        .group_by(ChatRequestLabel.label_id, ChatRequest.status)
+    )
+    for label_id, status, n in rows.all():
+        counts = by_label.setdefault(label_id, {"ordered": 0, "lost": 0, "open": 0})
+        counts["ordered" if status == "ordered" else "lost" if status in LOST_STATUSES else "open"] += int(n or 0)
+    labelled = select(ChatRequestLabel.request_id)
+    lost_without = int(await db.scalar(select(func.count(ChatRequest.id)).where(
+        *in_period, ChatRequest.status.in_(LOST_STATUSES), ChatRequest.id.not_in(labelled))) or 0)
+    labelled_total = int(await db.scalar(select(func.count(ChatRequest.id)).where(*in_period, ChatRequest.id.in_(labelled))) or 0)
+    result = []
+    for lab in labels:
+        counts = by_label.get(lab.id, {"ordered": 0, "lost": 0, "open": 0})
+        total = sum(counts.values())
+        if lab.archived and not total:
+            continue
+        result.append({**serialize_label(lab), **counts, "total": total})
+    result.sort(key=lambda item: (-item["lost"], -item["total"], item["name"]))
+    return {"ok": True, "days": days, "total": sum(outcomes.values()), "outcomes": outcomes,
+            "labels": result, "labelled": labelled_total, "lost_without_label": lost_without}
 
 
 @router.get("/api/chat-requests/team-stats")

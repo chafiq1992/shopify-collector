@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     JSON,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -249,6 +250,32 @@ class ChatRequestEvent(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
 
     user = relationship("User")
+
+
+class ChatLabel(Base):
+    """A reason label agents put on chat requests after talking to the customer (size, price, later...)."""
+
+    __tablename__ = "chat_labels"
+    __table_args__ = (UniqueConstraint("store_key", "key", name="uq_chat_labels_store_key"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    store_key = Column(String(63), nullable=False, index=True)
+    key = Column(String(48), nullable=False)
+    name = Column(String(60), nullable=False)
+    color = Column(String(16), nullable=False, default="slate")
+    position = Column(Integer, nullable=False, default=0)
+    archived = Column(Boolean, nullable=False, default=False)
+    created_by_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ChatRequestLabel(Base):
+    __tablename__ = "chat_request_labels"
+
+    request_id = Column(Integer, ForeignKey("chat_requests.id", ondelete="CASCADE"), primary_key=True)
+    label_id = Column(Integer, ForeignKey("chat_labels.id", ondelete="CASCADE"), primary_key=True, index=True)
+    created_by_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class InventoryReceiptPhoto(Base):

@@ -399,3 +399,72 @@ for _test in (test_ordered_website_chat_closes_its_callback_and_shows_under_orde
     setattr(ChatRequestTests, _test.__name__, _test)
 del _test, test_ordered_website_chat_closes_its_callback_and_shows_under_ordered
 del test_ordered_chat_without_a_callback_is_created_closed_with_its_chat_link, test_public_intake_cannot_mark_a_request_ordered
+
+
+# Reason labels after talking to the customer (added to the shared fixture class).
+async def test_stores_start_with_the_usual_reasons_and_agents_can_add_more(self):
+    async with self.sessions() as db:
+        first = await routes.list_chat_labels(store="irrakids", db=db, user=self.agent)
+    self.assertEqual([l["key"] for l in first["labels"]], ["size", "only_ask", "price", "later", "no_answer"])
+    async with self.sessions() as db:
+        added = await routes.create_chat_label(routes.ChatLabelBody(store="irrakids", name="  Delivery   time "), db=db, user=self.agent)
+        again = await routes.create_chat_label(routes.ChatLabelBody(store="irrakids", name="delivery time"), db=db, user=self.other)
+        arabic = await routes.create_chat_label(routes.ChatLabelBody(store="irrakids", name="التوصيل غالي"), db=db, user=self.agent)
+    self.assertEqual((added["label"]["name"], added["label"]["key"]), ("Delivery time", "delivery_time"))
+    self.assertTrue(again["existing"])
+    self.assertEqual(again["label"]["id"], added["label"]["id"])
+    self.assertEqual(arabic["label"]["key"], "label")
+    async with self.sessions() as db:
+        with self.assertRaises(HTTPException) as caught:
+            await routes.update_chat_label(added["label"]["id"], routes.ChatLabelBody(archived=True), db=db, user=self.agent)
+        self.assertEqual(caught.exception.status_code, 403)
+        await routes.update_chat_label(added["label"]["id"], routes.ChatLabelBody(archived=True), db=db, user=self.admin)
+    async with self.sessions() as db:
+        shown = await routes.list_chat_labels(store="irrakids", db=db, user=self.agent)
+        other_store = await routes.list_chat_labels(store="irranova", db=db, user=self.agent)
+    self.assertNotIn("Delivery time", [l["name"] for l in shown["labels"]])
+    self.assertEqual(len(other_store["labels"]), 5)
+
+
+async def test_labels_on_requests_filter_the_queue_and_explain_lost_customers(self):
+    for phone in ("0611111111", "0622222222", "0633333333", "0644444444"):
+        await self._intake(phone=phone)
+    async with self.sessions() as db:
+        labels = {l["key"]: l["id"] for l in (await routes.list_chat_labels(store="irrakids", db=db, user=self.agent))["labels"]}
+        ids = [r.id for r in (await db.execute(select(ChatRequest).order_by(ChatRequest.id))).scalars()]
+    one, two, three, four = ids
+    result = await self._act(one, "labels", labels=[labels["price"], labels["later"]])
+    self.assertEqual([l["name"] for l in result["request"]["labels"]], ["Price", "Later"])
+    await self._act(one, "not_interested")
+    await self._act(two, "labels", labels=[labels["price"]])
+    await self._act(two, "ordered", order_ref="1001")
+    await self._act(three, "labels", labels=[labels["size"]])
+    await self._act(four, "wrong_number")
+    # Changing the set replaces it, and the history says what changed.
+    await self._act(three, "labels", labels=[labels["size"], labels["no_answer"]])
+    updated = await self._act(three, "labels", labels=[labels["no_answer"]])
+    self.assertEqual([l["key"] for l in updated["request"]["labels"]], ["no_answer"])
+    async with self.sessions() as db:
+        history = await chat_request_history(request_id=three, db=db, user=self.agent)
+    self.assertIn({"added": [], "removed": ["Size"]}, [{k: e["detail"].get(k) for k in ("added", "removed")} for e in history["events"] if e["action"] == "labels"])
+    with self.assertRaises(HTTPException):
+        await self._act(three, "labels", labels=[999999])
+    # The queue filters by reason, across every status, for the whole team.
+    priced = await self._list(user=self.other, scope="mine", level="any", label=labels["price"])
+    self.assertEqual(sorted(r["id"] for r in priced["requests"]), [one, two])
+    lost = await self._list(user=self.other, scope="mine", level="lost")
+    self.assertEqual(sorted(r["id"] for r in lost["requests"]), [one, four])
+    async with self.sessions() as db:
+        report = await routes.chat_request_reasons(store="irrakids", days=30, db=db, user=self.agent)
+    self.assertEqual(report["outcomes"], {"ordered": 1, "not_interested": 1, "wrong_number": 1, "open": 1})
+    rows = {r["key"]: r for r in report["labels"]}
+    self.assertEqual({k: rows["price"][k] for k in ("total", "ordered", "lost", "open")}, {"total": 2, "ordered": 1, "lost": 1, "open": 0})
+    self.assertEqual(rows["no_answer"]["open"], 1)
+    self.assertEqual(report["labels"][0]["key"], "price")  # most lost customers first
+    self.assertEqual((report["lost_without_label"], report["labelled"]), (1, 3))
+
+
+for _test in (test_stores_start_with_the_usual_reasons_and_agents_can_add_more,
+              test_labels_on_requests_filter_the_queue_and_explain_lost_customers):
+    setattr(ChatRequestTests, _test.__name__, _test)
+del _test, test_stores_start_with_the_usual_reasons_and_agents_can_add_more, test_labels_on_requests_filter_the_queue_and_explain_lost_customers
