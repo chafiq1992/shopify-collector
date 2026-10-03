@@ -651,7 +651,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     const moreButton = (
       <button
         type="button"
-        onClick={(ev) => { ev.stopPropagation(); setOrderedFor(null); setMenuFor(r.id); }}
+        onClick={(ev) => { ev.stopPropagation(); setMenuFor(r.id); }}
         className={`${ACTION_BTN} ${ACTION_THEMES.more} w-8 !px-0`}
         title="Reason, note and more actions"
         aria-haspopup="dialog"
