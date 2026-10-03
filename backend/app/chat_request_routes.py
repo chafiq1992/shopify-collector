@@ -657,6 +657,172 @@ async def pull_chat_requests(
     return {"ok": True, "pulled": len(rows)}
 
 
+# ---------- Get more / move requests (mirrors the orders pull) ----------
+
+PULL_SOURCE_UNASSIGNED = "__unassigned__"
+# Admin target meaning "nobody": takes requests off agents and back into the pool.
+PULL_TARGET_UNASSIGNED = "__unassigned__"
+_PULL_LEVELS = ("all", "new", "n1", "n2", "n3", "n4", "enatt")
+_PULL_HARD_CAP = 2000
+
+
+class ChatPullPreviewBody(BaseModel):
+    store: str
+    level: str = "new"
+    # "new"/"all" only: also offer requests another agent already holds. The
+    # call-attempt levels always do, since those requests nearly always have one.
+    include_assigned: bool = False
+    source_agent_id: Optional[str] = None
+    target_agent_id: Optional[str] = None
+
+
+class ChatPullExecuteBody(ChatPullPreviewBody):
+    limit: int = 10  # 0 = every request available
+
+
+async def _resolve_pull_target(db: AsyncSession, user: User, target_agent_id: Optional[str]) -> Tuple[Optional[User], bool]:
+    """(owner the requests go to, whether they are being unassigned instead)."""
+    tid = (target_agent_id or "").strip()
+    if not tid or tid == user.id:
+        return user, False
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="only an admin can move requests to another agent or remove them from agents")
+    if tid == PULL_TARGET_UNASSIGNED:
+        return None, True
+    target = await db.scalar(select(User).where(User.id == tid, User.is_active == True))  # noqa: E712
+    if target is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    return target, False
+
+
+def _pull_pool(store_key: str, body: ChatPullPreviewBody, target: Optional[User], unassign: bool) -> Tuple[List[Any], Optional[Any]]:
+    """Filters for the whole pool, and the extra filter for the chosen source."""
+    level = body.level if body.level in _PULL_LEVELS else "new"
+    filters: List[Any] = [
+        ChatRequest.store_key == store_key,
+        ChatRequest.status.in_(OPEN_STATUSES) if level == "all" else _level_clause(level),
+    ]
+    includes_assigned = unassign or body.include_assigned or level not in ("new", "all")
+    if unassign:
+        filters.append(ChatRequest.assigned_to_id.is_not(None))
+    elif not includes_assigned:
+        filters.append(ChatRequest.assigned_to_id.is_(None))
+    else:
+        # Requests the target already holds are not "available" to them.
+        filters.append(or_(ChatRequest.assigned_to_id.is_(None), ChatRequest.assigned_to_id != target.id))
+
+    source = (body.source_agent_id or "").strip()
+    source_filter = None
+    if source == PULL_SOURCE_UNASSIGNED and not unassign:
+        source_filter = ChatRequest.assigned_to_id.is_(None)
+    elif source and source != PULL_SOURCE_UNASSIGNED and includes_assigned:
+        source_filter = ChatRequest.assigned_to_id == source
+    return filters, source_filter
+
+
+@router.post("/api/chat-requests/pull/preview")
+async def pull_chat_requests_preview(
+    body: ChatPullPreviewBody,
+    db: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
+):
+    store_key = _normalize_store(body.store)
+    target, unassign = await _resolve_pull_target(db, user, body.target_agent_id)
+    filters, source_filter = _pull_pool(store_key, body, target, unassign)
+
+    rows = await db.execute(
+        select(ChatRequest.assigned_to_id, func.count(ChatRequest.id))
+        .where(*filters)
+        .group_by(ChatRequest.assigned_to_id)
+    )
+    per_owner = {owner: int(n or 0) for owner, n in rows.all()}
+    unassigned_count = per_owner.pop(None, 0)
+    pool_total = unassigned_count + sum(per_owner.values())
+
+    source = (body.source_agent_id or "").strip()
+    if source_filter is None:
+        available, assigned_available = pool_total, pool_total - unassigned_count
+    elif source == PULL_SOURCE_UNASSIGNED:
+        available, assigned_available = unassigned_count, 0
+    else:
+        available = assigned_available = per_owner.get(source, 0)
+
+    owners = await _users_by_id(db, per_owner.keys())
+    by_agent = sorted(
+        (
+            {
+                "id": uid,
+                "name": owners[uid].name if uid in owners else None,
+                "email": owners[uid].email if uid in owners else None,
+                "is_active": bool(owners[uid].is_active) if uid in owners else False,
+                "count": n,
+            }
+            for uid, n in per_owner.items()
+        ),
+        key=lambda a: (-a["count"], (a["name"] or a["email"] or "").lower()),
+    )
+    return {
+        "ok": True,
+        "available": available,
+        "pool_total": pool_total,
+        "unassigned_available": unassigned_count,
+        "assigned_available": assigned_available,
+        "by_agent": by_agent,
+        "target_agent_id": target.id if target else None,
+    }
+
+
+@router.post("/api/chat-requests/pull/execute")
+async def pull_chat_requests_execute(
+    body: ChatPullExecuteBody,
+    db: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
+):
+    store_key = _normalize_store(body.store)
+    target, unassign = await _resolve_pull_target(db, user, body.target_agent_id)
+    filters, source_filter = _pull_pool(store_key, body, target, unassign)
+    if source_filter is not None:
+        filters.append(source_filter)
+    requested = int(body.limit or 0)
+    if requested < 0:
+        raise HTTPException(status_code=400, detail="limit must be 0 (all) or more")
+    limit = _PULL_HARD_CAP if requested == 0 else min(requested, _PULL_HARD_CAP)
+
+    rows = (await db.execute(
+        select(ChatRequest)
+        .where(*filters)
+        # New requests first (a customer is waiting for the first call), then
+        # the rest, newest first — matching the queue's order.
+        .order_by((ChatRequest.status == "new").desc(), ChatRequest.created_at.desc(), ChatRequest.id.desc())
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )).scalars().all()
+
+    now = datetime.now(timezone.utc)
+    reassigned = 0
+    for r in rows:
+        previous = r.assigned_to_id
+        if previous:
+            reassigned += 1
+        r.assigned_to_id = target.id if target else None
+        r.updated_at = now
+        if unassign:
+            action, detail = "release", {"previous_agent_id": previous, "via": "pull"}
+        elif previous is None and target.id == user.id:
+            action, detail = "claimed", {"via": "pull"}
+        else:
+            action, detail = "assign", {"previous_agent_id": previous, "agent_id": target.id, "via": "pull"}
+        db.add(ChatRequestEvent(request_id=r.id, user_id=user.id, action=action, detail=detail))
+    await db.commit()
+    return {
+        "ok": True,
+        "pulled": len(rows),
+        "reassigned": reassigned,
+        "target_agent_id": target.id if target else None,
+        "unassigned": unassign,
+    }
+
+
 class ChatActionBody(BaseModel):
     action: str
     labels: Optional[List[int]] = None

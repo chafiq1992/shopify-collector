@@ -332,3 +332,49 @@ export function ModalHeader({ id, icon: Icon, tone = "indigo", title, subtitle, 
     </div>
   );
 }
+
+// One choice in a pull dialog's "Take from" picker: everyone, unassigned, or an agent.
+export function SourceOption({ active, onClick, title, subtitle, count, avatar, disabled, testId }) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      data-testid={testId}
+      onClick={onClick}
+      disabled={disabled}
+      className={`flex items-center gap-2.5 rounded-xl px-3 py-2 text-left transition duration-150 active:scale-[0.98] ${
+        active
+          ? "bg-indigo-50 ring-2 ring-indigo-500"
+          : "bg-white ring-1 ring-inset ring-slate-200 hover:bg-slate-50 hover:ring-slate-300"
+      }`}
+    >
+      {avatar ? (
+        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${active ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}>{avatar}</span>
+      ) : (
+        <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full ring-2 ${active ? "ring-indigo-600" : "ring-slate-300"}`}>
+          {active && <span className="h-2 w-2 rounded-full bg-indigo-600" />}
+        </span>
+      )}
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-semibold text-slate-800">{title}</span>
+        {subtitle && <span className="block truncate text-[11px] text-slate-500">{subtitle}</span>}
+      </span>
+      <span className={`rounded-full px-2 py-0.5 text-xs font-bold tabular-nums ${active ? "bg-indigo-600 text-white" : count > 0 ? "bg-slate-100 text-slate-700" : "bg-slate-50 text-slate-400"}`}>
+        <AnimatedNumber value={count} />
+      </span>
+    </button>
+  );
+}
+
+// "Live" / "Counted 12s ago" under a pull dialog's live count.
+export function PreviewAge({ at, busy, source = "" }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (busy) return <span>Recounting…</span>;
+  const sec = Math.max(0, Math.floor((Date.now() - at) / 1000));
+  return <span>{sec < 3 ? (source ? `Live from ${source}` : "Live") : `Counted ${sec}s ago · auto-refreshes`}</span>;
+}

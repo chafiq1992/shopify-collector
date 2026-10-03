@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
+  ArrowRightLeft,
   Ban,
   BarChart3,
   CalendarCheck,
@@ -20,6 +21,7 @@ import {
   Phone,
   PhoneCall,
   PhoneOff,
+  RefreshCw,
   RotateCcw,
   Search,
   ShoppingBag,
@@ -31,6 +33,7 @@ import {
   Undo2,
   UserMinus,
   UserPlus,
+  Users,
   X,
 } from "lucide-react";
 import { authFetch, authHeaders } from "../lib/auth";
@@ -39,7 +42,7 @@ import { useToasts, ToastStack } from "../components/Toast";
 import { AnimatedNumber, useDepartingList, useFlipList } from "../components/Motion";
 import {
   ACTION_BTN, ACTION_THEMES, BTN, CARD, TONES,
-  KpiCard, SkeletonCards, SkeletonRows, Spinner, TopBar,
+  KpiCard, Modal, ModalHeader, PreviewAge, SkeletonCards, SkeletonRows, SourceOption, Spinner, TopBar,
   initialOf, isInteractiveTarget, timeAgo,
 } from "../components/ConfirmationUi";
 import { copyToClipboard, moroccoInternational } from "../lib/confirmationActions";
@@ -106,12 +109,25 @@ const CHAT_API = {
       body: JSON.stringify(payload),
     }), "Action failed");
   },
-  async pull(store, limit) {
-    return jsonOrThrow(await authFetch(`/api/chat-requests/pull`, {
+  async pullPreview({ store, level, include_assigned, source_agent_id, target_agent_id }) {
+    return jsonOrThrow(await authFetch(`/api/chat-requests/pull/preview`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ store, limit }),
-    }), "Could not take requests");
+      body: JSON.stringify({
+        store, level, include_assigned: !!include_assigned,
+        source_agent_id: source_agent_id || null, target_agent_id: target_agent_id || null,
+      }),
+    }), "Preview failed");
+  },
+  async pullExecute({ store, level, include_assigned, source_agent_id, target_agent_id, limit }) {
+    return jsonOrThrow(await authFetch(`/api/chat-requests/pull/execute`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        store, level, limit, include_assigned: !!include_assigned,
+        source_agent_id: source_agent_id || null, target_agent_id: target_agent_id || null,
+      }),
+    }), "Could not move requests");
   },
   async history(id) {
     return jsonOrThrow(await authFetch(`/api/chat-requests/${encodeURIComponent(id)}/history`, { headers: authHeaders() }), "Failed to load history");
@@ -241,11 +257,12 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   const [menuFor, setMenuFor] = useState(null);
   const [orderedFor, setOrderedFor] = useState(null);
   const [orderRef, setOrderRef] = useState("");
-  const [pullBusy, setPullBusy] = useState(false);
   // Reason labels (size, price, later, other...) chosen in the ⋯ popup.
   const [labels, setLabels] = useState([]);
   const [canManageLabels, setCanManageLabels] = useState(false);
   const [subView, setSubView] = useState(() => { try { return localStorage.getItem(SUBVIEW_STORAGE_KEY) === "reasons" ? "reasons" : "queue"; } catch { return "queue"; } });
+  // Get-more / move dialog: `{ mode, includeAssigned }`, null = closed.
+  const [pullMode, setPullMode] = useState(null);
   const requestIdRef = useRef(0);
   const teamRequestIdRef = useRef(0);
   const searchInputRef = useRef(null);
@@ -343,6 +360,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const tag = (e.target?.tagName || "").toLowerCase();
       if (["input", "textarea", "select"].includes(tag) || e.target?.isContentEditable) return;
+      if (pullMode) return;
       if (e.key === "/") {
         e.preventDefault();
         searchInputRef.current?.focus();
@@ -352,7 +370,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [refreshAll]);
+  }, [refreshAll, pullMode]);
 
   function changeStore(next) {
     if (!next || next === store) return;
@@ -460,29 +478,34 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     pushToast(ok ? `Copied ${local}` : "Clipboard blocked", ok ? "success" : "warn");
   }
 
-  async function takeRequests(limit) {
-    setPullBusy(true);
-    try {
-      const js = await CHAT_API.pull(store, limit);
-      const pulled = Number(js.pulled || 0);
-      if (pulled === 0) {
-        pushToast("No unassigned chat requests left — someone may have just taken them.", "warn", 5000);
-      } else {
-        pushToast(`Took ${pulled} chat request${pulled === 1 ? "" : "s"} into your queue`, "success", 4000);
-      }
-      if (pulled > 0 && (scope !== "mine" || level)) {
-        setScope("mine");
-        setLevel("");
-      } else {
-        load();
-      }
-      loadTeam();
-      onWaitingChanged?.();
-    } catch (e) {
-      pushToast(e?.message || "Could not take requests", "error", 6000);
-    } finally {
-      setPullBusy(false);
+  function openPull(mode, opts = {}) {
+    setPullMode({ mode, includeAssigned: !!opts.includeAssigned });
+  }
+
+  function onPulled(result, summary) {
+    setPullMode(null);
+    const pulled = Number(result.pulled || 0);
+    if (pulled === 0) {
+      pushToast("No requests were left to take — someone may have just taken them.", "warn", 5000);
+    } else {
+      const took = Number(result.reassigned || 0);
+      pushToast(
+        summary?.message
+          || (`Took ${pulled} chat request${pulled === 1 ? "" : "s"} into your queue`
+            + (took ? ` (${took} taken over from another agent)` : "")),
+        "success",
+        4500,
+      );
     }
+    const intoMyQueue = !result.unassigned && (!result.target_agent_id || result.target_agent_id === me.id);
+    if (pulled > 0 && intoMyQueue && (scope !== "mine" || level)) {
+      setScope("mine");
+      setLevel("");
+    } else {
+      load();
+    }
+    loadTeam();
+    onWaitingChanged?.();
   }
 
   function toggleExpanded(id) {
@@ -854,8 +877,8 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
             {waitingNew > 0 ? `${waitingNew} customer${waitingNew === 1 ? " is" : "s are"} waiting for a call.` : "No customer is waiting right now."}
           </div>
           {waitingNew > 0 && (
-            <button type="button" disabled={pullBusy} onClick={() => takeRequests(10)} className={`${BTN.primary} mt-4 h-9`}>
-              {pullBusy ? <Spinner /> : <Sparkles className="h-4 w-4" aria-hidden />} Take new requests
+            <button type="button" onClick={() => openPull("new")} className={`${BTN.primary} mt-4 h-9`}>
+              <Sparkles className="h-4 w-4" aria-hidden /> Get new requests
             </button>
           )}
         </>
@@ -1040,7 +1063,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
               hint={myRank && myRank.of > 1 ? `#${myRank.rank} of ${myRank.of} in team` : null}
             />
           </div>
-          <TakeRequestsCard waiting={waitingNew} busy={pullBusy} onTake={takeRequests} />
+          <GetMoreRequestsCard isAdmin={isAdmin} waiting={waitingNew} onPull={openPull} />
         </section>
 
         {/* Queue */}
@@ -1141,54 +1164,472 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
         </section>
         </>)}
       </main>
+
+      {pullMode && (
+        <ChatPullModal
+          initialMode={pullMode.mode}
+          initialIncludeAssigned={pullMode.includeAssigned}
+          store={store}
+          me={me}
+          isAdmin={isAdmin}
+          team={assignableAgents}
+          onClose={() => setPullMode(null)}
+          onSuccess={onPulled}
+        />
+      )}
     </div>
   );
 }
 
 // ---------- Pieces ----------
 
-const TAKE_AMOUNTS = [5, 10, 25, 50];
+const CHAT_PULL_BUTTONS = [
+  { mode: "n1",    label: "N1",      tone: "amber" },
+  { mode: "n2",    label: "N2",      tone: "orange" },
+  { mode: "n3",    label: "N3",      tone: "rose" },
+  { mode: "n4",    label: "N4",      tone: "red" },
+  { mode: "enatt", label: "En att.", tone: "fuchsia" },
+];
 
-function TakeRequestsCard({ waiting, busy, onTake }) {
+// Same card as "Get more orders" on the Orders tab.
+function GetMoreRequestsCard({ onPull, isAdmin, waiting = 0 }) {
   return (
     <div className={`${CARD} relative overflow-hidden p-4`}>
       <div aria-hidden className="pointer-events-none absolute -right-10 -top-12 h-36 w-36 rounded-full bg-gradient-to-br from-indigo-200/50 to-violet-200/40 blur-2xl" />
       <div className="relative flex items-start gap-3">
         <div className="min-w-0 flex-1">
-          <h2 className="text-sm font-semibold text-slate-900">Get more chat requests</h2>
-          <p className="mt-0.5 text-xs text-slate-500">
-            {waiting > 0
-              ? <><span className="font-semibold text-indigo-700">{waiting}</span> customer{waiting === 1 ? "" : "s"} asked for a chat and nobody has called yet.</>
-              : "Unassigned requests move into your queue so nobody else calls the same customer."}
-          </p>
+          <h2 className="text-sm font-semibold text-slate-900">Get more requests</h2>
+          <p className="mt-0.5 hidden text-xs text-slate-500 sm:block">Pulled requests go to your queue and leave everyone else's queue.</p>
         </div>
       </div>
-      <div className="relative mt-3 grid grid-cols-1">
+      <div className="relative mt-3 grid grid-cols-2 gap-2">
         <button
           type="button"
-          data-testid="take-chat-requests"
-          disabled={busy || waiting === 0}
-          onClick={() => onTake(10)}
+          data-testid="chat-pull-new"
+          onClick={() => onPull("new")}
           className={`${BTN.primary} h-10`}
         >
-          {busy ? <Spinner /> : <Sparkles className="h-4 w-4" aria-hidden />} Take new requests
+          <Sparkles className="h-4 w-4" aria-hidden /> New requests
+          {waiting > 0 && <span className="rounded-full bg-white/25 px-1.5 text-[11px] tabular-nums">{waiting}</span>}
+        </button>
+        <button
+          type="button"
+          data-testid="chat-pull-move"
+          onClick={() => onPull("all", { includeAssigned: true })}
+          className={`${BTN.secondary} h-10`}
+          title={isAdmin ? "Move requests between agents, or take them off an agent" : "Take requests that sit in another agent's queue"}
+        >
+          <ArrowRightLeft className="h-4 w-4 text-indigo-600" aria-hidden /> {isAdmin ? "Move requests" : "From an agent"}
         </button>
       </div>
-      <div className="relative mt-2 flex flex-wrap gap-1.5">
-        {TAKE_AMOUNTS.map((n) => (
+      <div className="cf-scroll-x relative -mx-4 mt-2 flex gap-1.5 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0">
+        {CHAT_PULL_BUTTONS.map((b) => (
           <button
-            key={n}
+            key={b.mode}
             type="button"
-            disabled={busy}
-            onClick={() => onTake(n)}
+            onClick={() => onPull(b.mode)}
             className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-white px-2.5 text-xs font-semibold text-slate-700 ring-1 ring-inset ring-slate-200 hover:bg-slate-50 hover:ring-slate-300 active:scale-[0.96] transition disabled:opacity-50"
-            title={`Take up to ${n} unassigned requests`}
+            title={`Pull ${b.label} requests into your queue`}
           >
-            <span aria-hidden className={`h-2 w-2 rounded-full ${TONES.indigo.dot}`} /> Take {n}
+            <span aria-hidden className={`h-2 w-2 rounded-full ${TONES[b.tone].dot}`} />
+            {b.label}
           </button>
         ))}
       </div>
     </div>
+  );
+}
+
+const CHAT_PULL_MODES = [
+  { mode: "all",   label: "All open",   title: "Get open requests",       tone: "slate",   icon: Inbox },
+  { mode: "new",   label: "New",        title: "Get new requests",        tone: "indigo",  icon: Sparkles },
+  { mode: "n1",    label: "N1",         title: "Get N1 requests",         tone: "amber",   icon: Phone },
+  { mode: "n2",    label: "N2",         title: "Get N2 requests",         tone: "orange",  icon: Phone },
+  { mode: "n3",    label: "N3",         title: "Get N3 requests",         tone: "rose",    icon: Phone },
+  { mode: "n4",    label: "N4",         title: "Get N4 requests",         tone: "red",     icon: Phone },
+  { mode: "enatt", label: "En attente", title: "Get En-attente requests", tone: "fuchsia", icon: Hourglass },
+];
+// Must match PULL_SOURCE_UNASSIGNED / PULL_TARGET_UNASSIGNED in chat_request_routes.py.
+const PULL_UNASSIGNED = "__unassigned__";
+const PULL_REFRESH_MS = 20_000;
+
+function requestsWord(n) {
+  return `request${n === 1 ? "" : "s"}`;
+}
+
+// The chat version of the orders "Get more orders" dialog: pick which requests
+// (level, and whose: unassigned or one agent's), then who gets them. Admins can
+// also send them to "Nobody", which takes them off an agent and back to Unassigned.
+function ChatPullModal({ initialMode = "new", initialIncludeAssigned = false, store, me, isAdmin, team, onClose, onSuccess }) {
+  const [mode, setMode] = useState(initialMode);
+  const cfg = CHAT_PULL_MODES.find((m) => m.mode === mode) || CHAT_PULL_MODES[0];
+  // Call-attempt levels always offer every agent's requests: by then they
+  // nearly always belong to whoever called.
+  const isLevelMode = mode !== "new" && mode !== "all";
+  const [includeAssigned, setIncludeAssigned] = useState(!!initialIncludeAssigned);
+  // Whose requests to take: "" = anyone in the pool, PULL_UNASSIGNED, or an agent id.
+  const [sourceId, setSourceId] = useState("");
+
+  // Where the requests go. Agents always pull into their own queue.
+  const targetOptions = useMemo(() => {
+    const list = [{ id: me.id, name: me.name, email: me.email, isMe: true }];
+    if (isAdmin) {
+      const seen = new Set([me.id]);
+      for (const a of team || []) {
+        if (!a?.id || seen.has(a.id)) continue;
+        seen.add(a.id);
+        list.push({ id: a.id, name: a.name, email: a.email, isMe: false });
+      }
+    }
+    return list;
+  }, [me, isAdmin, team]);
+  const [targetId, setTargetId] = useState(me.id);
+  const removing = isAdmin && targetId === PULL_UNASSIGNED;
+  const target = removing ? null : (targetOptions.find((t) => t.id === targetId) || targetOptions[0]);
+  const targetIsMe = !removing && target.id === me.id;
+
+  const showOwners = removing || isLevelMode || includeAssigned;
+  const effectiveSource = !showOwners ? "" : (removing && sourceId === PULL_UNASSIGNED ? "" : sourceId);
+  const targetParam = removing ? PULL_UNASSIGNED : (targetIsMe ? null : target.id);
+
+  const [preview, setPreview] = useState(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [previewErr, setPreviewErr] = useState(null);
+  const [previewAt, setPreviewAt] = useState(null);
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const [takeAll, setTakeAll] = useState(false);
+  const [amount, setAmount] = useState(10);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const previewReqRef = useRef(0);
+
+  useEffect(() => {
+    const handle = setTimeout(async () => {
+      const reqId = ++previewReqRef.current;
+      setPreviewing(true); setPreviewErr(null);
+      try {
+        const js = await CHAT_API.pullPreview({
+          store, level: mode, include_assigned: includeAssigned,
+          source_agent_id: effectiveSource || null, target_agent_id: targetParam,
+        });
+        if (reqId !== previewReqRef.current) return;
+        setPreview(js);
+        setPreviewAt(Date.now());
+      } catch (e) {
+        if (reqId !== previewReqRef.current) return;
+        setPreviewErr(e?.message || "Preview failed");
+        setPreview(null);
+      } finally {
+        if (reqId === previewReqRef.current) setPreviewing(false);
+      }
+    }, 250);
+    return () => clearTimeout(handle);
+  }, [store, mode, includeAssigned, effectiveSource, targetParam, refreshNonce]);
+
+  // Keep the number live while the dialog stays open.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (!busy && document.visibilityState === "visible") setRefreshNonce((n) => n + 1);
+    }, PULL_REFRESH_MS);
+    return () => clearInterval(t);
+  }, [busy]);
+
+  const available = preview ? Number(preview.available || 0) : null;
+  useEffect(() => {
+    if (available != null && available > 0 && !takeAll && Number(amount) > available) setAmount(available);
+  }, [available, takeAll, amount]);
+  const assignedAvailable = preview ? Number(preview.assigned_available || 0) : 0;
+  const byAgent = preview?.by_agent || [];
+  const sourceAgent = byAgent.find((a) => a.id === effectiveSource) || null;
+  const wanted = takeAll ? available : Math.max(0, Number(amount) || 0);
+  const willPull = available == null ? wanted : Math.min(wanted || 0, available);
+
+  async function submit() {
+    const limit = takeAll ? 0 : Math.max(0, Number(amount) || 0);
+    if (!takeAll && limit <= 0) {
+      setErr("Enter a number greater than 0 (or pick All).");
+      return;
+    }
+    setBusy(true); setErr(null);
+    try {
+      const js = await CHAT_API.pullExecute({
+        store, level: mode, include_assigned: includeAssigned,
+        source_agent_id: effectiveSource || null, target_agent_id: targetParam, limit,
+      });
+      const n = Number(js.pulled || 0);
+      const fromAgent = sourceAgent ? ` from ${agentName(sourceAgent)}` : "";
+      let message = null;
+      if (removing) {
+        message = `Removed ${n} ${requestsWord(n)}${fromAgent || " from agents"} · back in Unassigned`;
+      } else if (!targetIsMe) {
+        message = `Moved ${n} ${requestsWord(n)}${fromAgent} to ${agentName(target)}`;
+      } else if (sourceAgent) {
+        message = `Moved ${n} ${requestsWord(n)}${fromAgent} to your queue`;
+      }
+      onSuccess?.(js, { message });
+    } catch (e) {
+      setErr(e?.message || "Could not move requests");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const presets = [10, 20, 50, 100];
+  const submitDisabled = busy || previewing || !preview || available === 0 || (!takeAll && !(Number(amount) > 0));
+  const moving = removing || !targetIsMe || (!isLevelMode && includeAssigned);
+  const title = removing
+    ? "Remove requests from agents"
+    : moving && !isLevelMode && includeAssigned
+      ? (isAdmin ? "Move requests between agents" : "Take requests from an agent")
+      : cfg.title;
+  const inputCls = "h-10 w-full rounded-xl border-0 bg-white px-3 text-sm ring-1 ring-inset ring-slate-200 placeholder:text-slate-400 focus:ring-2 focus:ring-indigo-500";
+  const count = willPull > 0 ? `${takeAll ? "all " : ""}${willPull} ${requestsWord(willPull)}` : "requests";
+
+  return (
+    <Modal onClose={onClose} busy={busy} labelledBy="chat-pull-title" maxWidth="max-w-lg">
+      <ModalHeader
+        id="chat-pull-title"
+        icon={removing ? UserMinus : moving ? ArrowRightLeft : cfg.icon}
+        tone={removing ? "rose" : cfg.tone}
+        title={title}
+        subtitle={<>Chat requests · store <span className="font-semibold text-slate-700">{store}</span></>}
+        onClose={onClose}
+        busy={busy}
+      />
+
+      <div className="space-y-4 overflow-y-auto px-5 py-4">
+        {/* Which requests */}
+        <div className="cf-scroll-x -mx-5 flex gap-1.5 overflow-x-auto px-5 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0" role="tablist" aria-label="Which requests">
+          {CHAT_PULL_MODES.map((m) => {
+            const active = m.mode === mode;
+            return (
+              <button
+                key={m.mode}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                disabled={busy}
+                onClick={() => { setMode(m.mode); setSourceId(""); }}
+                className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-semibold transition active:scale-[0.96] ${
+                  active ? `${TONES[m.tone].solid} shadow-sm` : "bg-white text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+                }`}
+              >
+                {!active && <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${TONES[m.tone].dot}`} />}
+                {m.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {!isLevelMode && !removing && (
+          <label
+            className={`flex cursor-pointer select-none items-start gap-3 rounded-xl px-3.5 py-3 ring-1 ring-inset transition-colors ${
+              includeAssigned ? "bg-amber-50 ring-amber-200" : "bg-slate-50 ring-slate-200 hover:bg-slate-100"
+            }`}
+          >
+            <input
+              type="checkbox"
+              className="sr-only"
+              checked={includeAssigned}
+              disabled={busy}
+              onChange={(e) => { setIncludeAssigned(e.target.checked); setSourceId(""); }}
+            />
+            <span aria-hidden="true" className={`mt-0.5 h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors duration-200 ${includeAssigned ? "bg-amber-500" : "bg-slate-300"}`}>
+              <span className={`block h-4 w-4 rounded-full bg-white shadow transition-transform duration-200 ${includeAssigned ? "translate-x-4" : "translate-x-0"}`} />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-slate-800">Include requests already assigned to another agent</span>
+              <span className="mt-0.5 block text-xs text-slate-500">
+                {includeAssigned
+                  ? "Pick an agent below to move only their requests. They leave that agent's queue."
+                  : "Off: only requests nobody is working on right now."}
+              </span>
+            </span>
+          </label>
+        )}
+
+        {/* Who currently has them */}
+        {showOwners && (
+          <div className="cf-collapse-in">
+            <div className="mb-2 flex items-center gap-2">
+              <Users className="h-4 w-4 text-slate-400" aria-hidden />
+              <span className="text-xs font-semibold text-slate-700">{removing ? "Remove from" : "Take requests from"}</span>
+              {previewing && preview && <Spinner className="h-3.5 w-3.5 text-slate-400" />}
+            </div>
+            {!preview && previewing ? (
+              <div className="grid grid-cols-2 gap-2">
+                {[0, 1, 2, 3].map((i) => <div key={i} className="cf-shimmer h-12 rounded-xl" />)}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" role="radiogroup" aria-label={removing ? "Remove from" : "Take requests from"}>
+                <SourceOption
+                  testId="chat-source-all"
+                  active={!effectiveSource}
+                  onClick={() => setSourceId("")}
+                  title={removing ? "Every agent" : "Everyone"}
+                  subtitle={removing ? "All assigned requests in this pool" : "Anyone in this pool"}
+                  count={preview?.pool_total ?? preview?.available ?? 0}
+                  disabled={busy}
+                />
+                {!removing && (
+                  <SourceOption
+                    testId="chat-source-unassigned"
+                    active={effectiveSource === PULL_UNASSIGNED}
+                    onClick={() => setSourceId(PULL_UNASSIGNED)}
+                    title="Unassigned"
+                    subtitle="Nobody is working on them"
+                    count={preview?.unassigned_available ?? 0}
+                    disabled={busy}
+                  />
+                )}
+                {byAgent.map((a) => (
+                  <SourceOption
+                    key={a.id}
+                    testId={`chat-source-${a.id}`}
+                    active={effectiveSource === a.id}
+                    onClick={() => setSourceId(a.id)}
+                    title={agentName(a)}
+                    subtitle={`${a.email || ""}${a.is_active === false ? " · inactive" : ""}`}
+                    count={a.count}
+                    avatar={initialOf(agentName(a))}
+                    disabled={busy}
+                  />
+                ))}
+              </div>
+            )}
+            {preview && byAgent.length === 0 && (
+              <div className="mt-2 text-xs text-slate-500">
+                {removing ? "No agent holds requests in this pool right now." : "No other agent holds requests in this pool right now."}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Where they go (admins) */}
+        {isAdmin && (
+          <div>
+            <label className="mb-1.5 block text-xs font-semibold text-slate-700" htmlFor="chat-pull-target">Assign to</label>
+            <select
+              id="chat-pull-target"
+              data-testid="chat-pull-target"
+              value={removing ? PULL_UNASSIGNED : target.id}
+              disabled={busy}
+              onChange={(e) => {
+                const next = e.target.value;
+                setTargetId(next);
+                if (next === effectiveSource) setSourceId("");
+              }}
+              className={inputCls}
+            >
+              {targetOptions.map((t) => (
+                <option key={t.id} value={t.id}>{t.isMe ? `Me (${agentName(t)})` : agentName(t)}</option>
+              ))}
+              <option value={PULL_UNASSIGNED}>Nobody — remove from the agent (back to Unassigned)</option>
+            </select>
+          </div>
+        )}
+
+        {/* Live count */}
+        <div className={`rounded-2xl px-4 py-3 ring-1 ring-inset ${removing ? "bg-rose-50 ring-rose-100" : "bg-gradient-to-br from-indigo-50 to-violet-50 ring-indigo-100"}`}>
+          <div className="flex items-center gap-3">
+            <div className="min-w-0">
+              <div className={`text-xs font-semibold ${removing ? "text-rose-900" : "text-indigo-900"}`}>Available now</div>
+              <div className={`mt-0.5 text-[11px] ${removing ? "text-rose-700/80" : "text-indigo-700/80"}`}>
+                {previewErr ? "Couldn't load the count" : previewAt ? <PreviewAge at={previewAt} busy={previewing} /> : "Counting…"}
+              </div>
+            </div>
+            <div className={`ml-auto text-3xl font-bold leading-none tracking-tight ${removing ? "text-rose-950" : "text-indigo-950"}`} data-testid="chat-pull-available">
+              {available == null ? (previewing ? <Spinner className="h-6 w-6 text-indigo-400" /> : "—") : <AnimatedNumber value={available} />}
+            </div>
+            <button
+              type="button"
+              onClick={() => setRefreshNonce((n) => n + 1)}
+              disabled={previewing || busy}
+              className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/80 text-indigo-600 ring-1 ring-inset ring-indigo-200 hover:bg-white disabled:opacity-60"
+              title="Recount now"
+              aria-label="Recount now"
+            ><RefreshCw className={`h-4 w-4 ${previewing ? "animate-spin" : ""}`} aria-hidden /></button>
+          </div>
+          {!previewing && assignedAvailable > 0 && !removing && (
+            <div className="mt-2 border-t border-indigo-100 pt-2 text-[11px] text-amber-800">
+              {sourceAgent
+                ? <>All {assignedAvailable} belong to <b>{agentName(sourceAgent)}</b> and will leave their queue.</>
+                : <>{assignedAvailable} of these currently belong to another agent and will be taken over.</>}
+            </div>
+          )}
+        </div>
+        {previewErr && (
+          <div className="rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-700 ring-1 ring-inset ring-rose-200">{previewErr}</div>
+        )}
+
+        <div>
+          <div className="mb-1.5 text-xs font-semibold text-slate-700">How many</div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {presets.map((n) => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => { setAmount(n); setTakeAll(false); }}
+                disabled={busy || (available != null && n > available && Number(amount) !== n)}
+                className={`h-9 min-w-[48px] rounded-xl px-3 text-sm font-semibold transition active:scale-[0.96] disabled:opacity-35 ${
+                  !takeAll && Number(amount) === n
+                    ? "bg-indigo-600 text-white shadow-sm"
+                    : "bg-white text-slate-700 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+                }`}
+              >{n}</button>
+            ))}
+            <button
+              type="button"
+              data-testid="chat-pull-all"
+              onClick={() => setTakeAll((p) => !p)}
+              disabled={busy || available === 0}
+              className={`h-9 rounded-xl px-3 text-sm font-semibold transition active:scale-[0.96] disabled:opacity-35 ${
+                takeAll ? "bg-indigo-600 text-white shadow-sm" : "bg-white text-slate-700 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+              }`}
+            >All{available != null ? ` (${available})` : ""}</button>
+            <input
+              type="number"
+              min={1}
+              max={available || 9999}
+              value={takeAll ? (available ?? "") : amount}
+              onChange={(e) => { setAmount(e.target.value); setTakeAll(false); }}
+              disabled={busy || takeAll}
+              aria-label="Number of requests"
+              className="h-9 w-20 rounded-xl border-0 px-3 text-sm ring-1 ring-inset ring-slate-200 focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-50 disabled:text-slate-400"
+            />
+          </div>
+        </div>
+
+        {err && <div className="rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-700 ring-1 ring-inset ring-rose-200">{err}</div>}
+      </div>
+
+      <div className="border-t border-slate-100 bg-slate-50/70 px-5 py-3">
+        <div className="mb-2.5 text-[11px] leading-relaxed text-slate-500">
+          {removing
+            ? "These requests leave the agent's queue and go back to Unassigned, where anyone can take them."
+            : <>Each request belongs to exactly one agent — taken requests leave everyone else's queue
+              {targetIsMe ? " and go to yours." : <> and go to <b>{agentName(target)}</b>.</>}</>}
+        </div>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} disabled={busy} className={`${BTN.secondary} h-10`}>Cancel</button>
+          <button
+            type="button"
+            data-testid="chat-pull-submit"
+            onClick={submit}
+            disabled={submitDisabled}
+            className={`${removing ? "inline-flex items-center justify-center gap-1.5 rounded-xl bg-rose-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50 active:scale-[0.97] transition" : BTN.primary} h-10 px-4`}
+          >
+            {busy ? <><Spinner /> Saving…</> : removing ? (
+              <><UserMinus className="h-4 w-4" aria-hidden /> Remove {count}</>
+            ) : targetIsMe ? (
+              <><Sparkles className="h-4 w-4" aria-hidden /> Take {count}</>
+            ) : (
+              <><ArrowRightLeft className="h-4 w-4" aria-hidden /> Move {count}<span className="hidden sm:inline"> to {agentName(target)}</span></>
+            )}
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
