@@ -400,12 +400,16 @@ async def _record_ordered_chat(db, store_key, phone, body, fields, now):
         row = await db.scalar(select(ChatRequest).where(
             ChatRequest.store_key == store_key, ChatRequest.phone == phone, ChatRequest.status.in_(OPEN_STATUSES),
         ).order_by(ChatRequest.created_at.desc()).limit(1))
-    if row is None:
+    created = row is None
+    if created:
         row = ChatRequest(store_key=store_key, phone=phone, phone_raw=_clean(body.phone, 64), status="ordered",
                           attempts=0, enatt=0, request_count=1, closed_at=now, **fields)
         db.add(row)
         await db.flush()
-    else:
+    action = "ordered"
+    if created is False:
+        # The customer came back to an ordered chat and wrote more: refresh the conversation.
+        action = "chat_updated" if row.status == "ordered" and row.order_ref == fields["order_ref"] else "ordered"
         for key, value in fields.items():
             if value:
                 setattr(row, key, value)
@@ -413,7 +417,7 @@ async def _record_ordered_chat(db, store_key, phone, body, fields, now):
             row.status = "ordered"
             row.closed_at = now
         row.updated_at = now
-    db.add(ChatRequestEvent(request_id=row.id, action="ordered",
+    db.add(ChatRequestEvent(request_id=row.id, action=action,
                             detail={"source": "storefront-ai", "order_ref": fields["order_ref"], "source_id": body.source_id}))
     await db.commit()
     return {"ok": True, "id": row.id, "ordered": True}

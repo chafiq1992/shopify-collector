@@ -373,6 +373,17 @@ async def test_ordered_chat_without_a_callback_is_created_closed_with_its_chat_l
     self.assertEqual((saved.status, saved.order_ref, saved.customer_name, saved.product_title), ('ordered', '7788', 'Sara', 'Boots'))
     self.assertIsNotNone(saved.closed_at)
     self.assertIn('/storefront/chat-view/' + sid, link['url'])
+    # The customer came back and wrote more: same request, longer chat, no second order.
+    later = ChatRequestIntakeBody(**{**body.model_dump(), 'message': body.message + '\n\nCustomer: imta ywsal?', 'source_id': f'storefront:{sid}:order:9'})
+    with patch.dict(os.environ, {'CHAT_INTAKE_SECRET': 'shared-test-key'}):
+        async with self.sessions() as db:
+            again = await routes.integration_chat_request(later, request, db)
+        async with self.sessions() as db:
+            saved = await db.get(ChatRequest, created['id'])
+            actions = (await db.execute(select(ChatRequestEvent.action).where(ChatRequestEvent.request_id == created['id']))).scalars().all()
+    self.assertEqual(again['id'], created['id'])
+    self.assertTrue(saved.message.endswith('imta ywsal?'))
+    self.assertEqual(sorted(actions), ['chat_updated', 'ordered'])
 
 
 async def test_public_intake_cannot_mark_a_request_ordered(self):

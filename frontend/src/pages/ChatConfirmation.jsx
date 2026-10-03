@@ -1214,6 +1214,7 @@ const HISTORY_LABELS = {
   undo_call: (d) => `Undid a call attempt · now N${d.attempt ?? 0}`,
   enatt: (d) => `En attente · EA${d.enatt ?? ""}`,
   ordered: (d) => `Ordered${d.order_ref ? ` · ${d.order_ref}` : ""}`,
+  chat_updated: () => "Customer came back and wrote more in the website chat",
   not_interested: () => "Closed · not interested",
   wrong_number: () => "Closed · wrong number",
   reopen: () => "Reopened",
