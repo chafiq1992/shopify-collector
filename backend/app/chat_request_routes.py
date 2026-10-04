@@ -484,7 +484,9 @@ def _level_clause(level: str):
         return ChatRequest.status.in_(LOST_STATUSES)
     if level == "any":
         return ChatRequest.id.is_not(None)
-    return ChatRequest.status.in_(OPEN_STATUSES)
+    # The main list also keeps today's orders (shown in green), so the team sees what ended well.
+    today, _ = _today_bounds_utc()
+    return or_(ChatRequest.status.in_(OPEN_STATUSES), and_(ChatRequest.status == "ordered", ChatRequest.closed_at >= today))
 
 
 def _scope_clause(scope: str, user: User):

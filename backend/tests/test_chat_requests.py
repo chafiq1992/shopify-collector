@@ -384,7 +384,7 @@ async def test_ordered_website_chat_closes_its_callback_and_shows_under_ordered(
     listed = await self._list(user=self.other, scope='mine', level='ordered')
     self.assertEqual([r['id'] for r in listed['requests']], [lead['id']])
     self.assertEqual(listed['level_counts']['ordered'], 1)
-    self.assertEqual((await self._list(level=None))['total'], 0)
+    self.assertEqual([r['status'] for r in (await self._list(level=None))['requests']], ['ordered'])  # kept in green today
 
 
 async def test_ordered_chat_without_a_callback_is_created_closed_with_its_chat_link(self):
@@ -529,3 +529,29 @@ async def test_label_pills_count_requests_in_the_current_view(self):
 
 setattr(ChatRequestTests, "test_label_pills_count_requests_in_the_current_view", test_label_pills_count_requests_in_the_current_view)
 del test_label_pills_count_requests_in_the_current_view
+
+
+
+# Today's orders stay in the main list, in green (added to the shared fixture class).
+async def test_the_main_list_keeps_todays_orders_but_not_older_ones_or_other_closed_requests(self):
+    from datetime import datetime, timedelta, timezone
+    for phone in ("0611111111", "0622222222", "0633333333", "0644444444"):
+        await self._intake(phone=phone)
+    async with self.sessions() as session:
+        one, two, three, four = [r.id for r in (await session.execute(select(ChatRequest).order_by(ChatRequest.id))).scalars()]
+    await self._act(one, "ordered", order_ref="1001")
+    await self._act(two, "ordered", order_ref="1002")
+    await self._act(three, "not_interested")
+    async with self.sessions() as session:
+        old = await session.get(ChatRequest, two)
+        old.closed_at = datetime.now(timezone.utc) - timedelta(days=2)
+        await session.commit()
+    listed = await self._list(level=None)
+    self.assertEqual(sorted(r["id"] for r in listed["requests"]), [one, four])
+    self.assertEqual({r["id"]: r["status"] for r in listed["requests"]}[one], "ordered")
+    self.assertEqual(listed["level_counts"]["total"], 1)  # the open count is still only the open requests
+
+
+setattr(ChatRequestTests, test_the_main_list_keeps_todays_orders_but_not_older_ones_or_other_closed_requests.__name__,
+        test_the_main_list_keeps_todays_orders_but_not_older_ones_or_other_closed_requests)
+del test_the_main_list_keeps_todays_orders_but_not_older_ones_or_other_closed_requests

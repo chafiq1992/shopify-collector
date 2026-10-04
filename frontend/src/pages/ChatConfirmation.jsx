@@ -54,7 +54,7 @@ import ChatCreateOrderModal from "../components/ChatCreateOrderModal";
 const PER_PAGE = 50;
 
 const CHAT_LEVELS = [
-  { key: "",       label: "All open",   tone: "slate",   count: "total" },
+  { key: "",       label: "All open",   tone: "slate",   count: "total", title: "Open requests, plus today's orders in green" },
   { key: "new",    label: "New",        tone: "indigo",  count: "new" },
   { key: "n1",     label: "N1",         tone: "amber",   count: "n1" },
   { key: "n2",     label: "N2",         tone: "orange",  count: "n2" },
@@ -216,6 +216,11 @@ function agentName(user) {
   return user.name || String(user.email || "").split("@")[0] || "agent";
 }
 
+function orderedToday(r) {
+  if (r.status !== "ordered" || !r.closed_at) return false;
+  return new Date(r.closed_at).toDateString() === new Date().toDateString();
+}
+
 function matchesView(r, { scope, level, meId, labelId }) {
   if (labelId && !(r.labels || []).some((l) => l.id === labelId)) return false;
   if (level === "ordered") return r.status === "ordered";
@@ -224,7 +229,8 @@ function matchesView(r, { scope, level, meId, labelId }) {
   const closed = CLOSED.has(r.status);
   if (level === "closed") return CLOSED_VIEW.has(r.status);
   if (level === "cancelled") return r.status === "cancelled";
-  if (closed) return false;
+  // The main list keeps today's orders, in green; other closed requests leave it.
+  if (closed) return !level && orderedToday(r);
   if (level === "new") return r.status === "new";
   if (level === "enatt") return r.status === "enatt";
   if (/^n[1-4]$/.test(level)) return r.status === "calling" && Number(r.attempts) === Number(level.slice(1));
@@ -611,9 +617,15 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
 
   function renderStatus(r) {
     const chips = [];
-    if (CLOSED.has(r.status)) {
+    if (r.status === "ordered") {
+      chips.push(
+        <span key="outcome" className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-semibold text-white shadow-sm">
+          <Check className="h-3 w-3" aria-hidden />Ordered{r.order_ref ? ` · ${r.order_ref}` : ""}
+        </span>,
+      );
+    } else if (CLOSED.has(r.status)) {
       const o = OUTCOMES[r.status];
-      chips.push(chip(`${o.label}${(r.status === "ordered" || r.status === "cancelled") && r.order_ref ? ` · ${r.order_ref}` : ""}`, o.tone, "outcome"));
+      chips.push(chip(`${o.label}${r.status === "cancelled" && r.order_ref ? ` · ${r.order_ref}` : ""}`, o.tone, "outcome"));
     } else if (r.status === "new") {
       chips.push(chip("New", "indigo", "new"));
     }
@@ -764,10 +776,10 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
       <div
         key={r.id}
         data-flip-key={r.id}
-        className={`relative p-3.5 transition-colors ${leaving ? "cf-leave" : ""} ${isOpen || pickerOpen ? "bg-indigo-50/60" : "bg-white"}`}
+        className={`relative p-3.5 transition-colors ${leaving ? "cf-leave" : ""} ${isOpen || pickerOpen ? "bg-indigo-50/60" : r.status === "ordered" ? "bg-emerald-50/80" : "bg-white"}`}
         onClick={(e) => { if (!leaving && !isInteractiveTarget(e)) toggleExpanded(r.id); }}
       >
-        {(isOpen || pickerOpen) && <span aria-hidden className="absolute left-0 inset-y-0 w-1 bg-indigo-500" />}
+        {(isOpen || pickerOpen || r.status === "ordered") && <span aria-hidden className={`absolute left-0 inset-y-0 w-1 ${isOpen || pickerOpen ? "bg-indigo-500" : "bg-emerald-500"}`} />}
         <div className="flex items-center gap-2.5">
           <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600 ring-1 ring-inset ring-indigo-200">
             <MessageCircle className="h-3.5 w-3.5" aria-hidden />
@@ -798,15 +810,16 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     const isOpen = expanded.has(r.id);
     const pickerOpen = createOrderFor?.id === r.id;
     const active = isOpen || pickerOpen;
-    const rowBg = active ? "bg-indigo-50/70" : "bg-white";
+    const ordered = r.status === "ordered";
+    const rowBg = active ? "bg-indigo-50/70" : ordered ? "bg-emerald-50/80" : "bg-white";
     return (
       <React.Fragment key={r.id}>
         <tr
           data-flip-key={r.id}
-          className={`group border-t border-slate-100 cursor-pointer transition-colors ${rowBg} ${active ? "" : "hover:bg-slate-50/80"} ${leaving ? "cf-leave" : ""}`}
+          className={`group border-t border-slate-100 cursor-pointer transition-colors ${rowBg} ${active ? "" : ordered ? "hover:bg-emerald-50" : "hover:bg-slate-50/80"} ${leaving ? "cf-leave" : ""}`}
           onClick={(e) => { if (!leaving && !isInteractiveTarget(e)) toggleExpanded(r.id); }}
         >
-          <td className={`relative px-4 py-3 whitespace-nowrap ${active ? "shadow-[inset_3px_0_0_rgb(99_102_241)]" : ""}`}>
+          <td className={`relative px-4 py-3 whitespace-nowrap ${active ? "shadow-[inset_3px_0_0_rgb(99_102_241)]" : ordered ? "shadow-[inset_3px_0_0_rgb(16_185_129)]" : ""}`}>
             <div className="font-semibold text-slate-900">#{r.id}</div>
             <div className="text-[11px] text-slate-400" title={r.created_at ? new Date(r.created_at).toLocaleString() : ""}>{timeAgo(r.created_at)}</div>
           </td>
