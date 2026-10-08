@@ -24,6 +24,7 @@ PROTECTED_GETS = [
     "/api/chat-requests?store=irrakids",
     "/api/chat-requests/summary?store=irrakids",
     "/api/chat-requests/team-stats",
+    "/api/agent/web-confirmation/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 ]
 
 
@@ -70,6 +71,8 @@ def _no_shopify(monkeypatch):
         return (None, None, None)
 
     monkeypatch.setattr(main, "resolve_store_settings_effective", _unconfigured)
+    # Chat viewer links are signed with the shared key the chat backend checks.
+    monkeypatch.setenv("CHAT_INTAKE_SECRET", "route-auth-test-key")
 
 
 @pytest.mark.parametrize("path", PROTECTED_GETS)

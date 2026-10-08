@@ -15,6 +15,7 @@ Provides:
   - POST /api/chat-requests/{id}/action       -> call / enatt / close / reopen / claim / note ...
   - GET  /api/chat-requests/{id}/history      -> audit trail of one request
   - GET  /api/chat-requests/{id}/conversation -> signed link to the read-only website chat
+  - GET  /api/agent/web-confirmation/{session}  -> the same link for a COD order confirmed in a store chat
   - GET  /api/chat-requests/team-stats        -> per-agent calls / orders today
   - GET/POST /api/chat-labels, PATCH /api/chat-labels/{id} -> reason labels (size, price, later...)
   - GET  /api/chat-requests/reasons           -> outcomes by reason label over a period
@@ -1073,6 +1074,15 @@ async def chat_request_conversation(
             url, expires = chat_view_url(match[1])
             return {"ok": True, "url": url, "expires_at": expires}
     raise HTTPException(status_code=404, detail="This request has no website chat")
+
+
+@router.get("/api/agent/web-confirmation/{session_id}")
+async def order_confirmation_chat(session_id: str, user: User = Depends(get_current_user)):
+    """The order confirmation chat of a COD form order (its id is on the Shopify order), read-only."""
+    if not re.fullmatch(r"[a-f0-9]{32}", session_id or ""):
+        raise HTTPException(status_code=404, detail="chat not found")
+    url, expires = chat_view_url(session_id)
+    return {"ok": True, "url": url, "expires_at": expires}
 
 
 # ---------- Reason labels ----------

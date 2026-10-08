@@ -12,6 +12,8 @@ import {
   Hourglass,
   Inbox,
   MessageCircleOff,
+  MessageCircleReply,
+  ExternalLink,
   Minus,
   Package,
   Pencil,
@@ -129,6 +131,14 @@ const API = {
     const qs = new URLSearchParams({ store });
     const res = await authFetch(`/api/agent/team-stats?${qs}`, { headers: authHeaders() });
     if (!res.ok) throw new Error("Failed to load team stats");
+    return res.json();
+  },
+  async webConfirmationChat(sessionId) {
+    const res = await authFetch(`/api/agent/web-confirmation/${encodeURIComponent(sessionId)}`, { headers: authHeaders() });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Failed to load the chat" }));
+      throw new Error(js.detail || `Failed to load the chat (${res.status})`);
+    }
     return res.json();
   },
   async customerOrders(store, customerId) {
@@ -1191,6 +1201,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
           ) : (
             <span className="text-[15px] font-bold">{label}</span>
           )}
+          {o.web_confirmation && <WebChatBadge />}
           <span className="text-[11px] text-slate-400" title={o.created_at ? new Date(o.created_at).toLocaleString() : ""}>{timeAgo(o.created_at)}</span>
           <span className="ml-auto whitespace-nowrap text-[15px] font-bold tabular-nums text-slate-900">
             {o.total_price} <span className="text-[11px] font-medium text-slate-500">{o.currency}</span>
@@ -1266,6 +1277,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
             ) : (
               <span className="font-semibold">{label}</span>
             )}
+            {o.web_confirmation && <span className="ml-1.5 align-middle"><WebChatBadge compact /></span>}
             <div className="text-[11px] text-slate-400" title={o.created_at ? new Date(o.created_at).toLocaleString() : ""}>
               {timeAgo(o.created_at)}
             </div>
@@ -2619,6 +2631,60 @@ function StatusBadge({ kind, value }) {
   );
 }
 
+// COD form orders confirmed in the store's own chat right after the purchase (the confirmation
+// flow's template is answered there instead of WhatsApp). Other orders show nothing new.
+function WebChatBadge({ compact = false }) {
+  return (
+    <span
+      title="Website confirmation flow: confirmed in the store's chat right after the COD form"
+      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200"
+    >
+      <MessageCircleReply className="h-3 w-3" aria-hidden />
+      {compact ? <span className="sr-only">Website confirmation chat</span> : "Web chat"}
+    </span>
+  );
+}
+
+function OrderConfirmationChat({ sessionId }) {
+  const [view, setView] = useState({ loading: true });
+  useEffect(() => {
+    let cancelled = false;
+    setView({ loading: true });
+    API.webConfirmationChat(sessionId)
+      .then((js) => { if (!cancelled) setView({ url: js && /^https:\/\//.test(js.url || "") ? js.url : null }); })
+      .catch((e) => { if (!cancelled) setView({ error: e?.message || "Failed to load the chat" }); });
+    return () => { cancelled = true; };
+  }, [sessionId]);
+  return (
+    <div className="bg-white border border-emerald-200 rounded-2xl p-4 shadow-sm">
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <MessageCircleReply size={15} className="text-emerald-600" aria-hidden />
+        <span className="text-[11px] uppercase tracking-wider font-semibold text-emerald-700">Website confirmation chat</span>
+        <span className="text-xs text-gray-500">The confirmation flow and the customer's answers, as they saw them on the store.</span>
+      </div>
+      {view.loading ? (
+        <div className="flex h-24 items-center justify-center"><Spinner /></div>
+      ) : view.url ? (
+        <div className="space-y-1.5">
+          <iframe
+            src={view.url}
+            title="Website confirmation chat"
+            className="h-[520px] w-full rounded-xl bg-[#efeae2] ring-1 ring-inset ring-slate-200"
+            sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+            referrerPolicy="no-referrer"
+            loading="lazy"
+          />
+          <a href={view.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-700 hover:underline">
+            <ExternalLink className="h-3 w-3" aria-hidden /> Open the chat in a new tab
+          </a>
+        </div>
+      ) : (
+        <p className="text-xs text-rose-600">{view.error || "The chat is unavailable."}</p>
+      )}
+    </div>
+  );
+}
+
 function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
   const notify = onToast || (() => {});
   const [editOpen, setEditOpen] = useState(false);
@@ -2714,6 +2780,8 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
           Edit order
         </button>
       </div>
+
+      {order.web_confirmation && <OrderConfirmationChat sessionId={order.web_confirmation.session_id} />}
 
       {/* Customer & shipping  +  Add note */}
       <div className="grid grid-cols-1 md:grid-cols-5 gap-3">

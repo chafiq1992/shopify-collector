@@ -722,6 +722,7 @@ createdAt
 cancelledAt
 tags
 note
+customAttributes { key value }
 displayFinancialStatus
 displayFulfillmentStatus
 currentTotalPriceSet { shopMoney { amount currencyCode } }
@@ -795,6 +796,20 @@ def _gather_phone(node: Dict[str, Any]) -> str:
     )
 
 
+# Set by the Chattbase COD form when the order was confirmed in a chat on the store (whatsapp-last
+# backend/storefront_confirmation.py); the value is that chat's session id.
+WEB_CONFIRMATION_ATTRIBUTE = "Chattbase confirmation"
+
+
+def _web_confirmation(node: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    for attr in node.get("customAttributes") or []:
+        if isinstance(attr, dict) and str(attr.get("key") or "").strip() == WEB_CONFIRMATION_ATTRIBUTE:
+            value = str(attr.get("value") or "").strip()
+            if re.fullmatch(r"[a-f0-9]{32}", value):
+                return {"session_id": value}
+    return None
+
+
 def _money(v: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     m = ((v or {}).get("shopMoney") or {})
     return {"amount": m.get("amount") or "0", "currency": m.get("currencyCode") or ""}
@@ -847,6 +862,7 @@ def _flatten_order(node: Dict[str, Any]) -> Dict[str, Any]:
         "cancelled_at": node.get("cancelledAt"),
         "tags": list(node.get("tags") or []),
         "note": node.get("note") or "",
+        "web_confirmation": _web_confirmation(node),
         "financial_status": node.get("displayFinancialStatus") or "",
         "fulfillment_status": node.get("displayFulfillmentStatus") or "",
         "customer_name": (shipping.get("name") or cust.get("displayName") or "").strip(),
