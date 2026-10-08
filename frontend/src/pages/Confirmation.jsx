@@ -141,8 +141,9 @@ const API = {
     }
     return res.json();
   },
-  async customerOrders(store, customerId) {
+  async customerOrders(store, customerId, after = null) {
     const qs = new URLSearchParams({ store, customer_id: customerId });
+    if (after) qs.set("after", after);
     const res = await authFetch(`/api/agent/customer-orders?${qs}`, { headers: authHeaders() });
     if (!res.ok) {
       const js = await res.json().catch(() => ({ detail: "Failed to load customer history" }));
@@ -1389,7 +1390,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
         onViewChange={onViewChange}
         chatBadge={chatBadge}
       />
-      <main className={`mx-auto w-full max-w-[1600px] px-3 sm:px-5 lg:px-8 py-4 sm:py-6 space-y-4 sm:space-y-5 ${selected.size > 0 ? "pb-28" : ""}`}>
+      <main className={`mx-auto w-full max-w-[1440px] px-3 sm:px-5 lg:px-8 py-4 sm:py-6 space-y-4 sm:space-y-5 ${selected.size > 0 ? "pb-28" : ""}`}>
         {/* Global Shopify search */}
         <GlobalSearch
           query={searchQuery}
@@ -1500,7 +1501,16 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
               (including a zoomed-in desktop) the scroll-free card list takes over so
               the action buttons can never end up clipped. */}
           <div className="hidden xl:block overflow-x-auto">
-            <table className="min-w-full text-sm">
+            <table className="cf-order-queue-table w-full table-fixed text-xs">
+              <colgroup>
+                <col className="w-9" />
+                <col className="w-[100px]" />
+                <col />
+                <col className="w-[155px]" />
+                <col className="w-[100px]" />
+                <col className="w-[210px]" />
+                <col className="w-[285px]" />
+              </colgroup>
               <thead className="border-t border-slate-100 bg-slate-50/70 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                 <tr>
                   <th className="w-10 pl-4 pr-1 py-2.5">
@@ -2656,7 +2666,7 @@ function OrderConfirmationChat({ sessionId }) {
     return () => { cancelled = true; };
   }, [sessionId]);
   return (
-    <div className="bg-white border border-emerald-200 rounded-2xl p-4 shadow-sm">
+    <div className="cf-order-chat min-w-0 w-full max-w-[420px] self-start bg-white border border-emerald-200 rounded-2xl p-3 shadow-sm">
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <MessageCircleReply size={15} className="text-emerald-600" aria-hidden />
         <span className="text-[11px] uppercase tracking-wider font-semibold text-emerald-700">Website confirmation chat</span>
@@ -2669,7 +2679,7 @@ function OrderConfirmationChat({ sessionId }) {
           <iframe
             src={view.url}
             title="Website confirmation chat"
-            className="h-[520px] w-full rounded-xl bg-[#efeae2] ring-1 ring-inset ring-slate-200"
+            className="block h-[520px] w-full rounded-xl bg-[#efeae2] ring-1 ring-inset ring-slate-200"
             sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
             referrerPolicy="no-referrer"
             loading="lazy"
@@ -2695,6 +2705,11 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
   const [history, setHistory] = useState(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null);
+  const [historyMoreLoading, setHistoryMoreLoading] = useState(false);
+  const [historyMoreError, setHistoryMoreError] = useState(null);
+  const historyRequest = useRef({ key: "", busy: false });
+  const historyKey = `${store}:${order?.customer_id || ""}`;
+  historyRequest.current.key = historyKey;
 
   const labelRef = useRef(null);
   const [labelBusy, setLabelBusy] = useState(false);
@@ -2727,6 +2742,12 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
   useEffect(() => {
     let cancelled = false;
     const cid = order?.customer_id;
+    setHistory(null);
+    setHistoryError(null);
+    setHistoryMoreError(null);
+    setHistoryMoreLoading(false);
+    historyRequest.current = { key: historyKey, busy: false };
+    setHistoryLoading(false);
     if (!cid) { setHistory({ orders: [], total_orders: 0 }); return; }
     setHistoryLoading(true); setHistoryError(null);
     (async () => {
@@ -2741,6 +2762,31 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
     })();
     return () => { cancelled = true; };
   }, [order?.customer_id, store]);
+
+  async function loadOlderOrders() {
+    const cursor = history?.page_info?.end_cursor;
+    if (!cursor || !history?.page_info?.has_next_page || historyRequest.current.busy) return;
+    const key = historyKey;
+    const request = historyRequest.current;
+    request.busy = true;
+    setHistoryMoreLoading(true);
+    setHistoryMoreError(null);
+    try {
+      const next = await API.customerOrders(store, order.customer_id, cursor);
+      if (historyRequest.current !== request || historyRequest.current.key !== key) return;
+      setHistory((previous) => {
+        const seen = new Set((previous?.orders || []).map((item) => item.id));
+        return { ...next, orders: [...(previous?.orders || []), ...(next.orders || []).filter((item) => !seen.has(item.id))] };
+      });
+    } catch (error) {
+      if (historyRequest.current === request && historyRequest.current.key === key) setHistoryMoreError(error?.message || "Failed to load older orders");
+    } finally {
+      if (historyRequest.current === request && historyRequest.current.key === key) {
+        historyRequest.current.busy = false;
+        setHistoryMoreLoading(false);
+      }
+    }
+  }
 
   async function handleAddNote() {
     const text = (noteText || "").trim();
@@ -2763,7 +2809,7 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
   const initial = (order.customer_name || "?").trim().charAt(0).toUpperCase() || "?";
 
   return (
-    <div className="space-y-4">
+    <div className="cf-order-details space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-indigo-200 bg-gradient-to-r from-indigo-50 to-white px-4 py-3">
         <div>
           <div className="text-sm font-semibold text-gray-900">Order details</div>
@@ -2781,169 +2827,190 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
         </button>
       </div>
 
-      {order.web_confirmation && <OrderConfirmationChat sessionId={order.web_confirmation.session_id} />}
-
-      {/* Customer & shipping  +  Add note */}
-      <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
-        <div className="md:col-span-3 bg-white border border-gray-200 rounded-2xl p-4 shadow-sm">
-          <div className="flex items-center gap-2 mb-3">
-            <span className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600">👤 Customer & shipping</span>
-          </div>
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-full bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center shrink-0">
-              {initial}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-semibold leading-tight">{order.customer_name || "—"}</div>
-              <div className="text-xs font-mono text-gray-600 mt-0.5">{order.phone || order.customer_phone || "—"}</div>
-            </div>
-          </div>
-          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
-            <div>
-              <div className="text-[10px] uppercase tracking-wide text-gray-500">Address</div>
-              <div className="text-gray-800">
-                {order.shipping_address1 || "—"}
-                {order.shipping_address2 ? `, ${order.shipping_address2}` : ""}
+      <div className={`cf-order-details-layout ${order.web_confirmation ? "cf-order-details-with-chat" : ""}`}>
+        {order.web_confirmation && <OrderConfirmationChat sessionId={order.web_confirmation.session_id} />}
+        <div className="cf-order-details-panels">
+          <div className="cf-order-details-column">
+            <div className="cf-order-shipping min-w-0 bg-white border border-gray-200 rounded-2xl p-3 shadow-sm">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600">👤 Customer & shipping</span>
               </div>
-            </div>
-            <div>
-              <div className="text-[10px] uppercase tracking-wide text-gray-500">City</div>
-              <div className="text-gray-800 font-medium">
-                {order.shipping_city || "—"}
-                {order.shipping_zip ? <span className="ml-1 text-gray-500">· {order.shipping_zip}</span> : null}
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-full bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center shrink-0">
+                  {initial}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-semibold leading-tight">{order.customer_name || "—"}</div>
+                  <div className="text-xs font-mono text-gray-600 mt-0.5">{order.phone || order.customer_phone || "—"}</div>
+                </div>
               </div>
-            </div>
-            {order.shipping_country && (
-              <div>
-                <div className="text-[10px] uppercase tracking-wide text-gray-500">Country</div>
-                <div className="text-gray-800">{order.shipping_country}</div>
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-gray-500">Address</div>
+                  <div className="text-gray-800">
+                    {order.shipping_address1 || "—"}
+                    {order.shipping_address2 ? `, ${order.shipping_address2}` : ""}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-gray-500">City</div>
+                  <div className="text-gray-800 font-medium">
+                    {order.shipping_city || "—"}
+                    {order.shipping_zip ? <span className="ml-1 text-gray-500">· {order.shipping_zip}</span> : null}
+                  </div>
+                </div>
+                {order.shipping_country && (
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wide text-gray-500">Country</div>
+                    <div className="text-gray-800">{order.shipping_country}</div>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-          {order.note && (
-            <div className="mt-3 text-xs text-gray-700 bg-amber-50 border border-amber-200 rounded-lg p-2 whitespace-pre-wrap">
-              <div className="text-[10px] uppercase tracking-wide text-amber-700 font-semibold mb-1">📌 Existing note</div>
-              {order.note}
+              {order.note && (
+                <div className="mt-3 text-xs text-gray-700 bg-amber-50 border border-amber-200 rounded-lg p-2 whitespace-pre-wrap">
+                  <div className="text-[10px] uppercase tracking-wide text-amber-700 font-semibold mb-1">📌 Existing note</div>
+                  {order.note}
+                </div>
+              )}
             </div>
-          )}
-        </div>
 
-        <div className="md:col-span-2 bg-white border border-gray-200 rounded-2xl p-4 shadow-sm">
-          <div className="flex items-center gap-2 mb-3">
-            <span className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600">📝 Add note to Shopify</span>
-          </div>
-          <textarea
-            value={noteText}
-            onChange={(e) => setNoteText(e.target.value)}
-            placeholder="e.g. customer asked to call back tomorrow morning"
-            rows={3}
-            className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 resize-y focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400"
-          />
-          <div className="flex items-center gap-2 mt-2">
-            <button
-              type="button"
-              onClick={handleAddNote}
-              disabled={noteBusy || !noteText.trim()}
-              className={`text-xs px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-50 shadow-sm ${BTN_TAP}`}
-            >{noteBusy ? (
-              <span className="inline-flex items-center gap-1.5">
-                <span className="inline-block w-3 h-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
-                Adding…
-              </span>
-            ) : "Add note"}</button>
-            {noteMsg && <span className="text-[11px] text-gray-600 truncate" title={noteMsg}>{noteMsg}</span>}
-          </div>
-          <div className="text-[11px] text-gray-500 mt-1.5">Appends to the order note (existing notes preserved).</div>
-        </div>
-      </div>
-
-      {/* Customer order history */}
-      <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm">
-        <div className="flex items-center mb-3">
-          <span className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600">🕓 Customer history</span>
-          {history?.total_orders > 0 && (
-            <span className="ml-2 text-[11px] text-gray-500">
-              {history.total_orders} total order{history.total_orders === 1 ? "" : "s"}
-            </span>
-          )}
-        </div>
-        {historyLoading && <div className="text-xs text-gray-500">Loading customer orders…</div>}
-        {historyError && <div className="text-xs text-rose-700">{historyError}</div>}
-        {!historyLoading && !historyError && history && (
-          (history.orders || []).length === 0 ? (
-            <div className="text-xs text-gray-500">No previous orders.</div>
-          ) : (
-            <div className="overflow-auto rounded-lg border border-gray-100">
-              <table className="min-w-full text-xs">
-                <thead className="bg-gray-50 text-left text-[10px] uppercase tracking-wide text-gray-500">
-                  <tr>
-                    <th className="px-3 py-2">Order</th>
-                    <th className="px-3 py-2">Date</th>
-                    <th className="px-3 py-2">Fulfillment</th>
-                    <th className="px-3 py-2">Payment</th>
-                    <th className="px-3 py-2">Status</th>
-                    <th className="px-3 py-2 text-right">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(history.orders || []).map((h, idx) => {
-                    const url = shopifyOrderUrl({ id: h.id, legacy_id: h.legacy_id }, shopDomain);
-                    const isCancelled = !!h.cancelled_at;
-                    const isCurrent = h.id === order.id;
-                    const zebra = idx % 2 === 1 ? "bg-gray-50/60" : "bg-white";
-                    return (
-                      <tr key={h.id} className={`border-t border-gray-100 ${isCurrent ? "bg-indigo-50/70" : zebra}`}>
-                        <td className="px-3 py-2 font-medium whitespace-nowrap">
-                          {url ? (
-                            <a href={url} target="_blank" rel="noopener noreferrer" className="text-indigo-700 hover:underline">{h.name || `#${h.number}`}</a>
-                          ) : (h.name || `#${h.number}`)}
-                          {isCurrent && <span className="ml-1 text-[10px] text-indigo-700 font-semibold">(current)</span>}
-                        </td>
-                        <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{h.created_at ? new Date(h.created_at).toLocaleDateString() : ""}</td>
-                        <td className="px-3 py-2"><StatusBadge kind="fulfillment" value={h.fulfillment_status} /></td>
-                        <td className="px-3 py-2"><StatusBadge kind="financial" value={h.financial_status} /></td>
-                        <td className="px-3 py-2">
-                          {isCancelled
-                            ? <StatusBadge kind="lifecycle" value="cancelled" />
-                            : <span className="text-[10px] text-gray-400">—</span>}
-                        </td>
-                        <td className="px-3 py-2 text-right whitespace-nowrap tabular-nums">{h.total_price} {h.currency}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+            <div className="cf-order-note min-w-0 bg-white border border-gray-200 rounded-2xl p-3 shadow-sm">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600">📝 Add note to Shopify</span>
+              </div>
+              <textarea
+                value={noteText}
+                onChange={(e) => setNoteText(e.target.value)}
+                placeholder="e.g. customer asked to call back tomorrow morning"
+                rows={3}
+                className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 resize-y focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400"
+              />
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  type="button"
+                  onClick={handleAddNote}
+                  disabled={noteBusy || !noteText.trim()}
+                  className={`text-xs px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-50 shadow-sm ${BTN_TAP}`}
+                >{noteBusy ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="inline-block w-3 h-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+                    Adding…
+                  </span>
+                ) : "Add note"}</button>
+                {noteMsg && <span className="text-[11px] text-gray-600 truncate" title={noteMsg}>{noteMsg}</span>}
+              </div>
+              <div className="text-[11px] text-gray-500 mt-1.5">Appends to the order note (existing notes preserved).</div>
             </div>
-          )
-        )}
-      </div>
+          </div>
+          <div className="cf-order-details-column">
+            {/* Customer order history */}
+            <div className="cf-order-history min-w-0 bg-white border border-gray-200 rounded-2xl p-3 shadow-sm">
+              <div className="flex items-center mb-3">
+                <span className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600">🕓 Customer history</span>
+                {history?.total_orders > 0 && (
+                  <span className="ml-2 text-[11px] text-gray-500">
+                    {history.total_orders} total order{history.total_orders === 1 ? "" : "s"}
+                  </span>
+                )}
+              </div>
+              {historyLoading && <div className="text-xs text-gray-500">Loading customer orders…</div>}
+              {historyError && <div className="text-xs text-rose-700">{historyError}</div>}
+              {!historyLoading && !historyError && history && (
+                (history.orders || []).length === 0 ? (
+                  <div className="text-xs text-gray-500">No previous orders.</div>
+                ) : (
+                  <div
+                    className="cf-customer-history-scroll overflow-auto rounded-lg border border-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                    tabIndex={0}
+                    role="region"
+                    aria-label="Customer orders, newest first. Scroll to see older orders."
+                    onScroll={(event) => {
+                      const element = event.currentTarget;
+                      if (element.scrollTop > 0 && element.scrollHeight - element.clientHeight - element.scrollTop < 40 && !historyMoreError) loadOlderOrders();
+                    }}
+                  >
+                    <table className="cf-customer-history-table w-full text-[11px]">
+                      <thead className="sticky top-0 z-10 bg-gray-50 text-left text-[9px] uppercase tracking-wide text-gray-500">
+                        <tr>
+                          <th className="px-2 py-1.5">Order</th>
+                          <th className="px-2 py-1.5">Date</th>
+                          <th className="px-2 py-1.5">Fulfillment</th>
+                          <th className="px-2 py-1.5">Payment</th>
+                          <th className="px-2 py-1.5">Status</th>
+                          <th className="px-2 py-1.5 text-right">Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(history.orders || []).map((h, idx) => {
+                          const url = shopifyOrderUrl({ id: h.id, legacy_id: h.legacy_id }, shopDomain);
+                          const isCancelled = !!h.cancelled_at;
+                          const isCurrent = h.id === order.id;
+                          const zebra = idx % 2 === 1 ? "bg-gray-50/60" : "bg-white";
+                          return (
+                            <tr key={h.id} className={`border-t border-gray-100 ${isCurrent ? "bg-indigo-50/70" : zebra}`}>
+                              <td className="px-2 py-1.5 font-medium whitespace-nowrap">
+                                {url ? (
+                                  <a href={url} target="_blank" rel="noopener noreferrer" className="text-indigo-700 hover:underline">{h.name || `#${h.number}`}</a>
+                                ) : (h.name || `#${h.number}`)}
+                                {isCurrent && <span className="ml-1 text-[10px] text-indigo-700 font-semibold">(current)</span>}
+                              </td>
+                              <td className="px-2 py-1.5 text-gray-600 whitespace-nowrap">{h.created_at ? new Date(h.created_at).toLocaleDateString() : ""}</td>
+                              <td className="px-2 py-1.5"><StatusBadge kind="fulfillment" value={h.fulfillment_status} /></td>
+                              <td className="px-2 py-1.5"><StatusBadge kind="financial" value={h.financial_status} /></td>
+                              <td className="px-2 py-1.5">
+                                {isCancelled
+                                  ? <StatusBadge kind="lifecycle" value="cancelled" />
+                                  : <span className="text-[10px] text-gray-400">—</span>}
+                              </td>
+                              <td className="px-2 py-1.5 text-right whitespace-nowrap tabular-nums">{h.total_price} {h.currency}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )
+              )}
+              {(history?.orders || []).length > 5 && <p className="mt-2 text-[11px] text-gray-500">Latest 5 visible · scroll for older orders</p>}
+              {historyMoreError && <p className="mt-2 text-xs text-rose-700" role="alert">{historyMoreError}</p>}
+              {history?.page_info?.has_next_page && (
+                <button type="button" onClick={loadOlderOrders} disabled={historyMoreLoading}
+                  className={`mt-2 text-xs font-semibold text-indigo-700 hover:underline disabled:opacity-50 ${BTN_TAP}`}>
+                  {historyMoreLoading ? "Loading older orders…" : historyMoreError ? "Retry older orders" : "Load older orders"}
+                </button>
+              )}
+            </div>
 
-      {/* Line items */}
-      <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm">
-        <div className="flex items-center mb-3">
-          <span className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600">📦 Line items</span>
-          <div className="ml-auto flex items-center gap-2">
-            {labelMsg && <span className="text-[11px] text-gray-600 truncate max-w-[200px]" title={labelMsg}>{labelMsg}</span>}
-            <button
-              type="button"
-              onClick={handleCopyLabel}
-              disabled={labelBusy}
-              className={`text-xs px-3 py-1.5 rounded-lg border border-indigo-300 bg-indigo-50 text-indigo-700 font-semibold hover:bg-indigo-100 disabled:opacity-50 ${BTN_TAP}`}
-              title="Generate a PNG label and copy it to your clipboard"
-            >{labelBusy ? (
-              <span className="inline-flex items-center gap-1.5">
-                <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-300 border-t-indigo-700 animate-spin" />
-                Generating…
-              </span>
-            ) : "📋 Copy label"}</button>
+            {/* Line items */}
+            <div className="cf-order-items min-w-0 bg-white border border-gray-200 rounded-2xl p-3 shadow-sm">
+              <div className="flex items-center mb-3">
+                <span className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600">📦 Line items</span>
+                <div className="ml-auto flex items-center gap-2">
+                  {labelMsg && <span className="text-[11px] text-gray-600 truncate max-w-[200px]" title={labelMsg}>{labelMsg}</span>}
+                  <button
+                    type="button"
+                    onClick={handleCopyLabel}
+                    disabled={labelBusy}
+                    className={`text-xs px-3 py-1.5 rounded-lg border border-indigo-300 bg-indigo-50 text-indigo-700 font-semibold hover:bg-indigo-100 disabled:opacity-50 ${BTN_TAP}`}
+                    title="Generate a PNG label and copy it to your clipboard"
+                  >{labelBusy ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-300 border-t-indigo-700 animate-spin" />
+                      Generating…
+                    </span>
+                  ) : "📋 Copy label"}</button>
+                </div>
+              </div>
+              <LineItemsGrid order={order} />
+            </div>
+
           </div>
         </div>
-        <LineItemsGrid order={order} />
       </div>
 
       {/* Off-screen label used for the PNG capture. Positioned far off-screen so it
           stays out of the visible layout while still being rendered for html-to-image. */}
-      <div style={{ position: "fixed", left: -10000, top: 0, pointerEvents: "none", zIndex: -1 }} aria-hidden>
+      <div style={{ position: "absolute", left: -10000, top: 0, pointerEvents: "none" }} aria-hidden>
         <div ref={labelRef}>
           <OrderLabel order={order} store={store} />
         </div>
@@ -3580,39 +3647,27 @@ function LineItemsGrid({ order }) {
   const items = order.line_items || [];
   if (items.length === 0) return <div className="text-xs text-gray-500">No line items.</div>;
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+    <div className="space-y-2">
       {items.map((li, idx) => (
-        <div key={idx} className="bg-gradient-to-br from-white to-gray-50 border border-gray-200 rounded-xl p-3 hover:shadow-md transition">
-          <div className="w-full aspect-square bg-gray-100 rounded-lg overflow-hidden flex items-center justify-center mb-2 ring-1 ring-gray-200">
+        <div key={li.id || idx} className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50/50 p-2">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-white">
             {li.image ? (
-              <img src={li.image} alt={li.title} className="w-full h-full object-cover" />
-            ) : <span className="text-xs text-gray-400">no image</span>}
+              <img src={li.image} alt={li.title || "Product"} loading="lazy" className="h-full w-full object-contain" />
+            ) : <Package size={18} className="text-gray-400" aria-hidden />}
           </div>
-          <div className="text-sm font-semibold leading-tight line-clamp-2 text-gray-900">{li.title}</div>
-          {(li.options || []).length > 0 && (
-            <div className="mt-1.5 flex flex-wrap gap-1">
-              {(li.options || []).map((opt, i) => (
-                <span key={i} className="text-[10px] bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded-full font-medium">
-                  {opt.name}: {opt.value}
-                </span>
-              ))}
-            </div>
-          )}
-          <div className="mt-2 grid grid-cols-3 gap-1 text-center text-xs">
-            <div className="bg-sky-50 text-sky-800 border border-sky-200 rounded-md py-1">
-              <div className="text-[9px] uppercase font-semibold opacity-70">Qty</div>
-              <div className="font-bold tabular-nums">{li.quantity}</div>
-            </div>
-            <div className="bg-amber-50 text-amber-800 border border-amber-200 rounded-md py-1">
-              <div className="text-[9px] uppercase font-semibold opacity-70">Unit</div>
-              <div className="font-bold tabular-nums">{li.unit_price}</div>
-            </div>
-            <div className="bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-md py-1">
-              <div className="text-[9px] uppercase font-semibold opacity-70">Total</div>
-              <div className="font-bold tabular-nums">{(Number(li.unit_price || 0) * Number(li.quantity || 0)).toFixed(2)}</div>
-            </div>
+          <div className="min-w-0 flex-1">
+            <div className="line-clamp-2 text-xs font-semibold leading-tight text-gray-900" title={li.title}>{li.title}</div>
+            {(li.options || []).length > 0 && (
+              <div className="mt-0.5 text-[10px] text-indigo-700 break-words">
+                {(li.options || []).map((opt) => opt.name + ": " + opt.value).join(" · ")}
+              </div>
+            )}
+            {li.sku && <div className="mt-0.5 truncate font-mono text-[10px] text-gray-500" title={li.sku}>SKU: {li.sku}</div>}
           </div>
-          {li.sku && <div className="mt-1.5 text-[10px] text-gray-500 font-mono truncate" title={li.sku}>SKU: {li.sku}</div>}
+          <div className="shrink-0 text-right text-[10px] tabular-nums">
+            <div className="font-semibold text-gray-700">{li.quantity} × {li.unit_price}</div>
+            <div className="mt-0.5 font-bold text-emerald-700">{(Number(li.unit_price || 0) * Number(li.quantity || 0)).toFixed(2)} {order.currency}</div>
+          </div>
         </div>
       ))}
     </div>

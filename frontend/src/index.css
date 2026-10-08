@@ -63,9 +63,11 @@
   100% { transform: translateY(540px) rotate(260deg); opacity: 0; }
 }
 
-html, body, #root { height: 100%; }
-/* Allow vertical scrolling on small screens while avoiding horizontal overflow */
-html, body { overflow-x: hidden; overflow-y: auto; }
+html { height: 100%; }
+body, #root { min-height: 100%; }
+/* Keep one document scroller. A viewport-height scrolling body inside a scrolling
+   html element can clip long expanded orders and expose a blank lower panel. */
+html, body { overflow-x: clip; }
 
 /* Indeterminate top progress bar */
 .progress-track { position: relative; height: 4px; background: transparent; overflow: hidden; }
@@ -183,7 +185,7 @@ html, body { overflow-x: hidden; overflow-y: auto; }
   to   { opacity: 1; transform: translate(-50%, 0); }
 }
 
-.cf-collapse-in { animation: cfCollapseIn 220ms cubic-bezier(0.22, 1, 0.36, 1) both; transform-origin: top; }
+.cf-collapse-in { animation: cfCollapseIn 220ms cubic-bezier(0.22, 1, 0.36, 1) backwards; transform-origin: top; }
 @keyframes cfCollapseIn {
   from { opacity: 0; transform: translateY(-4px); }
   to   { opacity: 1; transform: none; }
@@ -205,6 +207,37 @@ html, body { overflow-x: hidden; overflow-y: auto; }
 
 .cf-scroll-x { scrollbar-width: none; }
 .cf-scroll-x::-webkit-scrollbar { display: none; }
+
+/* Expanded details adapt to their card's width, including search-result cards. */
+.cf-order-details { container: order-details / inline-size; }
+.cf-order-details-layout, .cf-order-details-panels {
+  display: grid;
+  align-items: start;
+  gap: 12px;
+  min-width: 0;
+}
+.cf-order-details-column { min-width: 0; display: grid; gap: 12px; }
+.cf-order-chat { justify-self: center; }
+.cf-customer-history-scroll { max-height: 212px; scrollbar-gutter: stable; }
+.cf-customer-history-table { border-collapse: separate; border-spacing: 0; }
+.cf-customer-history-table thead tr { height: 30px; }
+.cf-customer-history-table tbody tr { height: 36px; }
+.cf-customer-history-table th, .cf-customer-history-table td { white-space: nowrap; }
+.cf-customer-history-table td > span { font-size: 9px; padding: 2px 5px; }
+.cf-order-queue-table > tbody > tr[data-flip-key] > td { padding-top: 8px; padding-bottom: 8px; }
+@container order-details (min-width: 700px) {
+  .cf-order-details-layout:not(.cf-order-details-with-chat) .cf-order-details-panels {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  }
+}
+@container order-details (min-width: 800px) {
+  .cf-order-details-with-chat { grid-template-columns: minmax(0, 400px) minmax(0, 1fr); }
+}
+@container order-details (min-width: 1100px) {
+  .cf-order-details-with-chat .cf-order-details-panels {
+    grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.6fr);
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .cf-toast, .cf-leave, .cf-fade-in, .cf-pop-in, .cf-slide-up, .cf-collapse-in, .cf-shimmer, .cf-live-dot::after {

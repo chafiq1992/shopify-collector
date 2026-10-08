@@ -1045,12 +1045,13 @@ async def agent_queue(
 # ---------- Customer order history (for the row-expand panel) ----------
 
 CUSTOMER_ORDERS_GQL = f"""
-query CustomerOrders($id: ID!, $first: Int!) {{
+query CustomerOrders($id: ID!, $first: Int!, $after: String) {{
   customer(id: $id) {{
     id
     displayName
     numberOfOrders
-    orders(first: $first, sortKey: CREATED_AT, reverse: true) {{
+    orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) {{
+      pageInfo {{ hasNextPage endCursor }}
       edges {{
         node {{ {_ORDER_NODE_FIELDS} }}
       }}
@@ -1547,6 +1548,7 @@ async def customer_orders(
     store: str,
     customer_id: str,
     first: int = 20,
+    after: Optional[str] = None,
     user: User = Depends(get_current_user),
 ):
     cid = (customer_id or "").strip()
@@ -1565,13 +1567,14 @@ async def customer_orders(
     try:
         data = await shopify_graphql(
             CUSTOMER_ORDERS_GQL,
-            {"id": cid, "first": max(1, min(50, int(first or 20)))},
+            {"id": cid, "first": max(1, min(50, int(first or 20))), "after": after or None},
             store=store,
         )
     except HTTPException as he:
         raise he
     customer = (data or {}).get("customer") or {}
     edges = ((customer.get("orders") or {}).get("edges") or [])
+    page_info = (customer.get("orders") or {}).get("pageInfo") or {}
     # Full order shape (with line items + tags etc.) so the frontend can render the
     # same interactive card it uses for the queue and global search.
     orders_out: List[Dict[str, Any]] = [_flatten_order(e.get("node") or {}) for e in edges]
@@ -1581,6 +1584,10 @@ async def customer_orders(
         "display_name": customer.get("displayName") or "",
         "total_orders": int(customer.get("numberOfOrders") or 0),
         "orders": orders_out,
+        "page_info": {
+            "has_next_page": bool(page_info.get("hasNextPage")),
+            "end_cursor": page_info.get("endCursor"),
+        },
         "shop_domain": shop_domain,
     }
 
