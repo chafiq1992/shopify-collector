@@ -1097,6 +1097,24 @@ query SearchCustomers($first: Int!, $ordersFirst: Int!, $query: String) {{
 }}
 """
 
+PHONE_CUSTOMERS_GQL = """
+query PhoneCustomers($query: String!, $after: String) {
+  customers(first: 100, after: $after, query: $query) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id phone }
+  }
+}
+"""
+
+PHONE_ORDERS_GQL = f"""
+query PhoneOrders($query: String!, $first: Int!, $after: String) {{
+  orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {{
+    pageInfo {{ hasNextPage endCursor }}
+    edges {{ node {{ {_ORDER_NODE_FIELDS} }} }}
+  }}
+}}
+"""
+
 
 # ---------- Reliable, idempotent Confirmation action writes ----------
 
@@ -1590,6 +1608,50 @@ async def customer_orders(
         },
         "shop_domain": shop_domain,
     }
+
+
+@router.get("/api/agent/phone-orders")
+async def phone_orders(
+    store: str, phone: str, first: int = 20, after: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """Same-phone orders across Shopify customer records, paged and store-scoped."""
+    details = _confirmation_phone_variants(phone)
+    canonical = details['normalized_phone']
+    if not canonical or not re.fullmatch(r'\+\d{8,15}', canonical):
+        raise HTTPException(422, 'A valid phone number is required')
+    from .main import shopify_graphql
+    customer_ids, cursor = set(), None
+    for _ in range(5):
+        data = await shopify_graphql(PHONE_CUSTOMERS_GQL, {
+            'query': ' OR '.join(f'(phone:{value})' for value in details['variants']), 'after': cursor,
+        }, store=store)
+        connection = (data or {}).get('customers') or {}
+        for customer in connection.get('nodes') or []:
+            if _confirmation_phone_variants(customer.get('phone') or '')['normalized_phone'] == canonical:
+                gid = str(customer.get('id') or '')
+                if re.fullmatch(r'gid://shopify/Customer/\d+', gid):
+                    customer_ids.add(gid.rsplit('/', 1)[-1])
+        info = connection.get('pageInfo') or {}
+        if not info.get('hasNextPage'):
+            break
+        cursor = info.get('endCursor')
+    else:
+        raise HTTPException(422, 'Too many customer records share this number; refine the customer records first')
+    if not customer_ids:
+        return {'ok': True, 'orders': [], 'normalized_phone': canonical, 'page_info': {'has_next_page': False, 'end_cursor': None}}
+    data = await shopify_graphql(PHONE_ORDERS_GQL, {
+        'query': ' OR '.join(f'(customer_id:{cid})' for cid in sorted(customer_ids)),
+        'first': max(1, min(50, first)), 'after': after or None,
+    }, store=store)
+    connection = (data or {}).get('orders') or {}
+    # Shopify can match an old customer phone while the order was shipped to
+    # someone else. Only include orders whose actual order phone still matches.
+    orders = [_flatten_order(edge.get('node') or {}) for edge in connection.get('edges') or []]
+    orders = [order for order in orders if _confirmation_phone_variants(order['phone'])['normalized_phone'] == canonical]
+    info = connection.get('pageInfo') or {}
+    return {'ok': True, 'orders': orders, 'normalized_phone': canonical,
+            'page_info': {'has_next_page': bool(info.get('hasNextPage')), 'end_cursor': info.get('endCursor')}}
 
 
 # ---------- Edit Shopify order items and shipping ----------

@@ -36,6 +36,7 @@ import { useToasts, ToastStack } from "../components/Toast";
 import { AnimatedNumber, useDepartingList, useFlipList } from "../components/Motion";
 import ChatConfirmationView, { useChatWaitingCount } from "./ChatConfirmation";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
+import { groupConfirmationOrders, orderPhone } from "../lib/confirmationOrderGroups";
 import {
   enqueueTagWrite,
   enqueueTagWrites,
@@ -148,6 +149,16 @@ const API = {
     if (!res.ok) {
       const js = await res.json().catch(() => ({ detail: "Failed to load customer history" }));
       throw new Error(js.detail || `Failed to load customer history (${res.status})`);
+    }
+    return res.json();
+  },
+  async phoneOrders(store, phone, after = null) {
+    const qs = new URLSearchParams({ store, phone });
+    if (after) qs.set('after', after);
+    const res = await authFetch(`/api/agent/phone-orders?${qs}`, { headers: authHeaders() });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({}));
+      throw new Error(js.detail || 'Failed to load orders with this phone');
     }
     return res.json();
   },
@@ -397,6 +408,8 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
   const [error, setError] = useState(null);
   const [lastLoadedAt, setLastLoadedAt] = useState(null);
   const [expanded, setExpanded] = useState(() => new Set());
+  const [phoneOrdersByKey, setPhoneOrdersByKey] = useState({});
+  const relatedBusy = useRef(new Set());
   const [datePickerFor, setDatePickerFor] = useState(null);
   const [chosenDate, setChosenDate] = useState(() => todayISO());
   const [teamStats, setTeamStats] = useState([]);
@@ -531,6 +544,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
       }
       return touched ? next : prev;
     });
+    setPhoneOrdersByKey(prev => Object.fromEntries(Object.entries(prev).map(([key, entry]) => [key, { ...entry, orders: patchArr(entry.orders) }])));
   }
   // Per-row "..." dropdown + cancel-order modal
   const [actionsDropdownFor, setActionsDropdownFor] = useState(null);
@@ -928,7 +942,8 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
 
   // ---------- Motion: rows slide into place, leave in place, new ones flash ----------
   const listResetKey = `${store}|${filterLevel}|${pageIndex}`;
-  const displayRows = useDepartingList(ordersForView, (o) => o.id, { resetKey: listResetKey });
+  const groupedOrders = useMemo(() => groupConfirmationOrders(ordersForView), [ordersForView]);
+  const displayRows = useDepartingList(groupedOrders, (o) => o.id, { resetKey: listResetKey });
   const flipSignature = displayRows.map((r) => r.item.id).join(",");
   const tableBodyRef = useRef(null);
   const cardListRef = useRef(null);
@@ -1170,7 +1185,67 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
   // Reusable order card — same look and behaviour for the queue (mobile), the global
   // search results, and the expanded customer's order list. Closes over every action
   // handler and piece of state so callers don't need to pass anything beyond the order.
-  function renderOrderCard(o, { leaving = false } = {}) {
+  async function loadRelatedOrders(o, more = false, force = false) {
+    const phone = orderPhone(o), key = `${store}:${phone}`;
+    if (!phone || relatedBusy.current.has(key)) return;
+    const previous = phoneOrdersByKey[key];
+    if (!more && previous?.loaded && !force) return;
+    relatedBusy.current.add(key);
+    setPhoneOrdersByKey(prev => ({ ...prev, [key]: { ...prev[key], loading: true, error: null } }));
+    try {
+      const js = await API.phoneOrders(store, phone, more ? previous?.page_info?.end_cursor : null);
+      setPhoneOrdersByKey(prev => {
+        const existing = more ? prev[key]?.orders || [] : [];
+        const seen = new Set(existing.map(order => order.id));
+        return { ...prev, [key]: { ...js, loaded: true, loading: false, orders: [...existing, ...(js.orders || []).filter(order => !seen.has(order.id))] } };
+      });
+    } catch (error) {
+      setPhoneOrdersByKey(prev => ({ ...prev, [key]: { ...prev[key], loading: false, error: error.message } }));
+    } finally { relatedBusy.current.delete(key); }
+  }
+
+  function openOrder(o, nested = false) {
+    if (!expanded.has(o.id) && !nested) loadRelatedOrders(o);
+    toggleExpanded(o.id);
+  }
+
+  function relatedFor(o) {
+    const phone = orderPhone(o), entry = phoneOrdersByKey[`${store}:${phone}`];
+    const seen = new Set([o.id]);
+    const rows = [...(o.relatedOrders || []), ...(entry?.orders || [])].filter(order => {
+      if (seen.has(order.id) || !phone || orderPhone(order) !== phone) return false;
+      seen.add(order.id); return true;
+    });
+    return { entry, rows: applyPendingQueueWrites(rows, store) };
+  }
+
+  function renderGroupBadge(o, nested) {
+    if (nested) return null;
+    const count = relatedFor(o).rows.length;
+    return count > 0 ? <button type="button" onClick={() => openOrder(o)} aria-expanded={expanded.has(o.id)}
+      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+      <Package size={12} aria-hidden /> {count + 1} orders <span aria-hidden>▾</span>
+    </button> : null;
+  }
+
+  function renderRelatedOrders(o) {
+    if (!orderPhone(o)) return null;
+    const { entry, rows } = relatedFor(o);
+    return <section className="mt-4 rounded-2xl border border-indigo-200 bg-white" aria-label="Other orders with this phone">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-100 bg-indigo-50/60 px-4 py-3 rounded-t-2xl">
+        <div><div className="text-sm font-semibold text-indigo-900">Other orders with this phone {rows.length > 0 ? `(${rows.length})` : ''}</div>
+          <div className="text-xs text-slate-500">Each order keeps its own items, chat, status and actions.</div></div>
+        <button type="button" onClick={() => loadRelatedOrders(o, false, true)} disabled={entry?.loading} className={BTN.secondary}>Refresh</button>
+      </div>
+      {entry?.loading && <p className="px-4 py-3 text-xs text-slate-500">Loading orders…</p>}
+      {entry?.error && <p className="px-4 py-3 text-xs text-rose-600">{entry.error} <button type="button" onClick={() => loadRelatedOrders(o, false, true)} className="underline">Retry</button></p>}
+      {!entry?.loading && !entry?.error && rows.length === 0 && <p className="px-4 py-3 text-xs text-slate-500">No other orders found with this phone.</p>}
+      <div className="divide-y divide-slate-100">{rows.map(order => renderOrderCard(order, { nested: true }))}</div>
+      {entry?.page_info?.has_next_page && <div className="p-3"><button type="button" disabled={entry.loading} onClick={() => loadRelatedOrders(o, true)} className={BTN.secondary}>Load older orders</button></div>}
+    </section>;
+  }
+
+  function renderOrderCard(o, { leaving = false, nested = false } = {}) {
     const isOpen = expanded.has(o.id);
     const pickerOpen = datePickerFor === o.id;
     const isSelected = selected.has(o.id);
@@ -1184,7 +1259,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
         className={`relative p-3.5 transition-colors ${leaving ? "cf-leave" : ""} ${
           isOpen || pickerOpen ? "bg-indigo-50/60" : isSelected ? "bg-indigo-50/40" : "bg-white"
         }`}
-        onClick={(e) => { if (!leaving && !isInteractiveTarget(e)) toggleExpanded(o.id); }}
+        onClick={(e) => { if (!leaving && !isInteractiveTarget(e)) openOrder(o, nested); }}
       >
         {(isOpen || pickerOpen || isSelected) && (
           <span aria-hidden className={`absolute left-0 inset-y-0 w-1 ${isOpen || pickerOpen ? "bg-indigo-500" : "bg-indigo-200"}`} />
@@ -1203,6 +1278,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
             <span className="text-[15px] font-bold">{label}</span>
           )}
           {o.web_confirmation && <WebChatBadge />}
+          {renderGroupBadge(o, nested)}
           <span className="text-[11px] text-slate-400" title={o.created_at ? new Date(o.created_at).toLocaleString() : ""}>{timeAgo(o.created_at)}</span>
           <span className="ml-auto whitespace-nowrap text-[15px] font-bold tabular-nums text-slate-900">
             {o.total_price} <span className="text-[11px] font-medium text-slate-500">{o.currency}</span>
@@ -1241,6 +1317,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
               onToast={pushToast}
               onOrderUpdated={(updatedOrder) => patchOrderInPlace(o.id, () => updatedOrder)}
             />
+            {!nested && renderRelatedOrders(o)}
           </div>
         )}
       </div>
@@ -1261,7 +1338,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
         <tr
           data-flip-key={o.id}
           className={`group border-t border-slate-100 cursor-pointer transition-colors ${rowBg} ${active ? "" : "hover:bg-slate-50/80"} ${leaving ? "cf-leave" : ""}`}
-          onClick={(e) => { if (!leaving && !isInteractiveTarget(e)) toggleExpanded(o.id); }}
+          onClick={(e) => { if (!leaving && !isInteractiveTarget(e)) openOrder(o); }}
         >
           <td className={`relative w-10 pl-4 pr-1 py-3 ${active ? "shadow-[inset_3px_0_0_rgb(99_102_241)]" : ""}`}>
             <input
@@ -1285,6 +1362,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
           </td>
           <td className="px-2 py-3 max-w-[240px]">
             <div className="truncate font-medium text-slate-900">{o.customer_name || <span className="text-slate-400">—</span>}</div>
+            {renderGroupBadge(o)}
             <div className="truncate text-xs text-slate-500">
               {[o.shipping_address1, o.shipping_city].filter(Boolean).join(", ") || "—"}
             </div>
@@ -1320,6 +1398,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
                   onToast={pushToast}
                   onOrderUpdated={(updatedOrder) => patchOrderInPlace(o.id, () => updatedOrder)}
                 />
+                {renderRelatedOrders(o)}
               </div>
             </td>
           </tr>
@@ -2447,7 +2526,7 @@ function GlobalSearch({
                   : `Orders (${orders.length})`}
               </div>
               <div className="rounded-xl border border-slate-200 bg-white overflow-hidden divide-y divide-slate-100">
-                {orders.map((o) => (
+                {groupConfirmationOrders(orders).map((o) => (
                   <React.Fragment key={o.id}>{renderOrderCard(o)}</React.Fragment>
                 ))}
               </div>
@@ -2520,7 +2599,7 @@ function GlobalSearch({
                           )}
                           {!custLoading && !custError && custOrders.length > 0 && (
                             <div className="divide-y divide-gray-100">
-                              {custOrders.map((o) => (
+                              {groupConfirmationOrders(custOrders).map((o) => (
                                 <React.Fragment key={o.id}>{renderOrderCard(o)}</React.Fragment>
                               ))}
                             </div>
@@ -2669,8 +2748,8 @@ function OrderConfirmationChat({ sessionId }) {
     <div className="cf-order-chat min-w-0 w-full max-w-[420px] self-start bg-white border border-emerald-200 rounded-2xl p-3 shadow-sm">
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <MessageCircleReply size={15} className="text-emerald-600" aria-hidden />
-        <span className="text-[11px] uppercase tracking-wider font-semibold text-emerald-700">Website confirmation chat</span>
-        <span className="text-xs text-gray-500">The confirmation flow and the customer's answers, as they saw them on the store.</span>
+        <span className="text-[11px] uppercase tracking-wider font-semibold text-emerald-700">Website + WhatsApp conversation</span>
+        <span className="text-xs text-gray-500">Website chat followed by messages to this store's connected WhatsApp numbers, matched by phone from the time of purchase. Updates while open.</span>
       </div>
       {view.loading ? (
         <div className="flex h-24 items-center justify-center"><Spinner /></div>
