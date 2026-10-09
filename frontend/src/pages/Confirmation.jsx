@@ -2734,8 +2734,9 @@ function WebChatBadge({ compact = false }) {
   );
 }
 
-function OrderConfirmationChat({ sessionId }) {
+function OrderConfirmationChat({ sessionId, phone }) {
   const [view, setView] = useState({ loading: true });
+  const whatsappPhone = orderPhone({ phone });
   useEffect(() => {
     let cancelled = false;
     setView({ loading: true });
@@ -2770,6 +2771,12 @@ function OrderConfirmationChat({ sessionId }) {
       ) : (
         <p className="text-xs text-rose-600">{view.error || "The chat is unavailable."}</p>
       )}
+      {whatsappPhone && <div className="mt-3 border-t border-emerald-100 pt-3">
+        <a href={`whatsapp://send?phone=${whatsappPhone}`} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600">
+          <MessageCircleReply size={18} aria-hidden /> Open in WhatsApp
+        </a>
+        <p className="mt-2 text-center text-xs text-slate-500">Reply using your WhatsApp app · <a href={`https://wa.me/${whatsappPhone}`} target="_blank" rel="noopener noreferrer" className="font-semibold text-emerald-700 hover:underline">Open in browser</a></p>
+      </div>}
     </div>
   );
 }
@@ -2907,7 +2914,7 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
       </div>
 
       <div className={`cf-order-details-layout ${order.web_confirmation ? "cf-order-details-with-chat" : ""}`}>
-        {order.web_confirmation && <OrderConfirmationChat sessionId={order.web_confirmation.session_id} />}
+        {order.web_confirmation && <OrderConfirmationChat sessionId={order.web_confirmation.session_id} phone={order.phone || order.customer_phone} />}
         <div className="cf-order-details-panels">
           <div className="cf-order-details-column">
             <div className="cf-order-shipping min-w-0 bg-white border border-gray-200 rounded-2xl p-3 shadow-sm">
