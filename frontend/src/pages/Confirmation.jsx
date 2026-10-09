@@ -3001,7 +3001,7 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
                   ) : "📋 Copy label"}</button>
                 </div>
               </div>
-              <LineItemsGrid order={order} />
+              <LineItemsGrid order={order} onToast={notify} />
             </div>
 
           </div>
@@ -3643,33 +3643,56 @@ function EditField({ label, value, onChange, placeholder = "", optional = false 
   );
 }
 
-function LineItemsGrid({ order }) {
+function LineItemsGrid({ order, onToast }) {
   const items = order.line_items || [];
   if (items.length === 0) return <div className="text-xs text-gray-500">No line items.</div>;
+
+  async function copyVariantId(variantId) {
+    const copied = await copyToClipboard(variantId);
+    onToast?.(copied ? `Copied variant ID ${variantId}` : "Clipboard blocked", copied ? "success" : "warn");
+  }
+
   return (
     <div className="space-y-2">
-      {items.map((li, idx) => (
-        <div key={li.id || idx} className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50/50 p-2">
-          <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-white">
+      {items.map((li, idx) => {
+        const variantId = String(li.variant_id || "").split("/").pop();
+        const options = (li.options || []).filter((opt) => opt.value && opt.value !== "Default Title");
+        return (
+        <article key={li.id || idx} className="cf-product-card flex items-center gap-3 rounded-xl border border-gray-200 bg-gray-50/50 p-2.5">
+          <div className="flex h-[76.8px] w-[76.8px] shrink-0 items-center justify-center overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
             {li.image ? (
               <img src={li.image} alt={li.title || "Product"} loading="lazy" className="h-full w-full object-contain" />
-            ) : <Package size={18} className="text-gray-400" aria-hidden />}
+            ) : <Package size={28} className="text-gray-400" aria-hidden />}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="line-clamp-2 text-xs font-semibold leading-tight text-gray-900" title={li.title}>{li.title}</div>
-            {(li.options || []).length > 0 && (
-              <div className="mt-0.5 text-[10px] text-indigo-700 break-words">
-                {(li.options || []).map((opt) => opt.name + ": " + opt.value).join(" · ")}
+            {variantId ? (
+              <button type="button" onClick={() => copyVariantId(variantId)}
+                aria-label={`Copy variant ID ${variantId}`} title="Copy variant ID"
+                className={`inline-flex max-w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-xs font-bold text-indigo-700 hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${BTN_TAP}`}>
+                <span className="shrink-0 text-[10px] uppercase tracking-wide">Variant ID</span>
+                <span className="break-all font-mono">{variantId}</span>
+                <Copy className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              </button>
+            ) : <div className="text-xs text-gray-500">Variant ID unavailable</div>}
+            {options.length > 0 ? (
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {options.map((opt, optionIdx) => (
+                  <span key={`${opt.name}-${optionIdx}`} className="rounded-md border border-indigo-100 bg-white px-2 py-1 text-xs font-bold text-gray-900">
+                    {opt.name}: <strong>{opt.value}</strong>
+                  </span>
+                ))}
               </div>
-            )}
-            {li.sku && <div className="mt-0.5 truncate font-mono text-[10px] text-gray-500" title={li.sku}>SKU: {li.sku}</div>}
+            ) : li.variant_title && li.variant_title !== "Default Title" ? (
+              <div className="mt-1 text-xs font-bold text-gray-900">{li.variant_title}</div>
+            ) : null}
+            <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[11px] tabular-nums">
+              <span className="font-semibold text-gray-600">{li.quantity} × {li.unit_price}</span>
+              <span className="font-bold text-emerald-700">{(Number(li.unit_price || 0) * Number(li.quantity || 0)).toFixed(2)} {order.currency}</span>
+            </div>
           </div>
-          <div className="shrink-0 text-right text-[10px] tabular-nums">
-            <div className="font-semibold text-gray-700">{li.quantity} × {li.unit_price}</div>
-            <div className="mt-0.5 font-bold text-emerald-700">{(Number(li.unit_price || 0) * Number(li.quantity || 0)).toFixed(2)} {order.currency}</div>
-          </div>
-        </div>
-      ))}
+        </article>
+        );
+      })}
     </div>
   );
 }
