@@ -1097,23 +1097,26 @@ query SearchCustomers($first: Int!, $ordersFirst: Int!, $query: String) {{
 }}
 """
 
-PHONE_CUSTOMERS_GQL = """
-query PhoneCustomers($query: String!, $after: String) {
-  customers(first: 100, after: $after, query: $query) {
+PHONE_SCAN_GQL = """
+query PhoneOrderScan($after: String) {
+  orders(first: 250, after: $after, sortKey: CREATED_AT, reverse: true) {
     pageInfo { hasNextPage endCursor }
-    nodes { id phone }
+    edges { cursor node { id shippingAddress { phone } customer { phone } } }
   }
 }
 """
 
 PHONE_ORDERS_GQL = f"""
-query PhoneOrders($query: String!, $first: Int!, $after: String) {{
-  orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {{
-    pageInfo {{ hasNextPage endCursor }}
-    edges {{ node {{ {_ORDER_NODE_FIELDS} }} }}
+query PhoneOrders($ids: [ID!]!) {{
+  nodes(ids: $ids) {{
+    ... on Order {{ {_ORDER_NODE_FIELDS} }}
   }}
 }}
 """
+
+# Shared by same-store agent reads for one minute. A lightweight page is fetched
+# once, rather than scanning Shopify separately for every customer opened.
+_PHONE_SCAN_CACHE: Dict[Tuple[str, Optional[str]], Tuple[float, Dict[str, Any]]] = {}
 
 
 # ---------- Reliable, idempotent Confirmation action writes ----------
@@ -1615,43 +1618,51 @@ async def phone_orders(
     store: str, phone: str, first: int = 20, after: Optional[str] = None,
     user: User = Depends(get_current_user),
 ):
-    """Same-phone orders across Shopify customer records, paged and store-scoped."""
+    """Exact order-phone history, including COD customers with no profile phone.
+
+    Each read scans at most 1,000 lightweight orders, then loads full cards only
+    for matches. The cursor lets an agent continue older history without an
+    unbounded search or a heavy request on the purchase path.
+    """
     details = _confirmation_phone_variants(phone)
     canonical = details['normalized_phone']
     if not canonical or not re.fullmatch(r'\+\d{8,15}', canonical):
         raise HTTPException(422, 'A valid phone number is required')
     from .main import shopify_graphql
-    customer_ids, cursor = set(), None
-    for _ in range(5):
-        data = await shopify_graphql(PHONE_CUSTOMERS_GQL, {
-            'query': ' OR '.join(f'(phone:{value})' for value in details['variants']), 'after': cursor,
-        }, store=store)
-        connection = (data or {}).get('customers') or {}
-        for customer in connection.get('nodes') or []:
-            if _confirmation_phone_variants(customer.get('phone') or '')['normalized_phone'] == canonical:
-                gid = str(customer.get('id') or '')
-                if re.fullmatch(r'gid://shopify/Customer/\d+', gid):
-                    customer_ids.add(gid.rsplit('/', 1)[-1])
+    ids, cursor, has_more, scanned = [], after or None, False, 0
+    size = max(1, min(20, first))
+    for _ in range(4):
+        key = (store, cursor)
+        cached = _PHONE_SCAN_CACHE.get(key)
+        if cached and cached[0] > time.monotonic():
+            data = cached[1]
+        else:
+            data = await shopify_graphql(PHONE_SCAN_GQL, {'after': cursor}, store=store)
+            if len(_PHONE_SCAN_CACHE) >= 64:
+                _PHONE_SCAN_CACHE.clear()
+            _PHONE_SCAN_CACHE[key] = (time.monotonic() + 60, data)
+        connection = (data or {}).get('orders') or {}
+        edges = connection.get('edges') or []
         info = connection.get('pageInfo') or {}
-        if not info.get('hasNextPage'):
+        has_more = bool(edges) and bool(info.get('hasNextPage'))
+        for index, edge in enumerate(edges):
+            scanned += 1
+            node = edge.get('node') or {}
+            if _confirmation_phone_variants(_gather_phone(node))['normalized_phone'] == canonical and re.fullmatch(r'gid://shopify/Order/\d+', str(node.get('id') or '')) and node['id'] not in ids:
+                ids.append(node['id'])
+            cursor = edge.get('cursor')
+            has_more = index < len(edges) - 1 or bool(info.get('hasNextPage'))
+            if len(ids) >= size:
+                break
+        if not edges or not has_more or len(ids) >= size:
             break
-        cursor = info.get('endCursor')
-    else:
-        raise HTTPException(422, 'Too many customer records share this number; refine the customer records first')
-    if not customer_ids:
-        return {'ok': True, 'orders': [], 'normalized_phone': canonical, 'page_info': {'has_next_page': False, 'end_cursor': None}}
-    data = await shopify_graphql(PHONE_ORDERS_GQL, {
-        'query': ' OR '.join(f'(customer_id:{cid})' for cid in sorted(customer_ids)),
-        'first': max(1, min(50, first)), 'after': after or None,
-    }, store=store)
-    connection = (data or {}).get('orders') or {}
-    # Shopify can match an old customer phone while the order was shipped to
-    # someone else. Only include orders whose actual order phone still matches.
-    orders = [_flatten_order(edge.get('node') or {}) for edge in connection.get('edges') or []]
+    data = await shopify_graphql(PHONE_ORDERS_GQL, {'ids': ids}, store=store) if ids else {}
+    nodes = data.get('nodes') or []
+    by_id = {node['id']: node for node in nodes if isinstance(node, dict) and node.get('id')}
+    orders = [_flatten_order(by_id[oid]) for oid in ids if oid in by_id]
     orders = [order for order in orders if _confirmation_phone_variants(order['phone'])['normalized_phone'] == canonical]
-    info = connection.get('pageInfo') or {}
     return {'ok': True, 'orders': orders, 'normalized_phone': canonical,
-            'page_info': {'has_next_page': bool(info.get('hasNextPage')), 'end_cursor': info.get('endCursor')}}
+            'scanned_orders': scanned, 'page_info': {'has_next_page': has_more, 'end_cursor': cursor}}
 
 
 # ---------- Edit Shopify order items and shipping ----------

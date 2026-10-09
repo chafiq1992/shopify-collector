@@ -1239,7 +1239,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
       </div>
       {entry?.loading && <p className="px-4 py-3 text-xs text-slate-500">Loading orders…</p>}
       {entry?.error && <p className="px-4 py-3 text-xs text-rose-600">{entry.error} <button type="button" onClick={() => loadRelatedOrders(o, false, true)} className="underline">Retry</button></p>}
-      {!entry?.loading && !entry?.error && rows.length === 0 && <p className="px-4 py-3 text-xs text-slate-500">No other orders found with this phone.</p>}
+      {!entry?.loading && !entry?.error && rows.length === 0 && <p className="px-4 py-3 text-xs text-slate-500">{entry?.page_info?.has_next_page ? 'No other matches in the recent orders checked. Load older orders to continue.' : 'No other orders found with this phone.'}</p>}
       <div className="divide-y divide-slate-100">{rows.map(order => renderOrderCard(order, { nested: true }))}</div>
       {entry?.page_info?.has_next_page && <div className="p-3"><button type="button" disabled={entry.loading} onClick={() => loadRelatedOrders(o, true)} className={BTN.secondary}>Load older orders</button></div>}
     </section>;
