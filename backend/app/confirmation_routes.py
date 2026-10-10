@@ -20,6 +20,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 from zoneinfo import ZoneInfo
+from .web_confirmation_status import enrich as enrich_web_confirmations
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
@@ -1024,7 +1025,7 @@ async def agent_queue(
 
     return {
         "ok": True,
-        "orders": orders,
+        "orders": await enrich_web_confirmations(store, orders),
         "assigned_total": assigned_total,
         "level_counts": {
             "total": int(breakdown.get("total", 0)),
@@ -1557,7 +1558,7 @@ async def agent_search(
         "search_kind": search["kind"],
         "normalized_digits": search.get("digits") or "",
         "normalized_phone": search.get("normalized_phone"),
-        "orders": orders_out,
+        "orders": await enrich_web_confirmations(store, orders_out),
         "customers": customers_out,
         "shop_domain": shop_domain,
         "warnings": warnings,
@@ -1604,7 +1605,7 @@ async def customer_orders(
         "customer_id": customer.get("id") or cid,
         "display_name": customer.get("displayName") or "",
         "total_orders": int(customer.get("numberOfOrders") or 0),
-        "orders": orders_out,
+        "orders": await enrich_web_confirmations(store, orders_out),
         "page_info": {
             "has_next_page": bool(page_info.get("hasNextPage")),
             "end_cursor": page_info.get("endCursor"),
@@ -1661,7 +1662,7 @@ async def phone_orders(
     by_id = {node['id']: node for node in nodes if isinstance(node, dict) and node.get('id')}
     orders = [_flatten_order(by_id[oid]) for oid in ids if oid in by_id]
     orders = [order for order in orders if _confirmation_phone_variants(order['phone'])['normalized_phone'] == canonical]
-    return {'ok': True, 'orders': orders, 'normalized_phone': canonical,
+    return {'ok': True, 'orders': await enrich_web_confirmations(store, orders), 'normalized_phone': canonical,
             'scanned_orders': scanned, 'page_info': {'has_next_page': has_more, 'end_cursor': cursor}}
 
 

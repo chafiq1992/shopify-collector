@@ -4,6 +4,7 @@ import {
   Ban,
   CalendarCheck,
   Check,
+  CircleCheck,
   ChevronLeft,
   ChevronRight,
   CircleAlert,
@@ -37,6 +38,7 @@ import { AnimatedNumber, useDepartingList, useFlipList } from "../components/Mot
 import ChatConfirmationView, { useChatWaitingCount } from "./ChatConfirmation";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 import { groupConfirmationOrders, orderPhone } from "../lib/confirmationOrderGroups";
+import { confirmationInboxUrl } from "../lib/confirmationInbox";
 import {
   enqueueTagWrite,
   enqueueTagWrites,
@@ -1221,10 +1223,13 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
 
   function renderGroupBadge(o, nested) {
     if (nested) return null;
-    const count = relatedFor(o).rows.length;
+    const related = relatedFor(o).rows;
+    const count = related.length;
+    const confirmedCount = [o, ...related].filter(order => order.web_confirmation?.customer_confirmed).length;
     return count > 0 ? <button type="button" onClick={() => openOrder(o)} aria-expanded={expanded.has(o.id)}
       className="inline-flex shrink-0 items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
       <Package size={12} aria-hidden /> {count + 1} orders <span aria-hidden>▾</span>
+      {confirmedCount > 0 && <span className="inline-flex items-center gap-1 text-emerald-700" title="Customer-confirmed orders in this group"><CircleCheck size={12} aria-hidden /> {confirmedCount} confirmed</span>}
     </button> : null;
   }
 
@@ -1277,7 +1282,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
           ) : (
             <span className="text-[15px] font-bold">{label}</span>
           )}
-          {o.web_confirmation && <WebChatBadge />}
+          {o.web_confirmation && <WebChatBadge confirmed={o.web_confirmation.customer_confirmed} />}
           {renderGroupBadge(o, nested)}
           <span className="text-[11px] text-slate-400" title={o.created_at ? new Date(o.created_at).toLocaleString() : ""}>{timeAgo(o.created_at)}</span>
           <span className="ml-auto whitespace-nowrap text-[15px] font-bold tabular-nums text-slate-900">
@@ -1355,7 +1360,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
             ) : (
               <span className="font-semibold">{label}</span>
             )}
-            {o.web_confirmation && <span className="ml-1.5 align-middle"><WebChatBadge compact /></span>}
+            {o.web_confirmation && <span className="ml-1.5 align-middle"><WebChatBadge compact confirmed={o.web_confirmation.customer_confirmed} /></span>}
             <div className="text-[11px] text-slate-400" title={o.created_at ? new Date(o.created_at).toLocaleString() : ""}>
               {timeAgo(o.created_at)}
             </div>
@@ -2722,21 +2727,20 @@ function StatusBadge({ kind, value }) {
 
 // COD form orders confirmed in the store's own chat right after the purchase (the confirmation
 // flow's template is answered there instead of WhatsApp). Other orders show nothing new.
-function WebChatBadge({ compact = false }) {
+function WebChatBadge({ compact = false, confirmed = false }) {
   return (
     <span
-      title="Website confirmation flow: confirmed in the store's chat right after the COD form"
+      title={confirmed ? "Customer confirmed this order in the website chat" : "Website confirmation conversation attached; customer has not confirmed"}
       className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200"
     >
-      <MessageCircleReply className="h-3 w-3" aria-hidden />
-      {compact ? <span className="sr-only">Website confirmation chat</span> : "Web chat"}
+      {confirmed ? <CircleCheck className="h-4 w-4" aria-hidden /> : <MessageCircleReply className="h-3 w-3" aria-hidden />}
+      {confirmed ? "Customer confirmed" : compact ? <span className="sr-only">Website confirmation chat</span> : "Web chat"}
     </span>
   );
 }
 
-function OrderConfirmationChat({ sessionId, phone }) {
+function OrderConfirmationChat({ sessionId, inboxUrl }) {
   const [view, setView] = useState({ loading: true });
-  const whatsappPhone = orderPhone({ phone });
   useEffect(() => {
     let cancelled = false;
     setView({ loading: true });
@@ -2771,11 +2775,11 @@ function OrderConfirmationChat({ sessionId, phone }) {
       ) : (
         <p className="text-xs text-rose-600">{view.error || "The chat is unavailable."}</p>
       )}
-      {whatsappPhone && <div className="mt-3 border-t border-emerald-100 pt-3">
-        <a href={`whatsapp://send?phone=${whatsappPhone}`} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600">
-          <MessageCircleReply size={18} aria-hidden /> Open in WhatsApp
+      {inboxUrl && <div className="mt-3 border-t border-emerald-100 pt-3">
+        <a href={inboxUrl} target="_blank" rel="noopener noreferrer" className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600">
+          <MessageCircleReply size={18} aria-hidden /> Open in WhatsApp Last inbox
         </a>
-        <p className="mt-2 text-center text-xs text-slate-500">Reply using your WhatsApp app · <a href={`https://wa.me/${whatsappPhone}`} target="_blank" rel="noopener noreferrer" className="font-semibold text-emerald-700 hover:underline">Open in browser</a></p>
+        <p className="mt-2 text-center text-xs text-slate-500">View the conversation and reply from your team inbox.</p>
       </div>}
     </div>
   );
@@ -2914,7 +2918,7 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
       </div>
 
       <div className={`cf-order-details-layout ${order.web_confirmation ? "cf-order-details-with-chat" : ""}`}>
-        {order.web_confirmation && <OrderConfirmationChat sessionId={order.web_confirmation.session_id} phone={order.phone || order.customer_phone} />}
+        {order.web_confirmation && <OrderConfirmationChat sessionId={order.web_confirmation.session_id} inboxUrl={confirmationInboxUrl(order, store)} />}
         <div className="cf-order-details-panels">
           <div className="cf-order-details-column">
             <div className="cf-order-shipping min-w-0 bg-white border border-gray-200 rounded-2xl p-3 shadow-sm">
