@@ -317,7 +317,7 @@ _JOB_LOCK = asyncio.Lock()
 # { pc_id -> { job_id -> { "payload": {...}, "status": "pending"|"inflight", "leased_at": float|None, "attempts": int } } }
 JOB_STORE: Dict[str, Dict[str, dict]] = {}
 _DEDUP_CACHE: Dict[str, float] = {}
-_DEDUP_WINDOW_SEC = 10
+_DEDUP_WINDOW_SEC = 30
 _INFLIGHT_TIMEOUT_SEC = 90
 _MAX_ATTEMPTS = 4
 
@@ -337,8 +337,23 @@ def _dedup_key_for_label(delivery_order_id: str, store: Optional[str] = None) ->
 def _dedup_key_for_orders(orders: list, store: Optional[str] = None) -> str:
     return f"orders:{','.join(sorted(str(o).lstrip('#') for o in orders))}:{store or ''}"
 
+def _print_order_numbers(orders: list) -> list[str]:
+    return list(dict.fromkeys(str(o).strip().lstrip('#') for o in orders if str(o).strip().lstrip('#')))
+
+def _print_job_id(pc_id: str, request_id: Optional[str]) -> str:
+    import uuid
+    if request_id:
+        return hashlib.sha256(f"{pc_id}\0{request_id}".encode()).hexdigest()
+    return str(uuid.uuid4())
+
+def _print_content(payload: dict) -> dict:
+    return {"orders": sorted(_print_order_numbers(payload.get("orders") or [])),
+            "copies": payload.get("copies", 1), "pdf_url": payload.get("pdf_url"),
+            "store": payload.get("store"), "type": payload.get("type"),
+            "delivery_order_id": payload.get("delivery_order_id"), "envoy_code": payload.get("envoy_code")}
+
 async def _enqueue_job(pc_id: str, payload: dict, dedup_key: str = "") -> dict:
-    """Add a job to the store. Uses DB when available (shared across Cloud Run instances)."""
+    """Enqueue once, including retries after a lost response or a completed print."""
     import time as _t
     now = _t.time()
     if SessionLocal is not None and PrintJob is not None:
@@ -346,23 +361,50 @@ async def _enqueue_job(pc_id: str, payload: dict, dedup_key: str = "") -> dict:
             from datetime import datetime, timezone
             from datetime import timedelta
             async with SessionLocal() as session:
+                # Serialize enqueue decisions across PostgreSQL instances. SQLite's
+                # write transaction provides the same protection for local installs.
+                from sqlalchemy import text, update
+                if session.bind.dialect.name == "postgresql":
+                    lock_key = int.from_bytes(hashlib.sha256(pc_id.encode()).digest()[:8], "big", signed=True)
+                    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+                else:
+                    await session.execute(update(PrintJob).where(PrintJob.pc_id == pc_id).values(status=PrintJob.status))
+                existing = await session.scalar(select(PrintJob).where(
+                    PrintJob.pc_id == pc_id, PrintJob.job_id == payload["job_id"],
+                ))
+                if existing and _print_content(existing.payload) != _print_content(payload):
+                    raise HTTPException(status_code=409, detail="Print request ID was reused with different content")
+                if existing and existing.status == "alias":
+                    existing = await session.scalar(select(PrintJob).where(
+                        PrintJob.pc_id == pc_id, PrintJob.job_id == existing.payload["duplicate_of"],
+                    ))
                 if dedup_key:
                     cutoff = datetime.now(timezone.utc) - timedelta(seconds=_DEDUP_WINDOW_SEC)
-                    existing = await session.scalar(
-                        select(PrintJob.id).where(
+                    existing = existing or await session.scalar(
+                        select(PrintJob).where(
                             PrintJob.dedup_key == dedup_key,
                             PrintJob.pc_id == pc_id,
-                            PrintJob.created_at >= cutoff,
+                            or_(PrintJob.status.in_(["pending", "inflight"]), PrintJob.created_at >= cutoff),
                         ).limit(1)
                     )
-                    if existing:
-                        count = await session.scalar(
-                            select(func.count()).select_from(PrintJob).where(
-                                PrintJob.pc_id == pc_id,
-                                PrintJob.status.in_(["pending", "inflight"]),
-                            )
+                if existing:
+                    if existing.job_id != payload["job_id"]:
+                        # Remember this request ID as well. Otherwise a lost
+                        # duplicate response retried after the click window
+                        # could create another copy of the completed batch.
+                        alias = await session.scalar(select(PrintJob.id).where(PrintJob.job_id == payload["job_id"]))
+                        if not alias:
+                            session.add(PrintJob(job_id=payload["job_id"], pc_id=pc_id,
+                                payload={**payload, "duplicate_of": existing.job_id}, status="alias", attempts=0))
+                            await session.flush()
+                    count = await session.scalar(
+                        select(func.count()).select_from(PrintJob).where(
+                            PrintJob.pc_id == pc_id,
+                            PrintJob.status.in_(["pending", "inflight"]),
                         )
-                        return {"ok": True, "job_id": "dedup", "queued": count or 0, "dedup": True}
+                    )
+                    await session.commit()
+                    return {"ok": True, "job_id": existing.job_id, "queued": count or 0, "dedup": True, "status": existing.status}
                 row = PrintJob(
                     job_id=payload["job_id"],
                     pc_id=pc_id,
@@ -381,22 +423,32 @@ async def _enqueue_job(pc_id: str, payload: dict, dedup_key: str = "") -> dict:
                     )
                 )
                 return {"ok": True, "job_id": payload["job_id"], "queued": count or 1}
+        except HTTPException:
+            raise
         except Exception as e:
-            print(f"[PRINT_RELAY] DB enqueue failed, using in-memory: {e}")
+            logger.exception("[PRINT_RELAY] DB enqueue failed")
+            # A commit may have succeeded before the connection failed. Creating
+            # a second, process-local copy would make that uncertainty a duplicate.
+            raise HTTPException(status_code=503, detail="Print queue unavailable; retry the same request") from e
     async with _JOB_LOCK:
-        if dedup_key:
-            cutoff = now - _DEDUP_WINDOW_SEC
-            to_del = [k for k, v in _DEDUP_CACHE.items() if v < cutoff]
-            for k in to_del:
-                del _DEDUP_CACHE[k]
-            if dedup_key in _DEDUP_CACHE:
-                store_q = JOB_STORE.get(pc_id, {})
-                return {"ok": True, "job_id": "dedup", "queued": len(store_q), "dedup": True}
-            _DEDUP_CACHE[dedup_key] = now
         store_q = JOB_STORE.setdefault(pc_id, {})
+        existing = store_q.get(payload["job_id"])
+        if existing and _print_content(existing["payload"]) != _print_content(payload):
+            raise HTTPException(status_code=409, detail="Print request ID was reused with different content")
+        if existing and existing["status"] == "alias":
+            existing = store_q.get(existing["payload"]["duplicate_of"])
+        if not existing and dedup_key:
+            existing = next((j for j in store_q.values() if j.get("dedup_key") == dedup_key and (
+                j["status"] in ("pending", "inflight") or now - j.get("created_at", 0) < _DEDUP_WINDOW_SEC
+            )), None)
+        count = sum(j["status"] in ("pending", "inflight") for j in store_q.values())
+        if existing:
+            if existing["payload"]["job_id"] != payload["job_id"]:
+                store_q[payload["job_id"]] = {"payload": {**payload, "duplicate_of": existing["payload"]["job_id"]}, "status": "alias", "attempts": 0, "created_at": now}
+            return {"ok": True, "job_id": existing["payload"]["job_id"], "queued": count, "dedup": True, "status": existing["status"]}
         jid = payload["job_id"]
-        store_q[jid] = {"payload": payload, "status": "pending", "leased_at": None, "attempts": 0}
-        return {"ok": True, "job_id": jid, "queued": len(store_q)}
+        store_q[jid] = {"payload": payload, "status": "pending", "leased_at": None, "attempts": 0, "dedup_key": dedup_key, "created_at": now}
+        return {"ok": True, "job_id": jid, "queued": count + 1}
 
 # Backward-compat alias so any old code referencing JOBS still works at import-time
 JOBS = JOB_STORE
@@ -471,6 +523,7 @@ class EnqueueBody(BaseModel):
     copies: int = 1
     pdf_url: Optional[str] = None
     store: Optional[str] = None
+    request_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
 
 class EnqueueLabelBody(BaseModel):
     delivery_order_id: str
@@ -481,6 +534,9 @@ class AckBody(BaseModel):
     pc_id: str
     secret: str
     job_id: str
+    retry: bool = True
+    error: Optional[str] = Field(default=None, max_length=500)
+    lease_attempt: Optional[int] = Field(default=None, ge=1)
 
 def _require_api_key(x_api_key: Optional[str]):
     if RELAY_API_KEY and x_api_key != RELAY_API_KEY:
@@ -638,7 +694,8 @@ async def _find_order_gid_by_number(number: str, store: Optional[str]) -> Option
 async def _tag_orders_before_print(numbers: List[str], store: Optional[str]):
     if not numbers:
         return
-    # De-duplicate and limit to a small batch
+    # De-duplicate. Tagging runs in the background so every requested order
+    # receives the print marker without delaying submission to the queue.
     try:
         unique: List[str] = []
         seen = set()
@@ -647,9 +704,8 @@ async def _tag_orders_before_print(numbers: List[str], store: Optional[str]):
             if k and k not in seen:
                 seen.add(k)
                 unique.append(k)
-        unique = unique[:20]
     except Exception:
-        unique = [str(n).lstrip('#') for n in numbers if str(n).strip()][:20]
+        unique = [str(n).lstrip('#') for n in numbers if str(n).strip()]
 
     mutation = """
     mutation AddTag($id: ID!, $tags: [String!]!) {
@@ -675,16 +731,16 @@ async def enqueue(job: EnqueueBody, x_api_key: Optional[str] = Header(default=No
     if job.pc_id not in PCS:
         raise HTTPException(status_code=404, detail="unknown pc_id")
     import time as _t, uuid as _uuid
-    jid = str(_uuid.uuid4())
+    jid = _print_job_id(job.pc_id, job.request_id)
     payload = {
         "job_id": jid,
         "ts": int(_t.time()),
-        "orders": [str(o).lstrip("#") for o in (job.orders or [])],
+        "orders": _print_order_numbers(job.orders or []),
         "copies": max(1, job.copies),
         "pdf_url": job.pdf_url or None,
         "store": (job.store or None),
     }
-    dk = _dedup_key_for_orders(job.orders or [], job.store) if job.orders else ""
+    dk = _dedup_key_for_orders(payload["orders"], job.store) if payload["orders"] else ""
     result = await _enqueue_job(job.pc_id, payload, dk)
     if not result.get("dedup"):
         try:
@@ -705,16 +761,16 @@ async def enqueue_orders(
     if job.pc_id not in PCS:
         raise HTTPException(status_code=404, detail="unknown pc_id")
     import time as _t, uuid as _uuid
-    jid = str(_uuid.uuid4())
+    jid = _print_job_id(job.pc_id, job.request_id)
     payload = {
         "job_id": jid,
         "ts": int(_t.time()),
-        "orders": [str(o).lstrip("#") for o in (job.orders or [])],
+        "orders": _print_order_numbers(job.orders or []),
         "copies": max(1, job.copies),
         "pdf_url": job.pdf_url or None,
         "store": (job.store or None),
     }
-    dk = _dedup_key_for_orders(job.orders or [], job.store) if job.orders else ""
+    dk = _dedup_key_for_orders(payload["orders"], job.store) if payload["orders"] else ""
     result = await _enqueue_job(job.pc_id, payload, dk)
     if not result.get("dedup"):
         try:
@@ -735,17 +791,15 @@ async def pull(
     # Prefer a header so credentials never appear in Cloud Run request URLs.
     # Retain the hidden query parameter temporarily for older installed agents.
     _require_pc(pc_id, x_pc_secret or secret or "")
-    # Claiming below is a SELECT of `pending` rows followed by a separate
-    # mutation — no FOR UPDATE SKIP LOCKED and no atomic claim — so two
-    # deployments polling one database can lease the same job twice and print
-    # it twice. While another deployment still owns the print queue this one
-    # must refuse, loudly, rather than quietly serve an empty list.
+    # A standby deployment must still refuse consumption. Active deployments
+    # use conditional UPDATE claims so only one agent can receive each job.
     if not WORKER_LOOPS:
         raise HTTPException(
             status_code=503,
             detail="print relay disabled on this deployment (WORKER_LOOPS=0)",
         )
     import time as _t
+    max_items = min(max(max_items, 1), 50)
     wait = min(max(wait, 0), 25)
     deadline = _t.time() + wait
 
@@ -767,27 +821,29 @@ async def pull(
                                 PrintJob.leased_at < cutoff,
                             )
                         )
-                        .values(status="pending", leased_at=None)
+                        .values(status=case((PrintJob.attempts < _MAX_ATTEMPTS, "pending"), else_="failed"), leased_at=None)
                     )
                     await session.commit()
                     rows = (
                         await session.execute(
-                            select(PrintJob)
-                            .where(PrintJob.pc_id == pc_id, PrintJob.status == "pending")
+                            select(PrintJob.id)
+                            .where(PrintJob.pc_id == pc_id, PrintJob.status == "pending", PrintJob.attempts < _MAX_ATTEMPTS)
                             .order_by(PrintJob.created_at.asc())
                             .limit(max_items)
                         )
                     )
-                    jobs = list(rows.scalars().all())
-                    for j in jobs:
-                        j.status = "inflight"
-                        j.leased_at = int(now)
-                        j.attempts = (j.attempts or 0) + 1
-                        out.append(j.payload)
+                    for job_pk in rows.scalars().all():
+                        claimed = (await session.execute(
+                            update(PrintJob).where(PrintJob.id == job_pk, PrintJob.status == "pending")
+                            .values(status="inflight", leased_at=int(now), attempts=PrintJob.attempts + 1)
+                            .returning(PrintJob.payload, PrintJob.attempts)
+                        )).first()
+                        if claimed is not None:
+                            out.append({**claimed.payload, "lease_attempt": claimed.attempts})
                     await session.commit()
             except Exception as e:
-                print(f"[PRINT_RELAY] DB pull failed: {e}")
-                out = []
+                logger.exception("[PRINT_RELAY] DB pull failed")
+                raise HTTPException(status_code=503, detail="Print queue unavailable") from e
 
         if not out and (SessionLocal is None or PrintJob is None):
             async with _JOB_LOCK:
@@ -795,7 +851,7 @@ async def pull(
                 now = _t.time()
                 for _jid, _job in store.items():
                     if _job["status"] == "inflight" and now - (_job.get("leased_at") or 0) > _INFLIGHT_TIMEOUT_SEC:
-                        _job["status"] = "pending"
+                        _job["status"] = "pending" if _job.get("attempts", 0) < _MAX_ATTEMPTS else "failed"
                         _job["leased_at"] = None
                 pending = [(jid, j) for jid, j in store.items() if j["status"] == "pending"]
                 pending.sort(key=lambda x: x[1]["payload"].get("ts", 0))
@@ -803,7 +859,7 @@ async def pull(
                     j["status"] = "inflight"
                     j["leased_at"] = now
                     j["attempts"] = j.get("attempts", 0) + 1
-                    out.append(j["payload"])
+                    out.append({**j["payload"], "lease_attempt": j["attempts"]})
 
         if out:
             return {"ok": True, "jobs": out}
@@ -817,58 +873,106 @@ async def ack(b: AckBody):
     if SessionLocal is not None and PrintJob is not None:
         try:
             async with SessionLocal() as session:
-                from sqlalchemy import delete
-                await session.execute(
-                    delete(PrintJob).where(
+                from sqlalchemy import update
+                acknowledged = await session.scalar(
+                    update(PrintJob).where(
                         PrintJob.pc_id == b.pc_id,
                         PrintJob.job_id == b.job_id,
-                    )
+                        *([PrintJob.attempts == b.lease_attempt] if b.lease_attempt is not None else []),
+                    ).values(status="completed", leased_at=None).returning(PrintJob.job_id)
                 )
                 await session.commit()
+                if b.lease_attempt is not None and acknowledged is None:
+                    raise HTTPException(status_code=409, detail="Print lease is no longer owned by this attempt")
             return {"ok": True}
+        except HTTPException:
+            raise
         except Exception as e:
-            print(f"[PRINT_RELAY] DB ack failed: {e}")
+            logger.exception("[PRINT_RELAY] DB ack failed")
+            raise HTTPException(status_code=503, detail="Print acknowledgement unavailable") from e
     async with _JOB_LOCK:
         store = JOB_STORE.get(b.pc_id, {})
-        store.pop(b.job_id, None)
+        job = store.get(b.job_id)
+        if job and (b.lease_attempt is None or job["attempts"] == b.lease_attempt):
+            job.update(status="completed", leased_at=None)
+        elif b.lease_attempt is not None:
+            raise HTTPException(status_code=409, detail="Print lease is no longer owned by this attempt")
     return {"ok": True}
 
 @app.post("/nack")
 async def nack(b: AckBody):
-    """Re-queue a failed job for retry. After _MAX_ATTEMPTS the job is dropped."""
+    """Retry pre-print failures; hold ambiguous spool submissions for review."""
     _require_pc(b.pc_id, b.secret)
     if SessionLocal is not None and PrintJob is not None:
         try:
             async with SessionLocal() as session:
-                row = await session.scalar(
-                    select(PrintJob).where(
+                from sqlalchemy import update
+                status = case((PrintJob.attempts < _MAX_ATTEMPTS, "pending"), else_="failed") if b.retry else "failed"
+                row = (await session.execute(
+                    update(PrintJob).where(
                         PrintJob.pc_id == b.pc_id,
                         PrintJob.job_id == b.job_id,
-                    )
-                )
+                        PrintJob.status == "inflight",
+                        *([PrintJob.attempts == b.lease_attempt] if b.lease_attempt is not None else []),
+                    ).values(status=status, leased_at=None).returning(PrintJob.status, PrintJob.attempts)
+                )).first()
                 if not row:
-                    return {"ok": True, "status": "not_found"}
-                if (row.attempts or 0) >= _MAX_ATTEMPTS:
-                    await session.delete(row)
+                    current_status = await session.scalar(select(PrintJob.status).where(
+                        PrintJob.pc_id == b.pc_id, PrintJob.job_id == b.job_id,
+                    ))
                     await session.commit()
-                    return {"ok": True, "status": "dropped", "reason": "max_attempts"}
-                row.status = "pending"
-                row.leased_at = None
+                    return {"ok": True, "status": current_status or "not_found"}
                 await session.commit()
+            if row.status == "failed":
+                return {"ok": True, "status": "failed", "reason": "max_attempts" if b.retry else "manual_review"}
             return {"ok": True, "status": "requeued"}
         except Exception as e:
-            print(f"[PRINT_RELAY] DB nack failed: {e}")
+            logger.exception("[PRINT_RELAY] DB nack failed")
+            raise HTTPException(status_code=503, detail="Print retry queue unavailable") from e
     async with _JOB_LOCK:
         store = JOB_STORE.get(b.pc_id, {})
         job = store.get(b.job_id)
         if not job:
             return {"ok": True, "status": "not_found"}
+        if b.lease_attempt is not None and job["attempts"] != b.lease_attempt:
+            return {"ok": True, "status": "stale_lease"}
+        if job["status"] != "inflight":
+            return {"ok": True, "status": job["status"]}
+        if not b.retry:
+            job.update(status="failed", leased_at=None)
+            return {"ok": True, "status": "failed", "reason": "manual_review"}
         if job.get("attempts", 0) >= _MAX_ATTEMPTS:
-            store.pop(b.job_id, None)
-            return {"ok": True, "status": "dropped", "reason": "max_attempts"}
+            job.update(status="failed", leased_at=None)
+            return {"ok": True, "status": "failed", "reason": "max_attempts"}
         job["status"] = "pending"
         job["leased_at"] = None
     return {"ok": True, "status": "requeued"}
+
+@app.post("/renew")
+async def renew(b: AckBody):
+    """Keep a long-running batch leased while its agent renders and spools."""
+    _require_pc(b.pc_id, b.secret)
+    import time
+    if SessionLocal is not None and PrintJob is not None:
+        try:
+            from sqlalchemy import update
+            async with SessionLocal() as session:
+                jid = await session.scalar(update(PrintJob).where(
+                    PrintJob.pc_id == b.pc_id, PrintJob.job_id == b.job_id,
+                    PrintJob.status == "inflight",
+                    *([PrintJob.attempts == b.lease_attempt] if b.lease_attempt is not None else []),
+                ).values(leased_at=int(time.time())).returning(PrintJob.job_id))
+                await session.commit()
+        except Exception as e:
+            logger.exception("[PRINT_RELAY] DB renewal failed")
+            raise HTTPException(status_code=503, detail="Print lease renewal unavailable") from e
+        return {"ok": True, "renewed": jid is not None}
+    async with _JOB_LOCK:
+        job = JOB_STORE.get(b.pc_id, {}).get(b.job_id)
+        if not job or job["status"] != "inflight" or (b.lease_attempt is not None and job["attempts"] != b.lease_attempt):
+            return {"ok": True, "renewed": False}
+        job["leased_at"] = time.time()
+        return {"ok": True, "renewed": True}
 
 @app.post("/api/enqueue-label")
 async def enqueue_label(

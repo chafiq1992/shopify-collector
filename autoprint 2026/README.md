@@ -64,5 +64,23 @@ curl -X POST http://127.0.0.1:8787/print/orders -H "Content-Type: application/js
 ```
 
 ## Notes
-- SumatraPDF portable is bundled under `tools/SumatraPDF` and used automatically.
+- Install SumatraPDF separately and set `sumatra_path` to its executable, or preserve the existing `tools/SumatraPDF` installation when applying a source update.
 - Create a shortcut to `start_agent.bat` in your **Startup** folder to auto-start on login.
+
+## Printing reliability and speed (2026.10.13)
+
+- Use the updated collector with this agent: it uses `/renew` to keep long batches leased. Only one poller runs per installation, and jobs are never pulled again while the batch is still running.
+- Relay jobs have durable spool receipts in `state/print-jobs.sqlite3`. A failed acknowledgement or agent restart does not print submitted pages again. A later chunk failing before printing retries only unfinished chunks, using the original chunk plan.
+- Interrupted or failed Sumatra submissions are held for manual review, because some pages may already have entered the printer. Check the printer and collector queue before explicitly reprinting the missing labels. A successful response means accepted by Sumatra/spooler; it does not confirm physical output.
+- Local `/print/orders` clients should send a stable `request_id` for every retry of one print action. Relay forwarding clients can send `job_id`. Keep the same order list, copies, store and printer for that ID; use a new ID for an intentional reprint. Forwarding preserves these fields. Anonymous requests cannot be safely deduplicated.
+- Sumatra receives the exact copy count using its documented [`-print-settings "Nx"` syntax](https://www.sumatrapdfreader.org/docs/Command-line-arguments), including `1x`. Each PDF is submitted once, rather than starting Sumatra once per copy.
+- Keep `max_orders_per_batch: 0` to render one PDF for the entire selection. `post_print_delay_seconds: 0` removes the extra pause after submission. Existing config files can keep their old value, so change it explicitly if a delay is unnecessary for your driver. Shopify request throttling and image-loading time are preserved.
+- Every label gets its own template body layout. HTML conversions use isolated browser profiles so parallel conversions cannot reuse a desktop browser or each other's PDF output.
+
+Run regression tests without contacting Shopify or a printer:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+`tests/render_qa_fixture.py` additionally renders 30 synthetic labels per template through Edge/Chrome without submitting them to a printer. Run it from the repository root with the agent Python environment. It writes PDFs under `tmp/print-label-qa`; fixtures embed remote images locally and include QR codes and alternating exchange warnings.

@@ -1,7 +1,7 @@
 # app/main.py
 from __future__ import annotations
 
-import os, tempfile, json, shutil, traceback, threading, time, collections
+import os, tempfile, json, shutil, traceback, threading, time, collections, hashlib, re
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
@@ -13,9 +13,10 @@ import yaml
 from fastapi import FastAPI, UploadFile, File, Form, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .print_utils import print_pdf_silent, html_to_pdf, set_post_print_delay
+from .print_journal import PrintJournal, JobBusy, SubmissionUncertain
 from .shopify import fetch_order_by_number, hydrate_order_for_template, ensure_variant_images
 from .liquid_template import render_liquid
 from starlette.staticfiles import StaticFiles
@@ -29,7 +30,7 @@ BASE = Path(__file__).resolve().parent.parent
 # run which build.
 #   2026.09.23-print-auth: send pc_id + X-PC-Secret on /api/overrides and
 #   /api/delivery-label (the collector will start requiring them).
-AGENT_VERSION = "2026.09.23-print-auth"
+AGENT_VERSION = "2026.10.13-print-receipts"
 AGENT_USER_AGENT = f"autoprint-agent/{AGENT_VERSION}"
 CONFIG_PATH = BASE / "config.yaml"
 
@@ -70,6 +71,8 @@ class OrdersBody(BaseModel):
     copies: int = 1
     printer: Optional[str] = None
     store: Optional[str] = None
+    job_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    request_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
 
 # ----------------- helpers -----------------
 def check_secret(cfg: dict, x_secret: Optional[str]):
@@ -447,6 +450,20 @@ def _extract_style(html: str) -> str:
     s, e = html.find("<style>"), html.rfind("</style>")
     return html[s + 7 : e] if s != -1 and e != -1 and e > s else ""
 
+
+def _combined_label_html(order_results):
+    # Templates style their body as one 100mm label. Apply that layout to EACH
+    # page wrapper, rather than flexing every order inside a single label body.
+    style = (order_results[0][1] if order_results else "") or "@page { size: 100mm 100mm; margin: 0; }"
+    style = re.sub(r"(?<![\w.#-])body\b", ".label-page", style)
+    pages = "".join('<section class="label-page">' + result[0] + "</section>" for result in order_results)
+    return (
+        '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' + style
+        + "body{margin:0;padding:0;} .label-page{break-after:page;break-inside:avoid;}"
+        + ".label-page:last-child{break-after:auto;}"
+        + "</style></head><body>" + pages + "</body></html>"
+    )
+
 def _process_single_order(num: str, cfg: dict, overrides_map: dict, store_override: Optional[str]) -> Tuple[str, str, str]:
     """Returns (body_html, style, store_printer). Used for parallel order processing."""
     shop, token, api_version, currency_suffix, template_name, store_printer = _select_store_for_order(cfg, str(num), store_override)
@@ -491,6 +508,28 @@ def _chunked(seq, size: int):
             buf = []
     if buf:
         yield buf
+
+
+def _job_receipt(cfg, job_id, payload=None):
+    # Namespace by PC; retain receipts across agent restarts and relay failover.
+    key = hashlib.sha256(f"{cfg.get('pc_id', '')}\0{job_id}".encode()).hexdigest()
+    return PrintJournal(BASE / "state" / "print-jobs.sqlite3").claim(key, payload=payload)
+
+
+def _submit_pdf(path, cfg, printer, copies=1, receipt=None, part="pdf"):
+    if receipt and receipt.is_submitted(part):
+        return
+    try:
+        print_pdf_silent(
+            path, printer=printer, sumatra_path=cfg.get("sumatra_path"), copies=copies,
+            before_submit=(lambda: receipt.before_submit(part)) if receipt else None,
+        )
+    except OSError:
+        if receipt:
+            receipt.not_started(part)
+        raise
+    if receipt:
+        receipt.submitted(part)
 
 # ----------------- routes -----------------
 @app.get("/health")
@@ -696,68 +735,34 @@ def print_orders(
                 raise ValueError("Forward loop detected (already forwarded)")
             return _forward_json(cfg, "/print/orders", b.model_dump())
 
-        max_per_batch = int(cfg.get("max_orders_per_batch", 0) or 0)
-        order_groups = list(_chunked(b.orders or [], max_per_batch)) if (b.orders and max_per_batch and max_per_batch > 1) else [b.orders or []]
-        fetch_workers = int(cfg.get("fetch_order_workers", 4))
-        results = []
-        collector_session = _build_http_session(max(fetch_workers, 4))
-        overrides_map = fetch_overrides_from_collector(cfg, b.orders or [], b.store, session=collector_session)
-        chosen_printer = _normalize_printer_name(b.printer)
-
-        for group in order_groups:
-            if not group:
-                continue
-            with ThreadPoolExecutor(max_workers=fetch_workers) as pool:
-                futures = [pool.submit(_process_single_order, str(num), cfg, overrides_map, b.store) for num in group]
-                order_results = [f.result() for f in futures]
-            bodies = [r[0] for r in order_results]
-            first_style = (order_results[0][1] if order_results else "") or "@page { size: 100mm 100mm; margin: 0; }"
-            if not chosen_printer:
-                chosen_printer = next((r[2] for r in order_results if r[2]), "")
-            results.extend([{"order": num, "prepared": True} for num in group])
-
-            # Build combined HTML with page breaks for this group
-            if not bodies:
-                # No printable bodies in this group (likely all skipped) → skip PDF creation
-                continue
-            combined = (
-                "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-                + "<style>" + (first_style or "@page { size: 100mm 100mm; margin: 0; }") + "</style>"
-                + "<style>.page-break{ page-break-after: always; }</style>"
-                + "</head><body>"
-                + ("<div>" + "</div><div class=\"page-break\"></div><div>".join(bodies) + "</div>")
-                + "</body></html>"
-            )
-
-            # HTML → single PDF for this group
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as fhtml:
-                fhtml.write(combined.encode("utf-8"))
-                fhtml.flush()
-                out_pdf = fhtml.name.replace(".html", ".pdf")
-
-            html_to_pdf(
-                fhtml.name,
-                out_pdf,
-                chrome_path=cfg.get("chrome_path"),
-                edge_path=cfg.get("edge_path"),
-            )
-
-            # Print this group's PDF
-            print_pdf_silent(
-                out_pdf,
-                printer=chosen_printer or _normalize_printer_name(cfg.get("printer_name")),
-                sumatra_path=cfg.get("sumatra_path"),
-                copies=b.copies,
-            )
-
-            # cleanup
-            try: os.remove(fhtml.name)
-            except: pass
-            try: os.remove(out_pdf)
-            except: pass
-            time.sleep(0.3)
-
-        return {"ok": True, "results": results, "combined": True}
+        receipt = None
+        heartbeat_stop = threading.Event()
+        try:
+            identity = b.job_id or b.request_id
+            if identity:
+                receipt = _job_receipt(cfg, identity, {"orders": b.orders, "copies": b.copies, "printer": b.printer, "store": b.store})
+                if receipt.completed:
+                    return {"ok": True, "duplicate": True, "combined": True, "results": [{"order": num, "printed": True, "prepared": True} for num in b.orders]}
+                def touch_receipt():
+                    while not heartbeat_stop.wait(20):
+                        try:
+                            receipt.touch()
+                        except Exception as exc:
+                            _plog(f"[WARN] local receipt heartbeat failed: {exc}")
+                threading.Thread(target=touch_receipt, daemon=True).start()
+            with _build_http_session() as session:
+                _print_job({"orders": b.orders, "copies": b.copies, "printer": b.printer, "store": b.store}, cfg, session=session, receipt=receipt)
+            if receipt:
+                receipt.finish()
+            return {"ok": True, "results": [{"order": num, "printed": True, "prepared": True} for num in b.orders], "combined": True}
+        finally:
+            heartbeat_stop.set()
+            if receipt and not receipt.completed:
+                receipt.release()
+    except JobBusy as e:
+        return _json_error(e, 409)
+    except SubmissionUncertain as e:
+        return JSONResponse(status_code=409, content={"ok": False, "manual_review": True, "error": str(e)})
     except Exception as e:
         return _json_error(e)
 
@@ -864,8 +869,10 @@ def _print_status_banner():
     _plog("\n".join(lines))
 
 # ----------------- delivery label printing (from delivery print-agent) -----------------
-def _print_delivery_label(job: dict, cfg: dict, session: Optional[requests.Session] = None):
+def _print_delivery_label(job: dict, cfg: dict, session: Optional[requests.Session] = None, receipt=None):
     """Download and print a delivery label. Mirrors print-agent/poller.py logic."""
+    if receipt and receipt.is_submitted("label"):
+        return
     relay = _collector_base_url(cfg)
     if not relay:
         raise RuntimeError("relay_url not configured – cannot fetch delivery label")
@@ -902,40 +909,37 @@ def _print_delivery_label(job: dict, cfg: dict, session: Optional[requests.Sessi
             pdf_path = os.path.join(tmp_dir, "label.pdf")
             with open(pdf_path, "wb") as f:
                 f.write(r.content)
-            print_pdf_silent(pdf_path, printer=label_printer, sumatra_path=cfg.get("sumatra_path"))
+            _submit_pdf(pdf_path, cfg, label_printer, copies=int(job.get("copies", 1)), receipt=receipt, part="label")
         else:
             html_path = os.path.join(tmp_dir, "label.html")
             pdf_path = os.path.join(tmp_dir, "label.pdf")
             with open(html_path, "wb") as f:
                 f.write(r.content)
             html_to_pdf(html_path, pdf_path, chrome_path=cfg.get("chrome_path"), edge_path=cfg.get("edge_path"))
-            print_pdf_silent(pdf_path, printer=label_printer, sumatra_path=cfg.get("sumatra_path"))
+            _submit_pdf(pdf_path, cfg, label_printer, copies=int(job.get("copies", 1)), receipt=receipt, part="label")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 # ----------------- optional: cloud relay poller -----------------
-def _print_job(job: dict, cfg: dict, session: Optional[requests.Session] = None):
+def _print_job(job: dict, cfg: dict, session: Optional[requests.Session] = None, receipt=None):
     # Delivery label jobs (from the delivery app)
     if job.get("type") == "label":
         dlv_id = job.get("delivery_order_id", "")
         print(f"[poller] LABEL {dlv_id}")
-        _print_delivery_label(job, cfg, session=session)
+        _print_delivery_label(job, cfg, session=session, receipt=receipt)
         return
 
     # If pdf_url present, print PDF directly
     if job.get("pdf_url"):
+        if receipt and receipt.is_submitted("pdf"):
+            return
         client = session or requests
         r = client.get(job["pdf_url"], timeout=60)
         r.raise_for_status()
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(r.content); tmp.flush(); path = tmp.name
         try:
-            print_pdf_silent(
-                path,
-                printer=cfg.get("printer_name"),
-                sumatra_path=cfg.get("sumatra_path"),
-                copies=int(job.get("copies", 1)),
-            )
+            _submit_pdf(path, cfg, _normalize_printer_name(job.get("printer") or cfg.get("printer_name")), copies=int(job.get("copies", 1)), receipt=receipt)
         finally:
             try: os.remove(path)
             except: pass
@@ -944,44 +948,144 @@ def _print_job(job: dict, cfg: dict, session: Optional[requests.Session] = None)
     orders = job.get("orders") or []
     copies = int(job.get("copies", 1))
     if orders:
-        chosen_printer = ""
+        chosen_printer = _normalize_printer_name(job.get("printer"))
         overrides_map = fetch_overrides_from_collector(cfg, [str(n) for n in orders], job.get("store"), session=session)
         max_per_batch = int(cfg.get("max_orders_per_batch", 0) or 0)
         order_groups = list(_chunked(orders, max_per_batch)) if (orders and max_per_batch and max_per_batch > 1) else [orders]
-        fetch_workers = int(cfg.get("fetch_order_workers", 4))
-        for group in order_groups:
+        if receipt:
+            order_groups = receipt.plan(order_groups)
+        fetch_workers = max(1, int(cfg.get("fetch_order_workers", 4)))
+        for part, group in enumerate(order_groups):
+            if receipt and receipt.is_submitted(part):
+                continue
             if not group:
                 continue
             with ThreadPoolExecutor(max_workers=fetch_workers) as pool:
                 futures = [pool.submit(_process_single_order, str(num), cfg, overrides_map, job.get("store")) for num in group]
                 order_results = [f.result() for f in futures]
-            bodies = [r[0] for r in order_results]
-            first_style = (order_results[0][1] if order_results else "") or "@page { size: 100mm 100mm; margin: 0; }"
             if not chosen_printer:
                 chosen_printer = next((r[2] for r in order_results if r[2]), "")
 
-            combined = (
-                "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-                + "<style>" + (first_style or "@page { size: 100mm 100mm; margin: 0; }") + "</style>"
-                + "<style>.page-break{ page-break-after: always; }</style>"
-                + "</head><body>"
-                + ("<div>" + "</div><div class=\"page-break\"></div><div>".join(bodies) + "</div>")
-                + "</body></html>"
-            )
+            combined = _combined_label_html(order_results)
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as fhtml:
                 fhtml.write(combined.encode("utf-8")); fhtml.flush()
                 out_pdf = fhtml.name.replace(".html", ".pdf")
-            html_to_pdf(fhtml.name, out_pdf, chrome_path=cfg.get("chrome_path"), edge_path=cfg.get("edge_path"))
-            print_pdf_silent(out_pdf, printer=chosen_printer or _normalize_printer_name(cfg.get("printer_name")), sumatra_path=cfg.get("sumatra_path"), copies=copies)
-            try: os.remove(fhtml.name); os.remove(out_pdf)
-            except: pass
-            time.sleep(0.3)
+            try:
+                html_to_pdf(fhtml.name, out_pdf, chrome_path=cfg.get("chrome_path"), edge_path=cfg.get("edge_path"))
+                _submit_pdf(out_pdf, cfg, chosen_printer or _normalize_printer_name(cfg.get("printer_name")), copies=copies, receipt=receipt, part=part)
+            finally:
+                for path in (fhtml.name, out_pdf):
+                    try: os.remove(path)
+                    except OSError: pass
+
+
+def _handle_relay_job(job, cfg, ack, nack, renew):
+    """Keep the lease alive and persist spool receipts independently of ACK."""
+    jid = str(job.get("job_id") or "")
+    if not jid:
+        _plog("[ERR] Relay returned a job without job_id; refusing to print")
+        return
+    receipt = None
+    stop = threading.Event()
+    kind, desc = _job_desc(job)
+    try:
+        receipt = _job_receipt(cfg, jid, {k: v for k, v in job.items() if k not in ("ts", "job_id", "lease_attempt")})
+        _pq.add(jid, kind, desc)
+        if receipt.completed:
+            try:
+                ack(jid)
+            except Exception as exc:
+                _plog(f"[WARN] Already submitted {jid[:8]}, ACK pending: {exc}")
+            _pq.done(jid)
+            _plog(f"[ACK] Already submitted {jid[:8]}; no reprint")
+            return
+        _pq.printing(jid)
+        lease_ok = threading.Event()
+        if not renew(jid):
+            raise JobBusy("Relay job is no longer leased")
+        lease_ok.set()
+        last_renewed = [time.monotonic()]
+        receipt.can_submit = lambda: lease_ok.is_set() and time.monotonic() - last_renewed[0] < 60
+
+        def heartbeat():
+            while not stop.wait(20):
+                try:
+                    receipt.touch()
+                    if not renew(jid):
+                        lease_ok.clear()
+                        return
+                    last_renewed[0] = time.monotonic()
+                except Exception as exc:
+                    _plog(f"[WARN] Lease heartbeat {jid[:8]}: {exc}")
+
+        threading.Thread(target=heartbeat, daemon=True, name=f"print-lease-{jid[:8]}").start()
+        with _build_http_session() as worker_session:
+            _print_job(job, cfg, session=worker_session, receipt=receipt)
+        receipt.finish()
+        # A failed ACK must never undo the persisted receipt or NACK this job.
+        try:
+            ack(jid)
+        except Exception as exc:
+            _plog(f"[WARN] Submitted {jid[:8]}, ACK pending: {exc}")
+        _pq.done(jid)
+        _plog(f"[OK] {kind:6s} {desc}")
+    except JobBusy as exc:
+        # Another local process owns it, or its relay lease was lost. Do not
+        # mutate that process's lease by NACKing its active job.
+        _plog(f"[WAIT] {jid[:8]}: {exc}")
+        if receipt:
+            _pq.fail(jid, str(exc))
+    except Exception as exc:
+        err = str(exc)[:250]
+        _pq.fail(jid, err)
+        _plog(f"[ERR] {kind:6s} {desc}: {err}")
+        if not (receipt and receipt.completed):
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            try:
+                nack(jid, retry=not isinstance(exc, SubmissionUncertain) and status != 404)
+            except Exception as nack_exc:
+                _plog(f"[WARN] NACK {jid[:8]} failed: {nack_exc}")
+    finally:
+        stop.set()
+        if receipt and not receipt.completed:
+            receipt.release()
+
+
+_poller_started = False
+_poller_instance_file = None
+
+
+def _claim_poller_instance():
+    """One relay consumer per installation, including duplicate Windows starts."""
+    global _poller_instance_file
+    path = BASE / "state" / "poller.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            if path.stat().st_size == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    _poller_instance_file = handle
+    return True
 
 def start_poller():
+    global _poller_started
+    if _poller_started:
+        return
     try:
         cfg = load_config()
-        set_post_print_delay(cfg.get("post_print_delay_seconds", 1.5))
+        set_post_print_delay(cfg.get("post_print_delay_seconds", 0))
         _set_shopify_request_concurrency(cfg.get("shopify_request_concurrency", 1))
     except Exception:
         _plog("[poller] cannot load config; disabled")
@@ -995,9 +1099,16 @@ def start_poller():
         _plog("[poller] relay disabled (set relay_url, pc_id, pc_secret in config.yaml)")
         return
 
+    if not _claim_poller_instance():
+        _plog("[poller] another agent is already running in this installation; poller disabled")
+        return
+    _poller_started = True
+
     long_poll_sec = int(cfg.get("long_poll_seconds", 20))
-    max_items     = int(cfg.get("max_items", 10))
-    max_workers   = int(cfg.get("max_workers", 4))
+    max_workers   = max(1, int(cfg.get("max_workers", 4)))
+    # Every leased job starts immediately and gets a heartbeat. Jobs waiting
+    # behind a busy executor would otherwise expire before work begins.
+    max_items     = min(max_workers, max(1, int(cfg.get("max_items", 10))))
     status_sec    = int(cfg.get("status_interval_seconds", 30))
 
     sess = _build_http_session(max(4, max_workers * 2))
@@ -1013,48 +1124,35 @@ def start_poller():
         r.raise_for_status()
         return r.json().get("jobs", [])
 
-    def _ack(jid: str):
-        try:
-            sess.post(f"{_active_relay()}/ack",
-                       json={"pc_id": pc_id, "secret": pc_secret, "job_id": jid},
-                       timeout=10)
-        except Exception as e:
-            _plog(f"  [WARN] ack failed {jid[:8]}: {e}")
+    def _ack(jid: str, lease_attempt=None):
+        r = sess.post(f"{_active_relay()}/ack",
+                      json={"pc_id": pc_id, "secret": pc_secret, "job_id": jid, "lease_attempt": lease_attempt}, timeout=10)
+        r.raise_for_status()
 
-    def _nack(jid: str):
-        try:
-            sess.post(f"{_active_relay()}/nack",
-                       json={"pc_id": pc_id, "secret": pc_secret, "job_id": jid},
-                       timeout=10)
-        except Exception as e:
-            _plog(f"  [WARN] nack failed {jid[:8]}: {e}")
+    def _nack(jid: str, retry=True, lease_attempt=None):
+        r = sess.post(f"{_active_relay()}/nack",
+                      json={"pc_id": pc_id, "secret": pc_secret, "job_id": jid, "retry": retry, "lease_attempt": lease_attempt}, timeout=10)
+        r.raise_for_status()
 
-    # ── job handler (runs inside a worker thread) ──
-    def _handle(job: dict):
-        jid = job.get("job_id", "?")
-        kind, desc = _job_desc(job)
-        _pq.add(jid, kind, desc)
-        _pq.printing(jid)
-        _plog(f"  [>>] {kind:6s} {desc}")
+    def _renew(jid: str, lease_attempt=None):
+        # A separate session avoids sharing mutable requests session state with
+        # the main pull and print workers. Renewals are small and infrequent.
+        r = requests.post(f"{_active_relay()}/renew",
+                          headers={"User-Agent": AGENT_USER_AGENT},
+                          json={"pc_id": pc_id, "secret": pc_secret, "job_id": jid, "lease_attempt": lease_attempt}, timeout=10)
+        r.raise_for_status()
+        return bool(r.json().get("renewed"))
+
+    def _handle(job):
         try:
-            try:
-                cfg_now = load_config()
-            except Exception:
-                cfg_now = cfg
-            _print_job(job, cfg_now, session=sess)
-            _ack(jid)
-            _pq.done(jid)
-            _plog(f"  [OK] {kind:6s} {desc}")
-        except Exception as e:
-            err = str(e)[:120]
-            _plog(f"  [!!] {kind:6s} {desc} -- {err}")
-            is_404 = "404" in str(e) or (getattr(getattr(e, "response", None), "status_code", 0) == 404)
-            if is_404:
-                _ack(jid)
-                _plog(f"  [ACK] 404 - not retrying (resource not found)")
-            else:
-                _nack(jid)
-            _pq.fail(jid, err)
+            cfg_now = load_config()
+        except Exception:
+            cfg_now = cfg
+        attempt = job.get("lease_attempt")
+        _handle_relay_job(job, cfg_now,
+                          lambda jid: _ack(jid, lease_attempt=attempt),
+                          lambda jid, retry=True: _nack(jid, retry=retry, lease_attempt=attempt),
+                          lambda jid: _renew(jid, lease_attempt=attempt))
 
     # ── main poller loop ──
     def _poller_loop():
@@ -1080,14 +1178,14 @@ def start_poller():
                         continue
                     _plog(f"[PULL] {len(jobs)} job(s) received")
                     futs = {pool.submit(_handle, j): j for j in jobs}
-                    for fut in _as_completed(futs, timeout=180):
+                    for fut in _as_completed(futs):
                         try:
                             fut.result()
                         except Exception as e:
                             j = futs[fut]
                             jid = j.get("job_id", "")
                             _plog(f"  [ERR] worker crash {jid[:8]}: {e}")
-                            _nack(jid)
+                            _nack(jid, lease_attempt=j.get("lease_attempt"))
                             _pq.fail(jid, str(e)[:80])
 
                 except requests.exceptions.ConnectionError:
@@ -1125,8 +1223,10 @@ def start_poller():
     threading.Thread(target=_poller_loop, daemon=True, name="autoprint-poller").start()
     threading.Thread(target=_status_loop, daemon=True, name="autoprint-status").start()
 
-# start the engine (safe no-op if relay not configured)
-start_poller()
+# Start only with the HTTP application, never as a side effect of imports.
+@app.on_event("startup")
+def startup():
+    start_poller()
 
 # ----------------- runner -----------------
 if __name__ == "__main__":

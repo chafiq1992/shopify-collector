@@ -1,5 +1,6 @@
 // Prefer explicit env; else use current origin so production Cloud Run works without extra config
 import { authHeaders } from './auth';
+import { createPrintRequestId, sendRelayOrders } from './printSubmission.js';
 
 const RELAY_BASE = (import.meta.env.VITE_PRINT_RELAY_URL as string) || (typeof window !== 'undefined' ? window.location.origin : "");
 
@@ -27,7 +28,7 @@ function getRelayPcId(): string {
 
 const DEFAULT_PC_ID = getRelayPcId();
 
-export type EnqueueResponse = { ok: boolean; job_id?: string; queued?: number; error?: string };
+export type EnqueueResponse = { ok: boolean; job_id?: string; queued?: number; error?: string; status?: string; dedup?: boolean };
 
 type PublicConfig = { relayUrl?: string; relayApiKey?: string; relayPcId?: string };
 let cachedConfig: PublicConfig | null = null;
@@ -61,44 +62,22 @@ async function getRelayConfig(): Promise<{ base: string; apiKey: string; pcId: s
   return { base, apiKey, pcId };
 }
 
-export async function enqueueOrdersToRelay(orders: string[], copies = 1, pcId?: string, store?: string): Promise<EnqueueResponse> {
+export async function enqueueOrdersToRelay(orders: string[], copies = 1, pcId?: string, store?: string, requestId = createPrintRequestId()): Promise<EnqueueResponse> {
   const cfg = await getRelayConfig();
   if (!cfg.base) return { ok: false, error: "Relay URL not configured" };
   const pc_id = pcId || cfg.pcId;
   if (!pc_id) return { ok: false, error: "pc_id not configured" };
 
-  try {
-    const body = JSON.stringify({ pc_id, orders, copies, ...(store ? { store } : {}) });
-
-    // Prefer the authenticated app route so logged-in users do not depend on a browser-saved relay API key.
-    const r = await fetch(`${cfg.base}/api/enqueue-orders`, {
-      method: "POST",
-      headers: {
-        ...authHeaders({ "Content-Type": "application/json" }),
-        ...(cfg.apiKey ? { "x-api-key": cfg.apiKey } : {}),
-      },
-      body,
-      mode: "cors",
-    });
-    const data = await r.json().catch(() => ({}));
-    if (r.ok) return { ok: true, job_id: data.job_id, queued: data.queued };
-
-    // Back-compat fallback for older backends that do not expose /api/enqueue-orders yet.
-    const legacy = await fetch(`${cfg.base}/enqueue`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(cfg.apiKey ? { "x-api-key": cfg.apiKey } : {}),
-      },
-      body,
-      mode: "cors",
-    });
-    const legacyData = await legacy.json().catch(() => ({}));
-    if (!legacy.ok) return { ok: false, error: legacyData?.detail || data?.detail || legacy.statusText || r.statusText };
-    return { ok: true, job_id: legacyData.job_id, queued: legacyData.queued };
-  } catch (err: any) {
-    return { ok: false, error: String(err) };
-  }
+  const headers = {
+    "Content-Type": "application/json",
+    ...(cfg.apiKey ? { "x-api-key": cfg.apiKey } : {}),
+  };
+  return sendRelayOrders({
+    base: cfg.base,
+    body: JSON.stringify({ pc_id, orders, copies, request_id: requestId, ...(store ? { store } : {}) }),
+    headers: authHeaders(headers),
+    legacyHeaders: headers,
+  });
 }
 
 export async function enqueueLabelToRelay(deliveryOrderId: string, store?: string): Promise<EnqueueResponse> {

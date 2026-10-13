@@ -3,6 +3,7 @@ import { CheckCircle, PackageSearch, PackageCheck, XCircle, ChevronLeft, Chevron
 import { authFetch, authHeaders, loadAuth, clearAuth } from "./lib/auth";
 import { printOrdersLocally } from "./lib/localPrintClient";
 import { enqueueOrdersToRelay, isRelayConfigured } from "./lib/printRelayClient";
+import { getOrCreatePrintRequest, normalizePrintOrders, submitPrintOrders, withPrintLock } from "./lib/printSubmission.js";
 import StorePicker from "./components/StorePicker.jsx";
 import { persistStoreSelection, readCurrentStore } from "./lib/stores";
 import { DELIVERY_COMPANIES } from "./lib/deliveryCompanies";
@@ -276,6 +277,8 @@ export default function App(){
     return new Set();
   });
   const [printBusy, setPrintBusy] = useState(false);
+  const printLockRef = useRef(false);
+  const printRequestRef = useRef(null);
   const [printMsg, setPrintMsg] = useState(null);
   const [reloadCounter, setReloadCounter] = useState(0);
   useEffect(()=>{
@@ -695,28 +698,13 @@ export default function App(){
     });
   }
 
-  async function handlePrintOrders(orderNumbers){
-    const list = orderNumbers.map(n => String(n));
-    setPrintBusy(true);
-    setPrintMsg(null);
-    // Prefer relay path first so the agent can ensure customer info (Irranova)
-    try {
-      const r = await enqueueOrdersToRelay(list, 1, undefined, store);
-      setPrintBusy(false);
-      if (r.ok){
-        setPrintMsg(`Queued ${r.queued ?? list.length} order(s) for printing`);
-        return;
-      }
-      // Fall through to local on non-ok
-    } catch {}
-    // Fallback: direct local printing (no pre-checks)
-    const res = await printOrdersLocally(list, 1, store);
-    setPrintBusy(false);
-    if (res.ok){
-      setPrintMsg(`Printed ${res.results?.length ?? list.length} order(s)`);
-    } else {
-      setPrintMsg(`Print failed: ${res.error || 'unknown error'}`);
-    }
+  async function handlePrintOrders(orderNumbers, requestId){
+    return submitPrintOrders({
+      orders: orderNumbers, store, requestId,
+      relayConfigured: isRelayConfigured(),
+      enqueueRelay: enqueueOrdersToRelay,
+      printLocal: printOrdersLocally,
+    });
   }
 
   function toggleVariantOut(orderId, variantId){
@@ -1381,29 +1369,33 @@ export default function App(){
   }
 
   async function runPrint(orderNumbers){
-    const list = (orderNumbers || []).map(n => String(n));
+    const list = normalizePrintOrders(orderNumbers);
     if (!list.length) return;
     if (actionBusy) return;
-    setActionBusy(true);
-    showOverlay({ open: true, type: "print", variant: "info", title: "Printing…", subtitle: "Sending to printer." }, 1600);
-    try {
-      // Trigger webhook by tagging before printing so overrides get cached
+    return withPrintLock(printLockRef, async () => {
+      // Keep the token after an uncertain failure so an explicit retry cannot
+      // create another job if the first request was already accepted.
+      const requestId = getOrCreatePrintRequest(printRequestRef, store, list);
+      setActionBusy(true);
+      setPrintBusy(true);
+      setPrintMsg(null);
+      showOverlay({ open: true, type: "print", variant: "info", title: "Sending to printer…", subtitle: `${list.length} order(s).` }, 1600);
       try {
-        const now = Date.now();
-        for (const o of orders.filter(x => list.includes(x.number))){
-          try { recentSelfActionRef.current.set(String(o.id), now); } catch {}
-          await withRetries(() => API.addTag(o.id, "cod print", store), { attempts: 2, baseDelayMs: 250 });
-        }
-      } catch {}
-      // Small delay to allow webhook to reach the server (best-effort)
-      try { await sleep(400); } catch {}
-      await handlePrintOrders(list);
-      showOverlay({ open: true, type: "print", variant: "success", title: "Queued to print", subtitle: "Nice — moving fast." }, 900);
-    } catch (e){
-      showOverlay({ open: true, type: "print", variant: "danger", title: "Print failed", subtitle: e?.message || "Try again." }, 1200);
-    } finally {
-      setActionBusy(false);
-    }
+        // The backend updates print tags asynchronously and the agent fetches live
+        // overrides, so tagging every order here only delays the queue submission.
+        const result = await handlePrintOrders(list, requestId);
+        printRequestRef.current = null;
+        setPrintMsg(result.message);
+        showOverlay({ open: true, type: "print", variant: "success", title: result.title, subtitle: result.message }, 900);
+      } catch (e){
+        const message = e?.message || "Check the print queue before retrying.";
+        setPrintMsg(`Print failed: ${message}`);
+        showOverlay({ open: true, type: "print", variant: "danger", title: "Print failed", subtitle: message }, 1600);
+      } finally {
+        setPrintBusy(false);
+        setActionBusy(false);
+      }
+    });
   }
 }
 

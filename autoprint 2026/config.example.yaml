@@ -14,7 +14,7 @@ forward_timeout_seconds: 90
 printer_name: ""           # leave empty to use Windows default printer
 delivery_label_printer: ""  # empty = same as printer_name
 sumatra_path: "C:\\Tools\\SumatraPDF\\SumatraPDF.exe"  # full path to SumatraPDF.exe
-post_print_delay_seconds: 1.5   # wait after each print (reduces dropped jobs)
+post_print_delay_seconds: 0     # spooler queues jobs; use a delay only if your driver needs it
 
 # HTML→PDF via Edge/Chrome; set one explicitly if detection fails
 chrome_path: ""            # e.g., C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe
@@ -40,3 +40,5 @@ pc_id: "pc-lab-1"
 pc_secret: "YOUR_SECRET"
 # Poller: long_poll_seconds: 20, max_workers: 4, max_items: 10
 # fetch_order_workers: 2  # keep low to avoid Shopify 429 rate limit
+# max_orders_per_batch: 0  # all selected orders in one PDF (fastest; 0 is default)
+# shopify_request_concurrency: 1  # preserve Shopify's request/rate-limit protection
