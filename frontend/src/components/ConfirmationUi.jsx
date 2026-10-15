@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import {
   Boxes,
   CircleAlert,
+  FilePenLine,
   LoaderCircle,
   LogOut,
   MessageCircle,
@@ -14,7 +15,7 @@ import { clearAuth } from "../lib/auth";
 import { retrySyncQueueNow } from "../lib/syncQueue";
 import { AnimatedNumber } from "./Motion";
 
-// Look-and-feel shared by the two Confirmation tabs (orders and chat requests),
+// Look-and-feel shared by the Confirmation tabs,
 // so both read as one app.
 
 // Tailwind utility chunk applied to interactive buttons so every click visually presses
@@ -99,10 +100,11 @@ export function UpdatedAgo({ at, loading }) {
   return <span>{loading ? "Refreshing…" : sec < 5 ? "Up to date" : `Updated ${sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m`} ago`}</span>;
 }
 
-// The two Confirmation tabs. `chatBadge` is the number of chat requests nobody
+// `chatBadge` is the number of chat requests nobody
 // has picked up yet, so agents on the Orders tab notice waiting customers.
 export const CONFIRMATION_VIEWS = [
   { key: "orders", label: "Orders", short: "Orders", icon: Package },
+  { key: "drafts", label: "Drafts", short: "Drafts", icon: FilePenLine },
   { key: "chat", label: "Chat confirmation", short: "Chat", icon: MessageCircle },
 ];
 

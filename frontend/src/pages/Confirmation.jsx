@@ -38,6 +38,7 @@ import ConfirmationProductResults from "../components/ConfirmationProductResults
 import { useToasts, ToastStack } from "../components/Toast";
 import { AnimatedNumber, useDepartingList, useFlipList } from "../components/Motion";
 import ChatConfirmationView, { useChatWaitingCount } from "./ChatConfirmation";
+import ConfirmationDrafts from "./ConfirmationDrafts";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 import { groupConfirmationOrders, orderPhone } from "../lib/confirmationOrderGroups";
 import { confirmationInboxUrl } from "../lib/confirmationInbox";
@@ -376,18 +377,20 @@ export default function Confirmation() {
 
 function readViewFromUrl() {
   try {
-    return new URLSearchParams(location.search).get("tab") === "chat" ? "chat" : "orders";
+    const tab = new URLSearchParams(location.search).get("tab");
+    return ["chat", "drafts"].includes(tab) ? tab : "orders";
   } catch {
     return "orders";
   }
 }
 
-// Orders and Chat confirmation share the store selection, the top bar and the
+// Confirmation views share the store selection, the top bar and the
 // waiting-chat badge; each tab owns its own queue, polling and dialogs.
 function ConfirmationViews({ me }) {
   const [store, setStore] = useState(() => readCurrentStore());
   useEffect(() => { persistStoreSelection(store); }, [store]);
   const [view, setView] = useState(readViewFromUrl);
+  const [completedDraftOrder, setCompletedDraftOrder] = useState(null);
   const chatWaiting = useChatWaitingCount(store);
 
   useEffect(() => {
@@ -397,24 +400,32 @@ function ConfirmationViews({ me }) {
   }, []);
 
   function changeView(next) {
+    if (!["orders", "drafts", "chat"].includes(next)) return;
     setView(next);
     try {
       const params = new URLSearchParams(location.search);
-      if (next === "chat") params.set("tab", "chat"); else params.delete("tab");
+      if (next !== "orders") params.set("tab", next); else params.delete("tab");
       const qs = params.toString();
       history.replaceState(null, "", `${location.pathname}${qs ? `?${qs}` : ""}${location.hash || ""}`);
     } catch {}
   }
 
-  const shared = { me, store, setStore, view, onViewChange: changeView, chatBadge: chatWaiting.count };
+  const shared = { me, store, setStore, view, onViewChange: changeView, chatBadge: chatWaiting.count,
+    onInventory: () => goto("/inventory-helper", store) };
   if (view === "chat") {
     return <ChatConfirmationView {...shared} onWaitingChanged={chatWaiting.refresh} />;
   }
-  return <AgentView {...shared} />;
+  if (view === "drafts") {
+    return <ConfirmationDrafts {...shared} key={store} onOrderCompleted={(order) => {
+      setCompletedDraftOrder({ order, store });
+      changeView("orders");
+    }} />;
+  }
+  return <AgentView {...shared} initialOrder={completedDraftOrder} onInitialOrderShown={() => setCompletedDraftOrder(null)} />;
 }
 
 // ---------- Agent view ----------
-function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
+function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initialOrder, onInitialOrderShown }) {
 
   const [agentInfo, setAgentInfo] = useState(null);
   // Page cache, mirroring OrderBrowser. Each entry: { orders, nextCursor, startCursor }.
@@ -508,6 +519,18 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
       searchTimerRef.current = null;
     };
   }, [searchQuery, runSearch]);
+
+  useEffect(() => {
+    if (!initialOrder?.order || initialOrder.store !== store) return;
+    const order = initialOrder.order;
+    createdOrderRef.current = order;
+    searchReqIdRef.current += 1;
+    setSearchQuery(order.name || String(order.number || ""));
+    setSearchResults({ orders: [order], customers: [], search_kind: "order" });
+    setSearchError(null);
+    setExpanded((previous) => new Set([...previous, order.id]));
+    onInitialOrderShown?.();
+  }, [initialOrder, onInitialOrderShown, store]);
 
   function searchNow() {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
