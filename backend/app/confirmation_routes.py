@@ -13,12 +13,15 @@ Provides:
 """
 
 import asyncio
+import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
 import time
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
@@ -1708,6 +1711,45 @@ query ConfirmationProductVariants($first: Int!, $query: String!) {
 }
 """
 
+_PICKER_VARIANT_FIELDS = """
+id title sku barcode price inventoryQuantity inventoryPolicy availableForSale
+selectedOptions { name value } image { url }
+"""
+_PICKER_PRODUCT_FIELDS = "id title featuredImage { url }"
+PRODUCTS_PICKER_SEARCH_GQL = f"""
+query ConfirmationPickerProducts($first: Int!, $after: String, $query: String!, $preview: Int!, $identifierFirst: Int!, $identifierQuery: String!) {{
+  shop {{ currencyCode }}
+  products(first: $first, after: $after, query: $query, sortKey: RELEVANCE) {{
+    nodes {{ {_PICKER_PRODUCT_FIELDS}
+      variants(first: $preview, sortKey: POSITION) {{ nodes {{ {_PICKER_VARIANT_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }}
+    }}
+    pageInfo {{ hasNextPage endCursor }}
+  }}
+  identifierVariants: productVariants(first: $identifierFirst, query: $identifierQuery, sortKey: RELEVANCE) {{
+    nodes {{ {_PICKER_VARIANT_FIELDS} product {{ {_PICKER_PRODUCT_FIELDS} }} }}
+  }}
+}}
+"""
+PRODUCT_PICKER_VARIANTS_GQL = f"""
+query ConfirmationPickerVariants($id: ID!, $first: Int!, $after: String) {{
+  shop {{ currencyCode }}
+  product(id: $id) {{ {_PICKER_PRODUCT_FIELDS}
+    variants(first: $first, after: $after, sortKey: POSITION) {{ nodes {{ {_PICKER_VARIANT_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }}
+  }}
+}}
+"""
+PRODUCT_PICKER_RESOURCE_GQL = f"""
+query ConfirmationPickerResource($ids: [ID!]!, $first: Int!) {{
+  shop {{ currencyCode }}
+  nodes(ids: $ids) {{
+    ... on Product {{ {_PICKER_PRODUCT_FIELDS}
+      variants(first: $first, sortKey: POSITION) {{ nodes {{ {_PICKER_VARIANT_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }}
+    }}
+    ... on ProductVariant {{ {_PICKER_VARIANT_FIELDS} product {{ {_PICKER_PRODUCT_FIELDS} }} }}
+  }}
+}}
+"""
+
 # Keep inventory in a second request: read_products can work even when the
 # store has not granted read_inventory. Missing access must not hide products.
 PRODUCT_VARIANT_STOCK_GQL = """
@@ -2217,27 +2259,197 @@ async def _audit_confirmation_order_change(
             pass
 
 
-@router.get("/api/agent/product-variants/search")
-async def search_product_variants(
-    store: str,
-    q: str,
-    first: int = 20,
-    _: User = Depends(get_current_user),
-):
-    query = (q or "").strip()
-    if len(query) < 2:
-        return {"ok": True, "variants": [], "query": query}
+def _picker_fold(value):
+    return "".join(c for c in unicodedata.normalize("NFKD", str(value or "").casefold()) if not unicodedata.combining(c))
 
+
+def _picker_tokens(value):
+    stop = {"the", "and", "for", "with", "de", "des", "du", "la", "le", "les", "et", "en", "un", "une"}
+    words = list(dict.fromkeys(re.findall(r"[^\W_]+", _picker_fold(value), flags=re.UNICODE)))
+    return [w for w in words if len(w) >= 2 and w not in stop] or [w for w in words if len(w) >= 2]
+
+
+def _picker_query(raw):
+    tokens = _picker_tokens(raw)
+    if not any(char.isalnum() for char in raw):
+        return None
+    # Reordered prefixes match titles. Related-token OR remains in the same
+    # server-side query even when a strong title exists, so close titles aren't
+    # hidden by an exact result. Shopify determines relevance across pages.
+    raw_tokens = re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", raw.casefold()), flags=re.UNICODE)
+    prefixes = []
+    for word in tokens:
+        alternatives = list(dict.fromkeys([word, *(token for token in raw_tokens if _picker_fold(token) == word)]))
+        prefixes.append("(" + " OR ".join(f"title:{token}*" for token in alternatives) + ")")
+    strong = " AND ".join(prefixes)
+    related = " OR ".join(prefixes)
+    literal = _escape_tag(raw)
+    if re.fullmatch(r"\w[\w.\-/]*", raw, flags=re.UNICODE):
+        literal = raw.replace("\\", "\\\\") + "*"
+    identifier = f"(sku:{literal}) OR (barcode:{literal})"
+    if not tokens:
+        return identifier, identifier
+    return f"({strong}) OR ({related}) OR ({identifier})", identifier
+
+
+def _picker_match(node, raw):
+    if node.get("_id_match"):
+        return "id"
+    folded = _picker_fold(raw)
+    if any(_picker_fold(node.get(field)).startswith(folded) for field in ("sku", "barcode") if node.get(field)):
+        return "identifier"
+    title = _picker_fold((node.get("product") or {}).get("title"))
+    if title == folded:
+        return "exact"
+    words = _picker_tokens(title)
+    return "prefix" if all(any(word.startswith(token) for word in words) for token in _picker_tokens(raw)) else "related"
+
+
+def _picker_cursor_scope(store, raw, limit):
+    return hashlib.sha256(json.dumps([store, raw, limit], ensure_ascii=False).encode()).hexdigest()
+
+
+def _picker_encode_cursor(state):
+    from .auth_routes import JWT_SECRET
+    payload = json.dumps(state, separators=(",", ":"), ensure_ascii=False).encode()
+    signature = hmac.new(JWT_SECRET.encode(), b"confirmation-picker\0" + payload, hashlib.sha256).digest()
+    return ".".join(base64.urlsafe_b64encode(value).decode().rstrip("=") for value in (payload, signature))
+
+
+def _picker_decode_cursor(token, scope):
+    from .auth_routes import JWT_SECRET
+    try:
+        if len(token) > 16384:
+            raise ValueError()
+        parts = token.split(".")
+        if len(parts) != 2:
+            raise ValueError()
+        payload, signature = [base64.b64decode(v + "=" * (-len(v) % 4), altchars=b"-_", validate=True) for v in parts]
+        expected = hmac.new(JWT_SECRET.encode(), b"confirmation-picker\0" + payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError()
+        state = json.loads(payload)
+        if state.get("v") != 1 or state.get("scope") != scope or state.get("phase") not in {"products", "remaining", "id_product"}:
+            raise ValueError()
+        if len(state.get("pending") or []) > 10 or len(state.get("boost_ids") or []) > 8:
+            raise ValueError()
+        return state
+    except (ValueError, TypeError, AttributeError, KeyError, UnicodeDecodeError):
+        raise HTTPException(422, "This product-search cursor is invalid or belongs to a different search. Search again.")
+
+
+def _picker_connection_info(connection, previous=None):
+    info = (connection or {}).get("pageInfo") or {}
+    more = bool(info.get("hasNextPage"))
+    end = info.get("endCursor")
+    if more and (not end or end == previous or not (connection or {}).get("nodes")):
+        raise HTTPException(502, "Shopify did not advance product pagination. Retry this search page.")
+    return more, end
+
+
+def _picker_product_nodes(product):
+    meta = {key: product.get(key) for key in ("id", "title", "featuredImage")}
+    return [{**variant, "product": meta} for variant in (product.get("variants") or {}).get("nodes") or []]
+
+
+def _picker_interleave(products, raw):
+    groups = [_picker_product_nodes(product) for product in products]
+    rank = {"exact": 0, "prefix": 1, "identifier": 2, "related": 3}
+    # This reorders only the products Shopify supplied on this page. It does
+    # not claim globally sorted fuzzy scores or scan the catalog client-side.
+    groups.sort(key=lambda group: min((rank.get(_picker_match(n, raw), 3) for n in group), default=3))
+    return [group[index] for index in range(max((len(group) for group in groups), default=0)) for group in groups if index < len(group)]
+
+
+async def _picker_catalog_page(store, raw, limit, state):
+    from .main import shopify_graphql
+    async def read(gql, variables):
+        return await shopify_graphql(gql, variables, store=store, api_version=CONFIRMATION_API_VERSION)
+    scope = _picker_cursor_scope(store, raw, limit)
+    new = state is None
+    budget = min(8, limit // 5)
+    product_first = min(10, max(1, (limit - budget) // 2))
+    preview = min(2, max(1, (limit - budget) // product_first))
+    currency = ""
+    if new:
+        explicit = re.fullmatch(r"gid://shopify/(Product|ProductVariant)/(\d+)", raw)
+        numeric = raw.isdigit()
+        if explicit or numeric:
+            ids = [raw] if explicit else [f"gid://shopify/Product/{raw}", f"gid://shopify/ProductVariant/{raw}"]
+            data = await read(PRODUCT_PICKER_RESOURCE_GQL, {"ids": ids, "first": max(1, limit - (1 if numeric else 0))})
+            currency = ((data or {}).get("shop") or {}).get("currencyCode") or ""
+            resources = [n for n in (data or {}).get("nodes") or [] if n]
+            product = next((n for n in resources if (n.get("id") or "").startswith("gid://shopify/Product/")), None)
+            direct = [{**n, "_id_match": True} for n in resources if (n.get("id") or "").startswith("gid://shopify/ProductVariant/")]
+            if product:
+                rows = [{**n, "_id_match": True} for n in _picker_product_nodes(product)]
+                more, end = _picker_connection_info(product.get("variants"))
+                following = {"v": 1, "scope": scope, "phase": "id_product", "product_id": product["id"], "after": end,
+                             "boost_ids": [n["id"] for n in direct]} if more else None
+                return direct + rows, currency, following
+            if direct or explicit:
+                return direct, currency, None
+        search = _picker_query(raw)
+        if not search:
+            return [], currency, None
+        state = {"v": 1, "scope": scope, "phase": "products", "after": None, "extra": False, "boost_ids": [],
+                 "query": search[0], "identifier_query": search[1]}
+    if state["phase"] == "id_product":
+        data = await read(PRODUCT_PICKER_VARIANTS_GQL, {"id": state["product_id"], "first": limit, "after": state["after"]})
+        product = (data or {}).get("product")
+        if not product:
+            raise HTTPException(409, "This product is no longer available. Search again.")
+        more, end = _picker_connection_info(product.get("variants"), state["after"])
+        rows = [{**n, "_id_match": True} for n in _picker_product_nodes(product)]
+        return rows, ((data or {}).get("shop") or {}).get("currencyCode") or "", {**state, "after": end} if more else None
+    if state["phase"] == "products" or not state.get("pending"):
+        data = await read(PRODUCTS_PICKER_SEARCH_GQL, {"first": product_first, "after": state.get("after"), "preview": preview,
+                          "query": state["query"], "identifierFirst": max(1, budget), "identifierQuery": state["identifier_query"]})
+        currency = ((data or {}).get("shop") or {}).get("currencyCode") or ""
+        connection = (data or {}).get("products") or {}
+        products = connection.get("nodes") or []
+        more, end = _picker_connection_info(connection, state.get("after"))
+        pending = []
+        for product in products:
+            more_variants, variant_end = _picker_connection_info(product.get("variants"))
+            if more_variants:
+                pending.append({"id": product["id"], "after": variant_end})
+        if state["phase"] == "products":
+            boost = ((data or {}).get("identifierVariants") or {}).get("nodes") or [] if new and budget else []
+            rows = [*boost, *_picker_interleave(products, raw)]
+            state = {**state, "after": end, "extra": state.get("extra") or bool(pending),
+                     "boost_ids": [n["id"] for n in boost] if new else state.get("boost_ids", [])}
+            if more:
+                return rows, currency, state
+            if state["extra"]:
+                return rows, currency, {**state, "phase": "remaining", "after": None, "pending": []}
+            return rows, currency, None
+        state = {**state, "pending": pending, "after": end, "more_products": more}
+    # The second pass revisits only matching product pages, skipping each
+    # preview via its Shopify cursor. At most ten outstanding variant cursors
+    # are carried, regardless of the total number of matching products.
+    pending = state.get("pending") or []
+    if not pending:
+        return [], currency, state if state.get("more_products") else None
+    each = max(1, limit // len(pending))
+    pages = await asyncio.gather(*(read(PRODUCT_PICKER_VARIANTS_GQL, {"id": item["id"], "first": each, "after": item["after"]}) for item in pending))
+    next_pending, products = [], []
+    for item, data in zip(pending, pages):
+        product = (data or {}).get("product")
+        if not product:
+            raise HTTPException(409, "A matching product changed or was deleted. Search again to refresh the results.")
+        currency = currency or (((data or {}).get("shop") or {}).get("currencyCode") or "")
+        more, end = _picker_connection_info(product.get("variants"), item["after"])
+        if more:
+            next_pending.append({"id": item["id"], "after": end})
+        products.append(product)
+    following = {**state, "pending": next_pending} if next_pending or state.get("more_products") else None
+    return _picker_interleave(products, raw), currency, following
+
+
+async def _picker_enrich_stock(nodes, currency, store):
     from .main import shopify_graphql  # type: ignore
 
-    data = await shopify_graphql(
-        PRODUCT_VARIANTS_SEARCH_GQL,
-        {"first": max(1, min(30, int(first or 20))), "query": query},
-        store=(store or "").strip(),
-        api_version=CONFIRMATION_API_VERSION,
-    )
-    nodes = ((data or {}).get("productVariants") or {}).get("nodes") or []
-    currency = ((data or {}).get("shop") or {}).get("currencyCode") or ""
     stock: Dict[str, Dict[str, Any]] = {}
     warnings = []
     try:
@@ -2260,10 +2472,12 @@ async def search_product_variants(
                     continue
                 levels = inventory.get("inventoryLevels") or {}
                 rows = list(levels.get("nodes") or [])
+                location_cursors = set()
                 while (levels.get("pageInfo") or {}).get("hasNextPage"):
                     cursor = (levels.get("pageInfo") or {}).get("endCursor")
-                    if not cursor:
-                        raise ValueError("Missing inventory location cursor")
+                    if not cursor or cursor in location_cursors:
+                        raise ValueError("Missing or repeated inventory location cursor")
+                    location_cursors.add(cursor)
                     page = await shopify_graphql(
                         INVENTORY_LEVELS_PAGE_GQL, {"id": inventory["id"], "after": cursor},
                         store=store, api_version=CONFIRMATION_API_VERSION,
@@ -2292,6 +2506,9 @@ async def search_product_variants(
             "variant_title": node.get("title") or "",
             "options": node.get("selectedOptions") or [],
             "sku": node.get("sku") or "",
+            "barcode": node.get("barcode") or "",
+            "inventory_policy": node.get("inventoryPolicy") or "",
+            "available": node.get("availableForSale"),
             "price": str(node.get("price") or "0"),
             "inventory_quantity": node.get("inventoryQuantity"),
             "inventory_tracked": stock.get(node.get("id"), {}).get("inventory_tracked"),
@@ -2300,7 +2517,36 @@ async def search_product_variants(
             "currency": currency,
             "image": image,
         })
-    return {"ok": True, "variants": variants, "query": query, "currency": currency, "warnings": warnings}
+    return variants, warnings
+
+
+@router.get("/api/agent/product-variants/search")
+async def search_product_variants(store: str, q: str, first: int = 20, after: Optional[str] = None, _: User = Depends(get_current_user)):
+    from .main import _normalize_store
+    query = (q or "").strip()
+    if not (store or "").strip():
+        raise HTTPException(422, "Store is required")
+    if len(query) > 255:
+        raise HTTPException(422, "Use a product search of at most 255 characters")
+    if len(query) < 2:
+        return {"ok": True, "variants": [], "query": query, "currency": "", "warnings": [], "page_info": {"has_next_page": False, "end_cursor": None}}
+    store = _normalize_store(store.strip())
+    limit = max(1, min(40, int(first or 20)))
+    state = _picker_decode_cursor(after, _picker_cursor_scope(store, query, limit)) if after else None
+    old_boost = set((state or {}).get("boost_ids") or [])
+    nodes, currency, following = await _picker_catalog_page(store, query, limit, state)
+    unique = []
+    seen = set(old_boost)
+    for node in nodes:
+        if node.get("id") and node["id"] not in seen:
+            seen.add(node["id"])
+            unique.append(node)
+    variants, warnings = await _picker_enrich_stock(unique, currency, store)
+    for variant, node in zip(variants, unique):
+        variant["match_kind"] = _picker_match(node, query)
+    cursor = _picker_encode_cursor(following) if following else None
+    return {"ok": True, "variants": variants, "query": query, "currency": currency, "warnings": warnings,
+            "page_info": {"has_next_page": bool(cursor), "end_cursor": cursor}}
 
 
 @router.post("/api/agent/orders/create")

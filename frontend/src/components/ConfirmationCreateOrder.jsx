@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Minus, Package, Plus, Search, Trash2, X } from "lucide-react";
 import ConfirmationProductResults from "./ConfirmationProductResults";
+import useConfirmationProductSearch, { PRODUCT_SEARCH_PLACEHOLDER } from "../lib/useConfirmationProductSearch";
 import { cartKey, createOrderPayload, customerOrderFields, initialOrderForm, orderCartIssue } from "../lib/confirmationOrderForm";
 
 function Field({ label, optional = false, ...props }) {
@@ -37,14 +38,10 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
   const [seedError, setSeedError] = useState("");
   const [seedAttempt, setSeedAttempt] = useState(0);
   const [query, setQuery] = useState("");
-  const [variants, setVariants] = useState([]);
   const [currency, setCurrency] = useState(initial.currency);
-  const [searchBusy, setSearchBusy] = useState(false);
-  const [searchError, setSearchError] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(pending ? "A previous creation request needs checking. Retry to recover its order before starting a new one." : "");
   const [retryOnly, setRetryOnly] = useState(Boolean(pending));
-  const requestRef = useRef(0);
   const submittingRef = useRef(false);
   const submissionRef = useRef(pending?.payload || null);
   const dialogRef = useRef(null);
@@ -52,6 +49,9 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
   const blockedSeed = Boolean(initialOrderId && (seedLoading || seedError));
   const locked = busy || retryOnly || blockedSeed;
   const cartIssue = orderCartIssue(items);
+  const productSearch = useConfirmationProductSearch(store, query, { search: searchProducts, enabled: !locked });
+  const { variants, loading: searchBusy, error: searchError } = productSearch;
+  useEffect(() => { if (productSearch.currency) setCurrency(productSearch.currency); }, [productSearch.currency]);
 
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
@@ -113,24 +113,6 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
   }, [onClose]);
-
-  useEffect(() => {
-    const requestId = ++requestRef.current;
-    setVariants([]); setSearchError("");
-    if (locked || query.trim().length < 2) { setSearchBusy(false); return; }
-    setSearchBusy(true);
-    const timer = setTimeout(async () => {
-      try {
-        const result = await searchProducts(store, query.trim());
-        if (requestId !== requestRef.current) return;
-        setVariants(result.variants || []);
-        setCurrency(result.currency || result.variants?.[0]?.currency || "");
-      } catch (err) {
-        if (requestId === requestRef.current) setSearchError(err.message || "Product search failed");
-      } finally { if (requestId === requestRef.current) setSearchBusy(false); }
-    }, 250);
-    return () => { clearTimeout(timer); requestRef.current += 1; };
-  }, [query, store, searchProducts, locked]);
 
   function addItem(variant) {
 
@@ -214,12 +196,12 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
             <section className="rounded-xl border border-gray-200 bg-white p-4">
               <h3 className="text-sm font-semibold">Add products</h3>
               <label className="relative mt-3 block"><span className="sr-only">Search products</span><Search size={17} className="absolute left-3 top-3.5 text-gray-400" aria-hidden />
-                <input disabled={locked} type="search" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.preventDefault(); }} placeholder="Search product title, variant, SKU, or barcode" className="h-11 w-full rounded-lg border border-gray-300 pl-10 pr-3 text-sm outline-none focus:ring-2 focus:ring-indigo-200" />
+                <input disabled={locked} type="search" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.preventDefault(); }} placeholder={PRODUCT_SEARCH_PLACEHOLDER} className="h-11 w-full rounded-lg border border-gray-300 pl-10 pr-3 text-sm outline-none focus:ring-2 focus:ring-indigo-200" />
               </label>
               {searchBusy && <p role="status" className="mt-3 text-xs text-gray-500">Searching products…</p>}
               {searchError && <p role="alert" className="mt-3 text-xs text-rose-700">{searchError}</p>}
-              {query.trim().length >= 2 && !searchBusy && !searchError && !variants.length && <p className="mt-3 text-xs text-gray-500">No matching variants found.</p>}
-              <ConfirmationProductResults variants={variants} currency={currency} onChoose={addItem} disabled={locked} />
+              {query.trim().length >= 2 && !searchBusy && !searchError && !productSearch.hasNextPage && !variants.length && <p className="mt-3 text-xs text-gray-500">No matching variants found.</p>}
+              <ConfirmationProductResults variants={variants} currency={currency} onChoose={addItem} disabled={locked || searchBusy} searchState={productSearch} />
             </section>
           </div>
           <aside className="min-w-0 rounded-xl border border-gray-200 bg-white p-4 lg:sticky lg:top-0">

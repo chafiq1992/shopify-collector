@@ -36,7 +36,7 @@ from .chat_request_routes import (
     normalize_phone,
     serialize_request,
 )
-from .confirmation_routes import _SEARCH_ORDER_NODE_FIELDS, _confirmation_phone_variants, _flatten_order
+from .confirmation_routes import CONFIRMATION_API_VERSION, _SEARCH_ORDER_NODE_FIELDS, _confirmation_phone_variants, _flatten_order
 from .db import get_session
 from .models import ChatRequest, ChatRequestEvent, User
 
@@ -172,6 +172,7 @@ variants(first: 100) {
     selectedOptions { name value }
     image { url }
   }
+  pageInfo { hasNextPage endCursor }
 }
 """
 
@@ -186,6 +187,35 @@ query ChatProductsSearch($query: String!) {{
   products(first: 5, query: $query) {{ nodes {{ {_PRODUCT_FIELDS} }} }}
 }}
 """
+
+PRODUCT_VARIANTS_PAGE_GQL = f"""
+query ChatProductVariantPage($id: ID!, $after: String!) {{
+  product(id: $id) {{ {_PRODUCT_FIELDS.replace('variants(first: 100)', 'variants(first: 100, after: $after)')} }}
+}}
+"""
+
+
+async def _complete_product_variants(node, store):
+    """A searched variant beyond the first hundred remains a selectable option."""
+    connection = node.get("variants") or {}
+    variants = list(connection.get("nodes") or [])
+    cursors = set()
+    while (connection.get("pageInfo") or {}).get("hasNextPage"):
+        cursor = (connection.get("pageInfo") or {}).get("endCursor")
+        if not cursor or cursor in cursors:
+            raise HTTPException(422, "Shopify did not return all product options. Retry loading this product.")
+        cursors.add(cursor)
+        data = await _shopify(PRODUCT_VARIANTS_PAGE_GQL, {"id": node["id"], "after": cursor},
+                              store=store, api_version=CONFIRMATION_API_VERSION)
+        product = (data or {}).get("product") or {}
+        connection = product.get("variants")
+        if connection is None or (not connection.get("nodes") and (connection.get("pageInfo") or {}).get("hasNextPage")):
+            raise HTTPException(422, "Shopify did not return all product options. Retry loading this product.")
+        variants.extend(connection.get("nodes") or [])
+    ids = [v.get("id") for v in variants]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(422, "Shopify repeated a product option. Retry loading this product.")
+    return {**node, "variants": {"nodes": variants}}
 
 
 def handle_from_url(url: Optional[str]) -> Optional[str]:
@@ -264,24 +294,24 @@ async def chat_product_options(
     if pid:
         if not pid.startswith("gid://shopify/Product/"):
             raise HTTPException(status_code=400, detail="invalid product id")
-        data = await _shopify(PRODUCT_BY_ID_GQL, {"id": pid}, store=store_key)
+        data = await _shopify(PRODUCT_BY_ID_GQL, {"id": pid}, store=store_key, api_version=CONFIRMATION_API_VERSION)
         node = (data or {}).get("product")
     else:
         handle = handle_from_url(product_url)
         if handle:
             safe = handle.replace("\\", "\\\\").replace("'", "\\'")
-            data = await _shopify(PRODUCTS_SEARCH_GQL, {"query": f"handle:'{safe}'"}, store=store_key)
+            data = await _shopify(PRODUCTS_SEARCH_GQL, {"query": f"handle:'{safe}'"}, store=store_key, api_version=CONFIRMATION_API_VERSION)
             nodes = ((data or {}).get("products") or {}).get("nodes") or []
             node = next((n for n in nodes if _norm(n.get("handle")) == _norm(handle)), None)
         wanted_title = (title or "").strip()
         if node is None and wanted_title:
             safe = wanted_title.replace("\\", "\\\\").replace('"', '\\"')
-            data = await _shopify(PRODUCTS_SEARCH_GQL, {"query": f'title:"{safe}"'}, store=store_key)
+            data = await _shopify(PRODUCTS_SEARCH_GQL, {"query": f'title:"{safe}"'}, store=store_key, api_version=CONFIRMATION_API_VERSION)
             nodes = ((data or {}).get("products") or {}).get("nodes") or []
             node = next((n for n in nodes if _norm(n.get("title")) == _norm(wanted_title)), nodes[0] if nodes else None)
     if not node:
         return {"ok": True, "product": None, "matched_variant_id": None}
-    product = _product_payload(node)
+    product = _product_payload(await _complete_product_variants(node, store_key))
     return {"ok": True, "product": product, "matched_variant_id": match_variant(product, variant_title)}
 
 

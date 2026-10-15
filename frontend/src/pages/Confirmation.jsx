@@ -35,6 +35,7 @@ import StorePicker from "../components/StorePicker";
 import OrderLabel from "../components/OrderLabel";
 import ConfirmationCreateOrder from "../components/ConfirmationCreateOrder";
 import ConfirmationProductResults from "../components/ConfirmationProductResults";
+import useConfirmationProductSearch, { PRODUCT_SEARCH_PLACEHOLDER, searchConfirmationProducts } from "../lib/useConfirmationProductSearch";
 import { useToasts, ToastStack } from "../components/Toast";
 import { AnimatedNumber, useDepartingList, useFlipList } from "../components/Motion";
 import ChatConfirmationView, { useChatWaitingCount } from "./ChatConfirmation";
@@ -176,15 +177,7 @@ const API = {
     }
     return res.json();
   },
-  async searchProductVariants(store, q) {
-    const qs = new URLSearchParams({ store, q, first: "20" });
-    const res = await authFetch(`/api/agent/product-variants/search?${qs}`, { headers: authHeaders() });
-    if (!res.ok) {
-      const js = await res.json().catch(() => ({ detail: "Product search failed" }));
-      throw new Error(js.detail || `Product search failed (${res.status})`);
-    }
-    return res.json();
-  },
+  searchProductVariants: searchConfirmationProducts,
   async createOrder(payload) {
     const res = await authFetch("/api/agent/orders/create", {
       method: "POST",
@@ -3258,10 +3251,6 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
   ));
   const [additions, setAdditions] = useState([]);
   const [catalogQuery, setCatalogQuery] = useState("");
-  const [catalogResults, setCatalogResults] = useState([]);
-  const [catalogLoading, setCatalogLoading] = useState(false);
-  const [catalogError, setCatalogError] = useState("");
-  const catalogRequestRef = useRef(0);
   const [replaceLineId, setReplaceLineId] = useState(null);
   const [restock, setRestock] = useState(true);
   const [notifyCustomer, setNotifyCustomer] = useState(false);
@@ -3269,6 +3258,8 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
   const [shipping, setShipping] = useState(() => shippingDraftFromOrder(order));
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const catalogSearch = useConfirmationProductSearch(store, catalogQuery, { search: API.searchProductVariants, enabled: tab === "items" && !saveBusy });
+  const { variants: catalogResults, loading: catalogLoading, error: catalogError } = catalogSearch;
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
@@ -3282,36 +3273,6 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
       window.removeEventListener("keydown", onKey);
     };
   }, [onClose, saveBusy]);
-
-  useEffect(() => {
-    const query = catalogQuery.trim();
-    if (query.length < 2) {
-      catalogRequestRef.current += 1;
-      setCatalogResults([]);
-      setCatalogLoading(false);
-      setCatalogError("");
-      return undefined;
-    }
-    const requestId = ++catalogRequestRef.current;
-    setCatalogLoading(true);
-    setCatalogError("");
-    const timer = setTimeout(async () => {
-      try {
-        const result = await API.searchProductVariants(store, query);
-        if (requestId === catalogRequestRef.current) {
-          setCatalogResults(result.variants || []);
-        }
-      } catch (error) {
-        if (requestId === catalogRequestRef.current) {
-          setCatalogResults([]);
-          setCatalogError(error?.message || "Product search failed");
-        }
-      } finally {
-        if (requestId === catalogRequestRef.current) setCatalogLoading(false);
-      }
-    }, 220);
-    return () => { clearTimeout(timer); catalogRequestRef.current += 1; };
-  }, [catalogQuery, store]);
 
   const itemChanges = useMemo(() => originalItems
     .filter((item) => item.id)
@@ -3367,7 +3328,6 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
       });
       setReplaceLineId(null);
       setCatalogQuery("");
-      setCatalogResults([]);
       return;
     }
 
@@ -3573,7 +3533,6 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                                   onClick={() => {
                                     setReplaceLineId(item.id);
                                     setCatalogQuery("");
-                                    setCatalogResults([]);
                                   }}
                                   disabled={!canEdit}
                                   className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
@@ -3659,16 +3618,17 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                       autoFocus={Boolean(replaceLineId)}
                       value={catalogQuery}
                       onChange={(event) => setCatalogQuery(event.target.value)}
-                      placeholder="Search product name, variant, SKU, or barcode"
+                      placeholder={PRODUCT_SEARCH_PLACEHOLDER}
                       className="h-11 w-full rounded-lg border border-gray-300 bg-white pl-10 pr-10 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
                     />
                     {catalogLoading && <span className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600" />}
                   </div>
                   {catalogError && <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{catalogError}</div>}
-                  {catalogQuery.trim().length >= 2 && !catalogLoading && !catalogError && catalogResults.length === 0 && (
+                  {catalogQuery.trim().length >= 2 && !catalogLoading && !catalogError && !catalogSearch.hasNextPage && catalogResults.length === 0 && (
                     <div className="mt-3 rounded-lg bg-gray-50 px-3 py-5 text-center text-xs text-gray-500">No matching variants found.</div>
                   )}
                   <ConfirmationProductResults
+                    searchState={catalogSearch}
                     variants={catalogResults}
                     currency={order.currency}
                     onChoose={chooseCatalogVariant}

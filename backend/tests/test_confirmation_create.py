@@ -212,7 +212,7 @@ class ConfirmationCreateTests(unittest.IsolatedAsyncioTestCase):
 
 class ConfirmationCatalogSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_location_pages_sum_available_and_on_hand_separately(self):
-        catalog = {"shop": {"currencyCode": "MAD"}, "productVariants": {"nodes": [{"id": "variant-1", "inventoryQuantity": 100}]}}
+        catalog = {"shop": {"currencyCode": "MAD"}, "products": {"nodes": [{"id": "product-1", "title": "Shirt", "variants": {"nodes": [{"id": "variant-1", "inventoryQuantity": 100}]}}]}}
         initial = {"nodes": [{"id": "variant-1", "inventoryItem": {"id": "inventory-1", "tracked": True,
                    "inventoryLevels": {"nodes": [{"quantities": [{"name": "on_hand", "quantity": 7}, {"name": "available", "quantity": 4}]}], "pageInfo": {"hasNextPage": True, "endCursor": "page2"}}}}]}
         page = {"inventoryItem": {"inventoryLevels": {"nodes": [{"quantities": [{"name": "on_hand", "quantity": 3}, {"name": "available", "quantity": -1}]}], "pageInfo": {"hasNextPage": False}}}}
@@ -226,7 +226,7 @@ class ConfirmationCatalogSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(graphql.await_args_list[2].args[0], INVENTORY_LEVELS_PAGE_GQL)
 
     async def test_inventory_permission_denial_keeps_products_with_unknown_counts(self):
-        graphql = AsyncMock(side_effect=[{"productVariants": {"nodes": [{"id": "variant-1", "inventoryQuantity": 100}]}}, HTTPException(502, "ACCESS_DENIED read_inventory")])
+        graphql = AsyncMock(side_effect=[{"products": {"nodes": [{"id": "product-1", "title": "Shirt", "variants": {"nodes": [{"id": "variant-1", "inventoryQuantity": 100}]}}]}}, HTTPException(502, "ACCESS_DENIED read_inventory")])
         with patch("backend.app.main.shopify_graphql", graphql):
             result = await search_product_variants(store="irranova", q="shirt", first=20)
         self.assertEqual(len(result["variants"]), 1)

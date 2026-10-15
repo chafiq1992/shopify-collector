@@ -19,6 +19,8 @@ import {
   X,
 } from "lucide-react";
 import { authFetch, authHeaders } from "../lib/auth";
+import ConfirmationProductResults from "./ConfirmationProductResults";
+import useConfirmationProductSearch, { PRODUCT_SEARCH_PLACEHOLDER } from "../lib/useConfirmationProductSearch";
 import { isoToDDMMYY, todayDDMMYY, todayISO } from "../lib/confirmationActions";
 import { BTN, CARD, Spinner, initialOf, timeAgo } from "./ConfirmationUi";
 
@@ -57,7 +59,6 @@ async function call(url, options = {}) {
 const ORDER_API = {
   customers: (store, q) => call(`/api/chat-requests/customers/lookup?${new URLSearchParams({ store, q })}`),
   product: (store, params) => call(`/api/chat-requests/product-options?${new URLSearchParams({ store, ...params })}`),
-  searchVariants: (store, q) => call(`/api/agent/product-variants/search?${new URLSearchParams({ store, q, first: "20" })}`),
   create: (id, body) => call(`/api/chat-requests/${encodeURIComponent(id)}/create-order`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -189,9 +190,7 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
 
   const [lines, setLines] = useState([]);
   const [productQuery, setProductQuery] = useState("");
-  const [productResults, setProductResults] = useState({ loading: false, variants: [], error: null });
   const [replaceKey, setReplaceKey] = useState(null);
-  const productReq = useRef(0);
   const productInputRef = useRef(null);
 
   const [tags, setTags] = useState([]);
@@ -211,6 +210,7 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
   const [created, setCreated] = useState(null);
   const [linking, setLinking] = useState(null);
   const [manualRef, setManualRef] = useState("");
+  const productResults = useConfirmationProductSearch(store, productQuery, { enabled: !busy });
 
   useEffect(() => {
     const prev = document.body.style.overflow;
@@ -261,23 +261,6 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
     }, 300);
     return () => clearTimeout(t);
   }, [customerQuery, store]);
-
-  // Product search box.
-  useEffect(() => {
-    const q = productQuery.trim();
-    if (q.length < 2) { setProductResults({ loading: false, variants: [], error: null }); return undefined; }
-    const t = setTimeout(async () => {
-      const id = ++productReq.current;
-      setProductResults((s) => ({ ...s, loading: true, error: null }));
-      try {
-        const js = await ORDER_API.searchVariants(store, q);
-        if (id === productReq.current) setProductResults({ loading: false, variants: js.variants || [], error: null });
-      } catch (e) {
-        if (id === productReq.current) setProductResults({ loading: false, variants: [], error: e.message });
-      }
-    }, 300);
-    return () => clearTimeout(t);
-  }, [productQuery, store]);
 
   function onlyVariant(product) {
     return product?.variants?.length === 1 ? product.variants[0].id : null;
@@ -580,35 +563,16 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
                     data-testid="order-product-search"
                     value={productQuery}
                     onChange={(e) => setProductQuery(e.target.value)}
-                    placeholder={replaceKey ? "Search the new product…" : "Add a product: name or SKU"}
+                    placeholder={PRODUCT_SEARCH_PLACEHOLDER}
                     className={`${INPUT} pl-9`}
                   />
                 </div>
                 {(productQuery.trim().length >= 2) && (
-                  <div className="mt-1.5 max-h-72 space-y-1 overflow-auto">
+                  <div className="mt-1.5 space-y-1">
                     {productResults.loading && <div className="flex items-center gap-2 px-2 py-2 text-xs text-slate-500"><Spinner className="h-3.5 w-3.5" /> Searching products…</div>}
                     {productResults.error && <div className="px-2 py-2 text-xs text-rose-700">{productResults.error}</div>}
-                    {!productResults.loading && !productResults.error && productResults.variants.length === 0 && <div className="px-2 py-2 text-xs text-slate-500">No product found.</div>}
-                    {productResults.variants.map((v) => (
-                      <button
-                        key={v.id}
-                        type="button"
-                        data-testid="order-product-result"
-                        onClick={() => addVariant(v)}
-                        className="flex w-full items-center gap-2.5 rounded-lg bg-white px-2 py-1.5 text-left ring-1 ring-inset ring-slate-200 hover:bg-indigo-50 hover:ring-indigo-200"
-                      >
-                        {v.image ? <img src={v.image} alt="" className="h-10 w-10 shrink-0 rounded-md object-cover" /> : <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-slate-100"><Package className="h-4 w-4 text-slate-400" aria-hidden /></span>}
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-sm font-medium text-slate-900">{v.product_title}</span>
-                          <span className="mt-0.5 block"><OptionBadges options={v.options} /></span>
-                        </span>
-                        <span className="shrink-0 text-right text-xs">
-                          <span className="block font-semibold tabular-nums text-slate-900">{money(v.price)} {CURRENCY}</span>
-                          <span className={`block ${Number(v.inventory_quantity) > 0 ? "text-emerald-600" : "text-rose-600"}`}>{v.inventory_quantity == null ? "" : `${v.inventory_quantity} in stock`}</span>
-                        </span>
-                        <Plus className="h-4 w-4 shrink-0 text-indigo-600" aria-hidden />
-                      </button>
-                    ))}
+                    {!productResults.loading && !productResults.error && !productResults.hasNextPage && productResults.variants.length === 0 && <div className="px-2 py-2 text-xs text-slate-500">No product found.</div>}
+                    <ConfirmationProductResults variants={productResults.variants} currency={CURRENCY} onChoose={addVariant} disabled={busy || productResults.loading} actionLabel={replaceKey ? "Replace" : "Add"} searchState={productResults} resultTestId="order-product-result" />
                   </div>
                 )}
               </div>
