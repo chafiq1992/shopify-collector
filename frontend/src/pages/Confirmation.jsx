@@ -202,6 +202,18 @@ const API = {
     }
     return js;
   },
+  async searchCustomers(store, q, options = {}) {
+    const res = await authFetch(`/api/agent/customers/search?${new URLSearchParams({ store, q })}`, { signal: options.signal });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `Customer lookup failed (${res.status})`);
+    return data;
+  },
+  async loadDuplicateTemplate(store, orderId, options = {}) {
+    const res = await authFetch(`/api/agent/orders/duplicate-template?${new URLSearchParams({ store, order_id: orderId })}`, { signal: options.signal });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `Could not load order to duplicate (${res.status})`);
+    return data;
+  },
   async editOrderItems(payload) {
     const res = await authFetch("/api/agent/order-items/edit", {
       method: "POST",
@@ -457,6 +469,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
   // "n2" | "n3" | "n4" | "nowtp" | "enatt"); null = closed.
   const [pullMode, setPullMode] = useState(null);
   const [createOrderOpen, setCreateOrderOpen] = useState(false);
+  const [createOrderSourceId, setCreateOrderSourceId] = useState(null);
   // Toast notifications (button feedback)
   const [toasts, pushToast, dismissToast] = useToasts();
 
@@ -1014,7 +1027,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const tag = (e.target?.tagName || "").toLowerCase();
       if (["input", "textarea", "select"].includes(tag) || e.target?.isContentEditable) return;
-      if (pullMode || cancelModalFor) return;
+      if (pullMode || cancelModalFor || createOrderOpen) return;
       if (e.key === "/") {
         e.preventDefault();
         searchInputRef.current?.focus();
@@ -1024,7 +1037,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [pullMode, cancelModalFor, refreshAll]);
+  }, [pullMode, cancelModalFor, createOrderOpen, refreshAll]);
 
   function openPull(mode, opts = {}) {
     setPullMode({ mode, includeAssigned: !!opts.includeAssigned });
@@ -1374,6 +1387,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
               store={store}
               shopDomain={meta.shop_domain}
               onToast={pushToast}
+              onDuplicate={(sourceOrder) => { setCreateOrderSourceId(sourceOrder.id); setCreateOrderOpen(true); }}
               onOrderUpdated={(updatedOrder) => patchOrderInPlace(o.id, () => updatedOrder)}
             />
             {!nested && renderRelatedOrders(o)}
@@ -1455,6 +1469,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
                   store={store}
                   shopDomain={meta.shop_domain}
                   onToast={pushToast}
+                  onDuplicate={(sourceOrder) => { setCreateOrderSourceId(sourceOrder.id); setCreateOrderOpen(true); }}
                   onOrderUpdated={(updatedOrder) => patchOrderInPlace(o.id, () => updatedOrder)}
                 />
                 {renderRelatedOrders(o)}
@@ -1546,7 +1561,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
           customerOrdersById={customerOrdersById}
           onToggleCustomer={toggleSearchCustomerExpand}
           inputRef={searchInputRef}
-          onNewOrder={() => setCreateOrderOpen(true)}
+          onNewOrder={() => { setCreateOrderSourceId(null); setCreateOrderOpen(true); }}
         />
 
         {tagsAssigned.length === 0 && (
@@ -1768,16 +1783,20 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
 
       {createOrderOpen && (
         <ConfirmationCreateOrder
-          key={store}
+          key={`${store}:${createOrderSourceId || "new"}`}
           store={store}
           actorId={me.id}
           searchProducts={API.searchProductVariants}
+          searchCustomers={API.searchCustomers}
+          loadDuplicateTemplate={API.loadDuplicateTemplate}
+          initialOrderId={createOrderSourceId}
           createOrder={API.createOrder}
-          onClose={() => setCreateOrderOpen(false)}
+          onClose={() => { setCreateOrderOpen(false); setCreateOrderSourceId(null); }}
           onCreated={(result) => {
             const order = result.order;
             createdOrderRef.current = order;
             setCreateOrderOpen(false);
+            setCreateOrderSourceId(null);
             // Show the returned order immediately; Shopify search indexing can lag.
             searchReqIdRef.current += 1;
             if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
@@ -2875,7 +2894,7 @@ function OrderConfirmationChat({ sessionId, inboxUrl }) {
   );
 }
 
-function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
+function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated, onDuplicate }) {
   const notify = onToast || (() => {});
   const [editOpen, setEditOpen] = useState(false);
   const [noteText, setNoteText] = useState("");
@@ -3085,13 +3104,14 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
           <div className="cf-order-details-column">
             {/* Customer order history */}
             <div className="cf-order-history min-w-0 bg-white border border-gray-200 rounded-2xl p-3 shadow-sm">
-              <div className="flex items-center mb-3">
+              <div className="mb-3 flex flex-wrap items-center gap-1">
                 <span className="text-[11px] uppercase tracking-wider font-semibold text-indigo-600">🕓 Customer history</span>
                 {history?.total_orders > 0 && (
                   <span className="ml-2 text-[11px] text-gray-500">
                     {history.total_orders} total order{history.total_orders === 1 ? "" : "s"}
                   </span>
                 )}
+                {onDuplicate && <button type="button" onClick={() => onDuplicate(order)} className="ml-auto inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-1.5 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-100" title="Open an editable new order with this order’s customer and items"><Copy size={12} aria-hidden />Duplicate this order</button>}
               </div>
               {historyLoading && <div className="text-xs text-gray-500">Loading customer orders…</div>}
               {historyError && <div className="text-xs text-rose-700">{historyError}</div>}
@@ -3118,6 +3138,7 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
                           <th className="px-2 py-1.5">Payment</th>
                           <th className="px-2 py-1.5">Status</th>
                           <th className="px-2 py-1.5 text-right">Total</th>
+                          {onDuplicate && <th className="px-2 py-1.5"><span className="sr-only">Create a copy</span></th>}
                         </tr>
                       </thead>
                       <tbody>
@@ -3143,6 +3164,7 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated }) {
                                   : <span className="text-[10px] text-gray-400">—</span>}
                               </td>
                               <td className="px-2 py-1.5 text-right whitespace-nowrap tabular-nums">{h.total_price} {h.currency}</td>
+                              {onDuplicate && <td className="px-2 py-1.5 text-right"><button type="button" onClick={() => onDuplicate(h)} aria-label={`Duplicate ${h.name || `#${h.number}`}`} className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-white px-2 py-1.5 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-50"><Copy size={12} aria-hidden />Duplicate</button></td>}
                             </tr>
                           );
                         })}

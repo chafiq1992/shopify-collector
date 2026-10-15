@@ -1742,6 +1742,210 @@ query ConfirmationInventoryLevels($id: ID!, $after: String) {
 CONFIRMATION_API_VERSION = "2026-01"
 CONFIRMATION_CURRENCY_GQL = "query ConfirmationShopCurrency { shop { currencyCode } }"
 
+_CONFIRMATION_CONTACT_ADDRESS_FIELDS = "firstName lastName company phone address1 address2 city province zip country"
+_CONFIRMATION_ADDRESS_KEYS = {
+    "first_name": "firstName", "last_name": "lastName", "company": "company", "phone": "phone",
+    "address1": "address1", "address2": "address2", "city": "city", "province": "province", "zip": "zip", "country": "country",
+}
+
+# Address-only lastOrder fallback avoids fetching every order and its products
+# while still helping customers whose default shipping address was never saved.
+CONFIRMATION_CUSTOMER_LOOKUP_GQL = f"""
+query ConfirmationCustomerLookup($first: Int!, $query: String!) {{
+  customers(first: $first, query: $query, sortKey: UPDATED_AT, reverse: true) {{
+    nodes {{
+      id displayName firstName lastName numberOfOrders
+      defaultEmailAddress {{ emailAddress }} defaultPhoneNumber {{ phoneNumber }}
+      defaultAddress {{ {_CONFIRMATION_CONTACT_ADDRESS_FIELDS} }}
+      lastOrder {{ email phone shippingAddress {{ {_CONFIRMATION_CONTACT_ADDRESS_FIELDS} }} }}
+    }}
+  }}
+}}
+"""
+
+CONFIRMATION_CUSTOMER_ASSOCIATION_GQL = """
+query ConfirmationCustomerAssociation($id: ID!) { customer(id: $id) { id } }
+"""
+
+_DUPLICATE_LINE_FIELDS = """
+id title variantTitle sku quantity currentQuantity image { url }
+customAttributes { key value }
+originalUnitPriceSet { shopMoney { amount currencyCode } }
+variant {
+  id title sku price inventoryQuantity selectedOptions { name value } image { url }
+  product { id title status featuredImage { url } }
+}
+"""
+
+CONFIRMATION_DUPLICATE_ORDER_GQL = f"""
+query ConfirmationDuplicateOrder($id: ID!) {{
+  shop {{ currencyCode }}
+  order(id: $id) {{
+    id name updatedAt email phone
+    totalShippingPriceSet {{ shopMoney {{ amount currencyCode }} }}
+    shippingAddress {{ {_CONFIRMATION_CONTACT_ADDRESS_FIELDS} }}
+    customer {{ id displayName firstName lastName
+      defaultEmailAddress {{ emailAddress }} defaultPhoneNumber {{ phoneNumber }}
+      defaultAddress {{ {_CONFIRMATION_CONTACT_ADDRESS_FIELDS} }}
+    }}
+    lineItems(first: 25) {{ nodes {{ {_DUPLICATE_LINE_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }}
+  }}
+}}
+"""
+
+CONFIRMATION_DUPLICATE_LINES_GQL = f"""
+query ConfirmationDuplicateLines($id: ID!, $after: String!) {{
+  order(id: $id) {{ id updatedAt
+    lineItems(first: 25, after: $after) {{ nodes {{ {_DUPLICATE_LINE_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }}
+  }}
+}}
+"""
+
+
+async def _confirmation_read_graphql(query, variables, *, store, scope):
+    from .main import shopify_graphql
+    try:
+        return await shopify_graphql(query, variables, store=store, api_version=CONFIRMATION_API_VERSION)
+    except HTTPException as exc:
+        detail = str(exc.detail).lower()
+        if exc.status_code in {401, 403} or "access_denied" in detail or "access denied" in detail:
+            required = "read_products" if "product" in detail or "variant" in detail else "read_customers" if "customer" in detail else scope
+            raise HTTPException(403, f"The selected store requires {required} access for this lookup. An administrator must configure that scope and reconnect the store.") from exc
+        raise
+
+
+def _confirmation_customer_details(node):
+    latest = node.get("lastOrder") or {}
+    default = node.get("defaultAddress") or {}
+    # Choose one shipping address as a unit. Do not mix two different street
+    # addresses, cities and postal codes when the default is incomplete.
+    address = default if default.get("address1") else latest.get("shippingAddress") or default
+    phone = ((node.get("defaultPhoneNumber") or {}).get("phoneNumber") or node.get("phone")
+             or address.get("phone") or latest.get("phone") or "")
+    email = ((node.get("defaultEmailAddress") or {}).get("emailAddress") or node.get("email") or latest.get("email") or "")
+    normalized = {key: address.get(field) or "" for key, field in _CONFIRMATION_ADDRESS_KEYS.items()}
+    normalized["first_name"] = normalized["first_name"] or node.get("firstName") or ""
+    normalized["last_name"] = normalized["last_name"] or node.get("lastName") or ""
+    normalized["phone"] = normalized["phone"] or phone
+    return {
+        "id": node.get("id"), "name": node.get("displayName") or " ".join(v for v in [normalized["first_name"], normalized["last_name"]] if v),
+        "first_name": node.get("firstName") or normalized["first_name"], "last_name": node.get("lastName") or normalized["last_name"],
+        "email": email, "phone": phone, "orders_count": int(node.get("numberOfOrders") or 0), "address": normalized,
+    }
+
+
+@router.get("/api/agent/customers/search")
+async def search_confirmation_customers(store: str, q: str = "", _: User = Depends(get_current_user)):
+    from .main import _normalize_store
+    if not (store or "").strip():
+        raise HTTPException(422, "Store is required")
+    raw = (q or "").strip()
+    details = _confirmation_phone_variants(raw)
+    digits = str(details["normalized_phone"] or "").lstrip("+")
+    if not re.fullmatch(r"[+\d\s()./\-]+", raw) or not 7 <= len(digits) <= 15:
+        return {"ok": True, "customers": []}
+    query = " OR ".join(f"(phone:{_escape_tag(value)})" for value in details["variants"])
+    data = await _confirmation_read_graphql(CONFIRMATION_CUSTOMER_LOOKUP_GQL, {"first": 10, "query": query},
+                                            store=_normalize_store(store.strip()), scope="read_customers")
+    nodes = ((data or {}).get("customers") or {}).get("nodes") or []
+    return {"ok": True, "customers": [_confirmation_customer_details(n) for n in nodes if n and n.get("id")]}
+
+
+@router.get("/api/agent/orders/duplicate-template")
+async def confirmation_order_duplicate_template(store: str, order_id: str, _: User = Depends(get_current_user)):
+    """Read a complete source order and current catalog; never modify that order."""
+    from .main import _normalize_store
+    if not (store or "").strip():
+        raise HTTPException(422, "Store is required")
+    if not re.fullmatch(r"gid://shopify/Order/\d+", order_id or ""):
+        raise HTTPException(422, "Choose a valid Shopify order")
+    store = _normalize_store(store.strip())
+    data = await _confirmation_read_graphql(CONFIRMATION_DUPLICATE_ORDER_GQL, {"id": order_id}, store=store, scope="read_orders")
+    node = (data or {}).get("order")
+    if not node:
+        raise HTTPException(404, "The source order was not found in the selected store")
+    connection = node.get("lineItems") or {}
+    lines = list(connection.get("nodes") or [])
+    cursors = set()
+    while (connection.get("pageInfo") or {}).get("hasNextPage"):
+        cursor = (connection.get("pageInfo") or {}).get("endCursor")
+        if not cursor or cursor in cursors:
+            raise HTTPException(502, "Shopify did not return every source order line. Retry loading the order.")
+        cursors.add(cursor)
+        page = await _confirmation_read_graphql(CONFIRMATION_DUPLICATE_LINES_GQL, {"id": order_id, "after": cursor}, store=store, scope="read_orders")
+        page_node = (page or {}).get("order") or {}
+        if page_node.get("updatedAt") != node.get("updatedAt"):
+            raise HTTPException(409, "The source order changed while loading. Open Duplicate again to load its latest items.")
+        connection = page_node.get("lineItems")
+        if connection is None or (not connection.get("nodes") and (connection.get("pageInfo") or {}).get("hasNextPage")):
+            raise HTTPException(502, "Shopify did not return every source order line. Retry loading the order.")
+        lines.extend(connection.get("nodes") or [])
+    if not lines:
+        raise HTTPException(422, "This order has no items to duplicate. Start a new order and choose its products.")
+    if len(lines) > 50:
+        raise HTTPException(422, "This order has more than 50 lines. Nothing was copied; start a new order and choose the needed products.")
+    line_ids = [line.get("id") for line in lines]
+    if len(line_ids) != len(set(line_ids)):
+        raise HTTPException(502, "Shopify repeated a source order line. Retry loading the order.")
+    currency = ((data or {}).get("shop") or {}).get("currencyCode") or _money(node.get("totalShippingPriceSet"))["currency"]
+    warnings = ["Current catalog prices are used. Source discounts, payments, status, tags and notes are not copied."]
+    items = []
+    quantities = {}
+    for line in lines:
+        quantity = line.get("quantity")
+        if not isinstance(quantity, int) or isinstance(quantity, bool) or not 1 <= quantity <= 999:
+            raise HTTPException(422, f"Source item {line.get('title') or 'Untitled'} has a quantity outside 1–999. Nothing was copied; create its items manually.")
+        variant = line.get("variant") or {}
+        product = variant.get("product") or {}
+        reason = ""
+        if not variant.get("id"):
+            reason = "This is a custom item or its Shopify variant was deleted. Remove it or select a replacement product."
+        elif product.get("status") != "ACTIVE":
+            reason = "This product is archived, draft, or unavailable. Remove it or select a replacement product."
+        elif line.get("customAttributes"):
+            reason = "This item has personalization or custom properties that cannot be copied automatically. Remove it and choose a replacement after reviewing those details."
+        elif line.get("currentQuantity") is not None and line["currentQuantity"] != quantity:
+            reason = "This item's quantity changed after a refund or removal. Original quantity is shown for review; remove it or choose a replacement with the intended quantity."
+        price = None
+        if variant.get("price") is not None:
+            try:
+                catalog_price = Decimal(str(variant["price"]))
+                if catalog_price.is_finite() and catalog_price >= 0:
+                    price = format(catalog_price, "f")
+            except InvalidOperation:
+                pass
+        if price is None and not reason:
+            reason = "Shopify did not return a current catalog price. Remove it or select a replacement product."
+        if variant.get("id") and not reason:
+            quantities[variant["id"]] = quantities.get(variant["id"], 0) + quantity
+            if quantities[variant["id"]] > 999:
+                raise HTTPException(422, "The source order has more than 999 units of one variant. Nothing was copied; create its items manually.")
+        if reason:
+            warnings.append(f"{line.get('title') or 'Item'}: {reason}")
+        items.append({
+            "id": variant.get("id"), "row_key": line.get("id"), "source_line_id": line.get("id"),
+            "product_id": product.get("id"), "product_title": product.get("title") or line.get("title") or "",
+            "variant_title": variant.get("title") or line.get("variantTitle") or "", "sku": variant.get("sku") or line.get("sku") or "",
+            "image": (variant.get("image") or {}).get("url") or ((product.get("featuredImage") or {}).get("url")) or ((line.get("image") or {}).get("url")),
+            "price": price, "source_price": _money(line.get("originalUnitPriceSet"))["amount"], "quantity": quantity, "currency": currency,
+            "options": variant.get("selectedOptions") or [], "inventory_quantity": variant.get("inventoryQuantity"),
+            "inventory_tracked": None, "on_hand_quantity": None, "available_quantity": None,
+            "unavailable": bool(reason), "needs_review": bool(reason), "requires_review": bool(reason), "unavailable_reason": reason,
+        })
+    customer = _confirmation_customer_details(node.get("customer") or {})
+    source_shipping = node.get("shippingAddress") or {}
+    shipping = ({key: source_shipping.get(field) or "" for key, field in _CONFIRMATION_ADDRESS_KEYS.items()}
+                if source_shipping else dict(customer["address"]))
+    shipping["first_name"] = shipping["first_name"] or customer["first_name"]
+    shipping["last_name"] = shipping["last_name"] or customer["last_name"]
+    shipping["phone"] = shipping["phone"] or node.get("phone") or customer["phone"]
+    return {"ok": True, "template": {
+        "source_order_id": node["id"], "source_order_name": node.get("name") or "", "customer_id": customer["id"],
+        "customer": {key: customer[key] for key in ("id", "name", "email", "phone")}, "shipping_address": shipping,
+        "email": node.get("email") or customer["email"], "shipping_price": _money(node.get("totalShippingPriceSet"))["amount"],
+        "currency": currency, "items": items, "warnings": warnings,
+    }}
+
 ORDER_CREATE_GQL = f"""
 mutation ConfirmationOrderCreate($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput!) {{
   orderCreate(order: $order, options: $options) {{
@@ -1892,6 +2096,7 @@ class AgentOrderCreateBody(BaseModel):
     email: Optional[EmailStr] = None
     note: Optional[str] = Field(default=None, max_length=5000)
     shipping_price: str = Field(default="0.00", max_length=32)
+    customer_id: Optional[str] = Field(default=None, pattern=r"^gid://shopify/Customer/\d+$", max_length=128)
 
 
 def _new_confirmation_order_input(body: AgentOrderCreateBody) -> Dict[str, Any]:
@@ -1928,7 +2133,7 @@ def _new_confirmation_order_input(body: AgentOrderCreateBody) -> Dict[str, Any]:
         additions[variant_id] = additions.get(variant_id, 0) + item.quantity
         if additions[variant_id] > 999:
             raise HTTPException(status_code=422, detail="Variant quantity must be at most 999")
-    return {
+    order_input = {
         "shippingAddress": address,
         "phone": address["phone"],
         "financialStatus": "PENDING",
@@ -1937,6 +2142,11 @@ def _new_confirmation_order_input(body: AgentOrderCreateBody) -> Dict[str, Any]:
         "note": (body.note or "").strip(),
         "_shipping_price": format(price, ".2f"),
     }
+    # Omit the key when unselected so requests saved by older deployed builds
+    # retain byte-equivalent fingerprint inputs and can recover pending orders.
+    if body.customer_id:
+        order_input["customer"] = {"toAssociate": {"id": body.customer_id}}
+    return order_input
 
 
 def _mutation_payload_or_error(data: Dict[str, Any], key: str) -> Dict[str, Any]:
@@ -2143,6 +2353,12 @@ async def create_confirmation_order(
         note_recent_tag_add(store, node["id"], node.get("tags") or user.agent_tags or [])
         invalidate_all_breakdown_caches()
         return {"ok": True, "order": _flatten_order(node), "deduped": True, "audited": True}
+
+    if body.customer_id:
+        data = await _confirmation_read_graphql(CONFIRMATION_CUSTOMER_ASSOCIATION_GQL, {"id": body.customer_id},
+                                                store=store, scope="read_customers")
+        if ((data or {}).get("customer") or {}).get("id") != body.customer_id:
+            raise HTTPException(422, "The selected customer is unavailable in this store. Search and select the customer again, or clear the selection.")
 
     metadata = {"source": "confirmation", "confirmation_actor": True, "role": user.role,
                 "fingerprint": fingerprint, "state": "pending", "creation_tag": marker}
