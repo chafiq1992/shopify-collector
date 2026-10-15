@@ -51,6 +51,16 @@ class ConfirmationSearchTests(unittest.TestCase):
         self.assertEqual(result["kind"], "order")
         self.assertEqual(result["digits"], "71779")
 
+    def test_full_order_gid_and_admin_url_take_id_path(self):
+        for value in ["gid://shopify/Order/1234567890", "https://admin.shopify.com/store/test/orders/1234567890?foo=bar"]:
+            result = _classify_confirmation_search(value)
+            self.assertEqual(result["kind"], "order")
+            self.assertEqual(result["order_query"], "id:1234567890")
+
+    def test_custom_order_name_preserves_letters_and_suffix(self):
+        result = _classify_confirmation_search("#WEB-123-MA")
+        self.assertIn('name:"WEB-123-MA"', result["order_query"])
+
     def test_phone_search_uses_exact_supported_customer_filters(self):
         result = _classify_confirmation_search("+212 614 162-654")
 

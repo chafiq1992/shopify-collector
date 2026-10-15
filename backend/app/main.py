@@ -1379,11 +1379,13 @@ async def shopify_graphql(
     store: Optional[str],
     api_version: Optional[str] = None,
     retry_transient: bool = True,
+    retry_safe: bool = True,
 ) -> Dict[str, Any]:
     """Run an Admin GraphQL call. Throttling is always retried (Shopify ran
     nothing). Pass retry_transient=False for a mutation that must not run twice,
     such as orderCreate: a timeout or 5xx can arrive after Shopify already
-    applied it, so resending would duplicate it."""
+    applied it, so resending would duplicate it. Pass retry_safe=False to
+    disable all automatic retries for a durable confirmation-create intent."""
     domain, access_token, api_key = await resolve_store_settings_effective(store)
     if not domain or not access_token:
         raise HTTPException(status_code=400, detail="Shopify credentials not configured for selected store")
@@ -1394,7 +1396,7 @@ async def shopify_graphql(
     # Always use token/password header (custom/private app password)
     headers["X-Shopify-Access-Token"] = access_token
 
-    max_retries = 7
+    max_retries = 7 if retry_safe else 1
     base_delay = 0.75
     last_exc: Optional[Exception] = None
     url = _shopify_graphql_url(domain, access_token, api_key, api_version)
@@ -1402,8 +1404,13 @@ async def shopify_graphql(
         for attempt in range(max_retries):
             try:
                 r = await client.post(url, headers=headers, json={"query": query, "variables": variables or {}})
+                if not retry_safe and r.status_code in (401, 403):
+                    raise HTTPException(status_code=r.status_code, detail="Shopify rejected this request's credentials or access")
                 # Handle HTTP throttling
                 if r.status_code in (429, 430, 503):
+                    if not retry_safe and r.status_code == 503:
+                        # A server failure can follow a committed mutation.
+                        raise HTTPException(status_code=502, detail="Shopify returned an uncertain server failure")
                     # Respect Retry-After when present
                     ra = r.headers.get("Retry-After")
                     if attempt < max_retries - 1:

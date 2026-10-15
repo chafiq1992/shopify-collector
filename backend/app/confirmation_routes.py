@@ -13,17 +13,20 @@ Provides:
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import re
 import time
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 from zoneinfo import ZoneInfo
 from .web_confirmation_status import enrich as enrich_web_confirmations
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field, StrictInt
 from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1364,16 +1367,25 @@ def _confirmation_phone_variants(raw: str) -> Dict[str, Any]:
 
 def _classify_confirmation_search(raw: str) -> Dict[str, Any]:
     cleaned = (raw or "").strip()
+    explicit_id = re.fullmatch(r"gid://shopify/Order/(\d+)", cleaned)
+    admin_id = re.search(r"/orders/(\d+)(?:[/?#].*)?$", cleaned)
+    if explicit_id or admin_id:
+        order_id = (explicit_id or admin_id).group(1)
+        return {"kind": "order", "digits": order_id, "order_query": f"id:{order_id}"}
     details = _confirmation_phone_variants(cleaned)
     digits = details["digits"]
     compact = re.sub(r"[\s().+/\-]", "", cleaned)
     numeric_only = bool(compact) and compact.isdigit()
 
     if cleaned.startswith("#") or (numeric_only and 2 <= len(digits) <= 8):
+        number = cleaned.lstrip("#")
+        order_query = f"(name:{_escape_tag(number)}) OR (name:{_escape_tag('#' + number)})"
+        if number.isdigit():
+            order_query = f"(name:{number}) OR (name:#{number}) OR (id:{number})"
         return {
             "kind": "order",
             "digits": digits,
-            "order_query": f"(name:{digits}) OR (name:#{digits})",
+            "order_query": order_query,
         }
     if numeric_only and len(digits) >= 9:
         variants = details["variants"]
@@ -1382,6 +1394,11 @@ def _classify_confirmation_search(raw: str) -> Dict[str, Any]:
             "digits": digits,
             "normalized_phone": details["normalized_phone"],
             "customer_query": " OR ".join(f"(phone:{value})" for value in variants),
+            # Orders have no documented phone: search filter. Default free-text
+            # also finds orders whose shipping phone has no customer profile.
+            "order_query": " OR ".join(
+                [*(_escape_tag(value) for value in variants), f"id:{digits}"]
+            ),
         }
 
     # Keep free-text support for customer names/emails while making phone and
@@ -1471,6 +1488,7 @@ async def agent_search(
     domain_task = asyncio.create_task(_resolve_domain())
     requested: List[Tuple[str, Any]] = []
     if search["kind"] == "phone":
+        requested.append(("orders", _order_search(search["order_query"], first=25)))
         requested.append((
             "customers",
             _customer_search(
@@ -1670,6 +1688,7 @@ async def phone_orders(
 
 PRODUCT_VARIANTS_SEARCH_GQL = """
 query ConfirmationProductVariants($first: Int!, $query: String!) {
+  shop { currencyCode }
   productVariants(first: $first, query: $query, sortKey: RELEVANCE) {
     nodes {
       id
@@ -1687,6 +1706,55 @@ query ConfirmationProductVariants($first: Int!, $query: String!) {
     }
   }
 }
+"""
+
+# Keep inventory in a second request: read_products can work even when the
+# store has not granted read_inventory. Missing access must not hide products.
+PRODUCT_VARIANT_STOCK_GQL = """
+query ConfirmationVariantStock($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on ProductVariant {
+      id
+      inventoryItem {
+        id
+        tracked
+        inventoryLevels(first: 20) {
+          nodes { quantities(names: ["on_hand", "available"]) { name quantity } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+  }
+}
+"""
+
+INVENTORY_LEVELS_PAGE_GQL = """
+query ConfirmationInventoryLevels($id: ID!, $after: String) {
+  inventoryItem(id: $id) {
+    inventoryLevels(first: 100, after: $after) {
+      nodes { quantities(names: ["on_hand", "available"]) { name quantity } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
+CONFIRMATION_API_VERSION = "2026-01"
+CONFIRMATION_CURRENCY_GQL = "query ConfirmationShopCurrency { shop { currencyCode } }"
+
+ORDER_CREATE_GQL = f"""
+mutation ConfirmationOrderCreate($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput!) {{
+  orderCreate(order: $order, options: $options) {{
+    order {{ {_ORDER_NODE_FIELDS} }}
+    userErrors {{ field message }}
+  }}
+}}
+"""
+
+ORDER_CREATE_LOOKUP_GQL = f"""
+query ConfirmationCreatedOrder($id: ID!) {{
+  order(id: $id) {{ {_ORDER_NODE_FIELDS} }}
+}}
 """
 
 ORDER_EDIT_BEGIN_GQL = """
@@ -1811,6 +1879,66 @@ class OrderShippingEditBody(BaseModel):
     shipping_address: OrderShippingAddressInput
 
 
+class NewOrderVariantInput(BaseModel):
+    variant_id: str = Field(min_length=1, max_length=128)
+    quantity: StrictInt = Field(ge=1, le=999)
+
+
+class AgentOrderCreateBody(BaseModel):
+    store: str = Field(min_length=1, max_length=255)
+    client_action_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{8,128}$")
+    shipping_address: OrderShippingAddressInput
+    additions: List[NewOrderVariantInput] = Field(min_length=1, max_length=50)
+    email: Optional[EmailStr] = None
+    note: Optional[str] = Field(default=None, max_length=5000)
+    shipping_price: str = Field(default="0.00", max_length=32)
+
+
+def _new_confirmation_order_input(body: AgentOrderCreateBody) -> Dict[str, Any]:
+    source = body.shipping_address
+    address = {
+        key: str(getattr(source, attr) or "").strip()
+        for key, attr in {
+            "firstName": "first_name", "lastName": "last_name", "company": "company",
+            "phone": "phone", "address1": "address1", "address2": "address2",
+            "city": "city", "province": "province", "zip": "zip", "country": "country",
+        }.items()
+    }
+    if not (address["firstName"] or address["lastName"]):
+        raise HTTPException(status_code=422, detail="Customer name is required")
+    for key, label in [("phone", "Phone"), ("address1", "Street address"), ("city", "City"), ("country", "Country")]:
+        if not address[key]:
+            raise HTTPException(status_code=422, detail=f"{label} is required")
+    if any(len(value) > 255 for value in address.values()):
+        raise HTTPException(status_code=422, detail="Address fields must be at most 255 characters")
+    phone_digits = re.sub(r"\D", "", address["phone"])
+    if not 7 <= len(phone_digits) <= 15:
+        raise HTTPException(status_code=422, detail="Enter a valid customer phone number")
+    try:
+        price = Decimal(body.shipping_price)
+        if not price.is_finite() or price < 0 or price > Decimal("999999.99") or price.as_tuple().exponent < -2:
+            raise ValueError()
+    except (InvalidOperation, ValueError):
+        raise HTTPException(status_code=422, detail="Shipping price must be a non-negative amount with at most 2 decimals")
+    additions: Dict[str, int] = {}
+    for item in body.additions:
+        variant_id = item.variant_id.strip()
+        if not re.fullmatch(r"gid://shopify/ProductVariant/\d+", variant_id):
+            raise HTTPException(status_code=422, detail="Choose a valid Shopify product variant")
+        additions[variant_id] = additions.get(variant_id, 0) + item.quantity
+        if additions[variant_id] > 999:
+            raise HTTPException(status_code=422, detail="Variant quantity must be at most 999")
+    return {
+        "shippingAddress": address,
+        "phone": address["phone"],
+        "financialStatus": "PENDING",
+        "lineItems": [{"variantId": key, "quantity": additions[key]} for key in sorted(additions)],
+        "email": str(body.email) if body.email else None,
+        "note": (body.note or "").strip(),
+        "_shipping_price": format(price, ".2f"),
+    }
+
+
 def _mutation_payload_or_error(data: Dict[str, Any], key: str) -> Dict[str, Any]:
     payload = (data or {}).get(key) or {}
     errors = payload.get("userErrors") or []
@@ -1896,8 +2024,51 @@ async def search_product_variants(
         PRODUCT_VARIANTS_SEARCH_GQL,
         {"first": max(1, min(30, int(first or 20))), "query": query},
         store=(store or "").strip(),
+        api_version=CONFIRMATION_API_VERSION,
     )
     nodes = ((data or {}).get("productVariants") or {}).get("nodes") or []
+    currency = ((data or {}).get("shop") or {}).get("currencyCode") or ""
+    stock: Dict[str, Dict[str, Any]] = {}
+    warnings = []
+    try:
+        # Bounded batches keep inventory connections below Shopify's query cost
+        # ceiling, and every remaining location page is counted before display.
+        for offset in range(0, len(nodes), 10):
+            ids = [node["id"] for node in nodes[offset:offset + 10] if node.get("id")]
+            result = await shopify_graphql(
+                PRODUCT_VARIANT_STOCK_GQL, {"ids": ids}, store=store,
+                api_version=CONFIRMATION_API_VERSION,
+            )
+            for variant in (result or {}).get("nodes") or []:
+                if not variant:
+                    continue
+                inventory = variant.get("inventoryItem") or {}
+                tracked = inventory.get("tracked")
+                entry = {"inventory_tracked": tracked, "on_hand_quantity": None, "available_quantity": None}
+                stock[variant["id"]] = entry
+                if tracked is not True:
+                    continue
+                levels = inventory.get("inventoryLevels") or {}
+                rows = list(levels.get("nodes") or [])
+                while (levels.get("pageInfo") or {}).get("hasNextPage"):
+                    cursor = (levels.get("pageInfo") or {}).get("endCursor")
+                    if not cursor:
+                        raise ValueError("Missing inventory location cursor")
+                    page = await shopify_graphql(
+                        INVENTORY_LEVELS_PAGE_GQL, {"id": inventory["id"], "after": cursor},
+                        store=store, api_version=CONFIRMATION_API_VERSION,
+                    )
+                    levels = ((page or {}).get("inventoryItem") or {}).get("inventoryLevels")
+                    if levels is None:
+                        raise ValueError("Inventory location page unavailable")
+                    rows.extend(levels.get("nodes") or [])
+                for name, field in [("on_hand", "on_hand_quantity"), ("available", "available_quantity")]:
+                    quantities = [next((q.get("quantity") for q in row.get("quantities") or [] if q.get("name") == name), None) for row in rows]
+                    if quantities and all(isinstance(q, int) for q in quantities):
+                        entry[field] = sum(quantities)
+    except Exception:
+        logger.warning("Confirmation picker inventory lookup incomplete (store=%s)", store, exc_info=True)
+        warnings.append("Some inventory counts are unavailable")
     variants = []
     for node in nodes:
         product = node.get("product") or {}
@@ -1913,9 +2084,134 @@ async def search_product_variants(
             "sku": node.get("sku") or "",
             "price": str(node.get("price") or "0"),
             "inventory_quantity": node.get("inventoryQuantity"),
+            "inventory_tracked": stock.get(node.get("id"), {}).get("inventory_tracked"),
+            "on_hand_quantity": stock.get(node.get("id"), {}).get("on_hand_quantity"),
+            "available_quantity": stock.get(node.get("id"), {}).get("available_quantity"),
+            "currency": currency,
             "image": image,
         })
-    return {"ok": True, "variants": variants, "query": query}
+    return {"ok": True, "variants": variants, "query": query, "currency": currency, "warnings": warnings}
+
+
+@router.post("/api/agent/orders/create")
+async def create_confirmation_order(
+    body: AgentOrderCreateBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Create one unpaid COD order; a durable intent prevents duplicate submits.
+
+    An uncertain transport result is never automatically retried. The unique
+    Shopify tag lets a later request recover the order after a lost response.
+    """
+    from .main import _normalize_store, shopify_graphql  # type: ignore
+
+    order_input = _new_confirmation_order_input(body)
+    store = body.store.strip()
+    if not store:
+        raise HTTPException(status_code=422, detail="Store is required")
+    store_key = _normalize_store(store)
+    action_id = body.client_action_id
+    fingerprint = hashlib.sha256(json.dumps(order_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    marker = "confirmation-create-" + hashlib.sha256(f"{user.id}:{store_key}:{action_id}".encode()).hexdigest()[:32]
+    await _lock_client_action(db, action_id)
+    event = await db.scalar(select(OrderEvent).where(OrderEvent.client_action_id == action_id))
+    if event is not None:
+        metadata = event.event_metadata or {}
+        if event.user_id != user.id or event.store_key != store_key or metadata.get("fingerprint") != fingerprint:
+            raise HTTPException(status_code=409, detail="This submission was already started with different details. Search the order before submitting again.")
+        if event.order_gid:
+            data = await shopify_graphql(
+                ORDER_CREATE_LOOKUP_GQL, {"id": event.order_gid}, store=store,
+                api_version=CONFIRMATION_API_VERSION,
+            )
+            node = (data or {}).get("order")
+        else:
+            data = await shopify_graphql(
+                SEARCH_ORDERS_GQL, {"first": 2, "query": f"tag:{_escape_tag(marker)}"},
+                store=store, api_version=CONFIRMATION_API_VERSION,
+            )
+            matches = [edge.get("node") or {} for edge in ((data or {}).get("orders") or {}).get("edges") or []]
+            node = matches[0] if len(matches) == 1 else None
+        if not node:
+            raise HTTPException(status_code=409, detail=f"Creation status is uncertain. Search {marker} or the customer's phone before creating another order. Retry can recover the order once Shopify makes it searchable.")
+        event.action = "order_create"
+        event.order_gid = node["id"]
+        event.order_number = str(node.get("name") or "").lstrip("#")
+        event.event_metadata = {**metadata, "state": "complete"}
+        await db.commit()
+        note_recent_tag_add(store, node["id"], node.get("tags") or user.agent_tags or [])
+        invalidate_all_breakdown_caches()
+        return {"ok": True, "order": _flatten_order(node), "deduped": True, "audited": True}
+
+    metadata = {"source": "confirmation", "confirmation_actor": True, "role": user.role,
+                "fingerprint": fingerprint, "state": "pending", "creation_tag": marker}
+    event = OrderEvent(user_id=user.id, order_gid=None, order_number="", store_key=store_key,
+                       action="order_create_pending", client_action_id=action_id, event_metadata=metadata)
+    db.add(event)
+    try:
+        # Commit before the external side effect. A crash afterward leaves a
+        # recoverable intent rather than allowing a second order to be created.
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="This submission is already being processed. Retry to check its status.")
+
+    try:
+        currency_data = await shopify_graphql(CONFIRMATION_CURRENCY_GQL, {}, store=store, api_version=CONFIRMATION_API_VERSION)
+    except Exception:
+        # No mutation has run yet, so retrying this intent is safe.
+        await db.delete(event)
+        await db.commit()
+        raise
+    currency = ((currency_data or {}).get("shop") or {}).get("currencyCode")
+    if not currency:
+        await db.delete(event)
+        await db.commit()
+        raise HTTPException(status_code=502, detail="Shopify did not return the store currency")
+    shipping_price = order_input.pop("_shipping_price")
+    order_input.update({
+        "currency": currency,
+        "tags": _normalize_tags([*(user.agent_tags or []), "confirmation-created", marker]),
+        "shippingLines": [{"title": "Shipping", "priceSet": {"shopMoney": {"amount": shipping_price, "currencyCode": currency}}}],
+        "customAttributes": [{"key": "payment_method", "value": "Cash on Delivery"}],
+    })
+    try:
+        data = await shopify_graphql(
+            ORDER_CREATE_GQL,
+            {"order": order_input, "options": {"inventoryBehaviour": "DECREMENT_OBEYING_POLICY", "sendReceipt": False, "sendFulfillmentReceipt": False}},
+            store=store, api_version=CONFIRMATION_API_VERSION, retry_safe=False,
+        )
+        payload = _mutation_payload_or_error(data, "orderCreate")
+        node = payload.get("order") or {}
+        if not node.get("id"):
+            raise HTTPException(status_code=502, detail="Shopify returned no created order")
+    except HTTPException as exc:
+        if exc.status_code in {422, 429}:
+            # Explicit userErrors/throttle rejection mean nothing was created.
+            # Correcting the form or submitting a fresh action is safe.
+            await db.delete(event)
+            await db.commit()
+            raise
+        if exc.status_code in {401, 403} or "access denied for ordercreate field" in str(exc.detail).lower():
+            await db.delete(event)
+            await db.commit()
+            raise HTTPException(status_code=403, detail="This store has not granted order creation permission. An administrator must reconnect Shopify with write_orders access.") from exc
+        raise HTTPException(status_code=409, detail=f"Creation status is uncertain. Search {marker} or the customer's phone before creating another order. Retry to check this submission.") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=f"Creation status is uncertain. Search {marker} or the customer's phone before creating another order. Retry to check this submission.") from exc
+    event.action = "order_create"
+    event.order_gid = node["id"]
+    event.order_number = str(node.get("name") or "").lstrip("#")
+    event.event_metadata = {**metadata, "state": "complete"}
+    try:
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=f"Order was created but its audit could not be saved. Retry this submission to recover it; search {marker} before creating another order.") from exc
+    note_recent_tag_add(store, node["id"], order_input["tags"])
+    invalidate_all_breakdown_caches()
+    return {"ok": True, "order": _flatten_order(node), "deduped": False, "audited": True}
 
 
 @router.post("/api/agent/order-items/edit")

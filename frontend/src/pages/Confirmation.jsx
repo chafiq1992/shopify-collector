@@ -33,6 +33,8 @@ import {
 import { authFetch, authHeaders } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import OrderLabel from "../components/OrderLabel";
+import ConfirmationCreateOrder from "../components/ConfirmationCreateOrder";
+import ConfirmationProductResults from "../components/ConfirmationProductResults";
 import { useToasts, ToastStack } from "../components/Toast";
 import { AnimatedNumber, useDepartingList, useFlipList } from "../components/Motion";
 import ChatConfirmationView, { useChatWaitingCount } from "./ChatConfirmation";
@@ -181,6 +183,23 @@ const API = {
       throw new Error(js.detail || `Product search failed (${res.status})`);
     }
     return res.json();
+  },
+  async createOrder(payload) {
+    const res = await authFetch("/api/agent/orders/create", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    });
+    const js = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = Array.isArray(js.detail)
+        ? js.detail.map((item) => item.msg || "Invalid order details").join("; ")
+        : js.detail;
+      const error = new Error(detail || `Could not create order (${res.status})`);
+      error.status = res.status;
+      throw error;
+    }
+    return js;
   },
   async editOrderItems(payload) {
     const res = await authFetch("/api/agent/order-items/edit", {
@@ -426,6 +445,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
   // `{ mode, includeAssigned }` where mode is the level being pulled ("new" | "n1" |
   // "n2" | "n3" | "n4" | "nowtp" | "enatt"); null = closed.
   const [pullMode, setPullMode] = useState(null);
+  const [createOrderOpen, setCreateOrderOpen] = useState(false);
   // Toast notifications (button feedback)
   const [toasts, pushToast, dismissToast] = useToasts();
 
@@ -436,6 +456,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
   const [searchError, setSearchError] = useState(null);
   const searchReqIdRef = useRef(0);
   const searchTimerRef = useRef(null);
+  const createdOrderRef = useRef(null);
   const [expandedCustomerId, setExpandedCustomerId] = useState(null);
   const [customerOrdersById, setCustomerOrdersById] = useState({});
 
@@ -448,7 +469,11 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
     try {
       const js = await API.search(store, q);
       if (reqId !== searchReqIdRef.current) return;
-      setSearchResults(js);
+      const created = createdOrderRef.current;
+      const matchesCreated = created && [created.name, String(created.number || "")].includes(q);
+      setSearchResults(matchesCreated && !(js.orders || []).some((order) => order.id === created.id)
+        ? { ...js, orders: [created, ...(js.orders || [])] }
+        : js);
       const primed = {};
       for (const customer of (js.customers || [])) {
         if (customer?.id && Array.isArray(customer.orders)) {
@@ -503,6 +528,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
     if (!nextStore || nextStore === store) return;
     searchReqIdRef.current += 1;
     setStore(nextStore);
+    createdOrderRef.current = null;
     setSearchResults(null);
     setSearchError(null);
     setExpandedCustomerId(null);
@@ -531,6 +557,9 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
   // current queue page, the global search results, and any expanded customer's orders.
   // Keeps the UI consistent when the agent acts on an order from any of those places.
   function patchOrderInPlace(orderId, patch) {
+    if (createdOrderRef.current?.id === orderId) {
+      createdOrderRef.current = patch(createdOrderRef.current);
+    }
     const patchArr = (arr) => (arr || []).map((o) => (o.id === orderId ? patch(o) : o));
     setPages((prev) => prev.map((p, idx) => (idx === pageIndex ? { ...p, orders: patchArr(p.orders) } : p)));
     setSearchResults((prev) => (prev ? { ...prev, orders: patchArr(prev.orders) } : prev));
@@ -1033,7 +1062,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
     const menuOpen = actionsDropdownFor === o.id;
     const grow = stretch ? "flex-1" : "";
     return (
-      <div className={`flex items-center gap-1.5 ${stretch ? "w-full" : ""}`}>
+      <fieldset disabled={Boolean(o.cancelled_at)} className={`flex min-w-0 items-center gap-1.5 ${stretch ? "w-full" : ""}`}>
         <button
           type="button"
           disabled={isSyncing}
@@ -1107,11 +1136,12 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
             </div>
           )}
         </div>
-      </div>
+      </fieldset>
     );
   }
 
   function renderConfirmPicker(o, isSyncing) {
+    if (o.cancelled_at) return null;
     const today = todayISO();
     const tomorrow = todayISO(new Date(Date.now() + 86_400_000));
     const quick = [
@@ -1289,6 +1319,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
             {o.total_price} <span className="text-[11px] font-medium text-slate-500">{o.currency}</span>
           </span>
         </div>
+        {o.cancelled_at && <span className="mt-1 inline-flex rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-700">Cancelled</span>}
 
         <div className="mt-2 flex items-start justify-between gap-2">
           <div className="min-w-0">
@@ -1492,6 +1523,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
           customerOrdersById={customerOrdersById}
           onToggleCustomer={toggleSearchCustomerExpand}
           inputRef={searchInputRef}
+          onNewOrder={() => setCreateOrderOpen(true)}
         />
 
         {tagsAssigned.length === 0 && (
@@ -1711,6 +1743,32 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
         </div>
       )}
 
+      {createOrderOpen && (
+        <ConfirmationCreateOrder
+          key={store}
+          store={store}
+          actorId={me.id}
+          searchProducts={API.searchProductVariants}
+          createOrder={API.createOrder}
+          onClose={() => setCreateOrderOpen(false)}
+          onCreated={(result) => {
+            const order = result.order;
+            createdOrderRef.current = order;
+            setCreateOrderOpen(false);
+            // Show the returned order immediately; Shopify search indexing can lag.
+            searchReqIdRef.current += 1;
+            if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+            setSearchQuery(order.name || String(order.number || ""));
+            setSearchResults({ orders: [order], customers: [], query: order.name, search_kind: "order" });
+            setSearchError(null);
+            setSearchLoading(false);
+            setExpanded((previous) => new Set([...previous, order.id]));
+            pushToast(`Created ${order.name || "order"} · Ready for confirmation`, "success");
+            loadFirst();
+            loadTeam();
+          }}
+        />
+      )}
       {cancelModalFor && (
         <CancelOrderModal
           order={cancelModalFor}
@@ -1719,6 +1777,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge }) {
           onSuccess={() => {
             // Cancelled orders should disappear from the queue (status:open filter excludes them).
             const label = cancelModalFor.name || `#${cancelModalFor.number}`;
+            patchOrderInPlace(cancelModalFor.id, (order) => ({ ...order, cancelled_at: new Date().toISOString() }));
             removeLocalOrder(cancelModalFor.id);
             setCancelModalFor(null);
             // Refresh team-stats so any "confirmed today" / "assigned now" rollups update.
@@ -2428,7 +2487,7 @@ function PullOrdersModal({ initialMode = "new", initialIncludeAssigned = false, 
 // `+212 614 162-654`, `0614162654`, and `614162654` all match the same record.
 function GlobalSearch({
   query, onQueryChange, onSearchNow, onClear, loading, error, results, store, onStoreChange, pushToast,
-  renderOrderCard, expandedCustomerId, customerOrdersById, onToggleCustomer, inputRef,
+  renderOrderCard, expandedCustomerId, customerOrdersById, onToggleCustomer, inputRef, onNewOrder,
 }) {
   const orders = results?.orders || [];
   const customers = results?.customers || [];
@@ -2448,6 +2507,13 @@ function GlobalSearch({
 
   return (
     <section className={`${CARD} p-2.5 sm:p-3`}>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-900">Search any order</h2>
+          <p className="mt-0.5 text-xs text-gray-500">Find orders in the selected store, including orders outside your queue.</p>
+        </div>
+        <button type="button" onClick={onNewOrder} className={`inline-flex h-10 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-sm font-semibold text-white hover:bg-indigo-700 ${BTN_TAP}`}><Plus size={16} aria-hidden /> New order</button>
+      </div>
       <div className="flex items-center gap-2">
         <div className="flex h-11 max-w-[42%] shrink-0 items-center gap-1.5 rounded-xl bg-slate-50 pl-3 pr-1 ring-1 ring-inset ring-slate-200 sm:max-w-none">
           <span className="hidden text-[10px] font-semibold uppercase tracking-wider text-slate-500 sm:inline">Store</span>
@@ -2473,7 +2539,8 @@ function GlobalSearch({
               value={query}
               onChange={(e) => onQueryChange(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Escape" && query) { e.preventDefault(); onClear?.(); } }}
-              placeholder="Phone or order #"
+              aria-label="Search any order"
+              placeholder="Order number, phone, customer name, or email"
               className="h-11 w-full rounded-xl border-0 bg-white pl-9 pr-10 text-sm text-slate-900 ring-1 ring-inset ring-slate-200 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-indigo-500"
             />
             <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2">
@@ -3198,7 +3265,7 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
         if (requestId === catalogRequestRef.current) setCatalogLoading(false);
       }
     }, 220);
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); catalogRequestRef.current += 1; };
   }, [catalogQuery, store]);
 
   const itemChanges = useMemo(() => originalItems
@@ -3387,8 +3454,8 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           {tab === "items" ? (
-            <div className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_320px] sm:p-6">
-              <div className="space-y-4">
+            <div className="grid min-w-0 grid-cols-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_320px] sm:p-6">
+              <div className="min-w-0 space-y-4">
                 <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
                   <div className="border-b border-gray-200 px-4 py-3">
                     <h3 className="text-sm font-semibold text-gray-900">Items in this order</h3>
@@ -3556,40 +3623,13 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                   {catalogQuery.trim().length >= 2 && !catalogLoading && !catalogError && catalogResults.length === 0 && (
                     <div className="mt-3 rounded-lg bg-gray-50 px-3 py-5 text-center text-xs text-gray-500">No matching variants found.</div>
                   )}
-                  {catalogResults.length > 0 && (
-                    <div className="mt-3 max-h-72 divide-y divide-gray-100 overflow-y-auto rounded-lg border border-gray-200">
-                      {catalogResults.map((variant) => (
-                        <button
-                          key={variant.id}
-                          type="button"
-                          onClick={() => chooseCatalogVariant(variant)}
-                          className="flex w-full items-center gap-3 p-3 text-left hover:bg-indigo-50"
-                        >
-                          <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-gray-100">
-                            {variant.image
-                              ? <img src={variant.image} alt="" className="h-full w-full object-cover" />
-                              : <Package size={17} className="text-gray-400" />}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-sm font-semibold text-gray-900">{variant.product_title}</div>
-                            <div className="truncate text-xs text-gray-600">
-                              {variant.variant_title && variant.variant_title !== "Default Title" ? variant.variant_title : "Default variant"}
-                              {variant.sku ? ` · SKU ${variant.sku}` : ""}
-                            </div>
-                          </div>
-                          <div className="shrink-0 text-right">
-                            <div className="text-sm font-semibold tabular-nums text-gray-900">{variant.price} {order.currency}</div>
-                            <div className="text-[11px] text-gray-500">
-                              {variant.inventory_quantity == null ? "Inventory not tracked" : `${variant.inventory_quantity} in inventory`}
-                            </div>
-                          </div>
-                          <span className="ml-1 inline-flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white">
-                            {replacingItem ? "Replace" : "Add"} <Plus size={13} />
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  <ConfirmationProductResults
+                    variants={catalogResults}
+                    currency={order.currency}
+                    onChoose={chooseCatalogVariant}
+                    actionLabel={replacingItem ? "Replace" : "Add"}
+                    disabled={saveBusy || catalogLoading}
+                  />
                 </section>
               </div>
 
@@ -3653,7 +3693,7 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
               </aside>
             </div>
           ) : (
-            <div className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_340px] sm:p-6">
+            <div className="grid min-w-0 grid-cols-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_340px] sm:p-6">
               <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
                 <div className="mb-5">
                   <h3 className="text-sm font-semibold text-gray-900">Shipping address</h3>
