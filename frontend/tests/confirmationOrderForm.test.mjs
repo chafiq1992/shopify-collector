@@ -25,6 +25,24 @@ test('aggregated quantities are exact and require review instead of silently cla
   assert.equal(seed.items[0].quantity,1200); assert.match(orderCartIssue(seed.items),/999/);
   seed.items[0].quantity=900; assert.equal(orderCartIssue(seed.items),'');
 });
+test('cancelled source keeps original products, exact variants and quantities when current quantity is zero', () => {
+  const seed=duplicateOrderSeed({...template,items:[
+    {id:'gid://shopify/ProductVariant/101',product_title:'Boots',variant_title:'Black / 33',sku:'BOOT-33',image:'https://example.test/boots.jpg',price:'239.99',quantity:1,current_quantity:0},
+    {id:'gid://shopify/ProductVariant/102',product_title:'Boots',variant_title:'Black / 34',sku:'BOOT-34',image:'https://example.test/boots.jpg',price:'239.99',quantity:2,current_quantity:0},
+  ],warnings:['The source was cancelled. Original quantities were copied.']});
+  assert.equal(seed.items.length,2);
+  assert.deepEqual(seed.items.map(item=>({id:item.id,variant:item.variant_title,quantity:item.quantity})),[
+    {id:'gid://shopify/ProductVariant/101',variant:'Black / 33',quantity:1},
+    {id:'gid://shopify/ProductVariant/102',variant:'Black / 34',quantity:2},
+  ]);
+  assert.equal(seed.items[0].image,'https://example.test/boots.jpg');
+  assert.equal(seed.items[1].sku,'BOOT-34');
+  assert.equal(orderCartIssue(seed.items),'');
+  assert.deepEqual(createOrderPayload({store:'s',actionId:'new',...seed}).additions,[
+    {variant_id:'gid://shopify/ProductVariant/101',quantity:1},
+    {variant_id:'gid://shopify/ProductVariant/102',quantity:2},
+  ]);
+});
 test('pending creation overrides fresh duplicate source and keeps original linkage/action context', () => {
   const pending={payload:{store:'store1',client_action_id:'stable',customer_id:'priorCustomer',shipping_address:{first_name:'Prior'},email:'prior@example.test',shipping_price:'0',additions:[{variant_id:'priorVariant',quantity:1}]},items:[{id:'priorVariant',quantity:1}],currency:'MAD',customer:{id:'priorCustomer',name:'Prior'}};
   const state=initialOrderForm(pending,template);

@@ -1946,8 +1946,14 @@ async def confirmation_order_duplicate_template(store: str, order_id: str, _: Us
             reason = "This product is archived, draft, or unavailable. Remove it or select a replacement product."
         elif line.get("customAttributes"):
             reason = "This item has personalization or custom properties that cannot be copied automatically. Remove it and choose a replacement after reviewing those details."
-        elif line.get("currentQuantity") is not None and line["currentQuantity"] != quantity:
-            reason = "This item's quantity changed after a refund or removal. Original quantity is shown for review; remove it or choose a replacement with the intended quantity."
+        source_note = ""
+        if line.get("currentQuantity") is not None and line["currentQuantity"] != quantity:
+            # Cancellation/refunds can zero currentQuantity without deleting the
+            # original variant. Duplicating intentionally starts a new order
+            # with the original units; it must not force a different product.
+            source_note = (f"Copying original quantity {quantity}; the source currently has {line['currentQuantity']} "
+                           "after cancellation, refund or editing. Review the quantity before creating.")
+            warnings.append(f"{line.get('title') or 'Item'}: {source_note}")
         price = None
         if variant.get("price") is not None:
             try:
@@ -1970,6 +1976,7 @@ async def confirmation_order_duplicate_template(store: str, order_id: str, _: Us
             "variant_title": variant.get("title") or line.get("variantTitle") or "", "sku": variant.get("sku") or line.get("sku") or "",
             "image": (variant.get("image") or {}).get("url") or ((product.get("featuredImage") or {}).get("url")) or ((line.get("image") or {}).get("url")),
             "price": price, "source_price": _money(line.get("originalUnitPriceSet"))["amount"], "quantity": quantity, "currency": currency,
+            "source_quantity": quantity, "source_current_quantity": line.get("currentQuantity"), "source_note": source_note,
             "options": variant.get("selectedOptions") or [], "inventory_quantity": variant.get("inventoryQuantity"),
             "inventory_tracked": None, "on_hand_quantity": None, "available_quantity": None,
             "unavailable": bool(reason), "needs_review": bool(reason), "requires_review": bool(reason), "unavailable_reason": reason,

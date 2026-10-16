@@ -47,6 +47,7 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
   const dialogRef = useRef(null);
   const mountedRef = useRef(true);
   const blockedSeed = Boolean(initialOrderId && (seedLoading || seedError));
+  const duplicateFlow = Boolean(initialOrderId && !pending);
   const locked = busy || retryOnly || blockedSeed;
   const cartIssue = orderCartIssue(items);
   const productSearch = useConfirmationProductSearch(store, query, { search: searchProducts, enabled: !locked });
@@ -204,14 +205,25 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
               <ConfirmationProductResults variants={variants} currency={currency} onChoose={addItem} disabled={locked || searchBusy} searchState={productSearch} />
             </section>
           </div>
-          <aside className="min-w-0 rounded-xl border border-gray-200 bg-white p-4 lg:sticky lg:top-0">
-            <h3 className="text-sm font-semibold">Review order</h3>
-            {!items.length && <p className="mt-4 rounded-lg bg-gray-50 p-3 text-xs text-gray-500">Search for a product and choose its variant to add it.</p>}
+          <aside aria-label={duplicateFlow ? "Copied products" : "Review order"} className={`min-w-0 rounded-xl border border-gray-200 bg-white p-4 lg:sticky lg:top-0 ${duplicateFlow ? "order-first lg:order-none" : ""}`}>
+            <h3 className="text-sm font-semibold">{duplicateFlow ? "Copied products" : "Review order"}</h3>
+            {duplicateFlow && items.length > 0 && <p className="mt-1 text-xs text-gray-500">The source products, variants and quantities are ready to edit.</p>}
+            {!items.length && <p className="mt-4 rounded-lg bg-gray-50 p-3 text-xs text-gray-500">{seedLoading ? "Loading copied products…" : seedError ? "Source products could not be loaded. Retry the source order above." : "Search for a product and choose its variant to add it."}</p>}
             <div className="mt-3 space-y-3">{items.map((item, index) => <div key={cartKey(item, index)} className={`rounded-lg border p-3 ${item.unavailable || item.needs_review ? "border-rose-200 bg-rose-50/30" : "border-gray-200"}`}>
-              <p className="break-words text-sm font-semibold">{item.product_title}</p>
-              <p className="mt-1 text-xs text-indigo-700">{item.variant_title === "Default Title" ? "Default variant" : item.variant_title}</p>
+              <div className="flex items-start gap-3">
+                <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
+                  {item.image ? <img src={item.image} alt={item.product_title || "Product"} className="h-full w-full object-contain" /> : <Package size={24} className="text-gray-400" aria-hidden />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="break-words text-sm font-semibold">{item.product_title}</p>
+                  <p className="mt-1 inline-block rounded-md bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-800">{item.variant_title && item.variant_title !== "Default Title" ? item.variant_title : "Default variant"}</p>
+                  {item.sku && <p className="mt-1 break-all text-[11px] text-gray-500">SKU {item.sku}</p>}
+                  {item.id && <p className="mt-1 break-all font-mono text-[10px] text-gray-500">Variant ID {String(item.id).split("/").pop()}</p>}
+                </div>
+              </div>
               {item.unavailable || item.needs_review ? <p className="mt-2 text-xs font-medium text-rose-800">{item.unavailable_reason || "This source item is unavailable or needs review. Remove it and add a replacement."}</p> : <p className="mt-1 text-xs text-gray-600">{item.price} {item.currency || currency} each</p>}
               <div className="mt-2 flex items-center gap-1">
+                <span className="mr-1 text-xs font-medium text-gray-600">Qty</span>
                 <button type="button" disabled={locked || item.quantity <= 1} onClick={() => quantity(cartKey(item, index), Number(item.quantity) - 1)} aria-label={`Decrease ${item.product_title} quantity`} className="rounded border p-2 disabled:opacity-30"><Minus size={14} /></button>
                 <input type="number" min="1" max="999" step="1" disabled={locked} aria-label={`Quantity for ${item.product_title}`} value={item.quantity} onChange={(e) => quantity(cartKey(item, index), e.target.value)} className="h-9 w-16 rounded border text-center text-sm" />
                 <button type="button" disabled={locked || item.quantity >= 999} onClick={() => quantity(cartKey(item, index), Number(item.quantity) + 1)} aria-label={`Increase ${item.product_title} quantity`} className="rounded border p-2 disabled:opacity-30"><Plus size={14} /></button>

@@ -191,7 +191,7 @@ class DuplicateTemplateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(graphql.await_args_list[1].args[1], {"id": ORDER, "after": "page2"})
         self.assertEqual(graphql.await_args_list[1].kwargs["store"], "irranova")
 
-    async def test_custom_deleted_archived_personalized_and_refunded_rows_are_retained_blocked(self):
+    async def test_unavailable_rows_block_but_refunded_original_rows_remain_editable(self):
         archived = line(2)
         archived["variant"]["product"]["status"] = "ARCHIVED"
         lines = [line(1, variant=None), archived, line(3, customAttributes=[{"key": "Engraving", "value": "Name"}]),
@@ -202,8 +202,45 @@ class DuplicateTemplateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(items[0]["id"])
         self.assertIsNone(items[0]["price"])
         self.assertEqual(items[0]["quantity"], 2)
-        self.assertTrue(all(row["unavailable"] and row["requires_review"] and row["needs_review"] and row["unavailable_reason"] for row in items))
+        self.assertTrue(all(row["unavailable"] and row["requires_review"] and row["needs_review"] and row["unavailable_reason"] for row in items[:3]))
+        self.assertTrue(all(not row["unavailable"] and not row["requires_review"] and not row["needs_review"] for row in items[3:]))
+        self.assertEqual([row["quantity"] for row in items[3:]], [2, 2])
+        self.assertEqual([row["source_current_quantity"] for row in items[3:]], [0, 1])
+        self.assertTrue(all(row["source_note"] for row in items[3:]))
         self.assertEqual(len({row["row_key"] for row in items}), 5)
+
+    async def test_cancelled_zero_current_quantity_copies_exact_original_variants_and_quantities(self):
+        # Reproduces the technical shape of the reported cancelled #173780:
+        # both original lines remain in Shopify, while current quantities are 0.
+        first = line(1, quantity=1, currentQuantity=0)
+        second = line(2, quantity=1, currentQuantity=0)
+        first["variant"]["id"] = "gid://shopify/ProductVariant/55686049923448"
+        second["variant"]["id"] = "gid://shopify/ProductVariant/55686050251128"
+        first["variant"]["title"] = "Original option A"
+        second["variant"]["title"] = "Original option B"
+        source = source_order(cancelledAt="2026-10-15T10:00:00Z", lineItems={"nodes": [first, second], "pageInfo": {"hasNextPage": False}})
+        before = deepcopy(source)
+        result, _ = await self.load(source, store="irrakids")
+        items = result["template"]["items"]
+        self.assertEqual([(item["id"], item["quantity"]) for item in items], [(first["variant"]["id"], 1), (second["variant"]["id"], 1)])
+        self.assertEqual([item["variant_title"] for item in items], ["Original option A", "Original option B"])
+        self.assertTrue(all(not item["unavailable"] and not item["needs_review"] and not item["requires_review"] for item in items))
+        self.assertTrue(all(item["price"] == "99.50" for item in items))
+        self.assertEqual(source, before)
+
+    async def test_fulfilled_order_uses_original_variant_with_original_quantity(self):
+        source = source_order(displayFulfillmentStatus="FULFILLED", lineItems={"nodes": [line(quantity=3, currentQuantity=3)], "pageInfo": {"hasNextPage": False}})
+        result, _ = await self.load(source)
+        item = result["template"]["items"][0]
+        self.assertEqual((item["id"], item["quantity"]), (VARIANT, 3))
+        self.assertFalse(item["unavailable"])
+
+    async def test_genuinely_empty_source_cannot_return_customer_only_duplicate(self):
+        source = source_order(lineItems={"nodes": [], "pageInfo": {"hasNextPage": False}})
+        with self.assertRaises(HTTPException) as error:
+            await self.load(source)
+        self.assertEqual(error.exception.status_code, 422)
+        self.assertIn("no items", error.exception.detail)
 
     async def test_no_customer_or_shipping_keeps_editable_blank_contact(self):
         result, _ = await self.load(source_order(customer=None, shippingAddress=None, phone=None, email=None))
