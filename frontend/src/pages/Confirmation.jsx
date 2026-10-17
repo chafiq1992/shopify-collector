@@ -40,6 +40,7 @@ import { useToasts, ToastStack } from "../components/Toast";
 import { AnimatedNumber, useDepartingList, useFlipList } from "../components/Motion";
 import ChatConfirmationView, { useChatWaitingCount } from "./ChatConfirmation";
 import ConfirmationDrafts from "./ConfirmationDrafts";
+import ConfirmationOrdersList from "./ConfirmationOrdersList";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 import { groupConfirmationOrders, orderPhone } from "../lib/confirmationOrderGroups";
 import { confirmationInboxUrl } from "../lib/confirmationInbox";
@@ -383,7 +384,7 @@ export default function Confirmation() {
 function readViewFromUrl() {
   try {
     const tab = new URLSearchParams(location.search).get("tab");
-    return ["chat", "drafts"].includes(tab) ? tab : "orders";
+    return ["chat", "drafts", "list"].includes(tab) ? tab : "orders";
   } catch {
     return "orders";
   }
@@ -395,7 +396,7 @@ function ConfirmationViews({ me }) {
   const [store, setStore] = useState(() => readCurrentStore());
   useEffect(() => { persistStoreSelection(store); }, [store]);
   const [view, setView] = useState(readViewFromUrl);
-  const [completedDraftOrder, setCompletedDraftOrder] = useState(null);
+  const [orderToShow, setOrderToShow] = useState(null);
   const chatWaiting = useChatWaitingCount(store);
 
   useEffect(() => {
@@ -405,7 +406,7 @@ function ConfirmationViews({ me }) {
   }, []);
 
   function changeView(next) {
-    if (!["orders", "drafts", "chat"].includes(next)) return;
+    if (!["orders", "drafts", "list", "chat"].includes(next)) return;
     setView(next);
     try {
       const params = new URLSearchParams(location.search);
@@ -422,11 +423,18 @@ function ConfirmationViews({ me }) {
   }
   if (view === "drafts") {
     return <ConfirmationDrafts {...shared} key={store} onOrderCompleted={(order) => {
-      setCompletedDraftOrder({ order, store });
+      setOrderToShow({ order, store });
       changeView("orders");
     }} />;
   }
-  return <AgentView {...shared} initialOrder={completedDraftOrder} onInitialOrderShown={() => setCompletedDraftOrder(null)} />;
+  if (view === "list") {
+    // Opening a row searches that order in the Orders view, where agents act on it.
+    return <ConfirmationOrdersList {...shared} key={store} onOpenOrder={(order) => {
+      setOrderToShow({ lookup: { id: order.id, name: order.name }, store });
+      changeView("orders");
+    }} />;
+  }
+  return <AgentView {...shared} initialOrder={orderToShow} onInitialOrderShown={() => setOrderToShow(null)} />;
 }
 
 // ---------- Agent view ----------
@@ -527,6 +535,13 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
   }, [searchQuery, runSearch]);
 
   useEffect(() => {
+    if (initialOrder?.lookup && initialOrder.store === store) {
+      // The search effect loads it; the card opens once it arrives.
+      setSearchQuery(initialOrder.lookup.name);
+      setExpanded((previous) => new Set([...previous, initialOrder.lookup.id]));
+      onInitialOrderShown?.();
+      return;
+    }
     if (!initialOrder?.order || initialOrder.store !== store) return;
     const order = initialOrder.order;
     createdOrderRef.current = order;
@@ -3259,7 +3274,7 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState("");
   const catalogSearch = useConfirmationProductSearch(store, catalogQuery, { search: API.searchProductVariants, enabled: tab === "items" && !saveBusy });
-  const { variants: catalogResults, loading: catalogLoading, error: catalogError } = catalogSearch;
+  const { products: catalogResults, loading: catalogLoading, error: catalogError } = catalogSearch;
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
@@ -3625,11 +3640,10 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                   </div>
                   {catalogError && <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{catalogError}</div>}
                   {catalogQuery.trim().length >= 2 && !catalogLoading && !catalogError && !catalogSearch.hasNextPage && catalogResults.length === 0 && (
-                    <div className="mt-3 rounded-lg bg-gray-50 px-3 py-5 text-center text-xs text-gray-500">No matching variants found.</div>
+                    <div className="mt-3 rounded-lg bg-gray-50 px-3 py-5 text-center text-xs text-gray-500">No matching products found.</div>
                   )}
                   <ConfirmationProductResults
                     searchState={catalogSearch}
-                    variants={catalogResults}
                     currency={order.currency}
                     onChoose={chooseCatalogVariant}
                     actionLabel={replacingItem ? "Replace" : "Add"}

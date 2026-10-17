@@ -3,6 +3,7 @@ import {
   Boxes,
   CircleAlert,
   FilePenLine,
+  ListOrdered,
   LoaderCircle,
   LogOut,
   MessageCircle,
@@ -105,6 +106,7 @@ export function UpdatedAgo({ at, loading }) {
 export const CONFIRMATION_VIEWS = [
   { key: "orders", label: "Orders", short: "Orders", icon: Package },
   { key: "drafts", label: "Drafts", short: "Drafts", icon: FilePenLine },
+  { key: "list", label: "Orders list", short: "List", icon: ListOrdered },
   { key: "chat", label: "Chat confirmation", short: "Chat", icon: MessageCircle },
 ];
 

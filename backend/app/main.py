@@ -45,6 +45,8 @@ try:
     from .return_scan_routes import router as return_scan_router
     from .confirmation_routes import router as confirmation_router
     from .confirmation_draft_routes import router as confirmation_draft_router
+    from .confirmation_product_routes import router as confirmation_product_router
+    from .confirmation_orders_routes import router as confirmation_orders_router
     from .chat_request_routes import router as chat_request_router
     from .chat_order_routes import router as chat_order_router
     from .inventory_helper_routes import router as inventory_helper_router
@@ -247,6 +249,10 @@ if HAVE_AUTH_DB and "confirmation_router" in globals() and confirmation_router i
     app.include_router(confirmation_router)  # type: ignore[arg-type]
 if HAVE_AUTH_DB and "confirmation_draft_router" in globals() and confirmation_draft_router is not None:  # type: ignore[name-defined]
     app.include_router(confirmation_draft_router)  # type: ignore[arg-type]
+if HAVE_AUTH_DB and "confirmation_product_router" in globals() and confirmation_product_router is not None:  # type: ignore[name-defined]
+    app.include_router(confirmation_product_router)  # type: ignore[arg-type]
+if HAVE_AUTH_DB and "confirmation_orders_router" in globals() and confirmation_orders_router is not None:  # type: ignore[name-defined]
+    app.include_router(confirmation_orders_router)  # type: ignore[arg-type]
 if HAVE_AUTH_DB and "chat_request_router" in globals() and chat_request_router is not None:  # type: ignore[name-defined]
     app.include_router(chat_request_router)  # type: ignore[arg-type]
 if HAVE_AUTH_DB and "chat_order_router" in globals() and chat_order_router is not None:  # type: ignore[name-defined]

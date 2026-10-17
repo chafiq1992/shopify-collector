@@ -57,6 +57,14 @@ class NewOrderValidationTests(unittest.TestCase):
                 _new_confirmation_order_input(order_body(**changes))
             self.assertEqual(error.exception.status_code, 422)
 
+    def test_chosen_tags_must_fit_shopify_and_untagged_input_keeps_old_fingerprint(self):
+        self.assertNotIn("_tags", _new_confirmation_order_input(order_body()))
+        self.assertEqual(_new_confirmation_order_input(order_body(tags=[" cod 19/10/26 ", "VIP", "vip", ""]))["_tags"], ["cod 19/10/26", "VIP"])
+        for tags in [["x" * 41], ["a,b"]]:
+            with self.subTest(tags=tags), self.assertRaises(HTTPException) as error:
+                _new_confirmation_order_input(order_body(tags=tags))
+            self.assertEqual(error.exception.status_code, 422)
+
     def test_rejects_fractional_boolean_zero_and_empty_quantities(self):
         for additions in [[], [{"variant_id": "gid://shopify/ProductVariant/101", "quantity": 0}],
                           [{"variant_id": "gid://shopify/ProductVariant/101", "quantity": 1.5}],
@@ -96,7 +104,9 @@ class ConfirmationCreateTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(variables["order"]["financialStatus"], "PENDING")
             self.assertNotIn("transactions", variables["order"])
             self.assertIn("agent-1", variables["order"]["tags"])
-            self.assertTrue(any(t.startswith("confirmation-create-") for t in variables["order"]["tags"]))
+            self.assertTrue(any(t.startswith("confirm-") for t in variables["order"]["tags"]))
+            # Shopify refuses the whole order ("Order tags is invalid") above 40 characters.
+            self.assertTrue(all(len(t) <= 40 for t in variables["order"]["tags"]), variables["order"]["tags"])
             self.assertEqual(variables["order"]["shippingLines"][0]["priceSet"]["shopMoney"], {"amount": "25.00", "currencyCode": "MAD"})
             self.assertEqual(variables["options"], {"inventoryBehaviour": "DECREMENT_OBEYING_POLICY", "sendReceipt": False, "sendFulfillmentReceipt": False})
             return {"orderCreate": {"order": order_node(), "userErrors": []}}
@@ -116,6 +126,23 @@ class ConfirmationCreateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].action, "order_create")
         self.assertEqual(events[0].event_metadata["state"], "complete")
+
+    async def test_chosen_tags_reach_shopify_and_unusable_agent_tags_are_skipped(self):
+        self.user.agent_tags = ["agent-1", "an agent tag that is far too long for shopify"]
+        sent = {}
+        async def respond(query, variables, **kwargs):
+            if query == CONFIRMATION_CURRENCY_GQL:
+                return {"shop": {"currencyCode": "MAD"}}
+            sent.update(variables["order"])
+            return {"orderCreate": {"order": order_node(), "userErrors": []}}
+        with patch("backend.app.main.shopify_graphql", AsyncMock(side_effect=respond)):
+            async with self.sessions() as db:
+                await create_confirmation_order(order_body(tags=["cod 19/10/26", "fz"]), user=self.user, db=db)
+        self.assertIn("cod 19/10/26", sent["tags"])
+        self.assertIn("fz", sent["tags"])
+        self.assertIn("agent-1", sent["tags"])
+        self.assertNotIn("_tags", sent)
+        self.assertTrue(all(len(tag) <= 40 for tag in sent["tags"]), sent["tags"])
 
     async def test_lost_response_recovers_by_unique_tag_without_another_create(self):
         async def respond(query, variables, **kwargs):

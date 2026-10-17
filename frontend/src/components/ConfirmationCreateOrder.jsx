@@ -1,8 +1,10 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Minus, Package, Plus, Search, Trash2, X } from "lucide-react";
 import ConfirmationProductResults from "./ConfirmationProductResults";
+import TagInput from "./TagInput";
 import useConfirmationProductSearch, { PRODUCT_SEARCH_PLACEHOLDER } from "../lib/useConfirmationProductSearch";
 import { cartKey, createOrderPayload, customerOrderFields, initialOrderForm, orderCartIssue } from "../lib/confirmationOrderForm";
+import { codDateTags, useOrderTags } from "../lib/orderTags";
 
 function Field({ label, optional = false, ...props }) {
   return <label className="block text-xs font-medium text-gray-700">{label}{optional && <span className="ml-1 font-normal text-gray-400">Optional</span>}
@@ -28,6 +30,9 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
   const [note, setNote] = useState(initial.note);
   const [shippingPrice, setShippingPrice] = useState(initial.shippingPrice);
   const [items, setItems] = useState(initial.items);
+  const [tags, setTags] = useState(initial.tags);
+  const storeTags = useOrderTags(store);
+  const featuredTags = useMemo(() => codDateTags(), []);
   const [customer, setCustomer] = useState(initial.customer);
   const [customerQuery, setCustomerQuery] = useState("");
   const [customers, setCustomers] = useState([]);
@@ -51,7 +56,7 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
   const locked = busy || retryOnly || blockedSeed;
   const cartIssue = orderCartIssue(items);
   const productSearch = useConfirmationProductSearch(store, query, { search: searchProducts, enabled: !locked });
-  const { variants, loading: searchBusy, error: searchError } = productSearch;
+  const { products, loading: searchBusy, error: searchError } = productSearch;
   useEffect(() => { if (productSearch.currency) setCurrency(productSearch.currency); }, [productSearch.currency]);
 
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
@@ -133,7 +138,7 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
     if (submittingRef.current || blockedSeed || (!retryOnly && cartIssue)) return;
     submittingRef.current = true; setBusy(true); setError("");
     if (!submissionRef.current) {
-      submissionRef.current = createOrderPayload({ store, actionId: globalThis.crypto?.randomUUID?.() || `order-${Date.now()}-${Math.random().toString(36).slice(2)}`, shipping, email, note, shippingPrice, items, customer });
+      submissionRef.current = createOrderPayload({ store, actionId: globalThis.crypto?.randomUUID?.() || `order-${Date.now()}-${Math.random().toString(36).slice(2)}`, shipping, email, note, shippingPrice, items, customer, tags });
     }
     try { sessionStorage.setItem(pendingKey, JSON.stringify({ payload: submissionRef.current, items, currency, customer, source })); } catch {}
     try {
@@ -201,14 +206,14 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
               </label>
               {searchBusy && <p role="status" className="mt-3 text-xs text-gray-500">Searching products…</p>}
               {searchError && <p role="alert" className="mt-3 text-xs text-rose-700">{searchError}</p>}
-              {query.trim().length >= 2 && !searchBusy && !searchError && !productSearch.hasNextPage && !variants.length && <p className="mt-3 text-xs text-gray-500">No matching variants found.</p>}
-              <ConfirmationProductResults variants={variants} currency={currency} onChoose={addItem} disabled={locked || searchBusy} searchState={productSearch} />
+              {query.trim().length >= 2 && !searchBusy && !searchError && !productSearch.hasNextPage && !products.length && <p className="mt-3 text-xs text-gray-500">No matching products found.</p>}
+              <ConfirmationProductResults currency={currency} onChoose={addItem} disabled={locked || searchBusy} searchState={productSearch} />
             </section>
           </div>
           <aside aria-label={duplicateFlow ? "Copied products" : "Review order"} className={`min-w-0 rounded-xl border border-gray-200 bg-white p-4 lg:sticky lg:top-0 ${duplicateFlow ? "order-first lg:order-none" : ""}`}>
             <h3 className="text-sm font-semibold">{duplicateFlow ? "Copied products" : "Review order"}</h3>
             {duplicateFlow && items.length > 0 && <p className="mt-1 text-xs text-gray-500">The source products, variants and quantities are ready to edit.</p>}
-            {!items.length && <p className="mt-4 rounded-lg bg-gray-50 p-3 text-xs text-gray-500">{seedLoading ? "Loading copied products…" : seedError ? "Source products could not be loaded. Retry the source order above." : "Search for a product and choose its variant to add it."}</p>}
+            {!items.length && <p className="mt-4 rounded-lg bg-gray-50 p-3 text-xs text-gray-500">{seedLoading ? "Loading copied products…" : seedError ? "Source products could not be loaded. Retry the source order above." : "Search for a product, open it, then choose a variant to add it."}</p>}
             <div className="mt-3 space-y-3">{items.map((item, index) => <div key={cartKey(item, index)} className={`rounded-lg border p-3 ${item.unavailable || item.needs_review ? "border-rose-200 bg-rose-50/30" : "border-gray-200"}`}>
               <div className="flex items-start gap-3">
                 <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
@@ -233,6 +238,8 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
             <div className="mt-4 space-y-3 border-t border-gray-100 pt-4">
               <Field label={`Delivery fee${currency ? ` (${currency})` : ""}`} disabled={locked} type="number" min="0" max="999999" step="0.01" value={shippingPrice} onChange={(e) => setShippingPrice(e.target.value)} />
               <label className="block text-xs font-medium text-gray-700">Order note <span className="text-gray-400">Optional</span><textarea disabled={locked} value={note} onChange={(e) => setNote(e.target.value)} maxLength={2000} rows={2} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-normal" /></label>
+              <TagInput label={<>Tags <span className="font-normal text-gray-400">Optional</span></>} value={tags} onChange={setTags} suggestions={storeTags.tags} featured={featuredTags} loading={storeTags.loading} disabled={locked}
+                hint={storeTags.error ? "Store tags could not load. You can still type a tag and press Enter." : "Type to find a store tag, or press Enter to add a new one."} />
               <div className="flex justify-between text-xs"><span>Products</span><span>{subtotal.toFixed(2)} {currency}</span></div>
               <div className="flex justify-between text-sm font-semibold"><span>Estimated total</span><span>{total.toFixed(2)} {currency}</span></div>
               {items.some((item) => item.unavailable || item.needs_review) && <p className="text-xs text-rose-700">Unavailable items are excluded from this estimate. Remove or replace them before creating the order.</p>}

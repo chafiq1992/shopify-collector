@@ -4,13 +4,22 @@ import { createProductSearchPager, emptyProductSearch } from "./productSearchPag
 
 export const PRODUCT_SEARCH_PLACEHOLDER = "Search product title, product or variant ID, SKU, or barcode";
 
-export async function searchConfirmationProducts(store, q, { after, signal } = {}) {
-  const params = new URLSearchParams({ store, q, first: "30" });
-  if (after) params.set("after", after);
-  const res = await authFetch(`/api/agent/product-variants/search?${params}`, { signal });
+async function readJson(path, signal, fallback) {
+  const res = await authFetch(path, { signal });
   const result = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(typeof result.detail === "string" ? result.detail : result.detail?.message || `Product search failed (${res.status})`);
+  if (!res.ok) throw new Error(typeof result.detail === "string" ? result.detail : result.detail?.message || `${fallback} (${res.status})`);
   return result;
+}
+
+// Products ranked by how well their title matches; variants load per product.
+export function searchConfirmationProducts(store, q, { after, signal } = {}) {
+  const params = new URLSearchParams({ store, q });
+  if (after) params.set("after", after);
+  return readJson(`/api/agent/products/search?${params}`, signal, "Product search failed");
+}
+
+export function loadProductVariants(store, productId, { signal } = {}) {
+  return readJson(`/api/agent/products/variants?${new URLSearchParams({ store, product_id: productId })}`, signal, "Could not load this product's variants");
 }
 
 export default function useConfirmationProductSearch(store, query, { search = searchConfirmationProducts, enabled = true } = {}) {
@@ -27,5 +36,5 @@ export default function useConfirmationProductSearch(store, query, { search = se
     return () => { clearTimeout(timer); session.dispose(); if (pager.current?.session === session) pager.current = null; };
   }, [store, trimmed, search, enabled, scope]);
   const active = result.scope === scope ? result : { ...emptyProductSearch(), loading: enabled && trimmed.length >= 2 };
-  return { ...active, loadMore: () => { if (pager.current?.scope === scope) return pager.current.session.load(true); }, retry: () => { if (pager.current?.scope === scope) return pager.current.session.load(); } };
+  return { ...active, store, query: trimmed, loadMore: () => { if (pager.current?.scope === scope) return pager.current.session.load(true); }, retry: () => { if (pager.current?.scope === scope) return pager.current.session.load(); } };
 }

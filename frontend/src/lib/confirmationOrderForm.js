@@ -49,10 +49,11 @@ export function initialOrderForm(pending, template = null) {
       shippingPrice: String(payload.shipping_price ?? "0.00"), currency: pending.currency || "",
       items: (pending.items || []).map((item, index) => ({ ...item, row_key: cartKey(item, index) })),
       customer: payload.customer_id ? { ...pending.customer, id: payload.customer_id, name: pending.customer?.name || "Shopify customer" } : null,
-      source: pending.source || null,
+      source: pending.source || null, tags: [...(payload.tags || [])],
     };
   }
-  return template ? duplicateOrderSeed(template) : { shipping: shippingFields(), email: "", note: "", shippingPrice: "0.00", currency: "", items: [], customer: null, source: null };
+  // Source-order tags are never copied; a duplicate starts with no tags.
+  return template ? { ...duplicateOrderSeed(template), tags: [] } : { shipping: shippingFields(), email: "", note: "", shippingPrice: "0.00", currency: "", items: [], customer: null, source: null, tags: [] };
 }
 
 export function orderCartIssue(items) {
@@ -63,12 +64,13 @@ export function orderCartIssue(items) {
   return "";
 }
 
-export function createOrderPayload({ store, actionId, shipping, email, note, shippingPrice, items, customer }) {
+export function createOrderPayload({ store, actionId, shipping, email, note, shippingPrice, items, customer, tags = [] }) {
   return {
     store, client_action_id: actionId, shipping_address: shippingFields(shipping),
     email: email.trim() || null, note: note.trim() || null,
     shipping_price: Number(shippingPrice || 0).toFixed(2),
     additions: items.map((item) => ({ variant_id: item.id, quantity: Number(item.quantity) })),
     ...(customer?.id ? { customer_id: customer.id } : {}),
+    ...(tags.length ? { tags: [...tags] } : {}),
   };
 }

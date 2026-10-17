@@ -2146,6 +2146,43 @@ class AgentOrderCreateBody(BaseModel):
     note: Optional[str] = Field(default=None, max_length=5000)
     shipping_price: str = Field(default="0.00", max_length=32)
     customer_id: Optional[str] = Field(default=None, pattern=r"^gid://shopify/Customer/\d+$", max_length=128)
+    tags: List[str] = Field(default_factory=list, max_length=50)
+
+
+# Shopify rejects the whole order ("Order tags is invalid") when any tag is
+# longer than 40 characters, and it splits tags on commas.
+SHOPIFY_TAG_MAX_LENGTH = 40
+CREATION_TAG_PREFIX = "confirm-"
+
+
+def _creation_tag(user_id: str, store_key: str, action_id: str) -> str:
+    digest = hashlib.sha256(f"{user_id}:{store_key}:{action_id}".encode()).hexdigest()
+    return CREATION_TAG_PREFIX + digest[:28]
+
+
+def _order_tags_from_input(values: List[str]) -> List[str]:
+    tags = []
+    for value in values or []:
+        tag = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not tag:
+            continue
+        if "," in tag:
+            raise HTTPException(status_code=422, detail="A tag cannot contain a comma. Add each tag separately.")
+        if len(tag) > SHOPIFY_TAG_MAX_LENGTH:
+            raise HTTPException(status_code=422, detail=f'Tag "{tag[:60]}" is longer than {SHOPIFY_TAG_MAX_LENGTH} characters. Shorten it before creating the order.')
+        tags.append(tag)
+    return _normalize_tags(tags)
+
+
+def _assignable_agent_tags(user: User) -> List[str]:
+    tags = []
+    for value in user.agent_tags or []:
+        tag = str(value or "").strip()
+        if tag and len(tag) <= SHOPIFY_TAG_MAX_LENGTH and "," not in tag:
+            tags.append(tag)
+        elif tag:
+            logger.warning("agent %s tag %r cannot be added to a Shopify order", user.id, tag)
+    return tags
 
 
 def _new_confirmation_order_input(body: AgentOrderCreateBody) -> Dict[str, Any]:
@@ -2191,10 +2228,13 @@ def _new_confirmation_order_input(body: AgentOrderCreateBody) -> Dict[str, Any]:
         "note": (body.note or "").strip(),
         "_shipping_price": format(price, ".2f"),
     }
-    # Omit the key when unselected so requests saved by older deployed builds
+    # Omit the keys when unselected so requests saved by older deployed builds
     # retain byte-equivalent fingerprint inputs and can recover pending orders.
     if body.customer_id:
         order_input["customer"] = {"toAssociate": {"id": body.customer_id}}
+    tags = _order_tags_from_input(body.tags)
+    if tags:
+        order_input["_tags"] = tags
     return order_input
 
 
@@ -2459,15 +2499,28 @@ async def _picker_enrich_stock(nodes, currency, store):
 
     stock: Dict[str, Dict[str, Any]] = {}
     warnings = []
-    try:
-        # Bounded batches keep inventory connections below Shopify's query cost
-        # ceiling, and every remaining location page is counted before display.
-        for offset in range(0, len(nodes), 10):
-            ids = [node["id"] for node in nodes[offset:offset + 10] if node.get("id")]
-            result = await shopify_graphql(
+    # Bounded batches keep inventory connections below Shopify's query cost
+    # ceiling; two run at once so a product with many sizes opens quickly.
+    batches = [[node["id"] for node in nodes[offset:offset + 10] if node.get("id")] for offset in range(0, len(nodes), 10)]
+    limit = asyncio.Semaphore(2)
+
+    async def read_batch(ids):
+        async with limit:
+            return await shopify_graphql(
                 PRODUCT_VARIANT_STOCK_GQL, {"ids": ids}, store=store,
                 api_version=CONFIRMATION_API_VERSION,
             )
+
+    results = await asyncio.gather(*(read_batch(ids) for ids in batches if ids), return_exceptions=True)
+    failed = next((result for result in results if isinstance(result, BaseException)), None)
+    if failed is not None:
+        logger.warning("Confirmation picker inventory batch failed (store=%s): %s", store, failed)
+        warnings.append("Some inventory counts are unavailable")
+    try:
+        # Every remaining location page is counted before display.
+        for result in results:
+            if isinstance(result, BaseException):
+                continue
             for variant in (result or {}).get("nodes") or []:
                 if not variant:
                     continue
@@ -2499,7 +2552,8 @@ async def _picker_enrich_stock(nodes, currency, store):
                         entry[field] = sum(quantities)
     except Exception:
         logger.warning("Confirmation picker inventory lookup incomplete (store=%s)", store, exc_info=True)
-        warnings.append("Some inventory counts are unavailable")
+        if not warnings:
+            warnings.append("Some inventory counts are unavailable")
     variants = []
     for node in nodes:
         product = node.get("product") or {}
@@ -2576,13 +2630,14 @@ async def create_confirmation_order(
     store_key = _normalize_store(store)
     action_id = body.client_action_id
     fingerprint = hashlib.sha256(json.dumps(order_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    marker = "confirmation-create-" + hashlib.sha256(f"{user.id}:{store_key}:{action_id}".encode()).hexdigest()[:32]
+    marker = _creation_tag(user.id, store_key, action_id)
     await _lock_client_action(db, action_id)
     event = await db.scalar(select(OrderEvent).where(OrderEvent.client_action_id == action_id))
     if event is not None:
         metadata = event.event_metadata or {}
         if event.user_id != user.id or event.store_key != store_key or metadata.get("fingerprint") != fingerprint:
             raise HTTPException(status_code=409, detail="This submission was already started with different details. Search the order before submitting again.")
+        marker = metadata.get("creation_tag") or marker
         if event.order_gid:
             data = await shopify_graphql(
                 ORDER_CREATE_LOOKUP_GQL, {"id": event.order_gid}, store=store,
@@ -2639,9 +2694,10 @@ async def create_confirmation_order(
         await db.commit()
         raise HTTPException(status_code=502, detail="Shopify did not return the store currency")
     shipping_price = order_input.pop("_shipping_price")
+    chosen_tags = order_input.pop("_tags", [])
     order_input.update({
         "currency": currency,
-        "tags": _normalize_tags([*(user.agent_tags or []), "confirmation-created", marker]),
+        "tags": _normalize_tags([*_assignable_agent_tags(user), *chosen_tags, "confirmation-created", marker]),
         "shippingLines": [{"title": "Shipping", "priceSet": {"shopMoney": {"amount": shipping_price, "currencyCode": currency}}}],
         "customAttributes": [{"key": "payment_method", "value": "Cash on Delivery"}],
     })

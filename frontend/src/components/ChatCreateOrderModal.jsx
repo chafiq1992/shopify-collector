@@ -571,8 +571,8 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
                   <div className="mt-1.5 space-y-1">
                     {productResults.loading && <div className="flex items-center gap-2 px-2 py-2 text-xs text-slate-500"><Spinner className="h-3.5 w-3.5" /> Searching products…</div>}
                     {productResults.error && <div className="px-2 py-2 text-xs text-rose-700">{productResults.error}</div>}
-                    {!productResults.loading && !productResults.error && !productResults.hasNextPage && productResults.variants.length === 0 && <div className="px-2 py-2 text-xs text-slate-500">No product found.</div>}
-                    <ConfirmationProductResults variants={productResults.variants} currency={CURRENCY} onChoose={addVariant} disabled={busy || productResults.loading} actionLabel={replaceKey ? "Replace" : "Add"} searchState={productResults} resultTestId="order-product-result" />
+                    {!productResults.loading && !productResults.error && !productResults.hasNextPage && productResults.products.length === 0 && <div className="px-2 py-2 text-xs text-slate-500">No product found.</div>}
+                    <ConfirmationProductResults currency={CURRENCY} onChoose={addVariant} disabled={busy || productResults.loading} actionLabel={replaceKey ? "Replace" : "Add"} searchState={productResults} resultTestId="order-product-result" />
                   </div>
                 )}
               </div>
