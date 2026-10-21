@@ -238,6 +238,45 @@ def test_print_order_normalization_removes_duplicate_labels():
     assert main._print_order_numbers(["#1001", "1001", " #1002 ", "", "  "]) == ["1001", "1002"]
 
 
+def _label_readiness(monkeypatch, result):
+    from backend.app import delivery_sync
+
+    async def readiness(**kwargs):
+        return result
+
+    monkeypatch.setattr(delivery_sync, "check_label_readiness", readiness)
+
+
+def test_label_is_not_queued_until_the_order_lands_in_its_envoy(queue, monkeypatch):
+    _label_readiness(monkeypatch, {"ok": False, "status": 409, "reason": "not_accepted",
+                                   "message": "glog has not accepted this order yet."})
+    body = main.EnqueueLabelBody(delivery_order_id="4242", store="irrakids", envoy_code="EN-1")
+    with pytest.raises(HTTPException) as exc:
+        run(main.enqueue_label(body, x_api_key=main.RELAY_API_KEY, authorization=None))
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "glog has not accepted this order yet."
+
+    async def queued():
+        async with queue() as session:
+            return (await session.scalars(select(PrintJob))).all()
+
+    assert run(queued()) == []
+
+
+def test_ready_label_is_queued_with_the_current_envoy(queue, monkeypatch):
+    _label_readiness(monkeypatch, {"ok": True, "envoyCode": "EN-2", "company": "Kech", "partnerApi": False})
+    body = main.EnqueueLabelBody(delivery_order_id="4242", store="irrakids", envoy_code=None)
+    result = run(main.enqueue_label(body, x_api_key=main.RELAY_API_KEY, authorization=None))
+    assert result["ok"] is True
+
+    async def queued():
+        async with queue() as session:
+            return (await session.scalars(select(PrintJob))).all()
+
+    jobs = run(queued())
+    assert [(job.payload["delivery_order_id"], job.payload["envoy_code"]) for job in jobs] == [("4242", "EN-2")]
+
+
 def test_memory_queue_keeps_completion_receipt(monkeypatch):
     monkeypatch.setattr(main, "SessionLocal", None)
     monkeypatch.setattr(main, "JOB_STORE", {})

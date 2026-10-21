@@ -983,6 +983,30 @@ async def renew(b: AckBody):
         job["leased_at"] = time.time()
         return {"ok": True, "renewed": True}
 
+async def _require_label_ready(delivery_order_id: str, envoy_code: Optional[str]) -> dict:
+    """Refuse a label until its order has landed in its envoy company.
+
+    Checked on the server because both ways a label leaves this app (the
+    print queue and the signed browser link) are reachable without the
+    Order Lookup buttons that gate them.
+    """
+    from .delivery_sync import check_label_readiness
+
+    ready = await check_label_readiness(
+        delivery_url=DELVERY_BACKEND_URL,
+        admin_token=DELVERY_ADMIN_TOKEN,
+        delivery_order_id=delivery_order_id,
+        envoy_code=envoy_code,
+        client_factory=_shared_delivery_http_client,
+    )
+    if not ready.get("ok"):
+        _print_route_log(
+            f"label_refused order={delivery_order_id} reason={ready.get('reason')} status={ready.get('status')}"
+        )
+        raise HTTPException(status_code=int(ready.get("status") or 409), detail=ready.get("message") or "Label is not ready")
+    return ready
+
+
 @app.post("/api/enqueue-label")
 async def enqueue_label(
     body: EnqueueLabelBody,
@@ -994,13 +1018,14 @@ async def enqueue_label(
     import time as _t, uuid as _uuid
     jid = str(_uuid.uuid4())
     dlv_id = str(body.delivery_order_id).strip()
+    ready = await _require_label_ready(dlv_id, body.envoy_code)
     payload = {
         "job_id": jid,
         "ts": int(_t.time()),
         "type": "label",
         "delivery_order_id": dlv_id,
         "store": (body.store or "").strip() or None,
-        "envoy_code": (body.envoy_code or "").strip() or None,
+        "envoy_code": ready.get("envoyCode") or (body.envoy_code or "").strip() or None,
     }
     dk = _dedup_key_for_label(dlv_id, body.store)
     return await _enqueue_job(DEFAULT_PC_ID, payload, dk)
@@ -4135,6 +4160,27 @@ if HAVE_AUTH_DB:
                 "Immediate Delivery intake failed after Shopify fulfillment",
                 extra={"store": store_key, "error_type": type(exc).__name__},
             )
+        if not (delivery_sync or {}).get("ok"):
+            # Shopify's own webhook may still deliver it. If it never does, this
+            # keeps the order on the "not sent to Delivery" list, instead of only
+            # in a side-queue card that a reload discards.
+            try:
+                await _record_user_action(
+                    session,
+                    user_id=user.id,
+                    order_number=(getattr(body, "order_number", None) or "").lstrip("#") or None,
+                    order_gid=None,
+                    store_key=store_key,
+                    action="delivery_intake_failed",
+                    metadata={"order_gid": order_gid, "reason": (delivery_sync or {}).get("reason") or "exception"},
+                )
+                await session.commit()
+            except Exception:
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
+                logger.exception("Failed to record Delivery intake failure")
         print(
             "[FULFILL] timings order=%s store=%s %s delivery_ok=%s label=%s"
             % (
@@ -5222,7 +5268,8 @@ async def delivery_label_signed_url(
     window.open() cannot send the Authorization header, so signed-in staff get
     a URL signed over (order id, envoy code, expiry), valid for 10 minutes.
     """
-    url = sign_delivery_label_url(order_id, envoy_code)
+    ready = await _require_label_ready(order_id, envoy_code)
+    url = sign_delivery_label_url(order_id, ready.get("envoyCode") or envoy_code)
     if not url:
         raise HTTPException(status_code=503, detail="label signing is not configured")
     return {"url": url, "expires_in": LABEL_URL_TTL_SECONDS}
@@ -5337,6 +5384,119 @@ async def delivery_label_proxy(
 @app.get("/api/delivery-config")
 async def delivery_config_check(_user: User = Depends(get_current_user)):  # type: ignore
     return {"configured": bool(DELVERY_BACKEND_URL), "hint": "Set DELVERY_BACKEND_URL and DELVERY_ADMIN_TOKEN env vars" if not DELVERY_BACKEND_URL else "ok"}
+
+
+class UnsentRetryBody(BaseModel):
+    store: str
+    order_number: str = Field(min_length=1, max_length=64)
+
+
+# At most this many failed-intake orders are looked up in Delivery per refresh;
+# each costs one request, and the list refreshes every minute.
+_UNSENT_MISSING_CHECK_LIMIT = 25
+
+if HAVE_AUTH_DB:
+    @app.get("/api/delivery-unsent")
+    async def delivery_unsent_orders(
+        days: int = Query(7, ge=1, le=30, description="How far back to look for failed Delivery intake"),
+        _user: User = Depends(get_current_user),  # type: ignore
+        session: AsyncSession = Depends(get_session),  # type: ignore
+    ):
+        """Fulfilled orders that have not become a Delivery order yet.
+
+        Built on the server from Delivery's merchant queues (which keep every
+        NEW and ERROR row until it is sent) plus fulfillments whose push to
+        Delivery failed, so an order stays listed across reloads, devices and
+        agents until someone actually sends it.
+        """
+        from .delivery_sync import delivery_store_keys, find_delivery_order, list_unsent_queue_rows
+
+        stores = delivery_store_keys()
+        listing = await list_unsent_queue_rows(
+            delivery_url=DELVERY_BACKEND_URL,
+            admin_token=DELVERY_ADMIN_TOKEN,
+            store_keys=stores,
+            client_factory=_shared_delivery_http_client,
+        )
+        items = list(listing.get("items") or [])
+        errors = list(listing.get("errors") or [])
+        queued = {(item["store"], item["orderNumber"]) for item in items}
+        unreadable = {error.get("store") for error in errors}
+
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        failed = (await session.execute(
+            select(OrderEvent)
+            .where(OrderEvent.action == "delivery_intake_failed", OrderEvent.created_at >= since)
+            .order_by(OrderEvent.created_at.desc())
+        )).scalars().all()
+        checked: set = set()
+        for event in failed:
+            key = (event.store_key, str(event.order_number or "").lstrip("#"))
+            if not key[1] or key in checked or key in queued or event.store_key in unreadable:
+                continue
+            if len(checked) >= _UNSENT_MISSING_CHECK_LIMIT:
+                errors.append({"store": None, "message": f"Only the latest {_UNSENT_MISSING_CHECK_LIMIT} failed intakes were checked"})
+                break
+            checked.add(key)
+            found = await find_delivery_order(
+                delivery_url=DELVERY_BACKEND_URL,
+                admin_token=DELVERY_ADMIN_TOKEN,
+                store_key=event.store_key,
+                order_number=key[1],
+                client_factory=_shared_delivery_http_client,
+            )
+            if not found.get("ok"):
+                errors.append({"store": event.store_key, "message": f"Could not check #{key[1]} in Delivery"})
+                continue
+            if found.get("found"):
+                continue
+            items.append({
+                "kind": "not_in_delivery",
+                "store": event.store_key,
+                "orderNumber": key[1],
+                "status": "Not in Delivery",
+                "hasError": True,
+                "errorType": "intake",
+                "reason": (event.event_metadata or {}).get("reason"),
+                "createdAt": event.created_at.isoformat() if event.created_at else None,
+            })
+
+        numbers = sorted({item["orderNumber"] for item in items})
+        if numbers:
+            fulfilled = await session.execute(
+                select(OrderEvent.order_number, OrderEvent.store_key, OrderEvent.created_at, User.name, User.email)
+                .join(User, User.id == OrderEvent.user_id)
+                .where(OrderEvent.action == "fulfilled", OrderEvent.order_number.in_(numbers))
+                .order_by(OrderEvent.created_at.desc())
+            )
+            by_key: dict = {}
+            for number, store_key, created_at, name, email in fulfilled.all():
+                by_key.setdefault((store_key, number), (name or email, created_at))
+            for item in items:
+                who = by_key.get((item["store"], item["orderNumber"]))
+                if who:
+                    item["fulfilledBy"] = who[0]
+                    item["fulfilledAt"] = who[1].isoformat() if who[1] else None
+
+        # Oldest first: the order waiting longest is the one most likely forgotten.
+        items.sort(key=lambda item: str(item.get("fulfilledAt") or item.get("createdAt") or ""))
+        return {"items": items, "errors": errors, "checkedAt": datetime.now(timezone.utc).isoformat()}
+
+    @app.post("/api/delivery-unsent/retry")
+    async def delivery_unsent_retry(
+        body: UnsentRetryBody,
+        _user: User = Depends(get_current_user),  # type: ignore
+    ):
+        """Replay a fulfilled order into Delivery intake (idempotent backfill)."""
+        from .delivery_sync import sync_fulfilled_order_to_delivery
+
+        return await sync_fulfilled_order_to_delivery(
+            delivery_url=DELVERY_BACKEND_URL,
+            admin_token=DELVERY_ADMIN_TOKEN,
+            store_key=_normalize_store(body.store),
+            order_number=body.order_number,
+            client_factory=_shared_delivery_http_client,
+        )
 
 # --------- SPA client-side routes (serve index.html) ---------
 def _frontend_dist_dir() -> str:

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
-import { canDirectPrintEnvoyLabel, isAssignedEnvoyCompany } from "../lib/directEnvoyPrint";
+import { envoyNeedsNoPartnerSend, isAssignedEnvoyCompany } from "../lib/directEnvoyPrint";
 import { parseExplicitDeliveryOrderId } from "../lib/deliveryOrderReference";
 import {
   findCreatedDeliveryOrderId,
@@ -22,6 +22,18 @@ const STORE_MERCHANT_MAP = {
 
 const LABEL_WINDOW_FEATURES = "width=450,height=600,scrollbars=yes";
 
+/* For a company with no partner API there is nothing to send: being in its
+   envoy note is the whole hand-over, so the order counts as landed. */
+function noPartnerApiSendState(envoyNote) {
+  return {
+    ok: true,
+    message: `${envoyNote?.company || "This company"} has no partner API. Its envoy note is the hand-over.`,
+    sentAt: null,
+    integrationFailure: false,
+    noPartnerApi: true,
+  };
+}
+
 /* The label route needs credentials, and a tab opened with window.open() cannot
    send the Authorization header. Ask the server (with the token) for a
    short-lived signed link instead; it stays valid for about 10 minutes. */
@@ -30,7 +42,13 @@ async function fetchSignedLabelUrl(orderId, envoyLabelCode) {
   const res = await authFetch(`/api/delivery-label-url/${encodeURIComponent(orderId)}${qs}`, {
     headers: authHeaders({ Accept: "application/json" }),
   });
-  if (!res.ok) throw new Error(`Could not get a label link (${res.status})`);
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json())?.detail || ""; } catch {}
+    const err = new Error(typeof detail === "string" && detail ? detail : `Could not get a label link (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
   const js = await res.json();
   if (!js?.url) throw new Error("Could not get a label link");
   return js.url;
@@ -336,12 +354,14 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         const items = Array.isArray(env?.items) ? env.items : [];
         const item = items.find(x => Number(x?.orderId || x?.order_id) === oid) || null;
         const sentMessage = String(item?.sentMsg || "").trim();
-        const next = {
-          ok: item?.sentOk === true ? true : (item?.sentOk === false ? false : null),
-          message: sentMessage,
-          sentAt: item?.sentAt || null,
-          integrationFailure: item?.sentOk === false && Boolean(sentMessage),
-        };
+        const next = item && envoyNeedsNoPartnerSend(env)
+          ? noPartnerApiSendState(env)
+          : {
+              ok: item?.sentOk === true ? true : (item?.sentOk === false ? false : null),
+              message: sentMessage,
+              sentAt: item?.sentAt || null,
+              integrationFailure: item?.sentOk === false && Boolean(sentMessage),
+            };
         setPartnerSendState(next);
         return next;
       } catch (e) {
@@ -1129,6 +1149,12 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       const envDet = await dlvApi(`admin/envoy-notes/${encodeURIComponent(activeEnvoyCode)}`);
       const item = getEnvoyItemForOrder(envDet, deliveryOrderId);
       assertEnvoyItemMatchesOrder(item);
+      if (envoyNeedsNoPartnerSend(envDet)) {
+        addLog(`${envDet.company || "This company"} has no partner API; the envoy note is the hand-over. Ready to print.`);
+        setPartnerSendState(noPartnerApiSendState(envDet));
+        setPhase("ready_print");
+        return;
+      }
 
       const payload = {
         order_name: editFields.orderName || orderName,
@@ -1182,12 +1208,14 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       const text = await res.text();
       let detail = text;
       try { const j = JSON.parse(text); detail = j.detail || text; } catch {}
-      throw new Error(detail || `Enqueue failed (${res.status})`);
+      const err = new Error(detail || `Enqueue failed (${res.status})`);
+      err.status = res.status;
+      throw err;
     }
     return res.json();
   }
 
-  async function handlePrint(oid, envoyCodeOverride = "", { bypassPartnerSend = false } = {}) {
+  async function handlePrint(oid, envoyCodeOverride = "") {
     const id = oid || deliveryOrderId;
     if (!id) return;
     let validatedEnvoyCode = envoyCodeOverride || envoyCode;
@@ -1196,20 +1224,17 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       setPhase("company_select");
       return;
     }
-    if (!bypassPartnerSend && partnerSendState.ok !== true) {
+    // A label is printed only once the order has landed in its envoy company:
+    // the partner accepted it, or the company has no partner API at all.
+    if (partnerSendState.ok !== true) {
       setError("Send to partner must succeed before printing.");
-      setPhase("company_select");
-      return;
-    }
-    if (bypassPartnerSend && (partnerSendState.ok !== false || partnerSendState.integrationFailure !== true)) {
-      setError("Fallback printing is available only after a partner integration send fails.");
       setPhase("company_select");
       return;
     }
     try {
       const assigned = await fetchAssignedEnvoyForOrder(id);
-      if (bypassPartnerSend && !isAssignedEnvoyCompany(assigned)) {
-        throw new Error("Fallback printing requires an assigned company envoy.");
+      if (!isAssignedEnvoyCompany(assigned)) {
+        throw new Error("This order is still Unassigned. Choose its envoy company before printing.");
       }
       const activeEnvoyCode = assigned.code || validatedEnvoyCode;
       const envDet = await dlvApi(`admin/envoy-notes/${encodeURIComponent(activeEnvoyCode)}`);
@@ -1217,9 +1242,6 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       assertEnvoyItemMatchesOrder(getEnvoyItemForOrder(envDet, id));
       validatedEnvoyCode = activeEnvoyCode;
       if (activeEnvoyCode !== envoyCode) setEnvoyCode(activeEnvoyCode);
-      if (bypassPartnerSend) {
-        addLog(`Direct print approved for ${assigned?.company || assigned?.companyShort || "assigned company"}; partner send skipped.`);
-      }
     } catch (gateErr) {
       setError(gateErr?.message || "Envoy validation failed before printing.");
       setPhase("company_select");
@@ -1247,6 +1269,15 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         sourceRect,
       };
     } catch (e) {
+      if (e?.status === 400 || e?.status === 409) {
+        // The server refused: the order has not landed in its envoy company.
+        // Never route around that by opening the label in the browser.
+        addLog(`Label refused: ${e.message}`);
+        setError(e.message || "This order is not ready to print.");
+        setPhase("company_select");
+        refreshPartnerSendState(validatedEnvoyCode, id).catch(() => {});
+        return;
+      }
       addLog(`Relay failed: ${e.message} — opening in browser instead.`);
       try {
         await openLabelWindow(id, validatedEnvoyCode);
@@ -1260,38 +1291,6 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     }
     if (queuedPayload && typeof onQueued === "function") {
       onQueued(queuedPayload);
-    }
-  }
-
-  async function handleDirectPrint() {
-    setError(null);
-    await handlePrint(undefined, "", { bypassPartnerSend: true });
-  }
-
-  async function handleManualPrint() {
-    const raw = String(manualId).trim();
-    if (!raw) return;
-
-    setBusy(true);
-    setError(null);
-    try {
-      if (await recoverQueueReference(raw)) return;
-      const resolved = await resolveManualReference(raw);
-      setDeliveryOrderId(resolved.deliveryOrderId);
-      setOrderMap(orderNum, resolved.deliveryOrderId, store, merchantId);
-      if (resolved.envoyCode) {
-        setEnvoyCode(resolved.envoyCode);
-        applyResolvedCompany(resolved.companyName);
-        addLog(`Envoy: ${resolved.envoyCode}${resolved.companyName ? ` (${resolved.companyName})` : ""}`);
-      }
-      addLog(`Using order ID: ${resolved.deliveryOrderId}`);
-      setBusy(false);
-      await handlePrint(String(resolved.deliveryOrderId), resolved.envoyCode || "");
-      return;
-    } catch (e) {
-      setError(e?.message || "Failed to resolve manual reference");
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -1390,12 +1389,6 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     if (!cityName) return allCityOptions.slice(0, 15);
     return allCityOptions.filter(c => String(c).toLowerCase().includes(cityName.toLowerCase())).slice(0, 15);
   }, [allCityOptions, cityName]);
-  const directPrintEligible = canDirectPrintEnvoyLabel({
-    deliveryOrderId,
-    envoyCode,
-    company: selectedCompany || orderTagMatch?.company,
-    partnerSendState,
-  });
   const queueState = useMemo(() => {
     if (printStatus === "success") return { statusKey: "printed", statusLabel: "Printed" };
     if (phase === "fix_errors" || phase === "manual" || phase === "error") {
@@ -1404,14 +1397,14 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     if (phase === "company_select" || ((phase === "ready_print" || phase === "done") && envoyCode && partnerSendState.ok !== true)) {
       return {
         statusKey: "waiting_partner",
-        statusLabel: directPrintEligible ? "Direct print available" : "Waiting to send to partner",
+        statusLabel: partnerSendState.ok === false ? "Partner refused; resend" : "Waiting to send to partner",
       };
     }
     if ((phase === "ready_print" || (phase === "done" && printStatus !== "fallback")) && envoyCode && companyId && partnerSendState.ok === true) {
       return { statusKey: "ready_to_print", statusLabel: "Ready to print" };
     }
     return { statusKey: "preparing", statusLabel: "Preparing" };
-  }, [phase, printStatus, envoyCode, companyId, partnerSendState.ok, directPrintEligible]);
+  }, [phase, printStatus, envoyCode, companyId, partnerSendState.ok]);
   const needsControlPayload = queueState.statusKey === "waiting_partner" || queueState.statusKey === "information_error";
 
   // Use a ref to track the last emitted key values and avoid infinite loops
@@ -1423,7 +1416,6 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       order?.id, orderNum, queueState.statusKey, deliveryOrderId, envoyCode,
       selectedCompany?.name, selectedCompanyOrderTag, error, phase, busy,
       companyId, cityName, partnerSendState?.ok, partnerSendState?.message, printStatus,
-      directPrintEligible,
     ].join("|");
     if (fingerprint === lastEmitRef.current) return;
     lastEmitRef.current = fingerprint;
@@ -1450,19 +1442,17 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       globalCities: needsControlPayload ? cities : [],
       partnerSendState,
       printStatus,
-      directPrintEligible,
       actions: {
         setCompanyId,
         setCityName,
         setEditCity: (v) => { setField("city", v); setCityName(v); },
         handleSend,
         handlePrint: () => handlePrint(),
-        handleDirectPrint,
         handleFixAndCreate,
         handleRetry,
       },
     });
-  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, needsControlPayload, companies, companyId, cityName, filteredCities, allCityOptions, cities, partnerSendState, printStatus, directPrintEligible]);
+  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, needsControlPayload, companies, companyId, cityName, filteredCities, allCityOptions, cities, partnerSendState, printStatus]);
   const companyStepDone = partnerSendState.ok === true;
   const companyStepActive = phase === "company_select" || ((phase === "ready_print" || phase === "done") && !companyStepDone);
   const companyStepCls = companyStepDone
@@ -1473,13 +1463,14 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
   const showPartnerSendControls = Boolean(deliveryOrderId) && (phase === "company_select" || phase === "ready_print" || phase === "done");
   const showPartnerSendButton = showPartnerSendControls && Boolean(envoyCode) && partnerSendState.ok !== true;
   const partnerSendLabel = partnerSendState.ok === false ? "Resend to Partner" : "Send to Partner";
-  const partnerSendStatusText = partnerSendState.ok === true
+  const partnerSendStatusText = partnerSendState.noPartnerApi
+    ? partnerSendState.message
+    : partnerSendState.ok === true
     ? `Sent successfully${partnerSendState.sentAt ? ` at ${partnerSendState.sentAt}` : ""}`
     : partnerSendState.ok === false
       ? (partnerSendState.message || "Last send failed")
       : (envoyCode ? "Not sent to partner yet" : "Create or assign an envoy note first");
   const canSendToPartner = Boolean(deliveryOrderId && envoyCode && companyId && String(cityName || editFields.city || "").trim()) && partnerSendState.ok !== true;
-  const canDirectPrintLabel = directPrintEligible && partnerSendState.ok !== true;
   const canPrintLabel = Boolean(deliveryOrderId) && (phase === "ready_print" || phase === "done") && Boolean(envoyCode) && Boolean(companyId) && partnerSendState.ok === true;
 
   if (!open) return null;
@@ -1697,23 +1688,9 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
                     {busy ? "Sending..." : partnerSendLabel}
                   </button>
                 )}
-                {canDirectPrintLabel && (
-                  <button
-                    ref={printButtonRef}
-                    onClick={handleDirectPrint}
-                    disabled={busy}
-                    className="w-full px-4 py-2.5 rounded-xl bg-violet-600 text-white text-sm font-bold hover:bg-violet-700 disabled:opacity-50 active:scale-[.98] shadow-md flex items-center justify-center gap-2"
-                  >
-                    {busy ? (
-                      <><span className="animate-spin">⏳</span> Sending to printer...</>
-                    ) : (
-                      <><span className="text-lg">&#128424;</span> Print Directly — Skip Partner</>
-                    )}
-                  </button>
-                )}
-                {canDirectPrintLabel && (
-                  <div className="text-xs text-violet-700">
-                    Partner integration failed. This order is already assigned to a company envoy, so its label can be printed safely.
+                {partnerSendState.ok === false && (
+                  <div className="text-xs text-red-700">
+                    No label until the partner accepts this order. Fix the reason below and resend, or choose another company.
                   </div>
                 )}
                 <div className={`text-xs ${partnerSendState.ok === true ? "text-green-700" : partnerSendState.ok === false ? "text-red-700" : "text-amber-700"}`}>
@@ -1792,9 +1769,9 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
                 <button onClick={handleManualContinue} disabled={!manualId.trim() || busy} className="flex-1 px-3 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold disabled:opacity-50">
                   {busy ? "Loading..." : "Continue Flow"}
                 </button>
-                <button onClick={handleManualPrint} disabled={!manualId.trim()} className="flex-1 px-3 py-2 rounded-xl bg-green-600 text-white text-sm font-semibold disabled:opacity-50">
-                  Print Directly
-                </button>
+              </div>
+              <div className="text-[11px] text-amber-800 mt-2">
+                The label prints from the flow once the order is in its envoy company.
               </div>
             </div>
           )}

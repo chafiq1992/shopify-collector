@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspens
 import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import { persistStoreSelection, readCurrentStore, titleStore } from "../lib/stores";
+import { unsentAgeLabel, unsentReasonLabel } from "../lib/unsentDelivery";
 
 const loadDeliveryLabelPopup = () => import("../components/DeliveryLabelPopup");
 const DeliveryLabelPopup = lazy(loadDeliveryLabelPopup);
@@ -491,6 +492,39 @@ export default function OrderLookup(){
     return () => { cancelled = true; };
   }, [agentTodayReloadKey]);
 
+  // Fulfilled orders that are not a Delivery order yet. The list is built on
+  // the server from Delivery's merchant queues, so an order an agent left in an
+  // error state stays here after a reload, on any device, until it is sent.
+  const [unsent, setUnsent] = useState({ items: [], errors: [], loading: false, checkedAt: null, failed: "" });
+  const [unsentOpen, setUnsentOpen] = useState(false);
+  const [unsentReloadKey, setUnsentReloadKey] = useState(0);
+  const pendingUnsentOpenRef = useRef(null);
+  useEffect(() => {
+    let cancelled = false;
+    async function loadUnsent(){
+      if (!cancelled) setUnsent(prev => ({ ...prev, loading: true }));
+      try {
+        const res = await authFetch("/api/delivery-unsent", { headers: authHeaders({ "Accept": "application/json" }) });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const js = await res.json();
+        if (cancelled) return;
+        setUnsent({
+          items: Array.isArray(js?.items) ? js.items : [],
+          errors: Array.isArray(js?.errors) ? js.errors : [],
+          loading: false,
+          checkedAt: js?.checkedAt || null,
+          failed: "",
+        });
+      } catch (e) {
+        if (!cancelled) setUnsent(prev => ({ ...prev, loading: false, failed: e?.message || "Could not load" }));
+      }
+    }
+    loadUnsent();
+    const timer = setInterval(loadUnsent, 60000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [unsentReloadKey, agentTodayReloadKey]);
+  const unsentErrorCount = useMemo(() => unsent.items.filter((item) => item?.hasError).length, [unsent.items]);
+
   const handleLogout = useCallback(() => {
     clearAuth();
     try {
@@ -586,9 +620,6 @@ export default function OrderLookup(){
             globalCities: nextState?.globalCities || item.globalCities || [],
             partnerSendState: nextState?.partnerSendState || item.partnerSendState || {},
             printStatus: nextState?.printStatus || item.printStatus || null,
-            directPrintEligible: typeof nextState?.directPrintEligible === "boolean"
-              ? nextState.directPrintEligible
-              : !!item.directPrintEligible,
             actions: nextState?.actions || item.actions || null,
           }
         : item
@@ -757,11 +788,56 @@ export default function OrderLookup(){
         params.set("q", n);
         history.replaceState(null, "", `${location.pathname}?${params.toString()}`);
       } catch {}
+      return found || null;
     } catch (e){
-      if (searchTokenRef.current !== token) return;
+      if (searchTokenRef.current !== token) return null;
       setError(e?.message || "Search failed");
+      return null;
     } finally {
       if (searchTokenRef.current === token) setLoading(false);
+    }
+  }
+
+  // Load an unsent order and reopen its label flow, which finds the queue row
+  // and shows whatever still blocks it (for example an unrecognised city).
+  function openUnsentOrder(item){
+    const number = String(item?.orderNumber || "").replace(/^#/, "").trim();
+    if (!number) return;
+    setUnsentOpen(false);
+    setQuery(number);
+    const itemStore = String(item?.store || "").trim().toLowerCase();
+    if (itemStore && itemStore !== store) {
+      // doSearch reads the store from this render; search once it has switched.
+      pendingUnsentOpenRef.current = number;
+      setStore(itemStore);
+      return;
+    }
+    doSearch(number).then((found) => { if (found) setShowDeliveryPopup(true); });
+  }
+  useEffect(() => {
+    const pending = pendingUnsentOpenRef.current;
+    if (!pending) return;
+    pendingUnsentOpenRef.current = null;
+    doSearch(pending).then((found) => { if (found) setShowDeliveryPopup(true); });
+  }, [store]);
+
+  async function retryUnsentIntake(item){
+    const number = String(item?.orderNumber || "").replace(/^#/, "").trim();
+    if (!number) return;
+    try {
+      const res = await authFetch("/api/delivery-unsent/retry", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ store: item.store, order_number: number }),
+      });
+      const js = await res.json().catch(() => ({}));
+      setMessage(js?.ok
+        ? `#${number} is in the Delivery queue now. Open it to send it.`
+        : `Delivery still has no #${number} (${js?.reason || `HTTP ${res.status}`}).`);
+    } catch (e) {
+      setError(e?.message || `Could not retry #${number}`);
+    } finally {
+      setUnsentReloadKey((value) => value + 1);
     }
   }
 
@@ -1740,6 +1816,80 @@ export default function OrderLookup(){
             <span>Fulfilled today (all stores): <span className="font-semibold">{agentToday.loading ? "…" : agentToday.fulfilledToday}</span></span>
           </div>
           <div className="flex items-center gap-2">
+            <div className="relative">
+              <button
+                onClick={() => setUnsentOpen((value) => !value)}
+                title="Fulfilled orders that are not a Delivery order yet"
+                className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-semibold ${
+                  unsentErrorCount
+                    ? "border-red-300 bg-red-50 text-red-700"
+                    : unsent.items.length
+                      ? "border-amber-300 bg-amber-50 text-amber-800"
+                      : "border-gray-200 bg-white text-gray-600"
+                }`}
+              >
+                <span>Not sent to Delivery</span>
+                <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-white px-1.5 py-0.5 text-[10px] border border-current">
+                  {unsent.failed && !unsent.items.length ? "!" : unsent.items.length}
+                </span>
+              </button>
+              {unsentOpen && (
+                <div className="absolute right-0 z-50 mt-2 w-[360px] max-w-[90vw] max-h-[60vh] overflow-y-auto rounded-xl border border-gray-200 bg-white shadow-xl">
+                  <div className="flex items-center justify-between border-b border-gray-100 px-3 py-2">
+                    <div className="text-xs font-bold text-gray-900">Not sent to Delivery</div>
+                    <button
+                      onClick={() => setUnsentReloadKey((value) => value + 1)}
+                      className="text-[11px] text-indigo-700 hover:underline"
+                    >{unsent.loading ? "Checking…" : "Refresh"}</button>
+                  </div>
+                  {unsent.failed && (
+                    <div className="px-3 py-2 text-[11px] text-red-700 bg-red-50">Could not load the list ({unsent.failed}). It may be incomplete.</div>
+                  )}
+                  {unsent.errors.map((issue, index) => (
+                    <div key={`unsent-error-${index}`} className="px-3 py-1.5 text-[11px] text-red-700 bg-red-50 border-b border-red-100">
+                      {issue.store ? `${titleStore(issue.store)}: ` : ""}{issue.message}
+                    </div>
+                  ))}
+                  {!unsent.items.length && !unsent.failed && (
+                    <div className="px-3 py-4 text-[11px] text-gray-500 text-center">Every fulfilled order is in Delivery.</div>
+                  )}
+                  {unsent.items.map((item) => (
+                    <div key={`${item.store}-${item.orderNumber}-${item.kind}`} className={`border-b border-gray-100 px-3 py-2 ${item.hasError ? "bg-red-50/40" : ""}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-sm font-bold text-gray-900">
+                          #{item.orderNumber}
+                          <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wide bg-gray-100 text-gray-700 border border-gray-200">
+                            {titleStore(item.store)}
+                          </span>
+                        </div>
+                        <div className="flex gap-1">
+                          {item.kind === "not_in_delivery" && (
+                            <button
+                              onClick={() => retryUnsentIntake(item)}
+                              className="px-2 py-0.5 rounded-lg border border-red-300 bg-white text-[11px] font-semibold text-red-700 hover:bg-red-50"
+                            >Retry intake</button>
+                          )}
+                          <button
+                            onClick={() => openUnsentOrder(item)}
+                            className="px-2 py-0.5 rounded-lg bg-indigo-600 text-[11px] font-semibold text-white hover:bg-indigo-700"
+                          >Open</button>
+                        </div>
+                      </div>
+                      <div className={`mt-0.5 text-[11px] ${item.hasError ? "text-red-700" : "text-amber-800"}`}>
+                        {unsentReasonLabel(item)}
+                      </div>
+                      <div className="mt-0.5 text-[10px] text-gray-500">
+                        {[
+                          item.customerName,
+                          item.fulfilledBy ? `fulfilled by ${item.fulfilledBy}` : "",
+                          unsentAgeLabel(item.fulfilledAt || item.createdAt),
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
             <div
               ref={printQueueRef}
               className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-semibold transition-all ${
@@ -2545,7 +2695,6 @@ export default function OrderLookup(){
               const showCityError = isError && item.phase === "fix_errors";
               const partnerOk = item.partnerSendState?.ok === true;
               const showSendBtn = showCompanyControls && item.envoyCode && !partnerOk;
-              const showDirectPrintBtn = showCompanyControls && item.envoyCode && item.partnerSendState?.ok === false && item.directPrintEligible && item.actions?.handleDirectPrint;
               const showPrintBtn = (isReadyPrint || isPrinted) && item.actions;
 
               const itemStoreKey = String(item.store || store || "").trim().toLowerCase();
@@ -2716,26 +2865,15 @@ export default function OrderLookup(){
                           {item.busy ? "Sending…" : (item.partnerSendState?.ok === false ? "Resend to Partner" : "Send to Partner")}
                         </button>
                       )}
-                      {showDirectPrintBtn && (
-                        <button
-                          onClick={() => item.actions.handleDirectPrint()}
-                          disabled={item.busy}
-                          className="w-full px-2 py-2 rounded-lg bg-violet-600 text-white text-xs font-bold hover:bg-violet-700 disabled:opacity-50 flex items-center justify-center gap-1.5 shadow-sm"
-                        >
-                          {item.busy ? (
-                            <><span className="animate-spin">⏳</span> Sending to printer…</>
-                          ) : (
-                            <><span className="text-sm">🖨</span> Print Directly — Skip Partner</>
-                          )}
-                        </button>
-                      )}
-                      {showDirectPrintBtn && (
-                        <div className="text-[10px] text-violet-700 font-semibold">
-                          Partner integration failed; order is already in its company envoy.
+                      {showCompanyControls && item.partnerSendState?.ok === false && (
+                        <div className="text-[10px] text-red-700 font-semibold">
+                          No label until the partner accepts it: {item.partnerSendState?.message || "send failed"}
                         </div>
                       )}
                       {partnerOk && (
-                        <div className="text-[10px] text-green-700 font-semibold">✓ Sent to partner</div>
+                        <div className="text-[10px] text-green-700 font-semibold">
+                          {item.partnerSendState?.noPartnerApi ? "✓ In its envoy (no partner API)" : "✓ Sent to partner"}
+                        </div>
                       )}
                     </div>
                   )}
