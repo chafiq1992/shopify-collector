@@ -1,6 +1,8 @@
 import asyncio
+import datetime as dt
 import os
 from typing import Any, Awaitable, Callable
+from urllib.parse import quote
 
 import httpx
 
@@ -9,6 +11,14 @@ DEFAULT_MERCHANT_IDS = {
     "irrakids": 7,
     "irranova": 9,
 }
+
+# Delivery's names for "no company yet". Mirrors frontend/src/lib/directEnvoyPrint.js.
+UNASSIGNED_COMPANY_KEYS = {"", "unassigned", "unas", "none", "no company"}
+
+
+def delivery_store_keys() -> list[str]:
+    """Stores whose fulfilled orders land in a Delivery merchant queue."""
+    return [key for key in DEFAULT_MERCHANT_IDS if merchant_id_for_store(key) is not None]
 
 
 def merchant_id_for_store(store_key: str | None) -> int | None:
@@ -231,5 +241,200 @@ async def prepare_delivery_label(
                 "companyShort": envoy.get("companyShort"),
                 "queueRow": row,
             }
+    except Exception as exc:
+        return {"ok": False, "reason": "delivery_request_failed", "error_type": type(exc).__name__}
+
+
+def _company_assigned(name: Any, short: Any = None) -> bool:
+    return any(str(value or "").strip().lower() not in UNASSIGNED_COMPANY_KEYS for value in (name, short))
+
+
+def _not_ready(status: int, reason: str, message: str, **extra: Any) -> dict[str, Any]:
+    return {"ok": False, "status": status, "reason": reason, "message": message, **extra}
+
+
+async def check_label_readiness(
+    *,
+    delivery_url: str,
+    admin_token: str,
+    delivery_order_id: Any,
+    envoy_code: str | None = None,
+    client_factory: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Decide whether a delivery label may be printed.
+
+    A label is printable only once the order has landed in its envoy company:
+    it sits in a company's envoy note (never Unassigned) and, when that company
+    has a connected partner API, the partner accepted the parcel. A company
+    without one (in-house drivers, carriers handed parcels at the counter) has
+    nothing to accept it, so its envoy note is enough. Labels used to be printed
+    for parcels no carrier had accepted, which is how parcels reached the wrong
+    company while Delivery still showed the first one.
+
+    ``status`` is 409 when the order is not ready and 503 when Delivery could
+    not be read, so callers can tell "fix the order" from "try again".
+    """
+    base_url = str(delivery_url or "").strip().rstrip("/")
+    token = str(admin_token or "").strip()
+    order_id = str(delivery_order_id or "").strip()
+    if not base_url or not token:
+        return _not_ready(503, "not_configured", "Delivery is not configured, so the envoy cannot be confirmed.")
+    if not order_id.isdigit():
+        return _not_ready(400, "invalid_order", "Unknown delivery order.")
+
+    headers = {"X-Admin-Token": token}
+    factory = client_factory or httpx.AsyncClient
+    try:
+        async with factory(timeout=15.0) as client:
+            current = await client.get(f"{base_url}/ext/admin/envoy-notes/for-order/{order_id}", headers=headers)
+            if current.status_code == 404:
+                return _not_ready(409, "no_envoy", "This order is not in an envoy note yet. Assign its company first.")
+            if current.status_code >= 400:
+                return _not_ready(503, "delivery_http_error", f"Delivery could not confirm the envoy (HTTP {current.status_code}). Try again.")
+            envoy = current.json() or {}
+            code = str(envoy.get("code") or "").strip()
+            company = str(envoy.get("company") or "").strip()
+            if not code:
+                return _not_ready(409, "no_envoy", "This order is not in an envoy note yet. Assign its company first.")
+            requested = str(envoy_code or "").strip()
+            if requested and requested != code:
+                return _not_ready(
+                    409, "envoy_moved",
+                    f"This order moved to {company or 'another company'} ({code}). Reopen it before printing.",
+                    envoyCode=code, company=company,
+                )
+            if not _company_assigned(company, envoy.get("companyShort")):
+                return _not_ready(409, "unassigned", "This order is still Unassigned. Choose its envoy company before printing.")
+
+            detail = await client.get(f"{base_url}/admin/envoy-notes/{quote(code, safe='')}", headers=headers)
+            if detail.status_code >= 400:
+                return _not_ready(503, "delivery_http_error", f"Delivery could not read envoy {code} (HTTP {detail.status_code}). Try again.")
+            note = detail.json() or {}
+            item = next(
+                (
+                    row for row in (note.get("items") or [])
+                    if isinstance(row, dict) and str(row.get("orderId") or row.get("order_id") or "") == order_id
+                ),
+                None,
+            )
+            if item is None:
+                return _not_ready(409, "not_in_note", f"Envoy {code} no longer contains this order. Reopen it before printing.")
+            partner_api = bool(note.get("partnerId"))
+            if partner_api and item.get("sentOk") is not True:
+                reason = str(item.get("sentMsg") or "").strip()[:200]
+                return _not_ready(
+                    409, "not_accepted",
+                    f"{company} has not accepted this order yet{': ' + reason if reason else ''}. "
+                    f"Send it to {company} before printing.",
+                    envoyCode=code, company=company,
+                )
+            return {"ok": True, "envoyCode": code, "company": company, "partnerApi": partner_api}
+    except Exception as exc:
+        return _not_ready(
+            503, "delivery_request_failed",
+            "Delivery could not be reached to confirm the envoy. Try again.",
+            error_type=type(exc).__name__,
+        )
+
+
+async def list_unsent_queue_rows(
+    *,
+    delivery_url: str,
+    admin_token: str,
+    store_keys: list[str],
+    client_factory: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Every order still waiting in a store's Delivery merchant queue.
+
+    Delivery keeps NEW and ERROR rows until they become a delivery order, so
+    this is the durable list of fulfilled orders nobody has sent yet, the same
+    after a reload or on another device. A queue that cannot be read is
+    reported in ``errors``; it is never shown as an empty list.
+    """
+    base_url = str(delivery_url or "").strip().rstrip("/")
+    token = str(admin_token or "").strip()
+    items: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    if not base_url or not token:
+        return {"items": items, "errors": [{"store": None, "message": "Delivery is not configured"}]}
+    factory = client_factory or httpx.AsyncClient
+    async with factory(timeout=20.0) as client:
+        for store_key in store_keys:
+            merchant_id = merchant_id_for_store(store_key)
+            if merchant_id is None:
+                continue
+            try:
+                response = await client.get(
+                    f"{base_url}/ext/admin/merchant-queue/{merchant_id}",
+                    params={"limit": 1000},
+                    headers={"X-Admin-Token": token},
+                )
+            except Exception as exc:
+                errors.append({"store": store_key, "message": f"Delivery queue unreachable ({type(exc).__name__})"})
+                continue
+            if response.status_code >= 400:
+                errors.append({"store": store_key, "message": f"Delivery queue returned HTTP {response.status_code}"})
+                continue
+            for row in (response.json() or {}).get("items") or []:
+                if not isinstance(row, dict):
+                    continue
+                number = _normalize_order_name(row.get("orderName") or row.get("order_name"))
+                if not number:
+                    continue
+                has_error = _queue_row_has_error(row)
+                status = str(row.get("status") or "").strip()
+                items.append({
+                    "kind": "queue_error" if has_error else "queue_new",
+                    "store": store_key,
+                    "merchantId": merchant_id,
+                    "queueRowId": row.get("id"),
+                    "orderNumber": number,
+                    "status": status or ("ERROR" if has_error else "NEW"),
+                    "hasError": has_error,
+                    "errorType": str(row.get("errorType") or "").strip() or ("city" if has_error and not row.get("cityId") else None),
+                    "city": row.get("city"),
+                    "cityRaw": row.get("cityRaw"),
+                    "customerName": row.get("customerName"),
+                    "createdAt": row.get("createdAt"),
+                })
+    return {"items": items, "errors": errors}
+
+
+async def find_delivery_order(
+    *,
+    delivery_url: str,
+    admin_token: str,
+    store_key: str | None,
+    order_number: str | None,
+    client_factory: Callable[..., Any] | None = None,
+    today: dt.date | None = None,
+) -> dict[str, Any]:
+    """Whether Delivery already has an order with this Shopify number."""
+    base_url = str(delivery_url or "").strip().rstrip("/")
+    token = str(admin_token or "").strip()
+    order = _normalize_order_name(order_number)
+    merchant_id = merchant_id_for_store(store_key)
+    if not base_url or not token or not order or merchant_id is None:
+        return {"ok": False, "reason": "not_configured"}
+    end = today or dt.date.today()
+    factory = client_factory or httpx.AsyncClient
+    try:
+        async with factory(timeout=15.0) as client:
+            response = await client.get(
+                f"{base_url}/admin/orders",
+                params={
+                    "merchant_id": merchant_id,
+                    "q": order,
+                    "start": (end - dt.timedelta(days=45)).isoformat(),
+                    "end": end.isoformat(),
+                    "limit": 10,
+                },
+                headers={"X-Admin-Token": token},
+            )
+            if response.status_code >= 400:
+                return {"ok": False, "reason": "delivery_http_error", "status": response.status_code}
+            rows = (response.json() or {}).get("rows") or []
+            found = any(_normalize_order_name(row.get("orderName")) == order for row in rows if isinstance(row, dict))
+            return {"ok": True, "found": found}
     except Exception as exc:
         return {"ok": False, "reason": "delivery_request_failed", "error_type": type(exc).__name__}

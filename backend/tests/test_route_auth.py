@@ -19,6 +19,7 @@ PROTECTED_GETS = [
     "/api/orders?limit=1",
     "/api/print-data?numbers=1001",
     "/api/delivery-config",
+    "/api/delivery-unsent",
     "/api/shopify/stores",
     "/api/shopify/oauth/status?store=irrakids",
     "/api/chat-requests?store=irrakids",
@@ -128,6 +129,7 @@ PROTECTED_CALLS = [
     ("GET", "/api/delivery-rate?date_from=2026-09-01&date_to=2026-09-02", None),
     # The proxy attaches the delivery app's admin token to what it forwards.
     ("GET", "/api/delivery/ext/admin/merchants", None),
+    ("POST", "/api/delivery-unsent/retry", {"store": "irrakids", "order_number": "173396"}),
     ("POST", "/api/delivery/ext/admin/merchant-notes/create", {}),
     ("PUT", "/api/delivery/admin/orders/1", {}),
     ("DELETE", "/api/delivery/admin/orders/1", None),
@@ -253,8 +255,27 @@ def test_label_anonymous_served_while_not_enforced_refused_when_enforced(client,
     assert client.get(LABEL).status_code == 401
 
 
-def test_signed_label_url_round_trip(client, token, print_env):
+def _label_ready(monkeypatch, result):
+    from backend.app import delivery_sync
+
+    async def readiness(**kwargs):
+        return result
+
+    monkeypatch.setattr(delivery_sync, "check_label_readiness", readiness)
+
+
+def test_signed_label_url_refused_until_order_lands_in_its_envoy(client, token, print_env, monkeypatch):
     _enforce(print_env, True)
+    _label_ready(monkeypatch, {"ok": False, "status": 409, "reason": "not_accepted",
+                               "message": "glog has not accepted this order yet."})
+    r = client.get("/api/delivery-label-url/4242?envoy_code=EN-1", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 409
+    assert r.json()["detail"] == "glog has not accepted this order yet."
+
+
+def test_signed_label_url_round_trip(client, token, print_env, monkeypatch):
+    _enforce(print_env, True)
+    _label_ready(monkeypatch, {"ok": True, "envoyCode": "EN-1", "company": "glog", "partnerApi": True})
     assert client.get("/api/delivery-label-url/4242?envoy_code=EN-1").status_code == 401
     r = client.get("/api/delivery-label-url/4242?envoy_code=EN-1", headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200

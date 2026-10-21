@@ -31,12 +31,11 @@ export function isAssignedEnvoyCompany(company) {
   });
 }
 
-export function canDirectPrintEnvoyLabel({ deliveryOrderId, envoyCode, company, partnerSendState } = {}) {
-  return Boolean(
-    deliveryOrderId &&
-    envoyCode &&
-    partnerSendState?.ok === false &&
-    partnerSendState?.integrationFailure === true &&
-    isAssignedEnvoyCompany(company)
-  );
+// A company without a connected partner API (in-house drivers, carriers handed
+// parcels at the counter) has nothing to accept the order, so being in its
+// envoy note is what "landed" means. Every other company must accept the order
+// before a label can print; there is no skip-the-partner path. Mirrors
+// check_label_readiness in backend/app/delivery_sync.py, which enforces it.
+export function envoyNeedsNoPartnerSend(envoyNote) {
+  return Boolean(envoyNote) && !envoyNote.partnerId && isAssignedEnvoyCompany(envoyNote);
 }
