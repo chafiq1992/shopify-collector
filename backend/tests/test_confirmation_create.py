@@ -17,7 +17,8 @@ from backend.app.confirmation_routes import (
     AgentOrderCreateBody, CONFIRMATION_CURRENCY_GQL, INVENTORY_LEVELS_PAGE_GQL,
     ORDER_CREATE_GQL, ORDER_CREATE_LOOKUP_GQL, PRODUCT_VARIANTS_SEARCH_GQL,
     PRODUCT_VARIANT_STOCK_GQL, SEARCH_CUSTOMERS_GQL, SEARCH_ORDERS_GQL,
-    _new_confirmation_order_input, agent_search, create_confirmation_order,
+    _attach_line_item_stock, _flatten_order, _new_confirmation_order_input,
+    _stock_cache, agent_search, create_confirmation_order,
     recent_orders_tagged_with, search_product_variants,
 )
 from backend.app.db import Base
@@ -272,6 +273,48 @@ class ConfirmationCatalogSearchTests(unittest.IsolatedAsyncioTestCase):
         with patch("backend.app.main.shopify_graphql", AsyncMock(side_effect=respond)), patch("backend.app.main.resolve_store_settings_effective", AsyncMock(return_value=("test.myshopify.com", "unused", "unused"))):
             result = await agent_search(store="irranova", q="0612345678", user=User())
         self.assertEqual(result["orders"][0]["id"], "gid://shopify/Order/99")
+
+
+class OrderLineItemStockTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        _stock_cache.clear()
+
+    def line_node(self, variant_id, tags):
+        return {"node": {"id": f"line-{variant_id}", "quantity": 1, "currentQuantity": 1, "title": "Shirt",
+                         "variant": {"id": variant_id, "product": {"id": "product-1", "title": "Shirt", "tags": tags}}}}
+
+    async def test_line_items_carry_product_tags_and_summed_stock(self):
+        order = _flatten_order(order_node(lineItems={"edges": [
+            self.line_node("variant-1", ["cod/3-4"]), self.line_node("variant-2", []),
+        ]}))
+        self.assertEqual(order["line_items"][0]["product_tags"], ["cod/3-4"])
+        self.assertIsNone(order["line_items"][0]["available_quantity"])
+        stock = {"nodes": [
+            {"id": "variant-1", "inventoryItem": {"id": "inv-1", "tracked": True, "inventoryLevels": {"nodes": [
+                {"quantities": [{"name": "on_hand", "quantity": 2}, {"name": "available", "quantity": -3}]},
+                {"quantities": [{"name": "on_hand", "quantity": 1}, {"name": "available", "quantity": 1}]},
+            ], "pageInfo": {"hasNextPage": False}}}},
+            {"id": "variant-2", "inventoryItem": {"id": "inv-2", "tracked": False}},
+        ]}
+        graphql = AsyncMock(return_value=stock)
+        with patch("backend.app.main.shopify_graphql", graphql):
+            await _attach_line_item_stock("irrakids", [order])
+            # A re-poll inside the cache window must not query Shopify again.
+            await _attach_line_item_stock("irrakids", [_flatten_order(order_node(lineItems={"edges": [self.line_node("variant-1", [])]}))])
+        self.assertEqual(graphql.await_count, 1)
+        first, second = order["line_items"]
+        self.assertEqual((first["on_hand_quantity"], first["available_quantity"]), (3, -2))
+        self.assertFalse(second["inventory_tracked"])
+        self.assertIsNone(second["available_quantity"])
+
+    async def test_inventory_failure_leaves_counts_unknown_and_is_retried(self):
+        order = _flatten_order(order_node(lineItems={"edges": [self.line_node("variant-1", [])]}))
+        graphql = AsyncMock(side_effect=HTTPException(502, "ACCESS_DENIED read_inventory"))
+        with patch("backend.app.main.shopify_graphql", graphql):
+            await _attach_line_item_stock("irrakids", [order])
+            await _attach_line_item_stock("irrakids", [order])
+        self.assertIsNone(order["line_items"][0]["available_quantity"])
+        self.assertEqual(graphql.await_count, 2)
 
 
 class NonIdempotentShopifyTransportTests(unittest.IsolatedAsyncioTestCase):

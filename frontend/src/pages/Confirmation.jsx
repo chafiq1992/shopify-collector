@@ -53,6 +53,9 @@ import {
 } from "../lib/syncQueue";
 import { copyNodeAsPng, triggerDownload } from "../lib/labelClipboard";
 import {
+  PRODUCT_STATUS_THEMES, confirmWarning, isNegativeStock, orderProductStatus, parseProductTag,
+} from "../lib/productTagStatus";
+import {
   ACTION_BTN, ACTION_THEMES, BTN, BTN_TAP, CARD, TONES,
   KpiCard, Modal, ModalHeader, PreviewAge, SkeletonCards, SkeletonRows, SourceOption, Spinner, TopBar,
   initialOf, isInteractiveTarget, timeAgo,
@@ -882,6 +885,8 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
   }
 
   function openDatePicker(order) {
+    const warning = confirmWarning(order);
+    if (warning && !window.confirm(`${order.name || `#${order.number}`} is not ready to confirm:\n\n${warning}\n\nConfirm anyway?`)) return;
     setChosenDate(todayISO());
     setDatePickerFor(order.id);
   }
@@ -1331,18 +1336,17 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
     const isSyncing = pendingOrderIds.has(o.id);
     const url = shopifyOrderUrl(o, meta.shop_domain);
     const label = o.name || `#${o.number}`;
+    const statusTheme = PRODUCT_STATUS_THEMES[orderProductStatus(o).kind];
     return (
       <div
         key={o.id}
         data-flip-key={o.id}
-        className={`relative p-3.5 transition-colors ${leaving ? "cf-leave" : ""} ${
-          isOpen || pickerOpen ? "bg-indigo-50/60" : isSelected ? "bg-indigo-50/40" : "bg-white"
+        className={`relative p-3.5 pl-5 transition-colors ${leaving ? "cf-leave" : ""} ${statusTheme.bg} ${
+          isOpen || pickerOpen ? "ring-2 ring-inset ring-indigo-400" : isSelected ? "ring-2 ring-inset ring-indigo-200" : ""
         }`}
         onClick={(e) => { if (!leaving && !isInteractiveTarget(e)) openOrder(o, nested); }}
       >
-        {(isOpen || pickerOpen || isSelected) && (
-          <span aria-hidden className={`absolute left-0 inset-y-0 w-1 ${isOpen || pickerOpen ? "bg-indigo-500" : "bg-indigo-200"}`} />
-        )}
+        <span aria-hidden className={`absolute left-0 inset-y-0 w-1.5 ${statusTheme.bar}`} />
         <div className="flex items-center gap-2.5">
           <input
             type="checkbox"
@@ -1364,6 +1368,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
           </span>
         </div>
         {o.cancelled_at && <span className="mt-1 inline-flex rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-700">Cancelled</span>}
+        <ProductStatusBadges order={o} className="mt-1.5" />
 
         <div className="mt-2 flex items-start justify-between gap-2">
           <div className="min-w-0">
@@ -1412,16 +1417,17 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
     const isSyncing = pendingOrderIds.has(o.id);
     const url = shopifyOrderUrl(o, meta.shop_domain);
     const label = o.name || `#${o.number}`;
-    const active = isOpen || pickerOpen;
-    const rowBg = active ? "bg-indigo-50/70" : isSelected ? "bg-indigo-50/40" : "bg-white";
+    const statusTheme = PRODUCT_STATUS_THEMES[orderProductStatus(o).kind];
+    const rowBg = statusTheme.bg;
     return (
       <React.Fragment key={o.id}>
         <tr
           data-flip-key={o.id}
-          className={`group border-t border-slate-100 cursor-pointer transition-colors ${rowBg} ${active ? "" : "hover:bg-slate-50/80"} ${leaving ? "cf-leave" : ""}`}
+          className={`group border-t border-slate-100 cursor-pointer transition-colors ${rowBg} ${leaving ? "cf-leave" : ""}`}
           onClick={(e) => { if (!leaving && !isInteractiveTarget(e)) openOrder(o); }}
         >
-          <td className={`relative w-10 pl-4 pr-1 py-3 ${active ? "shadow-[inset_3px_0_0_rgb(99_102_241)]" : ""}`}>
+          <td className="relative w-10 pl-4 pr-1 py-3">
+            <span aria-hidden className={`absolute left-0 inset-y-0 w-1.5 ${statusTheme.bar}`} />
             <input
               type="checkbox"
               checked={isSelected}
@@ -1440,6 +1446,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
             <div className="text-[11px] text-slate-400" title={o.created_at ? new Date(o.created_at).toLocaleString() : ""}>
               {timeAgo(o.created_at)}
             </div>
+            <ProductStatusBadges order={o} compact className="mt-1" />
           </td>
           <td className="px-2 py-3 max-w-[240px]">
             <div className="truncate font-medium text-slate-900">{o.customer_name || <span className="text-slate-400">—</span>}</div>
@@ -1459,7 +1466,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
             </div>
           </td>
           {/* The open "more" menu overflows into the next rows, so its sticky cell must stack above theirs. */}
-          <td className={`sticky right-0 px-3 py-3 ${actionsDropdownFor === o.id ? "z-20" : "z-[1]"} ${rowBg} ${active ? "" : "group-hover:bg-slate-50"} shadow-[-8px_0_12px_-10px_rgba(15,23,42,0.18)]`}>
+          <td className={`sticky right-0 px-3 py-3 ${actionsDropdownFor === o.id ? "z-20" : "z-[1]"} ${rowBg} shadow-[-8px_0_12px_-10px_rgba(15,23,42,0.18)]`}>
             <div className="flex justify-end">{renderActions(o, isSyncing)}</div>
           </td>
         </tr>
@@ -1666,7 +1673,7 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
             <table className="cf-order-queue-table w-full table-fixed text-xs">
               <colgroup>
                 <col className="w-9" />
-                <col className="w-[100px]" />
+                <col className="w-[150px]" />
                 <col />
                 <col className="w-[155px]" />
                 <col className="w-[100px]" />
@@ -2816,6 +2823,34 @@ function AgentCard({ agent, isMe, rank, maxConfirmed = 1 }) {
 }
 
 // Colored status badge used in the customer-history list and order details.
+// Order-level summary of its products' tags and stock, shown on every order card.
+function ProductStatusBadges({ order, compact = false, className = "" }) {
+  const status = orderProductStatus(order);
+  const theme = PRODUCT_STATUS_THEMES[status.kind];
+  const negative = status.negativeStock.length;
+  return (
+    <div className={`flex gap-1 ${compact ? "flex-col items-start" : "flex-wrap items-center"} ${className}`}>
+      {status.mixed ? (
+        <span
+          className="inline-flex items-center rounded-full border border-violet-700 bg-violet-600 px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-white"
+          title="Products have different tags — open the order to see each product's tag"
+        >{compact ? "Mixed · open" : "Mixed · open to check"}</span>
+      ) : (
+        <span
+          className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${theme.badge}`}
+          title={theme.title}
+        >{status.kind === "ready" ? (negative ? "No tags" : "Ready to confirm") : status.label}</span>
+      )}
+      {negative > 0 && (
+        <span
+          className="inline-flex items-center rounded-full border border-rose-700 bg-rose-600 px-2 py-0.5 text-[11px] font-bold text-white"
+          title="Available stock is below zero — check inventory before confirming"
+        >{compact ? `⚠ Negative stock (${negative})` : `⚠ Negative stock (${negative}) — check inventory`}</span>
+      )}
+    </div>
+  );
+}
+
 function StatusBadge({ kind, value }) {
   const v = String(value || "").toLowerCase();
   // kind: "fulfillment" | "financial" | "lifecycle"
@@ -3806,8 +3841,10 @@ function LineItemsGrid({ order, onToast }) {
       {items.map((li, idx) => {
         const variantId = String(li.variant_id || "").split("/").pop();
         const options = (li.options || []).filter((opt) => opt.value && opt.value !== "Default Title");
+        const negative = isNegativeStock(li);
+        const statusTags = (li.product_tags || []).map(parseProductTag).filter(Boolean);
         return (
-        <article key={li.id || idx} className="cf-product-card flex items-center gap-3 rounded-xl border border-gray-200 bg-gray-50/50 p-2.5">
+        <article key={li.id || idx} className={`cf-product-card flex items-center gap-3 rounded-xl border p-2.5 ${negative ? "border-rose-400 bg-rose-50 ring-2 ring-rose-300" : "border-gray-200 bg-gray-50/50"}`}>
           <div className="flex h-[76.8px] w-[76.8px] shrink-0 items-center justify-center overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
             {li.image ? (
               <img src={li.image} alt={li.title || "Product"} loading="lazy" className="h-full w-full object-contain" />
@@ -3838,10 +3875,46 @@ function LineItemsGrid({ order, onToast }) {
               <span className="font-semibold text-gray-600">{li.quantity} × {li.unit_price}</span>
               <span className="font-bold text-emerald-700">{(Number(li.unit_price || 0) * Number(li.quantity || 0)).toFixed(2)} {order.currency}</span>
             </div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              {statusTags.length > 0 ? statusTags.map((tag) => (
+                <span key={tag.label} title={PRODUCT_STATUS_THEMES[tag.kind].title}
+                  className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${PRODUCT_STATUS_THEMES[tag.kind].badge}`}>
+                  {tag.label}
+                </span>
+              )) : (
+                <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${PRODUCT_STATUS_THEMES.ready.chip}`}>No tag</span>
+              )}
+              <LineItemStock lineItem={li} negative={negative} />
+            </div>
+            {negative && (
+              <div className="mt-1 text-[11px] font-semibold text-rose-700">⚠ Negative stock — check with inventory before confirming</div>
+            )}
           </div>
         </article>
         );
       })}
     </div>
+  );
+}
+
+function LineItemStock({ lineItem, negative }) {
+  if (lineItem.inventory_tracked === false) {
+    return <span className="text-[11px] text-gray-500">Inventory not tracked</span>;
+  }
+  const onHand = lineItem.on_hand_quantity;
+  const available = lineItem.available_quantity;
+  if (typeof onHand !== "number" && typeof available !== "number") {
+    return <span className="text-[11px] text-gray-500">Stock unknown — check inventory</span>;
+  }
+  const chip = "rounded-md border px-2 py-0.5 text-[11px] tabular-nums";
+  return (
+    <>
+      <span className={`${chip} ${negative ? "border-rose-300 bg-rose-100 text-rose-800" : "border-slate-200 bg-white text-slate-700"}`}>
+        On hand <strong>{typeof onHand === "number" ? onHand : "—"}</strong>
+      </span>
+      <span className={`${chip} ${negative ? "border-rose-700 bg-rose-600 text-white" : "border-slate-200 bg-white text-slate-700"}`}>
+        Available <strong>{typeof available === "number" ? available : "—"}</strong>
+      </span>
+    </>
   );
 }

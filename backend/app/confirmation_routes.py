@@ -763,7 +763,7 @@ lineItems(first: 50) {
         sku
         selectedOptions { name value }
         image { url }
-        product { id title featuredImage { url } }
+        product { id title tags featuredImage { url } }
       }
     }
   }
@@ -855,6 +855,12 @@ def _flatten_order(node: Dict[str, Any]) -> Dict[str, Any]:
             "unit_price": unit["amount"],
             "currency": unit["currency"],
             "image": img,
+            # Product tags drive the confirmation hold/change/test highlighting.
+            "product_tags": list(product.get("tags") or []),
+            # Filled in by _attach_line_item_stock; None means "not known".
+            "inventory_tracked": None,
+            "on_hand_quantity": None,
+            "available_quantity": None,
         })
     total = _money(node.get("currentTotalPriceSet"))
     return {
@@ -1031,7 +1037,7 @@ async def agent_queue(
 
     return {
         "ok": True,
-        "orders": await enrich_web_confirmations(store, orders),
+        "orders": await enrich_web_confirmations(store, await _attach_line_item_stock(store, orders)),
         "assigned_total": assigned_total,
         "level_counts": {
             "total": int(breakdown.get("total", 0)),
@@ -1572,6 +1578,7 @@ async def agent_search(
             continue
         seen_order_ids.add(oid)
         orders_out.append(_flatten_order(node))
+    await _attach_line_item_stock(store, [*orders_out, *(o for c in customers_out for o in c["orders"])])
 
     return {
         "ok": True,
@@ -1626,7 +1633,7 @@ async def customer_orders(
         "customer_id": customer.get("id") or cid,
         "display_name": customer.get("displayName") or "",
         "total_orders": int(customer.get("numberOfOrders") or 0),
-        "orders": await enrich_web_confirmations(store, orders_out),
+        "orders": await enrich_web_confirmations(store, await _attach_line_item_stock(store, orders_out)),
         "page_info": {
             "has_next_page": bool(page_info.get("hasNextPage")),
             "end_cursor": page_info.get("endCursor"),
@@ -1683,7 +1690,7 @@ async def phone_orders(
     by_id = {node['id']: node for node in nodes if isinstance(node, dict) and node.get('id')}
     orders = [_flatten_order(by_id[oid]) for oid in ids if oid in by_id]
     orders = [order for order in orders if _confirmation_phone_variants(order['phone'])['normalized_phone'] == canonical]
-    return {'ok': True, 'orders': await enrich_web_confirmations(store, orders), 'normalized_phone': canonical,
+    return {'ok': True, 'orders': await enrich_web_confirmations(store, await _attach_line_item_stock(store, orders)), 'normalized_phone': canonical,
             'scanned_orders': scanned, 'page_info': {'has_next_page': has_more, 'end_cursor': cursor}}
 
 
@@ -2494,28 +2501,53 @@ async def _picker_catalog_page(store, raw, limit, state):
     return _picker_interleave(products, raw), currency, following
 
 
-async def _picker_enrich_stock(nodes, currency, store):
+# Agents re-poll the queue every 15s; a short cache keeps that from re-reading
+# every line item's stock on each poll while still showing fresh counts.
+_STOCK_CACHE_TTL_S = 30.0
+_stock_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
+
+
+async def _fetch_variant_stock(
+    store: str, variant_ids: List[Optional[str]], *, use_cache: bool = False,
+) -> Tuple[Dict[str, Dict[str, Any]], bool]:
+    """On-hand and available stock per variant, summed over every location.
+
+    Returns (stock_by_variant_id, complete). A variant whose counts could not be
+    read is left out, so callers show "unknown" rather than a wrong number.
+    """
     from .main import shopify_graphql  # type: ignore
 
+    store_key = _store_key(store)
     stock: Dict[str, Dict[str, Any]] = {}
-    warnings = []
+    ids: List[str] = []
+    now = time.monotonic()
+    for vid in dict.fromkeys(v for v in variant_ids if v):
+        cached = _stock_cache.get((store_key, vid)) if use_cache else None
+        if cached and now - cached[0] < _STOCK_CACHE_TTL_S:
+            stock[vid] = cached[1]
+        else:
+            ids.append(vid)
+    if not ids:
+        return stock, True
+
     # Bounded batches keep inventory connections below Shopify's query cost
     # ceiling; two run at once so a product with many sizes opens quickly.
-    batches = [[node["id"] for node in nodes[offset:offset + 10] if node.get("id")] for offset in range(0, len(nodes), 10)]
+    batches = [ids[offset:offset + 10] for offset in range(0, len(ids), 10)]
     limit = asyncio.Semaphore(2)
 
-    async def read_batch(ids):
+    async def read_batch(batch_ids):
         async with limit:
             return await shopify_graphql(
-                PRODUCT_VARIANT_STOCK_GQL, {"ids": ids}, store=store,
+                PRODUCT_VARIANT_STOCK_GQL, {"ids": batch_ids}, store=store,
                 api_version=CONFIRMATION_API_VERSION,
             )
 
-    results = await asyncio.gather(*(read_batch(ids) for ids in batches if ids), return_exceptions=True)
+    results = await asyncio.gather(*(read_batch(batch) for batch in batches), return_exceptions=True)
+    complete = True
     failed = next((result for result in results if isinstance(result, BaseException)), None)
     if failed is not None:
-        logger.warning("Confirmation picker inventory batch failed (store=%s): %s", store, failed)
-        warnings.append("Some inventory counts are unavailable")
+        logger.warning("Confirmation inventory batch failed (store=%s): %s", store, failed)
+        complete = False
     try:
         # Every remaining location page is counted before display.
         for result in results:
@@ -2551,9 +2583,36 @@ async def _picker_enrich_stock(nodes, currency, store):
                     if quantities and all(isinstance(q, int) for q in quantities):
                         entry[field] = sum(quantities)
     except Exception:
-        logger.warning("Confirmation picker inventory lookup incomplete (store=%s)", store, exc_info=True)
-        if not warnings:
-            warnings.append("Some inventory counts are unavailable")
+        logger.warning("Confirmation inventory lookup incomplete (store=%s)", store, exc_info=True)
+        complete = False
+    if use_cache:
+        if len(_stock_cache) > 20000:
+            _stock_cache.clear()
+        stamp = time.monotonic()
+        for vid, entry in stock.items():
+            # A tracked variant with no counts is a partial read; don't pin it.
+            if entry["inventory_tracked"] is not True or entry["available_quantity"] is not None:
+                _stock_cache[(store_key, vid)] = (stamp, entry)
+    return stock, complete
+
+
+async def _attach_line_item_stock(store: str, orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Fill inventory fields on every flattened order's line items in place."""
+    items = [li for o in orders for li in (o.get("line_items") or [])]
+    if items:
+        stock, _complete = await _fetch_variant_stock(
+            store, [li.get("variant_id") for li in items], use_cache=True,
+        )
+        for li in items:
+            entry = stock.get(li.get("variant_id") or "")
+            if entry:
+                li.update(entry)
+    return orders
+
+
+async def _picker_enrich_stock(nodes, currency, store):
+    stock, complete = await _fetch_variant_stock(store, [node.get("id") for node in nodes])
+    warnings = [] if complete else ["Some inventory counts are unavailable"]
     variants = []
     for node in nodes:
         product = node.get("product") or {}
@@ -2867,6 +2926,7 @@ async def edit_order_items(
     if not order_node:
         raise HTTPException(status_code=502, detail="Shopify saved the edit but returned no order")
     flattened = _flatten_order(order_node)
+    await _attach_line_item_stock(store, [flattened])
     await _audit_confirmation_order_change(
         db,
         user=user,
@@ -2927,6 +2987,7 @@ async def update_order_shipping(
     if not order_node:
         raise HTTPException(status_code=502, detail="Shopify saved the address but returned no order")
     flattened = _flatten_order(order_node)
+    await _attach_line_item_stock(store, [flattened])
     await _audit_confirmation_order_change(
         db,
         user=user,
