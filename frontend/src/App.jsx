@@ -7,6 +7,7 @@ import { getOrCreatePrintRequest, normalizePrintOrders, submitPrintOrders, withP
 import StorePicker from "./components/StorePicker.jsx";
 import { persistStoreSelection, readCurrentStore } from "./lib/stores";
 import { DELIVERY_COMPANIES } from "./lib/deliveryCompanies";
+import './components/collector.css';
 
 const OrderCard = React.lazy(() => import('./components/OrderCard.jsx'));
 const OrderTagEditor = React.lazy(() => import('./components/OrderTagEditor.jsx'));
@@ -914,28 +915,28 @@ export default function App(){
   }
 
   return (
-    <div className="collector-shell flex h-dvh min-h-0 w-full flex-col overflow-hidden bg-slate-50 text-slate-900">
+    <div className="collector-shell">
       <ActionOverlay state={overlay} />
-      <header className="collector-header relative z-40 shrink-0 bg-white/95 border-b border-gray-200">
+      <header className="collector-header">
         {loading && (
           <div className="progress-track">
             <div className="progress-thumb"></div>
           </div>
         )}
-        <div className="max-w-5xl mx-auto px-3 py-1 flex min-w-0 items-center gap-1 sm:px-4 sm:gap-2">
+        <div className="collector-topbar">
           <PackageSearch className="hidden h-5 w-5 shrink-0 sm:block" />
           <StorePicker value={store} onChange={(next)=>{
             vibrate(10); setEditingTag(null);
             let saved = [];
             try { const parsed = JSON.parse(localStorage.getItem(`orderCollectorSelected_${next}`) || '[]'); if (Array.isArray(parsed)) saved = parsed; } catch {}
             setSelectedOrderNumbers(new Set(saved)); setSelectedOutMap({}); setOrders([]); setIndex(0); setStore(next);
-          }} className="collector-store min-w-0 max-w-[40%] sm:max-w-none" />
+          }} className="collector-store" />
           <div className="ml-auto flex items-center gap-2">
             <button aria-label="Open Inventory Helper" title="Inventory Helper" onClick={()=>{ vibrate(10); navigate('/inventory-helper'); }} className="p-1.5 rounded-full hover:bg-gray-100">
               <PackageOpen className="w-4 h-4 text-indigo-600" />
             </button>
             {auth?.user && (
-              <div className="hidden sm:flex items-center gap-2 text-xs text-gray-700 border border-gray-200 rounded-lg px-2 py-1 bg-white">
+              <div className="collector-session hidden sm:flex items-center gap-2 text-xs text-gray-700 border border-gray-200 rounded-lg px-2 py-1 bg-white">
                 <span className="font-semibold">{auth.user.email}</span>
                 <span className="uppercase text-[10px] px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">{auth.user.role}</span>
                 <span className="uppercase text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 border border-blue-200">
@@ -962,24 +963,23 @@ export default function App(){
             <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-xs font-medium">{loading ? "…" : totalCount}</span>
           </div>
         </div>
-        <div className="max-w-5xl mx-auto px-4 pb-1 flex flex-col gap-1">
+        <div className="collector-controls">
           {apiError && (
-            <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-xl px-3 py-2 text-xs">
-              <div className="font-semibold">Orders could not be refreshed</div>
-              <div className="mt-0.5">{apiError}</div>
-              <button type="button" className="mt-1 min-h-9 font-semibold underline" onClick={()=>load({preserveIndex:true})}>Retry</button>
+            <div className="collector-error" role="alert">
+              <button type="button" className="collector-error-message" aria-label="Read refresh error" title={apiError} onClick={()=>alert(apiError)}>{apiError}</button>
+              <button type="button" onClick={()=>load({preserveIndex:true})}>Retry</button>
             </div>
           )}
-          <div className="flex items-center gap-2 bg-gray-100 rounded-xl px-3 py-1">
+          <div className="collector-search">
             <Search className="w-4 h-4 text-gray-500" />
             <input
               value={search}
               onChange={(e)=>setSearch(e.target.value)}
               placeholder="Search order # or SKU"
-              className="min-h-9 min-w-0 bg-transparent outline-none w-full text-base sm:text-sm"
+              aria-label="Search orders"
             />
           </div>
-          <div className="flex items-center gap-1 overflow-x-auto flex-nowrap -mx-4 px-4">
+          <div className="collector-filters">
             {profile && profile.id === 'stock' ? (
               <>
                 <Chip
@@ -1070,7 +1070,8 @@ export default function App(){
                     onClick={()=> { setExcludeOut(v => !v); }}
                   />
                   <SmallChip
-                    label="Exclude btis/en att/an att b2/b3"
+                    label="Exclude stock tags"
+                    title="Exclude btis, en att b, en att, an att b2 and an att b3"
                     active={excludeStockTags}
                     onClick={()=> { setExcludeStockTags(v => !v); }}
                   />
@@ -1080,15 +1081,14 @@ export default function App(){
           </div>
           {/* Date range bar: compact layout without preview pill */}
           {(!profile || profile.id !== 'stock') && (
-            <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-              <div className="mb-1 text-[11px] uppercase tracking-wide text-gray-400">Date range</div>
-              <div className="grid min-w-0 grid-cols-[1fr_auto_1fr] items-center gap-2">
+            <div className="collector-date-bar">
+              <div className="collector-date-label">Date range</div>
+              <div className="collector-date-inputs">
                 <input
                   type="date"
                   value={codFromDate}
                   onChange={(e)=>{ setCodFromDate(e.target.value); }}
                   aria-label="From date"
-                  className="min-h-11 min-w-0 w-full text-sm border border-gray-300 rounded-lg px-2 py-1"
                 />
                 <span className="text-[11px] uppercase tracking-wide text-gray-400">to</span>
                 <input
@@ -1096,28 +1096,19 @@ export default function App(){
                   value={codToDate}
                   onChange={(e)=>{ setCodToDate(e.target.value); }}
                   aria-label="To date"
-                  className="min-h-11 min-w-0 w-full text-sm border border-gray-300 rounded-lg px-2 py-1"
                 />
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-2 pb-1">
                 <button
-                  className="inline-flex items-center px-3 py-1 rounded-full text-[11px] font-semibold bg-blue-600 text-white active:scale-[.98]"
+                  className="collector-date-apply"
                   onClick={()=>{ vibrate(15); setReloadCounter(c=>c+1); }}
                 >Apply</button>
                 <button
-                  className="inline-flex items-center px-3 py-1 rounded-full text-[11px] font-semibold bg-gray-200 text-gray-800 active:scale-[.98]"
                   onClick={()=>{ vibrate(15); setCodFromDate(""); setCodToDate(""); setReloadCounter(c=>c+1); }}
                 >Clear</button>
-                <button
-                  disabled={selectedOrderNumbers.size === 0}
-                  className="inline-flex items-center px-3 py-1 rounded-full text-[11px] font-semibold bg-red-600 text-white active:scale-[.98] shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                  onClick={()=>{ vibrate(15); setSelectedOrderNumbers(new Set()); }}
-                >Clear selection{selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}</button>
               </div>
             </div>
           )}
           {showProductFilter && (
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <div className="collector-product-filter flex min-w-0 flex-wrap items-center gap-2">
               <span className="text-[11px] uppercase tracking-wide text-gray-400">Product ID</span>
               <input
                 value={productIdFilter}
@@ -1146,10 +1137,10 @@ export default function App(){
         </div>
       </header>
 
-      <main className="min-h-0 w-full flex-1 overflow-y-auto overscroll-y-contain px-3 py-3 sm:px-4">
-        <div className="mx-auto max-w-5xl">
+      <main className="collector-main">
+        <div className="collector-stage">
         {current ? (
-          <div className="relative">
+          <div className="collector-order-container">
             <Suspense fallback={<div className="text-center py-10 text-gray-500">Loading…</div>}>
             <OrderCard
               key={current.id}
@@ -1189,40 +1180,22 @@ export default function App(){
         )}
         </div>
       </main>
-      <div className="collector-actions relative z-40 shrink-0 border-t border-slate-200 bg-white shadow-[0_-4px_20px_rgba(15,23,42,0.04)]">
-        <div className="max-w-5xl mx-auto px-3 pt-2 sm:px-4">
-          <div className="grid grid-cols-1 gap-2 mb-2">
-            <button onClick={()=>setShowConfirm('print')} disabled={printBusy} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm disabled:opacity-60">
-              <Printer className="w-4 h-4"/> <span className="font-semibold">{printBusy ? 'Printing…' : `Print${selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}`}</span>
-            </button>
-            {printMsg && <div className="text-sm text-gray-600 text-center">{printMsg}</div>}
-            {selectedOrderNumbers.size > 0 && (
-              <div className="flex min-w-0 items-center gap-2 text-xs text-slate-600">
-                <span className="shrink-0 font-semibold">{selectedOrderNumbers.size} selected</span>
-                <div className="collector-selection min-w-0 flex-1 overflow-x-auto whitespace-nowrap py-1">
-                  {Array.from(selectedOrderNumbers).map(n => (
-                    <button key={n} type="button" onClick={()=>toggleOrderSelected(n)} aria-label={`Deselect order ${n}`} className="mr-1 inline-flex items-center gap-1 rounded-md border border-blue-100 bg-blue-50 px-2 py-1 font-medium text-blue-700">{n}<span aria-hidden="true">×</span></button>
-                  ))}
-                </div>
-                <button type="button" onClick={()=>setSelectedOrderNumbers(new Set())} className="shrink-0 rounded-md px-2 py-1 text-xs font-semibold text-slate-500 hover:bg-slate-100">Clear</button>
-              </div>
-            )}
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <button type="button" disabled={actionBusy} onClick={()=>{ try { vibrate(10); } catch {}; setShowConfirm('collected'); }} className="touch-manipulation flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-green-600 hover:bg-green-700 active:scale-[.98] shadow-sm disabled:opacity-60 disabled:cursor-not-allowed">
-              <CheckCircle className="w-4 h-4"/> <span className="font-semibold">{`Collected${selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}`}</span>
-            </button>
-            <button type="button" disabled={actionBusy} onClick={()=>{ try { vibrate(10); } catch {}; setShowConfirm('out'); }} className="touch-manipulation flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-red-600 hover:bg-red-700 active:scale-[.98] shadow-sm disabled:opacity-60 disabled:cursor-not-allowed">
-              <XCircle className="w-4 h-4"/> <span className="font-semibold">{`OUT${selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}`}</span>
-            </button>
-          </div>
-          <div className="grid grid-cols-2 gap-2 mt-2">
-            <button onClick={()=>{ try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; gotoPrev(); }} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl bg-gray-200 text-gray-900 text-sm hover:bg-gray-300 active:scale-[.98] shadow-sm">
-              <ChevronLeft className="w-4 h-4"/> <span className="font-semibold">Prev order</span>
-            </button>
-            <button onClick={()=>{ try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {}; gotoNext(); }} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl bg-gray-900 text-white text-sm hover:bg:black active:scale-[.98] shadow-sm">
-              <ChevronRight className="w-4 h-4"/> <span className="font-semibold">Next order</span>
-            </button>
+      <div className="collector-actions">
+        <div className="collector-actions-inner">
+          {printMsg && <div className="collector-status" role="status" title={printMsg}>{printMsg}</div>}
+          {selectedOrderNumbers.size > 0 && <div className="collector-selection-row">
+            <strong>{selectedOrderNumbers.size} selected</strong>
+            <div className="collector-selection" aria-label="Selected orders">
+              {Array.from(selectedOrderNumbers).map(number => <button key={number} type="button" onClick={()=>toggleOrderSelected(number)} aria-label={`Deselect order ${number}`}>{number}<span aria-hidden="true">×</span></button>)}
+            </div>
+            <button type="button" className="collector-clear-selection" onClick={()=>setSelectedOrderNumbers(new Set())}>Clear</button>
+          </div>}
+          <div className="collector-action-row">
+            <button type="button" className="collector-nav" aria-label="Prev order" title="Previous order" onClick={()=>{ vibrate(10); gotoPrev(); }}><ChevronLeft size={15}/></button>
+            <button type="button" className="collector-action-collected" disabled={actionBusy} onClick={()=>{ vibrate(10); setShowConfirm('collected'); }}><CheckCircle size={13}/><span>Collected</span></button>
+            <button type="button" className="collector-action-out" disabled={actionBusy} onClick={()=>{ vibrate(10); setShowConfirm('out'); }}><XCircle size={13}/><span>OUT</span></button>
+            <button type="button" className="collector-action-print" disabled={printBusy} aria-label={`Print${selectedOrderNumbers.size ? ` ${selectedOrderNumbers.size} orders` : ''}`} onClick={()=>setShowConfirm('print')}><Printer size={13}/><span>{printBusy ? 'Printing…' : 'Print'}</span></button>
+            <button type="button" className="collector-nav" aria-label="Next order" title="Next order" onClick={()=>{ vibrate(10); gotoNext(); }}><ChevronRight size={15}/></button>
           </div>
         </div>
       </div>
@@ -1242,7 +1215,7 @@ export default function App(){
       /></Suspense>}
       {showConfirm && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
-          <div role="dialog" aria-modal="true" aria-labelledby="collector-confirm-title" className="flex max-h-[calc(100dvh-2rem)] w-full max-w-sm flex-col rounded-2xl bg-white shadow-lg border border-gray-200 p-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="collector-confirm-title" className="collector-confirm-dialog flex max-h-[calc(100dvh-2rem)] w-full max-w-sm flex-col rounded-2xl bg-white shadow-lg border border-gray-200 p-4">
             <h3 id="collector-confirm-title" className="shrink-0 text-lg font-semibold mb-2">{showConfirm === 'collected' ? 'Confirm Collected' : showConfirm === 'out' ? 'Confirm OUT' : 'Confirm Print'}</h3>
             {(() => {
               const selected = Array.from(selectedOrderNumbers || []);
@@ -1528,18 +1501,19 @@ const Chip = React.memo(function Chip({ label, active, onClick }){
   return (
     <button
       onClick={()=>{ try { onClick && onClick(); } finally { try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {} } }}
-      className={`inline-flex items-center justify-center h-8 min-w-[92px] px-3 rounded-full text-xs border font-medium transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
+      className={`collector-chip${active ? ' is-active' : ''}`}
     >
       {label}
     </button>
   );
 });
 
-const SmallChip = React.memo(function SmallChip({ label, active, onClick }){
+const SmallChip = React.memo(function SmallChip({ label, active, onClick, title }){
   return (
     <button
       onClick={()=>{ try { onClick && onClick(); } finally { try { if (navigator && navigator.vibrate) navigator.vibrate(10); } catch {} } }}
-      className={`inline-flex items-center justify-center h-7 min-w-[120px] px-3 rounded-full text-[11px] border font-medium transition-colors ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-800 border-gray-300 hover:bg-gray-100"}`}
+      title={title}
+      className={`collector-chip collector-chip-secondary${active ? ' is-active' : ''}`}
     >
       {label}
     </button>

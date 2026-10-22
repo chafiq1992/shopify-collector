@@ -42,7 +42,7 @@ export default function OrderTagEditor({ order, tag, store, suggestions = [], on
 
   const options = [...new Set(suggestions)].filter(t => t.toLowerCase() !== tag.toLowerCase() && t.length <= 40);
   return createPortal(
-    <dialog ref={dialogRef} aria-labelledby="tag-editor-title" onCancel={e => { e.preventDefault(); if (!busy) onClose(); }} className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl border border-slate-200 bg-white p-0 text-slate-900 shadow-2xl backdrop:bg-slate-900/40">
+    <dialog ref={dialogRef} aria-labelledby="tag-editor-title" onCancel={e => { e.preventDefault(); if (!busy) onClose(); }} className="collector-tag-editor max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl border border-slate-200 bg-white p-0 text-slate-900 shadow-2xl backdrop:bg-slate-900/40">
       <form onSubmit={save} className="p-5">
         <div className="flex items-start gap-3">
           <span className="rounded-xl bg-blue-50 p-2 text-blue-600"><Tag className="h-5 w-5" /></span>

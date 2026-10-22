@@ -41,5 +41,23 @@ window.addEventListener('message',event=>{
   if(event.data.testAction==='fail-tag')failTag=true;
   if(event.data.testAction==='offline'){offline=true;emit({type:'order.tag_added',id:'external',store:'irrakids'})}
   if(event.data.testAction==='online'){offline=false;window.dispatchEvent(new Event('online'))}
+  if(event.data.testAction==='many-tags'){orders.forEach(o=>o.tags=[...new Set([...o.tags,...Array.from({length:12},(_,i)=>`Additional warehouse tag ${i+1}`)])]);emit({type:'order.tag_added',id:'external',store:'irrakids'})}
 });
 createRoot(document.getElementById('root')).render(<App />);
+
+// Measure real rendered bounds at every viewport change, including selection changes.
+function reportLayout() {
+  const main=document.querySelector('.collector-main');
+  const card=document.querySelector('.collector-order');
+  const footer=document.querySelector('.collector-actions');
+  const photo=document.querySelector('.collector-photo');
+  const image=photo?.querySelector('img');
+  if(!main||!card||!footer||!photo)return;
+  const c=card.getBoundingClientRect(),f=footer.getBoundingClientRect(),p=photo.getBoundingClientRect();
+  parent.postMessage({fixtureMetrics:{width:innerWidth,height:innerHeight,photoHeight:Math.round(p.height),footerHeight:Math.round(f.height),noVerticalScroll:main.scrollHeight<=main.clientHeight+1&&document.documentElement.scrollHeight<=innerHeight+1,fullCardFits:c.top>=main.getBoundingClientRect().top-1&&c.bottom<=f.top+1&&p.height>0,containedImage:!image||getComputedStyle(image).objectFit==='contain'}},location.origin);
+}
+const layoutObserver=new ResizeObserver(()=>requestAnimationFrame(reportLayout));
+layoutObserver.observe(document.getElementById('root'));
+const layoutMutations=new MutationObserver(()=>{const main=document.querySelector('.collector-main');if(main)layoutObserver.observe(main);const footer=document.querySelector('.collector-actions');if(footer)layoutObserver.observe(footer);reportLayout()});
+layoutMutations.observe(document.getElementById('root'),{childList:true,subtree:true});
+window.addEventListener('resize',reportLayout);
