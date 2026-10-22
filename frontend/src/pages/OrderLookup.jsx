@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspens
 import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import { persistStoreSelection, readCurrentStore, titleStore } from "../lib/stores";
+import { applyFulfillmentQuantities, expandOrderUnits, isRemovedOrderVariant } from "../lib/orderUnits";
 import { unsentAgeLabel, unsentReasonLabel } from "../lib/unsentDelivery";
 
 const loadDeliveryLabelPopup = () => import("../components/DeliveryLabelPopup");
@@ -22,6 +23,17 @@ const recentTagsCache = new Map();
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function PendingPurchaseOrderBadge({ variant }) {
+  const purchaseOrders = asArray(variant?.pending_purchase_orders);
+  if (!purchaseOrders.length) return null;
+  return (
+    <span className="absolute left-2 top-2 inline-flex max-w-[calc(100%-1rem)] items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50/95 px-2 py-1 text-xs font-semibold text-amber-900 shadow-sm" title={`Pending purchase order: ${purchaseOrders.map((po) => po.number || po.id).join(", ")}`}>
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-4 w-4 shrink-0"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9m-4-16.2 8 4.5"/></svg>
+      <span className="truncate">Pending PO</span>
+    </span>
+  );
 }
 
 function normalizeOrderShape(value) {
@@ -290,28 +302,24 @@ function createEmptyFoData() {
 
 function buildFulfilledQueueOrder(baseOrder, foData) {
   if (!baseOrder) return null;
-  if (!foData?.orders || foData.orders.length === 0) {
-    return {
-      ...baseOrder,
-      fulfillment_status: "FULFILLED",
-      variants: (baseOrder.variants || []).map((variant) => ({ ...variant, status: "fulfilled", unfulfilled_qty: 0 })),
-    };
-  }
-  const variantIds = new Set();
-  foData.orders.forEach((group) => {
+  const quantities = new Map();
+  const fulfillAll = !foData?.orders?.length;
+  (foData?.orders || []).forEach((group) => {
     (group.lineItems || []).forEach((lineItem) => {
       if (foData.selectedLineItemIds.has(lineItem.id)) {
         const variantId = String(lineItem.variantId || "").trim();
-        if (variantId) variantIds.add(variantId);
+        if (variantId) quantities.set(variantId, (quantities.get(variantId) || 0) + Math.max(0, Number(lineItem.remainingQuantity) || 0));
       }
     });
   });
+  const variants = fulfillAll
+    ? (baseOrder.variants || []).map((variant) => isRemovedOrderVariant(variant) ? variant : { ...variant, status: "fulfilled", unfulfilled_qty: 0 })
+    : applyFulfillmentQuantities(baseOrder.variants, quantities);
+  const hasRemaining = expandOrderUnits(variants).some((variant) => variant.status === "unfulfilled");
   return {
     ...baseOrder,
-    fulfillment_status: "FULFILLED",
-    variants: (baseOrder.variants || []).map((variant) => (
-      variantIds.has(variant.id) ? { ...variant, status: "fulfilled", unfulfilled_qty: 0 } : variant
-    )),
+    fulfillment_status: hasRemaining ? "PARTIALLY_FULFILLED" : "FULFILLED",
+    variants,
   };
 }
 
@@ -330,6 +338,40 @@ export default function OrderLookup(){
     } catch { return ""; }
   });
   const [order, setOrder] = useState(null);
+  // Refresh PO markers independently so background inventory updates do not reset
+  // the current guide, tags, address edits, or fulfillment selection.
+  useEffect(() => {
+    if (!order?.id || !order?.number) return;
+    let cancelled = false;
+    let refreshing = false;
+    const orderId = order.id;
+    const refreshPurchaseOrders = async () => {
+      if (cancelled || refreshing || document.visibilityState === "hidden") return;
+      refreshing = true;
+      try {
+        const fresh = await API.searchOneByNumber(order.number, store);
+        if (cancelled || fresh?.id !== orderId) return;
+        const pendingByVariant = new Map(fresh.variants.map((variant) => [variant.id, asArray(variant.pending_purchase_orders)]));
+        setOrder((current) => current?.id !== orderId ? current : {
+          ...current,
+          variants: current.variants.map((variant) => ({ ...variant, pending_purchase_orders: pendingByVariant.get(variant.id) || [] })),
+        });
+      } catch {
+        // Retain the last known badges during a transient connection failure.
+      } finally {
+        refreshing = false;
+      }
+    };
+    const timer = window.setInterval(refreshPurchaseOrders, 60000);
+    window.addEventListener("focus", refreshPurchaseOrders);
+    document.addEventListener("visibilitychange", refreshPurchaseOrders);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshPurchaseOrders);
+      document.removeEventListener("visibilitychange", refreshPurchaseOrders);
+    };
+  }, [order?.id, order?.number, store]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [newTag, setNewTag] = useState("");
@@ -896,12 +938,9 @@ export default function OrderLookup(){
   }, [order]);
   const currencyCode = useMemo(() => String(order?.currency_code || "").trim() || "", [order]);
 
-  const _isRemovedVariant = useCallback((v) => {
-    const q = Number(v?.qty);
-    if (Number.isFinite(q) && q <= 0) return true;
-    const st = String(v?.status || "").toLowerCase();
-    return st === "removed" || st === "restocked";
-  }, []);
+  const _isRemovedVariant = isRemovedOrderVariant;
+
+  const orderUnits = useMemo(() => expandOrderUnits(order?.variants), [order?.variants]);
 
   const removedItems = useMemo(() => {
     if (!Array.isArray(order?.variants)) return [];
@@ -914,20 +953,14 @@ export default function OrderLookup(){
     if (!order || isOrderCancelled) return false;
     const fs = String(order.fulfillment_status || "").toUpperCase();
     if (fs === "FULFILLED") return true;
-    const variants = Array.isArray(order.variants) ? order.variants : [];
-    const active = variants.filter(v => !_isRemovedVariant(v));
+    const active = orderUnits.filter((variant) => variant.status !== "removed");
     if (active.length === 0) return false;
-    const byVariants = active.every((v) => {
-      const st = String(v?.status || "").toLowerCase();
-      if (st === "fulfilled") return true;
-      const uq = Number(v?.unfulfilled_qty);
-      return Number.isFinite(uq) ? uq <= 0 : false;
-    });
+    const byVariants = active.every((variant) => variant.status === "fulfilled");
     const byFO = Array.isArray(foData?.orders) && foData.orders.length > 0 && foData.orders.every((g) =>
       ((g?.lineItems || []).every((li) => Number(li?.remainingQuantity || 0) <= 0))
     );
     return byVariants || byFO;
-  }, [order, foData, _isRemovedVariant, isOrderCancelled]);
+  }, [order, orderUnits, foData, isOrderCancelled]);
 
   const screenshotTimeline = useMemo(() => {
     const text = String(order?.note || "");
@@ -1000,26 +1033,12 @@ export default function OrderLookup(){
   /* ── Guide logic ─────────────────────────────────────── */
 
   const unfulfilledItems = useMemo(() => {
-    if (!Array.isArray(order?.variants)) return [];
-    return order.variants.filter(v => {
-      if (_isRemovedVariant(v)) return false;
-      const st = String(v?.status || "").toLowerCase();
-      if (st === "fulfilled") return false;
-      const uq = Number(v?.unfulfilled_qty);
-      return Number.isFinite(uq) ? uq > 0 : true;
-    });
-  }, [order, _isRemovedVariant]);
+    return orderUnits.filter((v) => v.status === "unfulfilled");
+  }, [orderUnits]);
 
   const fulfilledItems = useMemo(() => {
-    if (!Array.isArray(order?.variants)) return [];
-    return order.variants.filter(v => {
-      if (_isRemovedVariant(v)) return false;
-      const st = String(v?.status || "").toLowerCase();
-      if (st === "fulfilled") return true;
-      const uq = Number(v?.unfulfilled_qty);
-      return Number.isFinite(uq) ? uq <= 0 : false;
-    });
-  }, [order, _isRemovedVariant]);
+    return orderUnits.filter((v) => v.status === "fulfilled");
+  }, [orderUnits]);
 
   const guideSteps = useMemo(() => {
     if (!order) return [];
@@ -1455,19 +1474,23 @@ export default function OrderLookup(){
       const idx = Number(key.split("-")[1]);
       const item = unfulfilledItems[idx];
       if (!item) return null;
-      const list = foData.mapByVariant[item.id] || [];
+      const isFirstVariantUnit = unfulfilledItems.findIndex((unit) => unit.id === item.id) === idx;
+      const list = isFirstVariantUnit ? foData.mapByVariant[item.id] || [] : [];
       const isItemActive = guideActive && activeGuideSection === key;
 
       return renderGuideFrame({
         title: `Item ${idx + 1}`,
-        subtitle: "Image, quantity, price, options, and fulfillment rows.",
+        subtitle: "Each card represents one item. Verify the image, price, and options.",
         children: (
           <div className="rounded-[24px] overflow-hidden border border-gray-200 shadow-sm">
+            <div className="relative">
             {item.image ? (
               <img src={item.image} alt="" className="w-full max-h-[46vh] object-contain bg-white" />
             ) : (
               <div className="w-full h-72 bg-gray-100 border-b border-gray-200" />
             )}
+            <PendingPurchaseOrderBadge variant={item} />
+            </div>
             <div className="px-4 pt-4 flex flex-wrap items-center gap-2">
               <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow' : ''}`}>
                 Price: {(() => {
@@ -1478,7 +1501,7 @@ export default function OrderLookup(){
                 })()}
               </span>
               <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-purple-100 text-purple-800 border border-purple-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow guide-badge-delay-1' : ''}`}>
-                Qty: {item.unfulfilled_qty ?? item.qty}
+                Item {item.unitIndex + 1} of {item.unitCount}
               </span>
             </div>
             <div className="p-4">
@@ -1498,9 +1521,10 @@ export default function OrderLookup(){
                     {list.map((li) => {
                       const checked = foData.selectedLineItemIds.has(li.id);
                       return (
-                        <label key={li.id} className="flex items-center gap-2 text-sm">
+                        <label key={li.id} className="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg border border-gray-200 px-2 py-2 text-sm">
                           <input
                             type="checkbox"
+                            className="h-5 w-5 shrink-0 accent-blue-600"
                             checked={checked}
                             onChange={(e)=>{
                               setFoData(prev => {
@@ -1511,7 +1535,7 @@ export default function OrderLookup(){
                             }}
                           />
                           <span className="flex-1 truncate">
-                            {li.title || item.title || item.sku || "Item"} — remaining: {li.remainingQuantity}
+                            Fulfill {li.remainingQuantity} {Number(li.remainingQuantity) === 1 ? "item" : "items"}: {li.title || item.title || item.sku || "Item"}
                           </span>
                         </label>
                       );
@@ -1519,6 +1543,7 @@ export default function OrderLookup(){
                   </div>
                 </div>
               )}
+              {!isFirstVariantUnit && (foData.mapByVariant[item.id] || []).length > 0 && <p className="mt-3 text-xs text-gray-500">Fulfillment selection is shared with the first card for this variant.</p>}
             </div>
           </div>
         ),
@@ -2128,7 +2153,7 @@ export default function OrderLookup(){
                       const isItemActive = guideActive && activeGuideSection === `item-${i}`;
                       return (
                         <li
-                          key={v.id || i}
+                          key={v.displayKey}
                           ref={registerSection(`item-${i}`)}
                           className={`py-2 transition-all duration-500 rounded-xl ${sectionCls(`item-${i}`)}`}
                         >
@@ -2136,11 +2161,14 @@ export default function OrderLookup(){
                             <div className="text-[10px] font-bold text-blue-600 uppercase tracking-wider mb-1 px-1 guide-label-animate">Step {guideStepIndex + 1}: Item {i + 1}</div>
                           )}
                           <div className="rounded-xl overflow-hidden border border-gray-200 shadow-sm">
+                            <div className="relative">
                             {v.image ? (
-                              <img src={v.image} alt="" className="w-full max-h-96 object-contain bg-white" />
+                              <img src={v.image} alt={v.title || v.sku || "Order item"} loading={i > 0 ? "lazy" : "eager"} decoding="async" className="w-full max-h-96 object-contain bg-white" />
                             ) : (
                               <div className="w-full h-60 rounded-md bg-gray-100 border-b border-gray-200" />
                             )}
+                            <PendingPurchaseOrderBadge variant={v} />
+                            </div>
                             <div className="px-3 pt-2 flex flex-wrap items-center gap-2">
                               <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow' : ''}`}>
                                 Price: {(() => {
@@ -2151,7 +2179,7 @@ export default function OrderLookup(){
                                 })()}
                               </span>
                               <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-purple-100 text-purple-800 border border-purple-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow guide-badge-delay-1' : ''}`}>
-                                Qty: {v.unfulfilled_qty ?? v.qty}
+                                Item {v.unitIndex + 1} of {v.unitCount}
                               </span>
                             </div>
                             <div className="p-3 flex items-start justify-between gap-3">
@@ -2166,6 +2194,9 @@ export default function OrderLookup(){
                                   </span>
                                 </div>
                                 {(() => {
+                                  if (unfulfilledItems.findIndex((unit) => unit.id === v.id) !== i) {
+                                    return (foData.mapByVariant[v.id] || []).length > 0 ? <p className="mt-2 text-xs text-gray-500">Fulfillment selection is shared with the first card for this variant.</p> : null;
+                                  }
                                   const list = foData.mapByVariant[v.id] || [];
                                   if (!list.length) return null;
                                   return (
@@ -2175,9 +2206,10 @@ export default function OrderLookup(){
                                         {list.map((li) => {
                                           const checked = foData.selectedLineItemIds.has(li.id);
                                           return (
-                                            <label key={li.id} className="flex items-center gap-2 text-xs">
+                                            <label key={li.id} className="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg border border-gray-200 px-2 py-2 text-xs">
                                               <input
                                                 type="checkbox"
+                                                className="h-5 w-5 shrink-0 accent-blue-600"
                                                 checked={checked}
                                                 onChange={(e)=>{
                                                   setFoData(prev => {
@@ -2188,7 +2220,7 @@ export default function OrderLookup(){
                                                 }}
                                               />
                                               <span className="flex-1 truncate">
-                                                {li.title || v.title || v.sku || "Item"} — remaining: {li.remainingQuantity}
+                                                Fulfill {li.remainingQuantity} {Number(li.remainingQuantity) === 1 ? "item" : "items"}: {li.title || v.title || v.sku || "Item"}
                                               </span>
                                             </label>
                                           );
@@ -2215,10 +2247,10 @@ export default function OrderLookup(){
                   </div>
                   <ul className="space-y-3">
                     {fulfilledItems.map((v, i) => (
-                      <li key={v.id || `fulfilled-${i}`} className="flex gap-3 p-3 rounded-xl bg-gray-50 border border-gray-200 opacity-75">
+                      <li key={v.displayKey} className="flex gap-3 p-3 rounded-xl bg-gray-50 border border-gray-200 opacity-75">
                         <div className="w-16 h-16 flex-shrink-0 bg-white rounded-lg border border-gray-200 overflow-hidden">
                           {v.image ? (
-                            <img src={v.image} alt="" className="w-full h-full object-contain" />
+                            <img src={v.image} alt={v.title || v.sku || "Fulfilled item"} loading="lazy" decoding="async" className="w-full h-full object-contain" />
                           ) : (
                             <div className="w-full h-full bg-gray-100" />
                           )}
@@ -2229,7 +2261,7 @@ export default function OrderLookup(){
                             {v.color && <span className="px-1.5 py-0.5 bg-gray-200 rounded">Color: {v.color}</span>}
                             {v.size && <span className="px-1.5 py-0.5 bg-gray-200 rounded">Size: {v.size}</span>}
                           </div>
-                          <div className="mt-1.5 flex items-center justify-between">
+                          <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
                             <span className="text-xs font-semibold text-gray-700">
                               {(() => {
                                 try {
@@ -2237,8 +2269,7 @@ export default function OrderLookup(){
                                   return `${Number(v.unit_price).toFixed(2)}${v.currency_code ? ` ${v.currency_code}` : ""}`;
                                 } catch { return "—"; }
                               })()}
-                              <span className="text-gray-400 font-normal mx-1">×</span>
-                              {v.qty}
+                              <span className="ml-2 text-[10px] font-normal text-gray-500">Item {v.unitIndex + 1} of {v.unitCount}</span>
                             </span>
                             <span className="text-[10px] font-bold text-green-700 bg-green-50 px-2 py-0.5 rounded-full border border-green-100">Fulfilled</span>
                           </div>

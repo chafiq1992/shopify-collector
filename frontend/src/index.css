@@ -2,6 +2,42 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Leave a reliable preview of the next unit at every viewport width. */
+.collector-item { flex-basis: calc(100% - 44px); }
+@media (min-width: 640px) { .collector-item { flex-basis: 64%; } }
+@media (min-width: 1024px) { .collector-item { flex-basis: 58%; } }
+.collector-items { scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+.collector-actions { padding-bottom: max(0.5rem, env(safe-area-inset-bottom)); }
+.collector-actions button { min-height: 44px; }
+.collector-shell { padding-top: env(safe-area-inset-top); padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+.collector-store select { min-width: 0; max-width: 100%; }
+.collector-selection { scrollbar-width: none; }
+.collector-selection::-webkit-scrollbar { display: none; }
+.collector-shell header .overflow-x-auto { scrollbar-width: thin; }
+@media (max-height: 550px) {
+  .collector-header { max-height: 28dvh; overflow-y: auto; }
+  .collector-actions > div { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+  .collector-actions > div > div:first-child { grid-column: 1 / -1; margin-bottom: 0; }
+  .collector-actions > div > div:first-child { display: flex; min-width: 0; align-items: center; }
+  .collector-actions > div > div:first-child > button { flex: 0 0 25%; }
+  .collector-actions > div > div:first-child > div { flex: 1; min-width: 0; }
+  .collector-actions > div > div:last-child { margin-top: 0; }
+}
+@media (max-width: 639px) {
+  .collector-shell header button { min-height: 40px; }
+  .collector-shell header button[aria-label] { min-width: 36px; }
+  .collector-actions button { min-height: 44px; }
+  .collector-shell [aria-label="Order tags"] button { min-height: 32px; }
+  .collector-item button { min-height: 44px; }
+  .collector-shell input:not([type="checkbox"]) { font-size: 16px; }
+  dialog input { font-size: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .collector-items { scroll-behavior: auto; }
+}
+
+
+
 /* -----------------------------
    Action overlays (mobile-safe)
 -------------------------------- */

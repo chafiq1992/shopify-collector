@@ -9,6 +9,7 @@ import { persistStoreSelection, readCurrentStore } from "./lib/stores";
 import { DELIVERY_COMPANIES } from "./lib/deliveryCompanies";
 
 const OrderCard = React.lazy(() => import('./components/OrderCard.jsx'));
+const OrderTagEditor = React.lazy(() => import('./components/OrderTagEditor.jsx'));
 const PresetSettingsModal = React.lazy(() => import('./components/PresetSettingsModal.jsx'));
 const ProfilePickerModal = React.lazy(() => import('./components/ProfilePickerModal.jsx'));
 
@@ -19,34 +20,39 @@ const ProfilePickerModal = React.lazy(() => import('./components/ProfilePickerMo
  */
 
 const API = {
-  async getOrders(params = {}) {
+  async getOrders(params = {}, signal) {
     const q = new URLSearchParams(params).toString();
-    const res = await authFetch(`/api/orders?${q}`, { headers: authHeaders() });
-    return res.json();
+    const res = await authFetch(`/api/orders?${q}`, { headers: authHeaders(), signal });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `Could not load orders (${res.status}). Please retry.`);
+    return data;
   },
   async addTag(orderId, tag, store) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    await authFetch(`/api/orders/${encodeURIComponent(orderId)}/add-tag${qs}`, {
+    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/add-tag${qs}`, {
       method: 'POST',
       headers: authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ tag })
     });
+    if (!res.ok) throw new Error(`Could not add tag (${res.status}). Please retry.`);
   },
   async removeTag(orderId, tag, store) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    await authFetch(`/api/orders/${encodeURIComponent(orderId)}/remove-tag${qs}`, {
+    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/remove-tag${qs}`, {
       method: 'POST',
       headers: authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ tag })
     });
+    if (!res.ok) throw new Error(`Could not remove tag (${res.status}). Please retry.`);
   },
   async appendNote(orderId, append, store) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
-    await authFetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
+    const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/append-note${qs}`, {
       method: 'POST',
       headers: authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ append })
     });
+    if (!res.ok) throw new Error(`Could not save order note (${res.status}). Please retry.`);
   },
   async markCollected(orderId, orderNumber, store, metadata = {}) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
@@ -219,6 +225,7 @@ export default function App(){
   const [orders, setOrders] = useState([]);
   const [tags, setTags] = useState([]);
   const [apiError, setApiError] = useState(null);
+  const [editingTag, setEditingTag] = useState(null);
   const [index, setIndex] = useState(0);
   const [search, setSearch] = useState("");
   const [productIdFilter, setProductIdFilter] = useState("");
@@ -310,8 +317,12 @@ export default function App(){
 
   const wsRef = useRef(null);
   const requestIdRef = useRef(0);
+  const loadControllerRef = useRef(null);
   const currentOrderIdRef = useRef(null);
   const wsReloadTimerRef = useRef(null);
+  const inventoryRefreshRef = useRef(() => {});
+  const liveStoreRef = useRef(store);
+  liveStoreRef.current = store;
   const recentSelfActionRef = useRef(new Map());
   function handleLogout(){
     clearAuth();
@@ -400,6 +411,9 @@ export default function App(){
 
   async function load({ preserveIndex = false } = {}){
     const reqId = ++requestIdRef.current;
+    loadControllerRef.current?.abort();
+    const controller = new AbortController();
+    loadControllerRef.current = controller;
     const prevOrderId = preserveIndex ? currentOrderIdRef.current : null;
     setLoading(true);
     setApiError(null);
@@ -408,6 +422,7 @@ export default function App(){
       setOrders([]);
       return;
     }
+    try {
     const codDatesCSV = computeCodDatesCSV(codFromDate, codToDate);
     const usingStockProfile = !!(profile && profile.id === 'stock');
     const isGlobalSearch = (!usingStockProfile && !statusFilter && (search || '').trim() && !showProductFilter);
@@ -447,7 +462,7 @@ export default function App(){
       store,
       // Skip collect ranking when forcing product old->new sort
       disable_collect_ranking: (!!(productIdFilter||"").trim() && productSortOldToNew) ? true : false,
-    });
+    }, controller.signal);
     if (reqId !== requestIdRef.current) return; // stale response
     if (data && data.error){
       setApiError(String(data.error));
@@ -459,7 +474,10 @@ export default function App(){
       try {
         let next = data.nextCursor || null;
         let hasNext = (data.pageInfo || {}).hasNextPage || false;
+        const seenCursors = new Set();
         while (hasNext && next) {
+          if (seenCursors.has(next)) throw new Error('Order pagination stalled. Please retry.');
+          seenCursors.add(next);
           const page = await API.getOrders({
             limit: perPage,
             cursor: next,
@@ -477,7 +495,7 @@ export default function App(){
             base_query: baseQuery,
             store,
             disable_collect_ranking: (isProductMode && productSortOldToNew) ? true : false,
-          });
+          }, controller.signal);
           if (reqId !== requestIdRef.current) return; // stale response
           const more = page.orders || [];
           ords = ords.concat(more);
@@ -488,8 +506,13 @@ export default function App(){
         // Since we loaded all, disable further paging
         data.pageInfo = { hasNextPage: false };
         data.nextCursor = null;
-      } catch {}
+      } catch (error) {
+        if (error.name === 'AbortError') throw error;
+        setApiError(error.message || 'Some orders could not be loaded. Please retry.');
+      }
     }
+    if (reqId !== requestIdRef.current || controller.signal.aborted) return;
+    ords = [...new Map(ords.map(order => [order.id, order])).values()];
     // Client-side exclusion for specific tags when enabled (non-Stock profile)
     if (!usingStockProfile && excludeStockTags){
       const disallowed = new Set(["btis", "en att b", "en att", "an att b2", "an att b3"]);
@@ -534,12 +557,18 @@ export default function App(){
     }
     setLoading(false);
     setTotalCount(pidFilter ? ords.length : (totalCountFromApi || ords.length));
+    } catch (error) {
+      if (reqId === requestIdRef.current && error.name !== 'AbortError') setApiError(error.message || 'Could not load orders. Please retry.');
+    } finally {
+      if (reqId === requestIdRef.current) setLoading(false);
+    }
   }
 
   async function loadMore(){
     if (loadingMore) return;
     if (!pageInfo?.hasNextPage || !nextCursor) return;
     setLoadingMore(true);
+    const reqId = requestIdRef.current;
     if (!auth?.access_token){
       setLoadingMore(false);
       return;
@@ -583,8 +612,10 @@ export default function App(){
         disable_collect_ranking: (isProductMode && productSortOldToNew) ? true : false,
       });
       const more = data.orders || [];
+      if (reqId !== requestIdRef.current) return;
       setOrders(prev => {
-        const merged = prev.concat(more);
+        const seen = new Set(prev.map(order => order.id));
+        const merged = prev.concat(more.filter(order => !seen.has(order.id)));
         if (productSortOldToNew && isProductMode){
           try { merged.sort((a,b) => sortOrdersByCodTagThenCreated(a, b, preset.collectPrefix)); } catch {}
         }
@@ -592,17 +623,16 @@ export default function App(){
       });
       setPageInfo(data.pageInfo || { hasNextPage: false });
       setNextCursor(data.nextCursor || null);
-    } catch {}
-    setLoadingMore(false);
+    } catch (error) {
+      if (reqId === requestIdRef.current) setApiError(error.message || 'Could not load more orders. Please retry.');
+    } finally { setLoadingMore(false); }
   }
 
-  useEffect(() => { load(); }, [statusFilter, tagFilter, codFromDate, codToDate, excludeOut, excludeStockTags, profile, stockFilter, store, reloadCounter, auth?.access_token]);
-
-  // Debounced search
+  // One debounced request handles filters and typing; cancel obsolete mobile requests.
   useEffect(() => {
-    const t = setTimeout(() => load(), 350);
-    return () => clearTimeout(t);
-  }, [search, auth?.access_token]);
+    const t = setTimeout(() => loadRef.current(), 250);
+    return () => { clearTimeout(t); loadControllerRef.current?.abort(); ++requestIdRef.current; };
+  }, [statusFilter, tagFilter, codFromDate, codToDate, excludeOut, excludeStockTags, profile, stockFilter, store, reloadCounter, search, auth?.access_token]);
 
   // Keep a ref to the latest load() so the WebSocket handler (mounted once)
   // always uses the freshest filter state — otherwise webhook-triggered reloads
@@ -614,15 +644,32 @@ export default function App(){
   useEffect(() => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const url = `${proto}://${location.host}/ws`;
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
+    let stopped = false;
+    let reconnectTimer;
+    let reconnectDelay = 1000;
+    let connectedBefore = false;
     const pendingIds = new Set();
-    ws.onmessage = (ev) => {
+    function connect() {
+      if (stopped) return;
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+      ws.onopen = () => {
+        reconnectDelay = 1000;
+        if (connectedBefore && document.visibilityState !== 'hidden') loadRef.current({ preserveIndex: true });
+        connectedBefore = true;
+      };
+      ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
+        if (msg.store && msg.store !== liveStoreRef.current) return;
+        if (msg.type === 'inventory.purchase_orders_changed') {
+          inventoryRefreshRef.current();
+          return;
+        }
         if (
           msg.type === "order.tag_added" ||
           msg.type === "order.tag_removed" ||
+          msg.type === "order.tag_replaced" ||
           msg.type === "order.note_updated" ||
           msg.type === "order.fulfilled"
         ){
@@ -654,12 +701,19 @@ export default function App(){
         }
       } catch {}
     };
-    ws.onclose = () => {
-      setTimeout(() => { if (wsRef.current === ws) wsRef.current = null; }, 1000);
-    };
+      ws.onclose = () => {
+        if (stopped) return;
+        wsRef.current = null;
+        reconnectTimer = setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(30000, reconnectDelay * 2);
+      };
+    }
+    connect();
     return () => {
+      stopped = true;
+      clearTimeout(reconnectTimer);
       try { if (wsReloadTimerRef.current) clearTimeout(wsReloadTimerRef.current); } catch {}
-      ws.close();
+      wsRef.current?.close();
     };
   }, []);
 
@@ -671,6 +725,53 @@ export default function App(){
   const [totalCount, setTotalCount] = useState(0);
   const total = orders.length;
   const current = orders[index] || null;
+
+  // Refresh only the visible order's inventory fields. Keep collection, tags and
+  // multi-order selections intact when returning to the app or receiving a PO.
+  useEffect(() => {
+    if (!current?.id || !auth?.access_token) return;
+    let cancelled = false;
+    let inFlight = false;
+    let refreshAgain = false;
+    const controller = new AbortController();
+    const orderId = current.id;
+    async function refreshInventory() {
+      if (cancelled || document.visibilityState === 'hidden') return;
+      if (inFlight) { refreshAgain = true; return; }
+      inFlight = true;
+      try {
+        const data = await API.getOrders({ store, search: current.number, status_filter: 'all', limit: 5 }, controller.signal);
+        const fresh = (data.orders || []).find(order => order.id === orderId);
+        if (cancelled || !fresh) return;
+        const byId = new Map((fresh.variants || []).map(variant => [variant.line_item_id || variant.id, variant]));
+        setOrders(previous => previous.map(order => order.id !== orderId ? order : {
+          ...order,
+          variants: order.variants.map(variant => {
+            const latest = byId.get(variant.line_item_id || variant.id);
+            return latest ? { ...variant, pending_purchase_orders: latest.pending_purchase_orders || [], on_hand_quantity: latest.on_hand_quantity } : variant;
+          }),
+        }));
+      } catch { /* Keep last confirmed stock information while offline. */ }
+      finally {
+        inFlight = false;
+        if (refreshAgain && !cancelled) { refreshAgain = false; refreshInventory(); }
+      }
+    }
+    inventoryRefreshRef.current = refreshInventory;
+    const timer = setInterval(refreshInventory, 60000);
+    window.addEventListener('focus', refreshInventory);
+    window.addEventListener('online', refreshInventory);
+    document.addEventListener('visibilitychange', refreshInventory);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearInterval(timer);
+      inventoryRefreshRef.current = () => {};
+      window.removeEventListener('focus', refreshInventory);
+      window.removeEventListener('online', refreshInventory);
+      document.removeEventListener('visibilitychange', refreshInventory);
+    };
+  }, [current?.id, current?.number, store, auth?.access_token]);
 
   function gotoNext(){
     setIndex(i => {
@@ -813,17 +914,22 @@ export default function App(){
   }
 
   return (
-    <div className="min-h-screen w-full bg-gray-50 text-gray-900 overflow-hidden">
+    <div className="collector-shell flex h-dvh min-h-0 w-full flex-col overflow-hidden bg-slate-50 text-slate-900">
       <ActionOverlay state={overlay} />
-      <header className="sticky top-0 z-40 bg-white/80 backdrop-blur border-b border-gray-200">
+      <header className="collector-header relative z-40 shrink-0 bg-white/95 border-b border-gray-200">
         {loading && (
           <div className="progress-track">
             <div className="progress-thumb"></div>
           </div>
         )}
-        <div className="max-w-5xl mx-auto px-4 py-1 flex items-center gap-2">
-          <PackageSearch className="w-5 h-5" />
-          <StorePicker value={store} onChange={(next)=>{ vibrate(10); setStore(next); }} className="ml-3" />
+        <div className="max-w-5xl mx-auto px-3 py-1 flex min-w-0 items-center gap-1 sm:px-4 sm:gap-2">
+          <PackageSearch className="hidden h-5 w-5 shrink-0 sm:block" />
+          <StorePicker value={store} onChange={(next)=>{
+            vibrate(10); setEditingTag(null);
+            let saved = [];
+            try { const parsed = JSON.parse(localStorage.getItem(`orderCollectorSelected_${next}`) || '[]'); if (Array.isArray(parsed)) saved = parsed; } catch {}
+            setSelectedOrderNumbers(new Set(saved)); setSelectedOutMap({}); setOrders([]); setIndex(0); setStore(next);
+          }} className="collector-store min-w-0 max-w-[40%] sm:max-w-none" />
           <div className="ml-auto flex items-center gap-2">
             <button aria-label="Open Inventory Helper" title="Inventory Helper" onClick={()=>{ vibrate(10); navigate('/inventory-helper'); }} className="p-1.5 rounded-full hover:bg-gray-100">
               <PackageOpen className="w-4 h-4 text-indigo-600" />
@@ -859,11 +965,9 @@ export default function App(){
         <div className="max-w-5xl mx-auto px-4 pb-1 flex flex-col gap-1">
           {apiError && (
             <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-xl px-3 py-2 text-xs">
-              <div className="font-semibold">Backend error</div>
+              <div className="font-semibold">Orders could not be refreshed</div>
               <div className="mt-0.5">{apiError}</div>
-              <div className="mt-1 text-[11px] text-amber-800/80">
-                Usually this means the store has not been connected yet. Set <span className="font-mono">SHOPIFY_CLIENT_ID</span>, <span className="font-mono">SHOPIFY_CLIENT_SECRET</span>, and <span className="font-mono">SHOPIFY_STORE_KEYS</span>, then connect it in Shopify Connect.
-              </div>
+              <button type="button" className="mt-1 min-h-9 font-semibold underline" onClick={()=>load({preserveIndex:true})}>Retry</button>
             </div>
           )}
           <div className="flex items-center gap-2 bg-gray-100 rounded-xl px-3 py-1">
@@ -872,7 +976,7 @@ export default function App(){
               value={search}
               onChange={(e)=>setSearch(e.target.value)}
               placeholder="Search order # or SKU"
-              className="bg-transparent outline-none w-full text-xs"
+              className="min-h-9 min-w-0 bg-transparent outline-none w-full text-base sm:text-sm"
             />
           </div>
           <div className="flex items-center gap-1 overflow-x-auto flex-nowrap -mx-4 px-4">
@@ -976,24 +1080,26 @@ export default function App(){
           </div>
           {/* Date range bar: compact layout without preview pill */}
           {(!profile || profile.id !== 'stock') && (
-            <div className="bg-white border border-gray-200 rounded-xl px-3 py-2">
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] uppercase tracking-wide text-gray-400">Date range</span>
+            <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+              <div className="mb-1 text-[11px] uppercase tracking-wide text-gray-400">Date range</div>
+              <div className="grid min-w-0 grid-cols-[1fr_auto_1fr] items-center gap-2">
                 <input
                   type="date"
                   value={codFromDate}
                   onChange={(e)=>{ setCodFromDate(e.target.value); }}
-                  className="text-xs border border-gray-300 rounded px-2 py-0.5"
+                  aria-label="From date"
+                  className="min-h-11 min-w-0 w-full text-sm border border-gray-300 rounded-lg px-2 py-1"
                 />
                 <span className="text-[11px] uppercase tracking-wide text-gray-400">to</span>
                 <input
                   type="date"
                   value={codToDate}
                   onChange={(e)=>{ setCodToDate(e.target.value); }}
-                  className="text-xs border border-gray-300 rounded px-2 py-0.5"
+                  aria-label="To date"
+                  className="min-h-11 min-w-0 w-full text-sm border border-gray-300 rounded-lg px-2 py-1"
                 />
               </div>
-              <div className="mt-2 flex items-center gap-3">
+              <div className="mt-1 flex flex-wrap items-center gap-2 pb-1">
                 <button
                   className="inline-flex items-center px-3 py-1 rounded-full text-[11px] font-semibold bg-blue-600 text-white active:scale-[.98]"
                   onClick={()=>{ vibrate(15); setReloadCounter(c=>c+1); }}
@@ -1011,13 +1117,13 @@ export default function App(){
             </div>
           )}
           {showProductFilter && (
-            <div className="flex items-center gap-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
               <span className="text-[11px] uppercase tracking-wide text-gray-400">Product ID</span>
               <input
                 value={productIdFilter}
                 onChange={(e)=>setProductIdFilter(e.target.value)}
                 placeholder="Paste Shopify GID or numeric ID"
-                className="text-xs border border-gray-300 rounded px-2 py-0.5 w-60"
+                className="min-h-11 min-w-0 flex-1 text-base border border-gray-300 rounded-lg px-2 py-1"
               />
               <label className="ml-2 inline-flex items-center gap-1 text-[11px] text-gray-700">
                 <input
@@ -1040,7 +1146,8 @@ export default function App(){
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-4 pb-48">
+      <main className="min-h-0 w-full flex-1 overflow-y-auto overscroll-y-contain px-3 py-3 sm:px-4">
+        <div className="mx-auto max-w-5xl">
         {current ? (
           <div className="relative">
             <Suspense fallback={<div className="text-center py-10 text-gray-500">Loading…</div>}>
@@ -1057,6 +1164,7 @@ export default function App(){
               total={total}
               selectedForPrint={selectedOrderNumbers.has(current.number)}
               onToggleSelectOrder={()=>toggleOrderSelected(current.number)}
+              onEditTag={(order, tag)=>setEditingTag({ order, tag, store })}
               onCopyProductId={async (pid)=>{
                 try {
                   if (!pid) return;
@@ -1079,22 +1187,24 @@ export default function App(){
             <p>No orders match these filters.</p>
           </div>
         )}
+        </div>
       </main>
-      <div className="fixed bottom-0 inset-x-0 z-40 border-t border-gray-200 bg-white/90 backdrop-blur">
-        <div className="max-w-5xl mx-auto px-4 py-3">
+      <div className="collector-actions relative z-40 shrink-0 border-t border-slate-200 bg-white shadow-[0_-4px_20px_rgba(15,23,42,0.04)]">
+        <div className="max-w-5xl mx-auto px-3 pt-2 sm:px-4">
           <div className="grid grid-cols-1 gap-2 mb-2">
             <button onClick={()=>setShowConfirm('print')} disabled={printBusy} className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-xl text-white text-sm bg-indigo-600 hover:bg-indigo-700 active:scale-[.98] shadow-sm disabled:opacity-60">
               <Printer className="w-4 h-4"/> <span className="font-semibold">{printBusy ? 'Printing…' : `Print${selectedOrderNumbers.size ? ` (${selectedOrderNumbers.size})` : ''}`}</span>
             </button>
             {printMsg && <div className="text-sm text-gray-600 text-center">{printMsg}</div>}
             {selectedOrderNumbers.size > 0 && (
-              <div className="text-xs text-gray-700 text-center">
-                <span className="font-medium">Selected:</span> {selectedOrderNumbers.size} order{selectedOrderNumbers.size>1?'s':''}
-                <div className="mt-1 overflow-x-auto whitespace-nowrap px-1">
+              <div className="flex min-w-0 items-center gap-2 text-xs text-slate-600">
+                <span className="shrink-0 font-semibold">{selectedOrderNumbers.size} selected</span>
+                <div className="collector-selection min-w-0 flex-1 overflow-x-auto whitespace-nowrap py-1">
                   {Array.from(selectedOrderNumbers).map(n => (
-                    <span key={n} className="inline-block mr-1 px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200">{n}</span>
+                    <button key={n} type="button" onClick={()=>toggleOrderSelected(n)} aria-label={`Deselect order ${n}`} className="mr-1 inline-flex items-center gap-1 rounded-md border border-blue-100 bg-blue-50 px-2 py-1 font-medium text-blue-700">{n}<span aria-hidden="true">×</span></button>
                   ))}
                 </div>
+                <button type="button" onClick={()=>setSelectedOrderNumbers(new Set())} className="shrink-0 rounded-md px-2 py-1 text-xs font-semibold text-slate-500 hover:bg-slate-100">Clear</button>
               </div>
             )}
           </div>
@@ -1116,17 +1226,31 @@ export default function App(){
           </div>
         </div>
       </div>
+      {editingTag && <Suspense fallback={null}><OrderTagEditor
+        key={`${editingTag.store}:${editingTag.order.id}:${editingTag.tag}`}
+        {...editingTag}
+        suggestions={tags}
+        onClose={()=>setEditingTag(null)}
+        onReconciled={(orderId, orderTags)=>setOrders(previous=>previous.map(order=>order.id === orderId ? {...order, tags: orderTags} : order))}
+        onSaved={(orderId, oldTag, newTag, data)=>{
+          recentSelfActionRef.current.set(String(orderId), Date.now());
+          setOrders(previous=>previous.map(order=>order.id === orderId ? { ...order, tags: data.tags || [...new Set((order.tags || []).map(tag=>tag === oldTag ? newTag : tag))] } : order));
+          setTags(previous=>[...new Set([...previous, newTag])].sort());
+          setPrintMsg('Tag updated');
+          setTimeout(()=>setPrintMsg(message=>message === 'Tag updated' ? null : message), 2500);
+        }}
+      /></Suspense>}
       {showConfirm && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center">
-          <div className="w-full max-w-sm rounded-2xl bg-white shadow-lg border border-gray-200 p-4">
-            <h3 className="text-lg font-semibold mb-2">{showConfirm === 'collected' ? 'Confirm Collected' : showConfirm === 'out' ? 'Confirm OUT' : 'Confirm Print'}</h3>
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="collector-confirm-title" className="flex max-h-[calc(100dvh-2rem)] w-full max-w-sm flex-col rounded-2xl bg-white shadow-lg border border-gray-200 p-4">
+            <h3 id="collector-confirm-title" className="shrink-0 text-lg font-semibold mb-2">{showConfirm === 'collected' ? 'Confirm Collected' : showConfirm === 'out' ? 'Confirm OUT' : 'Confirm Print'}</h3>
             {(() => {
               const selected = Array.from(selectedOrderNumbers || []);
               const targets = selected.length > 0 ? orders.filter(o => selected.includes(o.number)) : (current ? [current] : []);
-              const targetNumbers = targets.map(o => o.number);
+              const targetNumbers = showConfirm === 'print' && selected.length > 0 ? selected : targets.map(o => o.number);
               const missingOut = showConfirm === 'out' ? targets.filter(o => !(selectedOutMap[o.id] && selectedOutMap[o.id].size > 0)).map(o => o.number) : [];
               return (
-                <div className="text-sm text-gray-600 mb-4">
+                <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain text-sm text-gray-600 mb-4">
                   {showConfirm === 'collected' && (
                     <p>{`Mark ${targetNumbers.length} order${targetNumbers.length>1?'s':''} as Collected and add tag pc?`}</p>
                   )}
@@ -1136,6 +1260,7 @@ export default function App(){
                   {showConfirm === 'print' && (
                     <p>{`Print ${targetNumbers.length} order${targetNumbers.length>1?'s':''}?`}</p>
                   )}
+                  {showConfirm !== 'print' && selected.length > targets.length && <p className="mt-2 text-xs text-amber-700">{selected.length - targets.length} selected orders outside the current filters will remain selected.</p>}
                   {targetNumbers.length > 0 && (
                     <div className="mt-2 flex gap-1 flex-wrap">
                       {targetNumbers.map(n => (
@@ -1151,8 +1276,8 @@ export default function App(){
                 </div>
               );
             })()}
-            <div className="flex justify-end gap-3">
-              <button onClick={()=>setShowConfirm(null)} className="px-4 py-2 rounded-xl border border-gray-300 text-sm font-medium hover:bg-gray-50">Cancel</button>
+            <div className="flex shrink-0 justify-end gap-3">
+              <button onClick={()=>setShowConfirm(null)} className="min-h-11 px-4 py-2 rounded-xl border border-gray-300 text-sm font-medium hover:bg-gray-50">Cancel</button>
               <button
                 onClick={async ()=>{
                   const selected = Array.from(selectedOrderNumbers || []);
@@ -1162,7 +1287,7 @@ export default function App(){
                     if (actionBusy) return;
                     if (showConfirm === 'collected'){
                       await runCollected(targets, { source: selected.length > 0 ? "bulk" : "single", afterSingle: selected.length === 0 });
-                      if (selected.length > 0) setSelectedOrderNumbers(new Set());
+                      if (selected.length > 0) setSelectedOrderNumbers(previous=>new Set([...previous].filter(number=>!targets.some(order=>order.number === number))));
                     } else if (showConfirm === 'out'){
                       // Only process orders with at least one selected variant
                       const processable = targets.filter(o => (selectedOutMap[o.id] && selectedOutMap[o.id].size > 0));
@@ -1175,9 +1300,9 @@ export default function App(){
                         return { order: o, titles };
                       });
                       await runOut(list, { afterSingle: selected.length === 0 });
-                      if (selected.length > 0) setSelectedOrderNumbers(new Set());
+                      if (selected.length > 0) setSelectedOrderNumbers(previous=>new Set([...previous].filter(number=>!processable.some(order=>order.number === number))));
                     } else if (showConfirm === 'print'){
-                      const nums = targets.map(o => o.number);
+                      const nums = selected.length > 0 ? selected : targets.map(o => o.number);
                       await runPrint(nums);
                     }
                   } catch (e){
@@ -1185,7 +1310,7 @@ export default function App(){
                     try { alert(e?.message || "Action failed"); } catch {}
                   }
                 }}
-                className={`px-4 py-2 rounded-xl text-white text-sm font-semibold ${showConfirm === 'collected' ? 'bg-green-600 hover:bg-green-700' : showConfirm === 'out' ? 'bg-red-600 hover:bg-red-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                className={`min-h-11 px-4 py-2 rounded-xl text-white text-sm font-semibold ${showConfirm === 'collected' ? 'bg-green-600 hover:bg-green-700' : showConfirm === 'out' ? 'bg-red-600 hover:bg-red-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}
               >Confirm</button>
             </div>
           </div>
@@ -1420,5 +1545,3 @@ const SmallChip = React.memo(function SmallChip({ label, active, onClick }){
     </button>
   );
 });
-
- 

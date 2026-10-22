@@ -28,6 +28,17 @@ _ALLOWED_PHOTO_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 _TRANSFER_API_VERSION = os.environ.get("SHOPIFY_INVENTORY_API_VERSION", "2026-07").strip()
 
+
+async def _notify_purchase_orders_changed(store: str, transfer_id: Optional[str] = None) -> None:
+    """Refresh Collector only after the receiving transaction has committed."""
+    from .main import ORDERS_CACHE, manager
+    from .purchase_order_badges import invalidate_purchase_order_membership
+
+    if transfer_id:
+        invalidate_purchase_order_membership(store, transfer_id)
+    ORDERS_CACHE.clear()
+    await manager.broadcast({"type": "inventory.purchase_orders_changed", "store": store})
+
 _TRANSFER_LINE_ITEM_FIELDS = """
   id
   title
@@ -1067,6 +1078,7 @@ async def _sync_shopify_transfers_for_period(
         created += 1
 
     await db.commit()
+    await _notify_purchase_orders_changed(store_key)
     return created
 
 
@@ -1185,6 +1197,7 @@ async def create_receipt(
     )
     db.add(row)
     await db.commit()
+    await _notify_purchase_orders_changed(row.store_key, row.shopify_order_gid)
     return _serialize(await _loaded_receipt(db, row.id))
 
 
@@ -1221,6 +1234,7 @@ async def load_receipt_details(
     row.expected_items = int(payload.get("expected_items") or 0)
     row.shopify_details_loaded = True
     await db.commit()
+    await _notify_purchase_orders_changed(row.store_key, row.shopify_order_gid)
     return _serialize(await _loaded_receipt(db, row.id))
 
 
@@ -1242,6 +1256,7 @@ async def update_receipt_admin(
     if row.actual_items is not None:
         row.status = "pending"
     await db.commit()
+    await _notify_purchase_orders_changed(row.store_key, row.shopify_order_gid)
     return _serialize(await _loaded_receipt(db, row.id))
 
 
@@ -1334,6 +1349,7 @@ async def update_receipt_count(
     # accidentally turning a purchase order green before the final review.
     row.status = "pending"
     await db.commit()
+    await _notify_purchase_orders_changed(row.store_key, row.shopify_order_gid)
     result = _serialize(await _loaded_receipt(db, row.id))
     result["inventory_operations"] = operations
     return result
@@ -1361,6 +1377,7 @@ async def complete_receipt(
     row.counted_at = now
     row.finalized_at = now
     await db.commit()
+    await _notify_purchase_orders_changed(row.store_key, row.shopify_order_gid)
     return _serialize(await _loaded_receipt(db, row.id))
 
 
@@ -1376,6 +1393,7 @@ async def reopen_receipt(
     row.status = "pending"
     row.finalized_at = None
     await db.commit()
+    await _notify_purchase_orders_changed(row.store_key, row.shopify_order_gid)
     return _serialize(await _loaded_receipt(db, row.id))
 
 

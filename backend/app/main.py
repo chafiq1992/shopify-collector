@@ -1498,6 +1498,32 @@ async def shopify_graphql(
     raise HTTPException(status_code=502, detail=f"Shopify request failed: {last_exc}")
 
 
+PENDING_PURCHASE_ORDER_TIMEOUT_SECONDS = 3.0
+
+
+async def _enrich_orders_with_inventory(items: List["OrderDTO"], *, store: Optional[str]) -> None:
+    async def pending_purchase_orders():
+        if not HAVE_AUTH_DB or not SessionLocal:
+            return
+        try:
+            from .purchase_order_badges import enrich_orders_with_purchase_orders
+            from .inventory_helper_routes import _TRANSFER_API_VERSION
+            async with SessionLocal() as db:
+                await asyncio.wait_for(
+                    enrich_orders_with_purchase_orders(
+                        items, store=normalize_store_label(store), db=db,
+                        graphql=shopify_graphql, api_version=_TRANSFER_API_VERSION,
+                    ),
+                    timeout=PENDING_PURCHASE_ORDER_TIMEOUT_SECONDS,
+                )
+        except asyncio.TimeoutError:
+            logger.warning("Pending purchase-order enrichment timed out; using cached membership")
+        except Exception:
+            logger.warning("Pending purchase-order enrichment failed", exc_info=True)
+
+    await asyncio.gather(_enrich_orders_with_on_hand(items, store=store), pending_purchase_orders())
+
+
 async def _enrich_orders_with_on_hand(items: List["OrderDTO"], *, store: Optional[str]) -> None:
     """
     Populate OrderVariant.on_hand_quantity by querying InventoryItem inventoryLevels in batch.
@@ -1608,6 +1634,8 @@ class OrderVariant(BaseModel):
     currency_code: Optional[str] = None
     color: Optional[str] = None
     size: Optional[str] = None
+    pending_purchase_orders: List[Dict[str, Any]] = Field(default_factory=list)
+
 
 class OrderDTO(BaseModel):
     id: str
@@ -2818,7 +2846,7 @@ async def list_orders(
             pages += 1
         unique_tags = sorted({t for o in matches for t in (o.tags or [])})
         try:
-            await _enrich_orders_with_on_hand(matches, store=store)
+            await _enrich_orders_with_inventory(matches, store=store)
         except Exception:
             pass
         resp: Dict[str, Any] = {
@@ -2979,7 +3007,7 @@ async def list_orders(
 
         items = flattened[:limit]
         try:
-            await _enrich_orders_with_on_hand(items, store=store)
+            await _enrich_orders_with_inventory(items, store=store)
         except Exception:
             pass
         # Gather unique tags for chips and return with computed page info
@@ -3004,7 +3032,7 @@ async def list_orders(
     unique_tags = sorted({t for o in items for t in (o.tags or [])})
 
     try:
-        await _enrich_orders_with_on_hand(items, store=store)
+        await _enrich_orders_with_inventory(items, store=store)
     except Exception:
         pass
 
@@ -3037,6 +3065,11 @@ class TagPayload(BaseModel):
     # is not enough to decide which team's analytics should receive credit.
     source: Optional[str] = None
 
+class ReplaceTagPayload(BaseModel):
+    old_tag: str = Field(min_length=1, max_length=40)
+    new_tag: str = Field(min_length=1, max_length=40)
+    source: Optional[str] = None
+
 class OrderActionBody(BaseModel):
     order_number: Optional[str] = None
     store: Optional[str] = None
@@ -3044,6 +3077,17 @@ class OrderActionBody(BaseModel):
 
 
 # ---------- Shared Shopify helpers for tags/notes ----------
+async def _shopify_get_order_tags(order_gid: str, store: Optional[str]) -> List[str]:
+    data = await shopify_graphql(
+        "query CollectorOrderTags($id: ID!) { node(id: $id) { ... on Order { id tags } } }",
+        {"id": order_gid}, store=store,
+    )
+    node = data.get("node")
+    if not node:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return list(node.get("tags") or [])
+
+
 async def _shopify_add_tag(order_gid: str, tag: str, store: Optional[str]):
     mutation = """
     mutation AddTag($id: ID!, $tags: [String!]!) {
@@ -3393,6 +3437,80 @@ else:
         data = await _shopify_remove_tag(order_gid, payload.tag, store)
         await manager.broadcast({"type": "order.tag_removed", "id": order_gid, "tag": payload.tag})
         return {"ok": True, "result": data}
+
+@app.post("/api/orders/{order_gid:path}/replace-tag")
+async def replace_tag(
+    order_gid: str,
+    payload: ReplaceTagPayload,
+    store: Optional[str] = Query(None),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    old_tag, new_tag = payload.old_tag.strip(), payload.new_tag.strip()
+    if not old_tag or not new_tag:
+        raise HTTPException(status_code=400, detail="Enter a non-empty tag")
+    store_key = normalize_store_label(store)
+    tags = await _shopify_get_order_tags(order_gid, store_key)
+    existing_by_key = {tag.casefold(): tag for tag in tags}
+    original = existing_by_key.get(old_tag.casefold())
+    if original is None:
+        return JSONResponse(status_code=409, content={
+            "ok": False, "detail": "The original tag has changed. Refresh the order before editing it.",
+            "tags": tags,
+        })
+    if old_tag.casefold() == new_tag.casefold():
+        # Shopify considers these the same tag; removing either spelling would
+        # delete the original after the supposedly harmless casing edit.
+        return {"ok": True, "old_tag": original, "new_tag": original, "tags": tags}
+    old_tag = original
+    already_present = new_tag.casefold() in existing_by_key
+    if already_present:
+        new_tag = existing_by_key[new_tag.casefold()]
+    # Add first: a failed add must never remove the existing workflow tag.
+    # Separate additive mutations also preserve unrelated concurrent tags.
+    if not already_present:
+        await _shopify_add_tag(order_gid, new_tag, store_key)
+        tags.append(new_tag)
+    try:
+        await _shopify_remove_tag(order_gid, old_tag, store_key)
+    except Exception:
+        ORDERS_CACHE.clear()
+        if HAVE_AUTH_DB:
+            _bust_confirmation_caches()
+        # A timeout can happen after Shopify accepted the removal. Re-read when
+        # possible so the response distinguishes known partial state from an
+        # unconfirmed result instead of falsely claiming that both tags remain.
+        verified = False
+        try:
+            tags = await _shopify_get_order_tags(order_gid, store_key)
+            verified = True
+        except Exception:
+            pass
+        removed = verified and not any(tag.casefold() == old_tag.casefold() for tag in tags)
+        replacement_present = any(tag.casefold() == new_tag.casefold() for tag in tags)
+        await manager.broadcast({"type": "order.tag_added", "id": order_gid, "tag": new_tag, "store": store_key})
+        if removed and replacement_present:
+            return {"ok": True, "old_tag": old_tag, "new_tag": new_tag, "tags": tags}
+        return JSONResponse(status_code=409, content={
+            "ok": False,
+            "detail": (
+                f'The tag "{new_tag}" is present, but "{old_tag}" could not be removed. Both tags remain; refresh and retry.'
+                if verified and replacement_present else
+                "The tag replacement could not be confirmed. Refresh the order before retrying."
+            ),
+            "tags": tags if verified else None,
+            "partial": True, "state_verified": verified,
+        })
+    tags = [tag for tag in tags if tag.casefold() != old_tag.casefold()]
+    ORDERS_CACHE.clear()
+    if HAVE_AUTH_DB:
+        _bust_confirmation_caches()
+        if not already_present:
+            await _maybe_log_agent_tag_action(user, session, order_gid=order_gid, tag=new_tag, op="add", store=store_key, source=payload.source)
+        await _maybe_log_agent_tag_action(user, session, order_gid=order_gid, tag=old_tag, op="remove", store=store_key, source=payload.source)
+    await manager.broadcast({"type": "order.tag_replaced", "id": order_gid, "old_tag": old_tag, "new_tag": new_tag, "store": store_key})
+    return {"ok": True, "old_tag": old_tag, "new_tag": new_tag, "tags": tags}
+
 
 class AppendNotePayload(BaseModel):
     append: str
