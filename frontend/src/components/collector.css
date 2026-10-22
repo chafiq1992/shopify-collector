@@ -75,25 +75,28 @@
 .collector-note svg { flex: none; }
 .collector-empty { margin: auto; padding: 12px; color: #94a3b8; font-size: 12px; }
 .collector-actions { flex: none; z-index: 40; background: white; border-top: 1px solid #e2e8f0; }
-.collector-actions-inner { padding: 5px 0 0; }
-.collector-selection-toolbar { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 8px; margin-bottom: 4px; }
-.collector-selection-count { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; color: #465b77; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.collector-actions-inner { display: grid; grid-template-columns: 50px minmax(0, 1fr) 50px; gap: 6px; padding: 0; }
+.collector-footer-center { min-width: 0; padding: 5px 0 6px; }
+.collector-selection-toolbar { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 28px; margin-bottom: 4px; }
+.collector-selection-count { display: inline-flex; align-items: center; gap: 6px; color: #465b77; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .collector-selection-count > span { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 24px; padding: 0 5px; border-radius: 7px; color: #1d4ed8; background: #eaf1ff; font-size: 12px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .collector-selection-toolbar > button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; height: 27px; padding: 0 9px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .collector-selection-toolbar > .collector-clear-selection { color: #64748b; background: #f8fafc; }
 .collector-selection-toolbar > .collector-action-print { color: white; border-color: #2563eb; background: #2563eb; }
 .collector-actions button:disabled { opacity: .45; }
-.collector-action-row { display: grid; grid-template-columns: 50px minmax(0, 1fr) minmax(0, 1fr) 50px; align-items: center; gap: 6px; }
+.collector-action-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; gap: 6px; }
 .collector-action-row > button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 0; height: 38px; padding: 0 6px; border: 1px solid transparent; border-radius: 7px; color: white; font-size: 12px; font-weight: 650; white-space: nowrap; }
-.collector-action-row > .collector-nav { align-self: stretch; height: 50px; padding: 0; border-radius: 0; color: #2563eb; border-top-color: #e2e8f0; background: #eff5ff; }
-.collector-action-row > .collector-nav:first-child { border-right-color: #e2e8f0; border-top-right-radius: 10px; }
-.collector-action-row > .collector-nav:last-child { border-left-color: #e2e8f0; border-top-left-radius: 10px; }
+.collector-actions-inner > .collector-nav { display: flex; align-items: center; justify-content: center; align-self: stretch; min-height: 76px; padding: 0; border: 1px solid #e2e8f0; border-bottom: 0; border-radius: 0; color: #2563eb; background: #eff5ff; }
+.collector-actions-inner > .collector-nav:first-child { border-left: 0; border-top-right-radius: 10px; }
+.collector-actions-inner > .collector-nav:last-child { border-right: 0; border-top-left-radius: 10px; }
 .collector-action-row > .collector-action-collected { border-color: #159761; background: #159761; }
 .collector-action-row > .collector-action-out { border-color: #dc3545; background: #dc3545; }
 .collector-action-row button:disabled { cursor: wait; }
-.collector-selection-row { display: flex; align-items: center; height: 20px; padding: 0 8px; margin-bottom: 3px; }
+.collector-selection-row { display: flex; align-items: center; height: 20px; margin-bottom: 3px; }
 .collector-selection { display: flex; align-items: center; gap: 3px; flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; white-space: nowrap; scrollbar-width: none; }
 .collector-selection button { display: inline-flex; align-items: center; gap: 4px; flex: none; height: 18px; padding: 0 4px; border-radius: 4px; color: #6481aa; background: #f0f5fc; font-size: 9px; }
+.collector-selection button:first-child { margin-left: auto; }
+.collector-selection button:last-child { margin-right: auto; }
 .collector-status { margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; color: #64748b; font-size: 10px; line-height: 14px; }
 .collector-error { display: flex; align-items: center; gap: 6px; height: 25px; padding: 0 6px; border: 1px solid #f4e3bd; border-radius: 5px; background: #fffbef; color: #9a742d; font-size: 10px; }
 .collector-error-message { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }

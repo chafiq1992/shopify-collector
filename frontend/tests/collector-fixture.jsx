@@ -57,8 +57,11 @@ function reportLayout() {
   const toolbar=document.querySelector('.collector-selection-toolbar')?.getBoundingClientRect();
   const selection=document.querySelector('.collector-selection-row')?.getBoundingClientRect();
   const bottom=document.querySelector('.collector-action-row');
-  const previous=bottom?.firstElementChild?.getBoundingClientRect(),next=bottom?.lastElementChild?.getBoundingClientRect();
-  const footerLayout=!!toolbar&&!!previous&&!!next&&(!selection||toolbar.bottom<=selection.top)&&Math.abs(previous.left-f.left)<1&&Math.abs(next.right-f.right)<1&&previous.height>=44&&next.height>=44&&!bottom.querySelector('.collector-action-print');
+  const previous=document.querySelector('.collector-nav[aria-label="Prev order"]')?.getBoundingClientRect(),next=document.querySelector('.collector-nav[aria-label="Next order"]')?.getBoundingClientRect();
+  const collected=bottom?.firstElementChild?.getBoundingClientRect();
+  const toolbarItems=[...document.querySelectorAll('.collector-selection-toolbar > *')].map(element=>element.getBoundingClientRect());
+  const toolbarCentered=toolbarItems.length===3&&Math.abs((toolbarItems[0].left+toolbarItems[2].right)/2-(f.left+f.right)/2)<1;
+  const footerLayout=!!toolbar&&!!previous&&!!next&&!!collected&&toolbarCentered&&(!selection||toolbar.bottom<=selection.top)&&Math.abs(previous.left-f.left)<1&&Math.abs(next.right-f.right)<1&&previous.top<=toolbar.top&&next.top<=toolbar.top&&Math.abs(previous.bottom-f.bottom)<1&&Math.abs(next.bottom-f.bottom)<1&&previous.height>collected.height&&next.height>collected.height&&!bottom.querySelector('.collector-action-print');
   parent.postMessage({fixtureMetrics:{width:innerWidth,height:innerHeight,photoHeight:Math.round(p.height),footerHeight:Math.round(f.height),noVerticalScroll:main.scrollHeight<=main.clientHeight+1&&document.documentElement.scrollHeight<=innerHeight+1,fullCardFits:c.top>=main.getBoundingClientRect().top-1&&c.bottom<=f.top+1&&p.height>0,containedImage:!image||getComputedStyle(image).objectFit==='contain',footerLayout}},location.origin);
 }
 const layoutObserver=new ResizeObserver(()=>requestAnimationFrame(reportLayout));
