@@ -18,6 +18,7 @@ const COMPANY_LABELS = {
   lx: "Lx",
   k: "K",
   fast: "Fast",
+  casa: "Casa",
 };
 
 function rateBadge(rate) {

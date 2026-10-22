@@ -23,7 +23,7 @@ router = APIRouter(dependencies=[Depends(get_current_user)])
 # Fallback list if the caller doesn't pass ?companies=... explicitly. The frontend
 # (frontend/src/lib/deliveryCompanies.js) is the source of truth and always passes its
 # own list, so this constant only matters for direct/manual API calls.
-_DEFAULT_COMPANIES = ["ibex", "l24", "oscario", "meta", "pal", "12livery", "lx", "k", "fast"]
+_DEFAULT_COMPANIES = ["ibex", "l24", "oscario", "meta", "pal", "12livery", "lx", "k", "fast", "casa"]
 
 # Heavier than a single /api/orders page (full pagination over the whole range), so cache
 # for longer than the 5s TTL used elsewhere.
