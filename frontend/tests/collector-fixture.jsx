@@ -54,7 +54,12 @@ function reportLayout() {
   const image=photo?.querySelector('img');
   if(!main||!card||!footer||!photo)return;
   const c=card.getBoundingClientRect(),f=footer.getBoundingClientRect(),p=photo.getBoundingClientRect();
-  parent.postMessage({fixtureMetrics:{width:innerWidth,height:innerHeight,photoHeight:Math.round(p.height),footerHeight:Math.round(f.height),noVerticalScroll:main.scrollHeight<=main.clientHeight+1&&document.documentElement.scrollHeight<=innerHeight+1,fullCardFits:c.top>=main.getBoundingClientRect().top-1&&c.bottom<=f.top+1&&p.height>0,containedImage:!image||getComputedStyle(image).objectFit==='contain'}},location.origin);
+  const toolbar=document.querySelector('.collector-selection-toolbar')?.getBoundingClientRect();
+  const selection=document.querySelector('.collector-selection-row')?.getBoundingClientRect();
+  const bottom=document.querySelector('.collector-action-row');
+  const previous=bottom?.firstElementChild?.getBoundingClientRect(),next=bottom?.lastElementChild?.getBoundingClientRect();
+  const footerLayout=!!toolbar&&!!previous&&!!next&&(!selection||toolbar.bottom<=selection.top)&&Math.abs(previous.left-f.left)<1&&Math.abs(next.right-f.right)<1&&previous.height>=44&&next.height>=44&&!bottom.querySelector('.collector-action-print');
+  parent.postMessage({fixtureMetrics:{width:innerWidth,height:innerHeight,photoHeight:Math.round(p.height),footerHeight:Math.round(f.height),noVerticalScroll:main.scrollHeight<=main.clientHeight+1&&document.documentElement.scrollHeight<=innerHeight+1,fullCardFits:c.top>=main.getBoundingClientRect().top-1&&c.bottom<=f.top+1&&p.height>0,containedImage:!image||getComputedStyle(image).objectFit==='contain',footerLayout}},location.origin);
 }
 const layoutObserver=new ResizeObserver(()=>requestAnimationFrame(reportLayout));
 layoutObserver.observe(document.getElementById('root'));

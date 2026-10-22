@@ -1183,19 +1183,21 @@ export default function App(){
       <div className="collector-actions">
         <div className="collector-actions-inner">
           {printMsg && <div className="collector-status" role="status" title={printMsg}>{printMsg}</div>}
+          <div className="collector-selection-toolbar">
+            <strong className="collector-selection-count" aria-live="polite">Selected <span>{selectedOrderNumbers.size}</span></strong>
+            <button type="button" className="collector-clear-selection" disabled={!selectedOrderNumbers.size} onClick={()=>setSelectedOrderNumbers(new Set())}>Clear</button>
+            <button type="button" className="collector-action-print" disabled={printBusy} aria-label={`Print${selectedOrderNumbers.size ? ` ${selectedOrderNumbers.size} orders` : ''}`} onClick={()=>setShowConfirm('print')}><Printer size={13}/><span>{printBusy ? 'Printing…' : 'Print'}</span></button>
+          </div>
           {selectedOrderNumbers.size > 0 && <div className="collector-selection-row">
-            <strong>{selectedOrderNumbers.size} selected</strong>
             <div className="collector-selection" aria-label="Selected orders">
               {Array.from(selectedOrderNumbers).map(number => <button key={number} type="button" onClick={()=>toggleOrderSelected(number)} aria-label={`Deselect order ${number}`}>{number}<span aria-hidden="true">×</span></button>)}
             </div>
-            <button type="button" className="collector-clear-selection" onClick={()=>setSelectedOrderNumbers(new Set())}>Clear</button>
           </div>}
           <div className="collector-action-row">
-            <button type="button" className="collector-nav" aria-label="Prev order" title="Previous order" onClick={()=>{ vibrate(10); gotoPrev(); }}><ChevronLeft size={15}/></button>
+            <button type="button" className="collector-nav" aria-label="Prev order" title="Previous order" onClick={()=>{ vibrate(10); gotoPrev(); }}><ChevronLeft size={26}/></button>
             <button type="button" className="collector-action-collected" disabled={actionBusy} onClick={()=>{ vibrate(10); setShowConfirm('collected'); }}><CheckCircle size={13}/><span>Collected</span></button>
             <button type="button" className="collector-action-out" disabled={actionBusy} onClick={()=>{ vibrate(10); setShowConfirm('out'); }}><XCircle size={13}/><span>OUT</span></button>
-            <button type="button" className="collector-action-print" disabled={printBusy} aria-label={`Print${selectedOrderNumbers.size ? ` ${selectedOrderNumbers.size} orders` : ''}`} onClick={()=>setShowConfirm('print')}><Printer size={13}/><span>{printBusy ? 'Printing…' : 'Print'}</span></button>
-            <button type="button" className="collector-nav" aria-label="Next order" title="Next order" onClick={()=>{ vibrate(10); gotoNext(); }}><ChevronRight size={15}/></button>
+            <button type="button" className="collector-nav" aria-label="Next order" title="Next order" onClick={()=>{ vibrate(10); gotoNext(); }}><ChevronRight size={26}/></button>
           </div>
         </div>
       </div>
