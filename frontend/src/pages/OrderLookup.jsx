@@ -662,6 +662,7 @@ export default function OrderLookup(){
             globalCities: nextState?.globalCities || item.globalCities || [],
             partnerSendState: nextState?.partnerSendState || item.partnerSendState || {},
             printStatus: nextState?.printStatus || item.printStatus || null,
+            sendActionLabel: nextState?.sendActionLabel || item.sendActionLabel || "",
             actions: nextState?.actions || item.actions || null,
           }
         : item
@@ -2893,8 +2894,13 @@ export default function OrderLookup(){
                           disabled={item.busy}
                           className="w-full px-2 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-1"
                         >
-                          {item.busy ? "Sending…" : (item.partnerSendState?.ok === false ? "Resend to Partner" : "Send to Partner")}
+                          {item.busy ? "Sending…" : (item.sendActionLabel || (item.partnerSendState?.ok === false ? "Resend to Partner" : "Send to Partner"))}
                         </button>
+                      )}
+                      {showSendBtn && item.partnerSendState?.noPartnerApi && item.partnerSendState?.ok !== false && (
+                        <div className="text-[10px] text-amber-700 font-semibold">
+                          Keep this company, or pick a carrier and its city, then confirm.
+                        </div>
                       )}
                       {showCompanyControls && item.partnerSendState?.ok === false && (
                         <div className="text-[10px] text-red-700 font-semibold">

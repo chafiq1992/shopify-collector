@@ -1,6 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
-import { envoyNeedsNoPartnerSend, isAssignedEnvoyCompany } from "../lib/directEnvoyPrint";
+import {
+  companyStepActionLabel,
+  confirmationOutdated,
+  envoyNeedsNoPartnerSend,
+  isAssignedEnvoyCompany,
+  noPartnerApiSendState,
+} from "../lib/directEnvoyPrint";
 import { parseExplicitDeliveryOrderId } from "../lib/deliveryOrderReference";
 import {
   findCreatedDeliveryOrderId,
@@ -21,18 +27,6 @@ const STORE_MERCHANT_MAP = {
 };
 
 const LABEL_WINDOW_FEATURES = "width=450,height=600,scrollbars=yes";
-
-/* For a company with no partner API there is nothing to send: being in its
-   envoy note is the whole hand-over, so the order counts as landed. */
-function noPartnerApiSendState(envoyNote) {
-  return {
-    ok: true,
-    message: `${envoyNote?.company || "This company"} has no partner API. Its envoy note is the hand-over.`,
-    sentAt: null,
-    integrationFailure: false,
-    noPartnerApi: true,
-  };
-}
 
 /* The label route needs credentials, and a tab opened with window.open() cannot
    send the Authorization header. Ask the server (with the token) for a
@@ -354,14 +348,21 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         const items = Array.isArray(env?.items) ? env.items : [];
         const item = items.find(x => Number(x?.orderId || x?.order_id) === oid) || null;
         const sentMessage = String(item?.sentMsg || "").trim();
-        const next = item && envoyNeedsNoPartnerSend(env)
-          ? noPartnerApiSendState(env)
-          : {
-              ok: item?.sentOk === true ? true : (item?.sentOk === false ? false : null),
-              message: sentMessage,
-              sentAt: item?.sentAt || null,
-              integrationFailure: item?.sentOk === false && Boolean(sentMessage),
-            };
+        if (item && envoyNeedsNoPartnerSend(env)) {
+          // Only the agent can confirm a no-API envoy, so a refresh that lands
+          // after their confirmation of this same envoy must not undo it.
+          const pending = noPartnerApiSendState(env);
+          setPartnerSendState(prev => (
+            prev?.noPartnerApi && prev.ok === true && prev.envoyCode === code ? prev : pending
+          ));
+          return pending;
+        }
+        const next = {
+          ok: item?.sentOk === true ? true : (item?.sentOk === false ? false : null),
+          message: sentMessage,
+          sentAt: item?.sentAt || null,
+          integrationFailure: item?.sentOk === false && Boolean(sentMessage),
+        };
         setPartnerSendState(next);
         return next;
       } catch (e) {
@@ -548,6 +549,16 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       setPhase("ready_print");
     }
   }, [partnerSendState.ok, phase]);
+
+  // A confirmed company or city that the agent then changes (for example a
+  // Marrakech-region parcel moved to a carrier) has not been applied yet:
+  // reopen the step so the label cannot print with the old envoy.
+  useEffect(() => {
+    if (!confirmationOutdated(partnerSendState, { companyId, cityName })) return;
+    setPartnerSendState({ ok: null, message: "", sentAt: null, integrationFailure: false });
+    setPrintStatus(null);
+    if (phase === "ready_print" || phase === "done") setPhase("company_select");
+  }, [companyId, cityName, partnerSendState, phase]);
 
   function populateEditFromRow(row) {
     setEditFields({
@@ -1151,7 +1162,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       assertEnvoyItemMatchesOrder(item);
       if (envoyNeedsNoPartnerSend(envDet)) {
         addLog(`${envDet.company || "This company"} has no partner API; the envoy note is the hand-over. Ready to print.`);
-        setPartnerSendState(noPartnerApiSendState(envDet));
+        setPartnerSendState(noPartnerApiSendState(envDet, { confirmed: true, companyId, cityName }));
         setPhase("ready_print");
         return;
       }
@@ -1389,6 +1400,8 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     if (!cityName) return allCityOptions.slice(0, 15);
     return allCityOptions.filter(c => String(c).toLowerCase().includes(cityName.toLowerCase())).slice(0, 15);
   }, [allCityOptions, cityName]);
+  const sendActionLabel = companyStepActionLabel(selectedCompany, partnerSendState);
+  const confirmsOnly = sendActionLabel === "Confirm Envoy & City";
   const queueState = useMemo(() => {
     if (printStatus === "success") return { statusKey: "printed", statusLabel: "Printed" };
     if (phase === "fix_errors" || phase === "manual" || phase === "error") {
@@ -1397,15 +1410,23 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     if (phase === "company_select" || ((phase === "ready_print" || phase === "done") && envoyCode && partnerSendState.ok !== true)) {
       return {
         statusKey: "waiting_partner",
-        statusLabel: partnerSendState.ok === false ? "Partner refused; resend" : "Waiting to send to partner",
+        statusLabel: partnerSendState.ok === false
+          ? "Partner refused; resend"
+          : (confirmsOnly ? "Confirm envoy & city" : "Waiting to send to partner"),
       };
     }
     if ((phase === "ready_print" || (phase === "done" && printStatus !== "fallback")) && envoyCode && companyId && partnerSendState.ok === true) {
       return { statusKey: "ready_to_print", statusLabel: "Ready to print" };
     }
     return { statusKey: "preparing", statusLabel: "Preparing" };
-  }, [phase, printStatus, envoyCode, companyId, partnerSendState.ok]);
-  const needsControlPayload = queueState.statusKey === "waiting_partner" || queueState.statusKey === "information_error";
+  }, [phase, printStatus, envoyCode, companyId, partnerSendState.ok, confirmsOnly]);
+  // A confirmed no-API envoy (Marrakech) keeps its company and city editable,
+  // so the parcel can still be moved to a carrier before its label prints. A
+  // carrier that already accepted the parcel is not offered again: re-sending
+  // would leave a ghost parcel at the first carrier.
+  const needsControlPayload = queueState.statusKey === "waiting_partner"
+    || queueState.statusKey === "information_error"
+    || (queueState.statusKey === "ready_to_print" && Boolean(partnerSendState.noPartnerApi));
 
   // Use a ref to track the last emitted key values and avoid infinite loops
   const lastEmitRef = useRef("");
@@ -1416,6 +1437,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       order?.id, orderNum, queueState.statusKey, deliveryOrderId, envoyCode,
       selectedCompany?.name, selectedCompanyOrderTag, error, phase, busy,
       companyId, cityName, partnerSendState?.ok, partnerSendState?.message, printStatus,
+      sendActionLabel,
     ].join("|");
     if (fingerprint === lastEmitRef.current) return;
     lastEmitRef.current = fingerprint;
@@ -1442,6 +1464,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       globalCities: needsControlPayload ? cities : [],
       partnerSendState,
       printStatus,
+      sendActionLabel,
       actions: {
         setCompanyId,
         setCityName,
@@ -1452,7 +1475,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
         handleRetry,
       },
     });
-  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, needsControlPayload, companies, companyId, cityName, filteredCities, allCityOptions, cities, partnerSendState, printStatus]);
+  }, [onStateChange, order?.id, orderNum, queueState, deliveryOrderId, envoyCode, selectedCompany?.name, orderTagMatch?.company?.name, selectedCompanyOrderTag, error, phase, busy, needsControlPayload, companies, companyId, cityName, filteredCities, allCityOptions, cities, partnerSendState, printStatus, sendActionLabel]);
   const companyStepDone = partnerSendState.ok === true;
   const companyStepActive = phase === "company_select" || ((phase === "ready_print" || phase === "done") && !companyStepDone);
   const companyStepCls = companyStepDone
@@ -1462,7 +1485,7 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       : "border-gray-200 bg-gray-50 opacity-60";
   const showPartnerSendControls = Boolean(deliveryOrderId) && (phase === "company_select" || phase === "ready_print" || phase === "done");
   const showPartnerSendButton = showPartnerSendControls && Boolean(envoyCode) && partnerSendState.ok !== true;
-  const partnerSendLabel = partnerSendState.ok === false ? "Resend to Partner" : "Send to Partner";
+  const partnerSendLabel = sendActionLabel;
   const partnerSendStatusText = partnerSendState.noPartnerApi
     ? partnerSendState.message
     : partnerSendState.ok === true
