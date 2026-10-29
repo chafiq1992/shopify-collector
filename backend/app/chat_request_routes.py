@@ -246,6 +246,39 @@ async def _store_for_shop_domain(shop: str, known: List[str]) -> Optional[str]:
     return found
 
 
+class ChatItem(BaseModel):
+    """One item the customer chose in the website chat (the AI's cart or the shop's own cart)."""
+    variant_id: str
+    product_id: Optional[str] = None
+    product_title: Optional[str] = None
+    variant_title: Optional[str] = None
+    price: Optional[str] = None
+    quantity: int = 1
+    image: Optional[str] = None
+    source: Optional[str] = None
+
+
+def _clean_items(items) -> List[Dict[str, Any]]:
+    """Trusted chat items, stored on the request's history so agents can add them to the order (2026-10-29)."""
+    cleaned: List[Dict[str, Any]] = []
+    for item in (items or [])[:20]:
+        variant = str(item.variant_id or "").rsplit("/", 1)[-1]
+        product = str(item.product_id or "")
+        if not re.fullmatch(r"\d{6,20}", variant):
+            continue
+        cleaned.append({
+            "variant_id": variant,
+            "product_id": product if re.fullmatch(r"gid://shopify/Product/\d{1,20}", product) else None,
+            "product_title": _clean(item.product_title, 255),
+            "variant_title": _clean(item.variant_title, 255),
+            "price": _clean(item.price, 32),
+            "quantity": max(1, min(20, int(item.quantity or 1))),
+            "image": _clean_url(item.image),
+            "source": item.source if item.source in {"chat_cart", "store_cart"} else None,
+        })
+    return cleaned
+
+
 class ChatRequestIntakeBody(BaseModel):
     store: Optional[str] = None
     shop: Optional[str] = None
@@ -263,6 +296,8 @@ class ChatRequestIntakeBody(BaseModel):
     order_ref: Optional[str] = None
     # Trusted integrations only: "ordered" when the website AI already placed the order.
     outcome: Optional[str] = None
+    # Trusted integrations only: the items chosen in the chat, shown to agents with an "add to order" button.
+    items: Optional[List[ChatItem]] = None
 
 
 @router.post("/api/public/chat-requests")
@@ -359,6 +394,9 @@ async def _create_chat_request(body, request, db, *, trusted):
         "page_url": _clean_url(body.page_url),
     }
     now = datetime.now(timezone.utc)
+    items = {"items": _clean_items(body.items)} if trusted and body.items else {}
+    if not items.get("items"):
+        items = {}
     # Serialise this phone across app workers, including public storefront intake.
     if db.bind.dialect.name == "postgresql":
         lock = int.from_bytes(hashlib.sha256(f"chat:{store_key}:{phone}".encode()).digest()[:8], "big", signed=True)
@@ -395,7 +433,7 @@ async def _create_chat_request(body, request, db, *, trusted):
         db.add(ChatRequestEvent(
             request_id=existing.id,
             action="requested_again",
-            detail={**{k: v for k, v in fields.items() if v}, **({"source_id": body.source_id} if trusted else {})},
+            detail={**{k: v for k, v in fields.items() if v}, **({"source_id": body.source_id} if trusted else {}), **items},
         ))
         await db.commit()
         return {"ok": True, "id": existing.id, "repeat": True}
@@ -412,7 +450,7 @@ async def _create_chat_request(body, request, db, *, trusted):
     )
     db.add(req)
     await db.flush()
-    db.add(ChatRequestEvent(request_id=req.id, action="requested", detail={"page_url": fields["page_url"], **({"source_id": body.source_id} if trusted else {})}))
+    db.add(ChatRequestEvent(request_id=req.id, action="requested", detail={"page_url": fields["page_url"], **({"source_id": body.source_id} if trusted else {}), **items}))
     await db.commit()
     return {"ok": True, "id": req.id, "repeat": False}
 

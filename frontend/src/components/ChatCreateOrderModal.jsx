@@ -166,7 +166,7 @@ function Section({ icon: Icon, title, right, children }) {
 }
 
 // ---------- Modal ----------
-export default function ChatCreateOrderModal({ request: r, store, shopDomain, me, onClose, onCreated, onLinkExisting }) {
+export default function ChatCreateOrderModal({ request: r, store, shopDomain, me, onClose, onCreated, onLinkExisting, chatItems = [] }) {
   const initialName = splitName(r.customer_name);
   const [form, setForm] = useState({
     first_name: initialName.first,
@@ -226,7 +226,29 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
     ORDER_API.customers(store, localPhone(r.phone))
       .then((js) => { if (!cancelled) setPhoneMatches({ loading: false, customers: js.customers || [], error: null }); })
       .catch((e) => { if (!cancelled) setPhoneMatches({ loading: false, customers: [], error: e.message }); });
-    if (r.product_title || r.product_url) {
+    if (chatItems.length) {
+      // The items the agent added from the chat card, each with its exact variant and quantity.
+      const picked = chatItems.map((item) => ({ item, key: newKey() }));
+      setLines(picked.map(({ item, key }) => ({
+        key, loading: true, quantity: Math.max(1, Math.min(20, Number(item.quantity) || 1)), fromChat: true,
+        variantId: `gid://shopify/ProductVariant/${item.variant_id}`,
+        preview: { title: item.product_title, image: item.image },
+      })));
+      for (const { item, key } of picked) {
+        ORDER_API.product(store, item.product_id ? { product_id: item.product_id } : {
+          ...(item.product_title ? { title: item.product_title } : {}),
+          ...(item.variant_title ? { variant_title: item.variant_title } : {}),
+        })
+          .then((js) => {
+            if (cancelled) return;
+            setLines((ls) => ls.map((l) => (l.key !== key ? l : js.product
+              ? { ...l, loading: false, preview: null, product: js.product,
+                  variantId: js.product.variants?.some((v) => v.id === l.variantId) ? l.variantId : (js.matched_variant_id || onlyVariant(js.product)) }
+              : { ...l, loading: false, notFound: true })));
+          })
+          .catch((e) => { if (!cancelled) setLines((ls) => ls.map((l) => (l.key === key ? { ...l, loading: false, error: e.message } : l))); });
+      }
+    } else if (r.product_title || r.product_url) {
       const key = newKey();
       setLines([{ key, loading: true, quantity: 1, fromChat: true }]);
       ORDER_API.product(store, {

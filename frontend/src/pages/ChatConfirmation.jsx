@@ -269,6 +269,8 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   const [menuFor, setMenuFor] = useState(null);
   // The request whose "Create order" window is open.
   const [createOrderFor, setCreateOrderFor] = useState(null);
+  // Chat items an agent added to the order, by request id: the Create order form starts with them.
+  const [orderPicks, setOrderPicks] = useState({});
   // Reason labels (size, price, later, other...) chosen in the ⋯ popup.
   const [labels, setLabels] = useState([]);
   // Label pill filter (a label id), combined with the level pills.
@@ -764,6 +766,10 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
         onAssign={(agentId) => runAction(r, { action: "assign", assign_to: agentId || null }, {
           success: agentId ? "Request reassigned" : "Request unassigned",
         })}
+        picked={orderPicks[r.id] || []}
+        onPick={(items) => setOrderPicks((p) => ({ ...p, [r.id]: items }))}
+        onCreateOrder={() => openCreateOrder(r)}
+        onCopied={(id) => pushToast(`Variant ID ${id} copied`, "success", 1800)}
       />
     );
   }
@@ -1175,6 +1181,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
           store={store}
           shopDomain={data.shop_domain}
           me={me}
+          chatItems={orderPicks[createOrderFor.id] || []}
           onClose={() => setCreateOrderFor(null)}
           onCreated={onOrderCreated}
           onLinkExisting={(ref) => linkExistingOrder(createOrderFor, ref)}
@@ -2200,7 +2207,64 @@ function ConversationView({ request: r }) {
   );
 }
 
-function ChatRequestDetails({ request: r, store, shopDomain, isAdmin, agents, busy, onNote, onAssign }) {
+// The items the customer chose in the website chat (the AI's cart or the shop's cart), newest intake first.
+function chatItemsFrom(events) {
+  const event = (events || []).find((e) => Array.isArray(e.detail?.items) && e.detail.items.length);
+  return event ? event.detail.items : [];
+}
+
+function ChatItemsCard({ items, picked, onPick, onCreateOrder, onCopied }) {
+  const pickedIds = new Set(picked.map((i) => i.variant_id));
+  const toggle = (item) => onPick(pickedIds.has(item.variant_id) ? picked.filter((i) => i.variant_id !== item.variant_id) : [...picked, item]);
+  return (
+    <div className="mt-2 space-y-1.5" data-testid="chat-items">
+      <div className="text-[11px] font-semibold text-slate-500">Chosen in the chat</div>
+      {items.map((item) => {
+        const added = pickedIds.has(item.variant_id);
+        return (
+          <div key={item.variant_id} className="flex items-center gap-2 rounded-lg bg-slate-50 p-1.5 text-xs ring-1 ring-inset ring-slate-200">
+            {item.image
+              ? <img src={item.image} alt="" className="h-12 w-12 shrink-0 rounded-md object-cover" loading="lazy" />
+              : <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-white text-slate-300 ring-1 ring-inset ring-slate-200"><ShoppingBag className="h-4 w-4" aria-hidden /></span>}
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-semibold text-slate-900" title={item.product_title || ""}>{item.product_title || "Product"}</div>
+              <div className="truncate text-slate-500">
+                {[item.variant_title, item.price && `${item.price} MAD`, `× ${item.quantity || 1}`].filter(Boolean).join(" · ")}
+              </div>
+              <div className="mt-0.5 flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={async () => { if (await copyToClipboard(item.variant_id)) onCopied(item.variant_id); }}
+                  className="inline-flex items-center gap-1 font-mono text-[11px] text-indigo-700 hover:underline"
+                  title="Copy the variant ID"
+                >
+                  <Copy className="h-3 w-3" aria-hidden /> {item.variant_id}
+                </button>
+                {item.source === "store_cart" && <span className="shrink-0 rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800">shop cart</span>}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => toggle(item)}
+              aria-pressed={added}
+              className={`${added ? BTN.primary : BTN.secondary} h-8 shrink-0 text-xs`}
+            >
+              {added ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Plus className="h-3.5 w-3.5" aria-hidden />}
+              {added ? "Added" : "Add to order"}
+            </button>
+          </div>
+        );
+      })}
+      {picked.length > 0 && (
+        <button type="button" onClick={onCreateOrder} className={`${BTN.primary} h-8 w-full text-xs`}>
+          <ShoppingBag className="h-3.5 w-3.5" aria-hidden /> Create order with {picked.length} item{picked.length === 1 ? "" : "s"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ChatRequestDetails({ request: r, store, shopDomain, isAdmin, agents, busy, onNote, onAssign, picked = [], onPick = () => {}, onCreateOrder = () => {}, onCopied = () => {} }) {
   const [note, setNote] = useState("");
   const [events, setEvents] = useState(null);
   const [eventsError, setEventsError] = useState(null);
@@ -2326,6 +2390,9 @@ function ChatRequestDetails({ request: r, store, shopDomain, isAdmin, agents, bu
               {lookup ? "Search again" : "Find by phone"}
             </button>
           </div>
+          {chatItemsFrom(events).length > 0 && (
+            <ChatItemsCard items={chatItemsFrom(events)} picked={picked} onPick={onPick} onCreateOrder={onCreateOrder} onCopied={onCopied} />
+          )}
           {lookup?.error && <p className="mt-2 text-xs text-rose-700">{lookup.error}</p>}
           {lookup && !lookup.loading && !lookup.error && (
             lookup.orders.length === 0 ? (

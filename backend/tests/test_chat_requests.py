@@ -555,3 +555,40 @@ async def test_the_main_list_keeps_todays_orders_but_not_older_ones_or_other_clo
 setattr(ChatRequestTests, test_the_main_list_keeps_todays_orders_but_not_older_ones_or_other_closed_requests.__name__,
         test_the_main_list_keeps_todays_orders_but_not_older_ones_or_other_closed_requests)
 del test_the_main_list_keeps_todays_orders_but_not_older_ones_or_other_closed_requests
+
+
+# Items chosen in the website chat (added to the shared fixture class, 2026-10-29).
+async def test_chat_items_are_kept_on_the_history_for_the_create_order_card(self):
+    request = _FakeRequest()
+    request.headers['x-chat-intake-key'] = 'shared-test-key'
+    items = [{'variant_id': 'gid://shopify/ProductVariant/55706384073080', 'product_id': 'gid://shopify/Product/15068780167544',
+              'product_title': 'Girls Set', 'variant_title': 'beige / 2 years', 'price': '249.99', 'quantity': 2,
+              'image': 'https://cdn.shopify.com/a.png', 'source': 'store_cart'},
+             {'variant_id': 'not-a-variant'}, {'variant_id': '55706384105848', 'product_id': 'javascript:alert(1)', 'quantity': 99, 'source': 'x'}]
+    body = ChatRequestIntakeBody(store='irrakids', phone='0612345678', source_id='storefront:' + 'd' * 32 + ':1', items=items)
+    with patch.dict(os.environ, {'CHAT_INTAKE_SECRET': 'shared-test-key'}):
+        async with self.sessions() as db:
+            first = await routes.integration_chat_request(body, request, db)
+        again = ChatRequestIntakeBody(store='irrakids', phone='0612345678', source_id='storefront:' + 'd' * 32 + ':2', items=items[:1])
+        async with self.sessions() as db:
+            await routes.integration_chat_request(again, request, db)
+    async with self.sessions() as db:
+        events = (await db.execute(select(ChatRequestEvent).where(ChatRequestEvent.request_id == first['id']).order_by(ChatRequestEvent.id))).scalars().all()
+    saved = events[0].detail['items']
+    self.assertEqual([i['variant_id'] for i in saved], ['55706384073080', '55706384105848'])
+    self.assertEqual(saved[0]['product_id'], 'gid://shopify/Product/15068780167544')
+    self.assertEqual((saved[0]['quantity'], saved[0]['source']), (2, 'store_cart'))
+    self.assertEqual((saved[1]['product_id'], saved[1]['quantity'], saved[1]['source']), (None, 20, None))
+    self.assertEqual(len(events[1].detail['items']), 1)
+
+
+async def test_public_intake_ignores_items(self):
+    result = await self._intake(items=[{'variant_id': '55706384073080'}])
+    async with self.sessions() as db:
+        event = await db.scalar(select(ChatRequestEvent).where(ChatRequestEvent.request_id == result['id']))
+    self.assertNotIn('items', event.detail)
+
+
+for _test in (test_chat_items_are_kept_on_the_history_for_the_create_order_card, test_public_intake_ignores_items):
+    setattr(ChatRequestTests, _test.__name__, _test)
+del _test, test_chat_items_are_kept_on_the_history_for_the_create_order_card, test_public_intake_ignores_items
