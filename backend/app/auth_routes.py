@@ -76,6 +76,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
         raise
     if not user or not user.is_active:
         raise cred_exc
+    # End the read transaction so the connection goes back to the pool. Routes
+    # behind this dependency often await Shopify for tens of seconds, and an
+    # idle open transaction pins a pool slot until Postgres kills it at 60s.
+    await db.commit()
     return user
 
 

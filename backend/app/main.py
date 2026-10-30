@@ -1031,6 +1031,15 @@ async def enqueue_label(
     return await _enqueue_job(DEFAULT_PC_ID, payload, dk)
 
 
+def _public_job_status(status: Optional[str]) -> str:
+    # Browsers poll this every 2s until they see "done". Acked jobs are kept as
+    # "completed" (a missing row also means it finished), so report both as done
+    # or every printed label is polled for as long as the tab stays open.
+    if not status or status == "completed":
+        return "done"
+    return status
+
+
 @app.get("/api/print-job-status")
 async def print_job_status(
     job_id: str,
@@ -1049,6 +1058,13 @@ async def print_job_status(
                         PrintJob.job_id == job_id,
                     )
                 )
+                if row is not None and row.status == "alias":
+                    row = await session.scalar(
+                        select(PrintJob).where(
+                            PrintJob.pc_id == DEFAULT_PC_ID,
+                            PrintJob.job_id == (row.payload or {}).get("duplicate_of"),
+                        )
+                    )
                 queued = int((await session.scalar(
                     select(func.count()).select_from(PrintJob).where(
                         PrintJob.pc_id == DEFAULT_PC_ID,
@@ -1058,7 +1074,7 @@ async def print_job_status(
                 return {
                     "ok": True,
                     "job_id": job_id,
-                    "status": (row.status if row else "done"),
+                    "status": _public_job_status(row.status if row else None),
                     "queued": queued,
                 }
         except Exception as e:
@@ -1067,11 +1083,13 @@ async def print_job_status(
     async with _JOB_LOCK:
         store = JOB_STORE.get(DEFAULT_PC_ID, {})
         job = store.get(job_id)
+        if job and job.get("status") == "alias":
+            job = store.get((job.get("payload") or {}).get("duplicate_of"))
         queued = len([1 for item in store.values() if item.get("status") in ("pending", "inflight")])
         return {
             "ok": True,
             "job_id": job_id,
-            "status": (job.get("status") if job else "done"),
+            "status": _public_job_status(job.get("status") if job else None),
             "queued": queued,
         }
 

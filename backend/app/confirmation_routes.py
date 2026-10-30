@@ -921,6 +921,8 @@ async def agent_queue(
         }
     q = apply_level_filter(base_q, level)
     live_filter = await queue_filter_for_user(db, user)
+    # Release the connection before the Shopify paging loop below.
+    await db.commit()
 
     def _still_mine(tags_list: List[str]) -> bool:
         # Re-validate against live tags: the search index may still list an order

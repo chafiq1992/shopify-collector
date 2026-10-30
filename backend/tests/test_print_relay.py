@@ -290,3 +290,28 @@ def test_memory_queue_keeps_completion_receipt(monkeypatch):
         assert (await main._enqueue_job("test-pc", job))["dedup"] is True
         assert (await pull())["jobs"] == []
     run(scenario())
+
+
+@pytest.mark.parametrize("db", [True, False])
+def test_acked_and_deduplicated_jobs_report_done(queue, monkeypatch, db):
+    # The browser keeps polling a job until it reads "done"; anything else here
+    # turns every printed label into a 2s poll for the life of the tab.
+    if not db:
+        monkeypatch.setattr(main, "SessionLocal", None)
+    monkeypatch.setattr(main, "DEFAULT_PC_ID", "test-pc")
+    monkeypatch.setattr(main, "_has_relay_access", lambda *a: True)
+    async def status(job_id):
+        return (await main.print_job_status(job_id=job_id, x_api_key=None, authorization=None))["status"]
+    async def scenario():
+        first = payload()
+        await main._enqueue_job("test-pc", first, "orders:same-batch")
+        retry = payload()
+        assert (await main._enqueue_job("test-pc", retry, "orders:same-batch"))["dedup"] is True
+        assert await status(first["job_id"]) == "pending"
+        assert await status(retry["job_id"]) == "pending"
+        await pull()
+        await main.ack(main.AckBody(pc_id="test-pc", secret="secret", job_id=first["job_id"]))
+        assert await status(first["job_id"]) == "done"
+        assert await status(retry["job_id"]) == "done"
+        assert await status("never-queued") == "done"
+    run(scenario())
