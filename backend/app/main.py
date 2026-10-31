@@ -461,8 +461,12 @@ async def _enqueue_job(pc_id: str, payload: dict, dedup_key: str = "") -> dict:
 
 # Backward-compat alias so any old code referencing JOBS still works at import-time
 JOBS = JOB_STORE
-# In-memory minimal customer override cache: { order_no -> { customer, shippingAddress, phone, email, tags } }
+# In-memory minimal customer override cache: { "store:order_no" -> { customer, shippingAddress, phone, email, tags } }
 ORDER_OVERRIDES: Dict[str, Dict[str, Any]] = {}
+
+
+def _override_cache_key(store: Optional[str], order_no: str) -> str:
+    return f"{(store or '').strip().lower()}:{str(order_no or '').strip().lstrip('#')}"
 
 # Lightweight in-memory cache for orders API responses, with TTL and basic LRU trimming
 from time import time as _now
@@ -2421,7 +2425,7 @@ def _apply_cached_order_overrides(items: List["OrderDTO"], store: Optional[str])
     try:
         for order in items:
             key = (order.number or "").lstrip("#")
-            override = ORDER_OVERRIDES.get(key) or {}
+            override = ORDER_OVERRIDES.get(_override_cache_key("irranova", key)) or {}
             if (not order.customer) and ((override.get("customer") or {}).get("displayName")):
                 order.customer = (override.get("customer") or {}).get("displayName")
             shipping = (override.get("shippingAddress") or {})
@@ -4982,7 +4986,8 @@ async def orders_update_webhook(
                 "phone": data.get("phone"),
                 "tags": data.get("tags"),
             }
-            ORDER_OVERRIDES[key] = overrides
+            if store_key:
+                ORDER_OVERRIDES[_override_cache_key(store_key, key)] = overrides
             # keep dedupe timestamps minimal to avoid growth
             RECENT_ENQUEUED_ORDERS[key] = int(time.time())
     except Exception:
@@ -5001,7 +5006,6 @@ async def get_overrides(
 ):
     _print_route_gate(request, "overrides", user=user, pc_id=pc_id, pc_secret=x_pc_secret)
     keys = [o.strip().lstrip("#") for o in (orders or "").split(",") if o.strip()]
-    out: Dict[str, Any] = {}
 
     def _override_is_complete(ov: Dict[str, Any]) -> bool:
         try:
@@ -5014,12 +5018,7 @@ async def get_overrides(
         except Exception:
             return False
 
-    # Seed with cache if present
-    for k in keys:
-        if k in ORDER_OVERRIDES:
-            out[k] = ORDER_OVERRIDES[k]
-
-    async def _fetch_live_for_store(store_key: str):
+    async def _fetch_live_for_store(store_key: str, out: Dict[str, Any]):
         try:
             domain, access_token, api_key = await resolve_store_settings_effective(store_key)
             if not domain or not access_token:
@@ -5066,14 +5065,15 @@ async def get_overrides(
                         continue
                     try:
                         name = quote(f"#{k}")
-                        fields = quote("id,email,phone,customer,shipping_address", safe=",")
+                        fields = quote("id,name,email,phone,customer,shipping_address", safe=",")
                         url = f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/orders.json?name={name}&status=any&fields={fields}"
                         r = await client.get(url, headers=headers)
                         r.raise_for_status()
                         js = (r.json() or {}).get("orders", [])
-                        if not js:
+                        # Only take the order whose name is exactly #k.
+                        ord_full = next((o for o in js if str((o or {}).get("name") or "").lstrip("#") == k), None)
+                        if not ord_full:
                             continue
-                        ord_full = js[0] or {}
                         ov = _build_override(ord_full)
                         if not _override_is_complete(ov) and ord_full.get("id"):
                             full_url = f"https://{domain}/admin/api/{SHOPIFY_API_VERSION}/orders/{ord_full['id']}.json?fields={fields}"
@@ -5082,19 +5082,28 @@ async def get_overrides(
                             ord_full = (r2.json() or {}).get("order") or ord_full
                             ov = _build_override(ord_full)
                         out[k] = ov
-                        ORDER_OVERRIDES[k] = ov
+                        ORDER_OVERRIDES[_override_cache_key(store_key, k)] = ov
                     except Exception:
                         continue
         except Exception:
             return
 
+    # Order numbers repeat across stores (irranova #103794 and irrakids #103794 are
+    # different customers), so overrides are looked up per store. With no store
+    # given, a number found in more than one store is ambiguous and left out.
     store_key = (store or "").strip().lower()
-    # Attempt live enrichment for the requested store; if none provided, try all known stores.
-    if store_key:
-        await _fetch_live_for_store(store_key)
-    else:
-        for known_store in await known_store_labels():
-            await _fetch_live_for_store(known_store)
+    stores = [store_key] if store_key else await known_store_labels()
+    by_number: Dict[str, Dict[str, Any]] = {}
+    for s in stores:
+        found: Dict[str, Any] = {}
+        for k in keys:
+            cached = ORDER_OVERRIDES.get(_override_cache_key(s, k))
+            if cached:
+                found[k] = cached
+        await _fetch_live_for_store(s, found)
+        for k, ov in found.items():
+            by_number.setdefault(k, {})[s] = ov
+    out: Dict[str, Any] = {k: next(iter(per_store.values())) for k, per_store in by_number.items() if len(per_store) == 1}
 
     return {"ok": True, "overrides": out}
 
