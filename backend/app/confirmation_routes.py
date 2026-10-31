@@ -2032,6 +2032,7 @@ query ConfirmationOrderPricing($id: ID!) {
     currentTotalPriceSet { shopMoney { amount currencyCode } }
     discountApplications(first: 50) {
       nodes {
+        __typename
         allocationMethod
         targetSelection
         targetType
@@ -2090,11 +2091,20 @@ def _order_pricing(node: Dict[str, Any]) -> Dict[str, Any]:
             "index": index,
             "label": app.get("code") or app.get("title") or "Discount",
             "is_code": bool(app.get("code")),
+            "manual": app.get("__typename") == "ManualDiscountApplication",
             "applies_to": applies_to,
             "percentage": value.get("percentage"),
             "value": value.get("amount"),
             "amount": Decimal("0"),
         })
+
+    # An item discount spread over several lines can't be re-priced per line.
+    lines_per_app: Dict[int, int] = {}
+    for line in ((node.get("lineItems") or {}).get("nodes")) or []:
+        for allocation in line.get("discountAllocations") or []:
+            app_index = (allocation.get("discountApplication") or {}).get("index")
+            if isinstance(app_index, int):
+                lines_per_app[app_index] = lines_per_app.get(app_index, 0) + 1
 
     line_items: Dict[str, Dict[str, Any]] = {}
     before_discounts = Decimal("0")
@@ -2109,6 +2119,7 @@ def _order_pricing(node: Dict[str, Any]) -> Dict[str, Any]:
         before_discounts += original * current_qty
         line_discounts = []
         item_level = Decimal("0")
+        price_lock = None
         for allocation in line.get("discountAllocations") or []:
             amount = _decimal(((allocation.get("allocatedAmountSet") or {}).get("shopMoney") or {}).get("amount"))
             app_index = (allocation.get("discountApplication") or {}).get("index")
@@ -2119,6 +2130,10 @@ def _order_pricing(node: Dict[str, Any]) -> Dict[str, Any]:
                 app["amount"] += per_unit * current_qty
                 if app["applies_to"] == "item":
                     item_level += per_unit
+                    if not app["manual"]:
+                        price_lock = f"Priced by the {app['label']} discount"
+                    elif lines_per_app.get(app_index, 0) > 1:
+                        price_lock = "Its discount is shared with other items"
             line_discounts.append({
                 "label": app["label"] if app else "Discount",
                 "applies_to": app["applies_to"] if app else "item",
@@ -2131,6 +2146,10 @@ def _order_pricing(node: Dict[str, Any]) -> Dict[str, Any]:
             # Only the item's own discounts follow it to a replacement variant;
             # order-wide discounts are left for Shopify to spread again.
             "item_unit_discount": _money_str(item_level),
+            # The price the agent edits: before any order-wide discount.
+            "item_unit_price": _money_str(max(Decimal("0"), original - item_level)),
+            "price_editable": price_lock is None,
+            "price_lock": price_lock,
             "discounts": line_discounts,
         }
 
@@ -2150,17 +2169,26 @@ def _order_pricing(node: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _carried_discount_percent(unit_discount: Decimal, new_unit_price: Decimal) -> float:
-    """The replaced item's per-unit discount as a percentage of the new price.
+def _parse_unit_price(value: Optional[str]) -> Optional[Decimal]:
+    """An agent-entered price per unit, or None when the price isn't changing."""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        price = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        raise HTTPException(status_code=400, detail=f"{value} is not a valid price")
+    if not price.is_finite() or price < 0:
+        raise HTTPException(status_code=400, detail="A price can't be negative")
+    return price.quantize(Decimal("0.01"))
 
-    A percentage, unlike a fixed amount, is unambiguous per unit in Shopify's
-    order edit API. The same money comes off each unit, capped at its price.
-    """
-    if unit_discount <= 0 or new_unit_price <= 0:
-        return 0.0
-    if unit_discount >= new_unit_price:
-        return 100.0
-    return round(float(unit_discount / new_unit_price * 100), 6)
+
+def _line_discount_input(unit_discount: Decimal, currency: str, description: str) -> Dict[str, Any]:
+    # A fixed value comes off each unit (checked against Shopify 2026-01:
+    # 10.00 on a quantity-3 line allocates 30.00).
+    return {
+        "fixedValue": {"amount": _money_str(unit_discount), "currencyCode": currency},
+        "description": description,
+    }
 
 
 ORDER_EDIT_BEGIN_GQL = """
@@ -2173,6 +2201,14 @@ mutation ConfirmationOrderEditBegin($id: ID!) {
           id
           quantity
           editableQuantity
+          originalUnitPriceSet { shopMoney { amount currencyCode } }
+          calculatedDiscountAllocations {
+            discountApplication {
+              __typename
+              id
+              ... on CalculatedManualDiscountApplication { targetSelection }
+            }
+          }
         }
       }
     }
@@ -2212,7 +2248,7 @@ mutation ConfirmationOrderEditAddVariant(
     quantity: $quantity,
     allowDuplicates: true
   ) {
-    calculatedLineItem { id quantity originalUnitPriceSet { shopMoney { amount } } }
+    calculatedLineItem { id quantity originalUnitPriceSet { shopMoney { amount currencyCode } } }
     userErrors { field message }
   }
 }
@@ -2226,6 +2262,15 @@ mutation ConfirmationOrderEditAddLineItemDiscount(
 ) {
   orderEditAddLineItemDiscount(id: $id, lineItemId: $lineItemId, discount: $discount) {
     addedDiscountStagedChange { id }
+    userErrors { field message }
+  }
+}
+"""
+
+ORDER_EDIT_REMOVE_DISCOUNT_GQL = """
+mutation ConfirmationOrderEditRemoveDiscount($id: ID!, $discountApplicationId: ID!) {
+  orderEditRemoveDiscount(id: $id, discountApplicationId: $discountApplicationId) {
+    calculatedOrder { id }
     userErrors { field message }
   }
 }
@@ -2262,6 +2307,8 @@ mutation ConfirmationOrderShippingUpdate($input: OrderInput!) {{
 class OrderLineQuantityInput(BaseModel):
     line_item_id: str
     quantity: int
+    # Price per unit after the item's own discount; None leaves it unchanged.
+    unit_price: Optional[str] = None
 
 
 class OrderVariantAdditionInput(BaseModel):
@@ -2270,6 +2317,8 @@ class OrderVariantAdditionInput(BaseModel):
     # Set when this variant replaces an order line ("Change variant").
     replaces_line_item_id: Optional[str] = None
     keep_discount: bool = True
+    # Price per unit for the new line; overrides keep_discount when set.
+    unit_price: Optional[str] = None
 
 
 class OrderItemsEditBody(BaseModel):
@@ -2986,6 +3035,7 @@ async def edit_order_items(
         raise HTTPException(status_code=400, detail="store and order_id are required")
 
     requested_quantities: Dict[str, int] = {}
+    requested_prices: Dict[str, Decimal] = {}
     for item in body.items or []:
         line_id = (item.line_item_id or "").strip()
         if not line_id:
@@ -2994,11 +3044,15 @@ async def edit_order_items(
         if quantity < 0 or quantity > 999:
             raise HTTPException(status_code=400, detail="Item quantity must be between 0 and 999")
         requested_quantities[line_id] = quantity
+        price = _parse_unit_price(item.unit_price)
+        if price is not None and quantity > 0:
+            requested_prices[line_id] = price
 
     requested_additions: Dict[str, int] = {}
-    # (variant_id, quantity, replaced line id) added as their own lines so the
-    # replaced item's discount can be staged on exactly that line.
-    replacements: List[Tuple[str, int, str]] = []
+    # Added as their own lines so a discount can be staged on exactly that
+    # line: a replacement keeping the replaced item's discount, or a product
+    # added at a price the agent set.
+    separate_additions: List[Dict[str, Any]] = []
     for addition in body.additions or []:
         variant_id = (addition.variant_id or "").strip()
         quantity = int(addition.quantity)
@@ -3007,40 +3061,62 @@ async def edit_order_items(
         if quantity < 1 or quantity > 999:
             raise HTTPException(status_code=400, detail="Added quantity must be between 1 and 999")
         replaced = (addition.replaces_line_item_id or "").strip()
-        if replaced and addition.keep_discount:
-            replacements.append((variant_id, quantity, replaced))
+        price = _parse_unit_price(addition.unit_price)
+        if price is not None or (replaced and addition.keep_discount):
+            separate_additions.append({
+                "variant_id": variant_id, "quantity": quantity,
+                "replaces": replaced or None, "unit_price": price,
+            })
             continue
         requested_additions[variant_id] = min(
             999,
             requested_additions.get(variant_id, 0) + quantity,
         )
 
-    if not requested_quantities and not requested_additions and not replacements:
+    if not requested_quantities and not requested_additions and not separate_additions:
         raise HTTPException(status_code=400, detail="No item changes were provided")
 
     from .main import shopify_graphql  # type: ignore
 
-    # The discount to carry is read from Shopify, never taken from the request.
+    changed_in_shopify = HTTPException(
+        status_code=409,
+        detail="An order item changed in Shopify. Refresh the order and try again.",
+    )
+    # Discounts to carry and which prices may change are read from Shopify,
+    # never taken from the request.
     carried_discounts: Dict[str, Decimal] = {}
-    if replacements:
+    carried = [a["replaces"] for a in separate_additions if a["replaces"] and a["unit_price"] is None]
+    if carried or requested_prices:
         pricing_data = await shopify_graphql(
             ORDER_PRICING_GQL, {"id": order_id}, store=store, api_version=CONFIRMATION_API_VERSION,
         )
         pricing_lines = _order_pricing((pricing_data or {}).get("order") or {})["line_items"]
-        for _variant_id, _quantity, replaced in replacements:
+        for replaced in carried:
             line = pricing_lines.get(replaced)
             if line is None:
+                raise changed_in_shopify
+            carried_discounts[replaced] = _decimal(line["item_unit_discount"])
+        for line_id, price in requested_prices.items():
+            line = pricing_lines.get(line_id)
+            if line is None:
+                raise changed_in_shopify
+            if not line["price_editable"]:
                 raise HTTPException(
                     status_code=409,
-                    detail="An order item changed in Shopify. Refresh the order and try again.",
+                    detail=f"{line['price_lock']}, so its price can't be changed here. Change it in Shopify.",
                 )
-            carried_discounts[replaced] = _decimal(line["item_unit_discount"])
+            if price > _decimal(line["original_unit_price"]):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"A price can't be above the item's original price of {line['original_unit_price']}.",
+                )
 
     try:
         begin_data = await shopify_graphql(
             ORDER_EDIT_BEGIN_GQL,
             {"id": order_id},
             store=store,
+            api_version=CONFIRMATION_API_VERSION,
         )
         begin = _mutation_payload_or_error(begin_data, "orderEditBegin")
         calculated_order = begin.get("calculatedOrder") or {}
@@ -3051,10 +3127,23 @@ async def edit_order_items(
         line_map: Dict[str, Dict[str, Any]] = {}
         for line in ((calculated_order.get("lineItems") or {}).get("nodes") or []):
             calculated_line_id = str(line.get("id") or "")
+            price_set = (line.get("originalUnitPriceSet") or {}).get("shopMoney") or {}
+            applications = [
+                allocation.get("discountApplication") or {}
+                for allocation in line.get("calculatedDiscountAllocations") or []
+            ]
             entry = {
                 "calculated_id": calculated_line_id,
                 "quantity": int(line.get("quantity") or 0),
                 "editable_quantity": int(line.get("editableQuantity") or 0),
+                "original_price": _decimal(price_set.get("amount")),
+                "currency": price_set.get("currencyCode") or "",
+                # The item's own manual discounts, the ones a new price replaces.
+                "manual_discount_ids": [
+                    app["id"] for app in applications
+                    if app.get("__typename") == "CalculatedManualDiscountApplication"
+                    and app.get("targetSelection") != "ALL" and app.get("id")
+                ],
             }
             if calculated_line_id:
                 line_map[calculated_line_id] = entry
@@ -3064,16 +3153,28 @@ async def edit_order_items(
                 # it already has without ever guessing a CalculatedLineItem GID.
                 line_map[_shopify_gid_resource_key(calculated_line_id)] = entry
 
+        def calculated_line(line_id: str) -> Dict[str, Any]:
+            mapped = line_map.get(line_id) or line_map.get(_shopify_gid_resource_key(line_id))
+            if not mapped:
+                raise changed_in_shopify
+            return mapped
+
+        async def stage_line_discount(line_id: str, unit_discount: Decimal, currency: str, description: str) -> None:
+            discount_data = await shopify_graphql(
+                ORDER_EDIT_ADD_LINE_DISCOUNT_GQL,
+                {
+                    "id": calculated_id,
+                    "lineItemId": line_id,
+                    "discount": _line_discount_input(unit_discount, currency, description),
+                },
+                store=store,
+                api_version=CONFIRMATION_API_VERSION,
+            )
+            _mutation_payload_or_error(discount_data, "orderEditAddLineItemDiscount")
+
         changed_count = 0
         for requested_line_id, quantity in requested_quantities.items():
-            mapped = line_map.get(requested_line_id) or line_map.get(
-                _shopify_gid_resource_key(requested_line_id)
-            )
-            if not mapped:
-                raise HTTPException(
-                    status_code=409,
-                    detail="An order item changed in Shopify. Refresh the order and try again.",
-                )
+            mapped = calculated_line(requested_line_id)
             if quantity == mapped["quantity"]:
                 continue
             set_data = await shopify_graphql(
@@ -3089,6 +3190,23 @@ async def edit_order_items(
             _mutation_payload_or_error(set_data, "orderEditSetQuantity")
             changed_count += 1
 
+        # Shopify allows one manual discount per line, so a new price replaces
+        # the item's discount rather than stacking on it.
+        for requested_line_id, price in requested_prices.items():
+            mapped = calculated_line(requested_line_id)
+            for discount_id in mapped["manual_discount_ids"]:
+                remove_data = await shopify_graphql(
+                    ORDER_EDIT_REMOVE_DISCOUNT_GQL,
+                    {"id": calculated_id, "discountApplicationId": discount_id},
+                    store=store,
+                    api_version=CONFIRMATION_API_VERSION,
+                )
+                _mutation_payload_or_error(remove_data, "orderEditRemoveDiscount")
+            unit_discount = mapped["original_price"] - price
+            if unit_discount > 0:
+                await stage_line_discount(mapped["calculated_id"], unit_discount, mapped["currency"], "Price set in confirmation app")
+            changed_count += 1
+
         for variant_id, quantity in requested_additions.items():
             add_data = await shopify_graphql(
                 ORDER_EDIT_ADD_VARIANT_GQL,
@@ -3102,27 +3220,29 @@ async def edit_order_items(
             _mutation_payload_or_error(add_data, "orderEditAddVariant")
             changed_count += 1
 
-        for variant_id, quantity, replaced in replacements:
+        for addition in separate_additions:
             add_data = await shopify_graphql(
                 ORDER_EDIT_ADD_VARIANT_GQL,
-                {"id": calculated_id, "variantId": variant_id, "quantity": quantity},
+                {"id": calculated_id, "variantId": addition["variant_id"], "quantity": addition["quantity"]},
                 store=store,
             )
             added = _mutation_payload_or_error(add_data, "orderEditAddVariant").get("calculatedLineItem") or {}
             changed_count += 1
-            new_price = _decimal(((added.get("originalUnitPriceSet") or {}).get("shopMoney") or {}).get("amount"))
-            percent = _carried_discount_percent(carried_discounts.get(replaced, Decimal("0")), new_price)
-            if percent > 0 and added.get("id"):
-                discount_data = await shopify_graphql(
-                    ORDER_EDIT_ADD_LINE_DISCOUNT_GQL,
-                    {
-                        "id": calculated_id,
-                        "lineItemId": added["id"],
-                        "discount": {"percentValue": percent, "description": "Item discount (kept from replaced item)"},
-                    },
-                    store=store,
-                )
-                _mutation_payload_or_error(discount_data, "orderEditAddLineItemDiscount")
+            price_set = (added.get("originalUnitPriceSet") or {}).get("shopMoney") or {}
+            new_price = _decimal(price_set.get("amount"))
+            if addition["unit_price"] is not None:
+                if addition["unit_price"] > new_price:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"A price can't be above the product's price of {_money_str(new_price)}.",
+                    )
+                unit_discount = new_price - addition["unit_price"]
+                description = "Price set in confirmation app"
+            else:
+                unit_discount = min(carried_discounts.get(addition["replaces"], Decimal("0")), new_price)
+                description = "Item discount (kept from replaced item)"
+            if unit_discount > 0 and added.get("id"):
+                await stage_line_discount(added["id"], unit_discount, price_set.get("currencyCode") or "", description)
 
         if changed_count == 0:
             raise HTTPException(status_code=400, detail="No item quantities changed")
@@ -3156,8 +3276,12 @@ async def edit_order_items(
         action="order_items_edit",
         metadata={
             "changed_lines": changed_count,
-            "added_variants": len(requested_additions) + len(replacements),
-            "replacements_keeping_discount": len(replacements),
+            "added_variants": len(requested_additions) + len(separate_additions),
+            "replacements_keeping_discount": len(carried),
+            "price_changes": {line_id: _money_str(price) for line_id, price in requested_prices.items()},
+            "priced_additions": {
+                a["variant_id"]: _money_str(a["unit_price"]) for a in separate_additions if a["unit_price"] is not None
+            },
             "notify_customer": bool(body.notify_customer),
         },
     )

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   ArrowRightLeft,
   Ban,
@@ -56,7 +56,7 @@ import {
   PRODUCT_STATUS_THEMES, confirmWarning, isNegativeStock, orderProductStatus, parseProductTag,
 } from "../lib/productTagStatus";
 import {
-  additionUnitPrice, carriedUnitDiscount, estimateEditedTotal, formatMoney, summarizeDiscounts,
+  additionUnitPrice, carriedUnitDiscount, changedPrices, estimateEditedTotal, formatMoney, parsePrice, summarizeDiscounts,
 } from "../lib/orderEditPricing";
 import {
   ACTION_BTN, ACTION_THEMES, BTN, BTN_TAP, CARD, TONES,
@@ -3321,6 +3321,9 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
   const [saveError, setSaveError] = useState("");
   const [pricing, setPricing] = useState(null);
   const [pricingError, setPricingError] = useState("");
+  // Agent-typed price per unit, by order line id.
+  const [prices, setPrices] = useState({});
+  const [priceEditId, setPriceEditId] = useState(null);
   const catalogSearch = useConfirmationProductSearch(store, catalogQuery, { search: API.searchProductVariants, enabled: tab === "items" && !saveBusy });
   const { products: catalogResults, loading: catalogLoading, error: catalogError } = catalogSearch;
 
@@ -3357,7 +3360,14 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
     }))
     .filter((change) => change.from !== change.to), [originalItems, quantities]);
 
-  const changedUnits = itemChanges.length + additions.length;
+  const priceChanges = useMemo(() => changedPrices(pricing, prices), [pricing, prices]);
+  const priceChangeItems = originalItems.filter((item) => item.id in priceChanges && Number(quantities[item.id] ?? item.quantity ?? 0) > 0);
+  const invalidPrice = Object.entries(prices).some(([lineId, value]) => {
+    const line = pricing?.line_items?.[lineId];
+    return line && parsePrice(value, Math.round(Number(line.original_unit_price) * 100)) === null;
+  }) || additions.some((item) => String(item.unitPrice ?? "").trim() !== ""
+    && parsePrice(item.unitPrice, Math.round(Number(item.price) * 100)) === null);
+  const changedUnits = itemChanges.length + additions.length + priceChangeItems.length;
   const replacingItem = originalItems.find((item) => item.id === replaceLineId) || null;
 
   function minimumQuantity(item) {
@@ -3384,6 +3394,19 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
 
   function setKeepDiscount(key, keepDiscount) {
     setAdditions((current) => current.map((item) => item.key === key ? { ...item, keepDiscount } : item));
+  }
+
+  function setAddedPrice(key, unitPrice) {
+    setAdditions((current) => current.map((item) => item.key === key ? { ...item, unitPrice } : item));
+  }
+
+  function setLinePrice(lineId, value) {
+    setPrices((current) => {
+      const next = { ...current };
+      if (value === null) delete next[lineId];
+      else next[lineId] = value;
+      return next;
+    });
   }
 
   function chooseCatalogVariant(variant) {
@@ -3433,22 +3456,30 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
   }
 
   async function saveItemChanges() {
-    if (changedUnits === 0) return;
+    if (changedUnits === 0 || invalidPrice) return;
     setSaveBusy(true);
     setSaveError("");
+    const changedLines = originalItems.filter((item) => (
+      itemChanges.some((change) => change.item.id === item.id) || priceChangeItems.includes(item)
+    ));
     try {
       const result = await API.editOrderItems({
         store,
         order_id: order.id,
-        items: itemChanges.map((change) => ({
-          line_item_id: change.item.id,
-          quantity: change.to,
+        items: changedLines.map((item) => ({
+          line_item_id: item.id,
+          quantity: Number(quantities[item.id] ?? item.quantity ?? 0),
+          ...(item.id in priceChanges ? { unit_price: formatMoney(priceChanges[item.id]) } : {}),
         })),
-        additions: additions.map((item) => ({
-          variant_id: item.id,
-          quantity: Number(item.quantity || 1),
-          ...(item.replaces ? { replaces_line_item_id: item.replaces, keep_discount: item.keepDiscount !== false } : {}),
-        })),
+        additions: additions.map((item) => {
+          const unitPrice = parsePrice(item.unitPrice, Math.round(Number(item.price) * 100));
+          return {
+            variant_id: item.id,
+            quantity: Number(item.quantity || 1),
+            ...(item.replaces ? { replaces_line_item_id: item.replaces, keep_discount: item.keepDiscount !== false } : {}),
+            ...(unitPrice !== null ? { unit_price: formatMoney(unitPrice) } : {}),
+          };
+        }),
         restock,
         notify_customer: notifyCustomer,
         staff_note: staffNote.trim() || null,
@@ -3576,6 +3607,11 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                                 </div>
                                 <div className="text-right text-xs">
                                   <LinePrice item={item} line={pricing?.line_items?.[item.id]} currency={item.currency || order.currency} />
+                                  {item.id in priceChanges && (
+                                    <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 font-semibold text-indigo-700">
+                                      New price {priceChanges[item.id] === 0 ? "Free" : `${formatMoney(priceChanges[item.id])} ${item.currency || order.currency}`}
+                                    </div>
+                                  )}
                                   {changed && (
                                     <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 font-medium text-indigo-700">
                                       {item.quantity} <ChevronRight size={10} /> {quantity}
@@ -3630,12 +3666,36 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                                   <Trash2 size={14} aria-hidden />
                                   Remove
                                 </button>
+                                {pricing?.line_items?.[item.id] && canEdit && quantity > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setPriceEditId(priceEditId === item.id ? null : item.id)}
+                                    disabled={!pricing.line_items[item.id].price_editable}
+                                    title={pricing.line_items[item.id].price_lock || "Change this item's price or discount"}
+                                    className="inline-flex items-center gap-1.5 rounded-lg px-2 py-2 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:text-gray-400 disabled:hover:bg-transparent"
+                                  >
+                                    <Pencil size={13} aria-hidden />
+                                    Edit price
+                                  </button>
+                                )}
                                 <span className="ml-auto text-[11px] text-gray-500">
                                   {editableUnits > 0
                                     ? `${editableUnits} unfulfilled unit${editableUnits === 1 ? "" : "s"} editable`
                                     : "Fulfilled item — locked"}
                                 </span>
                               </div>
+                              {pricing?.line_items?.[item.id] && !pricing.line_items[item.id].price_editable && (
+                                <div className="mt-1.5 text-[11px] text-gray-500">{pricing.line_items[item.id].price_lock}, so its price can only be changed in Shopify.</div>
+                              )}
+                              {priceEditId === item.id && pricing?.line_items?.[item.id] && quantity > 0 && (
+                                <PriceEditor
+                                  line={pricing.line_items[item.id]}
+                                  value={prices[item.id] ?? pricing.line_items[item.id].item_unit_price}
+                                  currency={item.currency || order.currency}
+                                  onChange={(value) => setLinePrice(item.id, value)}
+                                  onReset={() => { setLinePrice(item.id, null); setPriceEditId(null); }}
+                                />
+                              )}
                             </div>
                           </div>
                         </div>
@@ -3653,7 +3713,9 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                       {additions.map((item) => {
                         const replaced = item.replaces ? originalItems.find((line) => line.id === item.replaces) : null;
                         const replacedDiscount = item.replaces ? Number(pricing?.line_items?.[item.replaces]?.item_unit_discount || 0) : 0;
-                        const keeps = carriedUnitDiscount(pricing, item) > 0;
+                        const hasPrice = String(item.unitPrice ?? "").trim() !== "";
+                        const priced = hasPrice && additionUnitPrice(pricing, item) !== Math.round(Number(item.price) * 100);
+                        const keeps = !hasPrice && carriedUnitDiscount(pricing, item) > 0;
                         return (
                         <div key={item.key} className="p-4">
                           <div className="flex items-center gap-3">
@@ -3669,7 +3731,7 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                               )}
                               <div className="text-[11px] text-gray-500">
                                 {item.sku ? `SKU ${item.sku} · ` : ""}
-                                {keeps
+                                {keeps || priced
                                   ? <><span className="line-through">{item.price}</span> <strong className="text-emerald-700">{formatMoney(additionUnitPrice(pricing, item))} {order.currency}</strong> each</>
                                   : <>{item.price} {order.currency}</>}
                               </div>
@@ -3686,7 +3748,26 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                             </div>
                             <button type="button" onClick={() => setAddedQuantity(item.key, 0)} className="rounded-lg p-2 text-gray-400 hover:bg-rose-50 hover:text-rose-700" aria-label={`Remove ${item.product_title}`}><X size={16} /></button>
                           </div>
-                          {replacedDiscount > 0 && (
+                          <div className="ml-[60px] mt-2">
+                            {item.unitPrice === undefined ? (
+                              <button
+                                type="button"
+                                onClick={() => setAddedPrice(item.key, formatMoney(additionUnitPrice(pricing, item)))}
+                                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
+                              >
+                                <Pencil size={13} aria-hidden /> Set price
+                              </button>
+                            ) : (
+                              <PriceEditor
+                                line={{ original_unit_price: item.price }}
+                                value={item.unitPrice}
+                                currency={order.currency}
+                                onChange={(value) => setAddedPrice(item.key, value)}
+                                onReset={() => setAddedPrice(item.key, undefined)}
+                              />
+                            )}
+                          </div>
+                          {replacedDiscount > 0 && item.unitPrice === undefined && (
                             <label className="ml-[60px] mt-2 flex cursor-pointer items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
                               <input
                                 type="checkbox"
@@ -3752,7 +3833,7 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                 <OrderPricingSummary pricing={pricing} error={pricingError} currency={order.currency} />
                 <h3 className="mt-4 border-t border-gray-100 pt-4 text-sm font-semibold text-gray-900">Review changes</h3>
                 <div className="mt-3 space-y-2 text-xs">
-                  {itemChanges.length === 0 && additions.length === 0 ? (
+                  {changedUnits === 0 ? (
                     <div className="rounded-lg bg-gray-50 px-3 py-4 text-center text-gray-500">No item changes yet.</div>
                   ) : (
                     <>
@@ -3768,8 +3849,16 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                           <span className="shrink-0 font-semibold text-emerald-700">+{item.quantity}</span>
                         </div>
                       ))}
+                      {priceChangeItems.map((item) => (
+                        <div key={`price-${item.id}`} className="flex items-start justify-between gap-3 rounded-lg bg-indigo-50 px-3 py-2">
+                          <span className="min-w-0 truncate text-indigo-900">Price of {item.title}{item.variant_title && item.variant_title !== "Default Title" ? ` (${item.variant_title})` : ""}</span>
+                          <span className="shrink-0 font-semibold tabular-nums text-indigo-700">
+                            {pricing.line_items[item.id].item_unit_price} → {formatMoney(priceChanges[item.id])}
+                          </span>
+                        </div>
+                      ))}
                       {pricing && (() => {
-                        const estimate = estimateEditedTotal({ pricing, items: originalItems, quantities, additions });
+                        const estimate = estimateEditedTotal({ pricing, items: originalItems, quantities, additions, prices });
                         const current = Math.round(Number(pricing.total) * 100);
                         const delta = estimate - current;
                         return (
@@ -3811,13 +3900,14 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                   </label>
                 </div>
                 <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
-                  Shopify recalculates taxes, discounts, and the order balance when these changes are saved. Added products are charged full price unless they replace a discounted item.
+                  Shopify recalculates taxes, discounts, and the order balance when these changes are saved. Added products are charged full price unless you set a price or they replace a discounted item. A new price replaces the item's own discount; order-wide discount codes stay as they are.
                 </div>
+                {invalidPrice && <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">Fix the highlighted price before saving.</div>}
                 {saveError && <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{saveError}</div>}
                 <button
                   type="button"
                   onClick={saveItemChanges}
-                  disabled={saveBusy || changedUnits === 0}
+                  disabled={saveBusy || changedUnits === 0 || invalidPrice}
                   className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   {saveBusy
@@ -3948,6 +4038,44 @@ function LinePrice({ item, line, currency }) {
           {discount.label} −{discount.per_unit}
         </span>
       ))}
+    </div>
+  );
+}
+
+// Price per unit for one line; the difference from the original price is
+// saved as that item's discount.
+function PriceEditor({ line, value, currency, onChange, onReset }) {
+  const inputId = useId();
+  const originalCents = Math.round(Number(line.original_unit_price) * 100);
+  const price = parsePrice(value, originalCents);
+  const discount = price === null ? null : originalCents - price;
+  const quick = "rounded-md border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50";
+  return (
+    <div className="mt-2 rounded-lg border border-indigo-200 bg-indigo-50/60 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="text-xs font-semibold text-indigo-900" htmlFor={inputId}>Price each</label>
+        <div className={`inline-flex h-9 items-center rounded-lg border bg-white ${price === null ? "border-rose-400 ring-2 ring-rose-100" : "border-gray-300"}`}>
+          <input
+            id={inputId}
+            inputMode="decimal"
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            className="h-full w-24 rounded-l-lg bg-transparent px-2 text-right text-sm font-semibold tabular-nums outline-none"
+            aria-invalid={price === null}
+          />
+          <span className="border-l border-gray-200 px-2 text-xs text-gray-500">{currency}</span>
+        </div>
+        <button type="button" onClick={() => onChange("0")} className={quick}>Free</button>
+        <button type="button" onClick={() => onChange(line.original_unit_price)} className={quick}>Full price</button>
+        <button type="button" onClick={onReset} className="ml-auto text-[11px] font-medium text-gray-600 hover:text-gray-900">Undo</button>
+      </div>
+      <div className={`mt-1.5 text-[11px] ${price === null ? "text-rose-700" : "text-indigo-800"}`}>
+        {price === null
+          ? `Enter a price from 0 to ${line.original_unit_price}.`
+          : discount > 0
+            ? `Discount −${formatMoney(discount)} ${currency} each, off ${line.original_unit_price}.`
+            : "Full price, no item discount."}
+      </div>
     </div>
   );
 }

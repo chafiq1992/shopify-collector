@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   additionUnitPrice,
+  changedPrices,
+  parsePrice,
   estimateEditedTotal,
   formatMoney,
   summarizeDiscounts,
@@ -12,6 +14,7 @@ import {
 const line = (original, discounted, itemDiscount) => ({
   original_unit_price: original, discounted_unit_price: discounted,
   unit_discount: (original - discounted).toFixed(2), item_unit_discount: itemDiscount, discounts: [],
+  item_unit_price: discounted.toFixed(2), price_editable: true,
 });
 const pricing = {
   shipping: "0.00",
@@ -61,4 +64,21 @@ test("a carried discount never makes the new price negative", () => {
 
 test("no estimate until pricing has loaded", () => {
   assert.equal(estimateEditedTotal({ pricing: null, items, quantities: {}, additions: [] }), null);
+});
+
+test("a new item price changes the estimate and ignores unchanged or invalid prices", () => {
+  assert.deepEqual(changedPrices(pricing, { a: "0", d: "200", b: "abc", c: "300" }), { d: 20000 });
+  assert.equal(estimateEditedTotal({ pricing, items, quantities: {}, additions: [], prices: { d: "200" } }), 20000);
+  assert.equal(estimateEditedTotal({ pricing, items, quantities: {}, additions: [], prices: { a: "100" } }), 32900);
+});
+
+test("a locked line keeps its price", () => {
+  const locked = { ...pricing, line_items: { ...pricing.line_items, d: { ...pricing.line_items.d, item_unit_price: "229.00", price_editable: false } } };
+  assert.deepEqual(changedPrices(locked, { d: "100" }), {});
+});
+
+test("an added product at a set price", () => {
+  assert.equal(additionUnitPrice(pricing, { price: "249.99", unitPrice: "199,5", quantity: 1 }), 19950);
+  assert.equal(additionUnitPrice(pricing, { price: "249.99", unitPrice: "300", quantity: 1 }), 24999);
+  assert.equal(parsePrice("12.345"), null);
 });
