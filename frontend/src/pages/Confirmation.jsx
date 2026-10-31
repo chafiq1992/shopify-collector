@@ -56,6 +56,9 @@ import {
   PRODUCT_STATUS_THEMES, confirmWarning, isNegativeStock, orderProductStatus, parseProductTag,
 } from "../lib/productTagStatus";
 import {
+  additionUnitPrice, carriedUnitDiscount, estimateEditedTotal, formatMoney, summarizeDiscounts,
+} from "../lib/orderEditPricing";
+import {
   ACTION_BTN, ACTION_THEMES, BTN, BTN_TAP, CARD, TONES,
   KpiCard, Modal, ModalHeader, PreviewAge, SkeletonCards, SkeletonRows, SourceOption, Spinner, TopBar,
   initialOf, isInteractiveTarget, timeAgo,
@@ -210,6 +213,14 @@ const API = {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || `Could not load order to duplicate (${res.status})`);
     return data;
+  },
+  async orderPricing(store, orderId) {
+    const res = await authFetch(`/api/agent/order-pricing?${new URLSearchParams({ store, order_id: orderId })}`, { headers: authHeaders() });
+    if (!res.ok) {
+      const js = await res.json().catch(() => ({ detail: "Could not load order discounts" }));
+      throw new Error(js.detail || `Could not load order discounts (${res.status})`);
+    }
+    return res.json();
   },
   async editOrderItems(payload) {
     const res = await authFetch("/api/agent/order-items/edit", {
@@ -3308,6 +3319,8 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
   const [shipping, setShipping] = useState(() => shippingDraftFromOrder(order));
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [pricing, setPricing] = useState(null);
+  const [pricingError, setPricingError] = useState("");
   const catalogSearch = useConfirmationProductSearch(store, catalogQuery, { search: API.searchProductVariants, enabled: tab === "items" && !saveBusy });
   const { products: catalogResults, loading: catalogLoading, error: catalogError } = catalogSearch;
 
@@ -3323,6 +3336,17 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
       window.removeEventListener("keydown", onKey);
     };
   }, [onClose, saveBusy]);
+
+  // The queue doesn't carry discounts; read this order's pricing when editing.
+  useEffect(() => {
+    let cancelled = false;
+    setPricing(null);
+    setPricingError("");
+    API.orderPricing(store, order.id)
+      .then((data) => { if (!cancelled) setPricing(data); })
+      .catch((error) => { if (!cancelled) setPricingError(error?.message || "Could not load order discounts"); });
+    return () => { cancelled = true; };
+  }, [store, order.id]);
 
   const itemChanges = useMemo(() => originalItems
     .filter((item) => item.id)
@@ -3349,11 +3373,17 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
     setQuantities((current) => ({ ...current, [item.id]: next }));
   }
 
-  function setAddedQuantity(variantId, nextQuantity) {
+  // Additions are keyed by variant, or by variant and replaced line for a
+  // "Change variant", so each replacement keeps its own discount choice.
+  function setAddedQuantity(key, nextQuantity) {
     const next = Math.max(0, Math.min(999, Number(nextQuantity) || 0));
     setAdditions((current) => next <= 0
-      ? current.filter((item) => item.id !== variantId)
-      : current.map((item) => item.id === variantId ? { ...item, quantity: next } : item));
+      ? current.filter((item) => item.key !== key)
+      : current.map((item) => item.key === key ? { ...item, quantity: next } : item));
+  }
+
+  function setKeepDiscount(key, keepDiscount) {
+    setAdditions((current) => current.map((item) => item.key === key ? { ...item, keepDiscount } : item));
   }
 
   function chooseCatalogVariant(variant) {
@@ -3367,14 +3397,15 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
         Number(replacingItem.unfulfilled_quantity ?? replacingItem.quantity ?? 1),
       );
       setItemQuantity(replacingItem, minimumQuantity(replacingItem));
+      const key = `${variant.id}|${replacingItem.id}`;
       setAdditions((current) => {
-        const existing = current.find((item) => item.id === variant.id);
+        const existing = current.find((item) => item.key === key);
         if (existing) {
-          return current.map((item) => item.id === variant.id
+          return current.map((item) => item.key === key
             ? { ...item, quantity: Math.min(999, item.quantity + replaceQuantity) }
             : item);
         }
-        return [...current, { ...variant, quantity: replaceQuantity }];
+        return [...current, { ...variant, key, replaces: replacingItem.id, keepDiscount: true, quantity: replaceQuantity }];
       });
       setReplaceLineId(null);
       setCatalogQuery("");
@@ -3390,13 +3421,13 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
       setItemQuantity(existingLine, Number(quantities[existingLine.id] ?? existingLine.quantity ?? 0) + 1);
     } else {
       setAdditions((current) => {
-        const existing = current.find((item) => item.id === variant.id);
+        const existing = current.find((item) => item.key === variant.id);
         if (existing) {
-          return current.map((item) => item.id === variant.id
+          return current.map((item) => item.key === variant.id
             ? { ...item, quantity: Math.min(999, item.quantity + 1) }
             : item);
         }
-        return [...current, { ...variant, quantity: 1 }];
+        return [...current, { ...variant, key: variant.id, quantity: 1 }];
       });
     }
   }
@@ -3416,6 +3447,7 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
         additions: additions.map((item) => ({
           variant_id: item.id,
           quantity: Number(item.quantity || 1),
+          ...(item.replaces ? { replaces_line_item_id: item.replaces, keep_discount: item.keepDiscount !== false } : {}),
         })),
         restock,
         notify_customer: notifyCustomer,
@@ -3543,7 +3575,7 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                                   {item.sku && <div className="mt-1 text-[11px] font-mono text-gray-500">SKU {item.sku}</div>}
                                 </div>
                                 <div className="text-right text-xs">
-                                  <div className="font-semibold tabular-nums text-gray-900">{item.unit_price} {item.currency || order.currency}</div>
+                                  <LinePrice item={item} line={pricing?.line_items?.[item.id]} currency={item.currency || order.currency} />
                                   {changed && (
                                     <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 font-medium text-indigo-700">
                                       {item.quantity} <ChevronRight size={10} /> {quantity}
@@ -3618,30 +3650,59 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                       <h3 className="text-sm font-semibold text-emerald-900">Products to add</h3>
                     </div>
                     <div className="divide-y divide-gray-100">
-                      {additions.map((item) => (
-                        <div key={item.id} className="flex items-center gap-3 p-4">
-                          <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-gray-100">
-                            {item.image
-                              ? <img src={item.image} alt="" className="h-full w-full object-cover" />
-                              : <Package size={18} className="text-gray-400" />}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-sm font-semibold">{item.product_title}</div>
-                            {item.variant_title && item.variant_title !== "Default Title" && (
-                              <div className="text-xs text-gray-600">{item.variant_title}</div>
-                            )}
-                            <div className="text-[11px] text-gray-500">
-                              {item.sku ? `SKU ${item.sku} · ` : ""}{item.price} {order.currency}
+                      {additions.map((item) => {
+                        const replaced = item.replaces ? originalItems.find((line) => line.id === item.replaces) : null;
+                        const replacedDiscount = item.replaces ? Number(pricing?.line_items?.[item.replaces]?.item_unit_discount || 0) : 0;
+                        const keeps = carriedUnitDiscount(pricing, item) > 0;
+                        return (
+                        <div key={item.key} className="p-4">
+                          <div className="flex items-center gap-3">
+                            <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-gray-100">
+                              {item.image
+                                ? <img src={item.image} alt="" className="h-full w-full object-cover" />
+                                : <Package size={18} className="text-gray-400" />}
                             </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-semibold">{item.product_title}</div>
+                              {item.variant_title && item.variant_title !== "Default Title" && (
+                                <div className="text-xs text-gray-600">{item.variant_title}</div>
+                              )}
+                              <div className="text-[11px] text-gray-500">
+                                {item.sku ? `SKU ${item.sku} · ` : ""}
+                                {keeps
+                                  ? <><span className="line-through">{item.price}</span> <strong className="text-emerald-700">{formatMoney(additionUnitPrice(pricing, item))} {order.currency}</strong> each</>
+                                  : <>{item.price} {order.currency}</>}
+                              </div>
+                              {replaced && (
+                                <div className="mt-0.5 text-[11px] font-medium text-indigo-700">
+                                  Replaces {replaced.title}{replaced.variant_title && replaced.variant_title !== "Default Title" ? ` (${replaced.variant_title})` : ""}
+                                </div>
+                              )}
+                            </div>
+                            <div className="inline-flex h-9 items-center rounded-lg border border-gray-300 bg-white">
+                              <button type="button" onClick={() => setAddedQuantity(item.key, item.quantity - 1)} className="flex h-full w-9 items-center justify-center hover:bg-gray-50"><Minus size={14} /></button>
+                              <div className="w-10 text-center text-sm font-semibold tabular-nums">{item.quantity}</div>
+                              <button type="button" onClick={() => setAddedQuantity(item.key, item.quantity + 1)} className="flex h-full w-9 items-center justify-center hover:bg-gray-50"><Plus size={14} /></button>
+                            </div>
+                            <button type="button" onClick={() => setAddedQuantity(item.key, 0)} className="rounded-lg p-2 text-gray-400 hover:bg-rose-50 hover:text-rose-700" aria-label={`Remove ${item.product_title}`}><X size={16} /></button>
                           </div>
-                          <div className="inline-flex h-9 items-center rounded-lg border border-gray-300 bg-white">
-                            <button type="button" onClick={() => setAddedQuantity(item.id, item.quantity - 1)} className="flex h-full w-9 items-center justify-center hover:bg-gray-50"><Minus size={14} /></button>
-                            <div className="w-10 text-center text-sm font-semibold tabular-nums">{item.quantity}</div>
-                            <button type="button" onClick={() => setAddedQuantity(item.id, item.quantity + 1)} className="flex h-full w-9 items-center justify-center hover:bg-gray-50"><Plus size={14} /></button>
-                          </div>
-                          <button type="button" onClick={() => setAddedQuantity(item.id, 0)} className="rounded-lg p-2 text-gray-400 hover:bg-rose-50 hover:text-rose-700" aria-label={`Remove ${item.product_title}`}><X size={16} /></button>
+                          {replacedDiscount > 0 && (
+                            <label className="ml-[60px] mt-2 flex cursor-pointer items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+                              <input
+                                type="checkbox"
+                                checked={item.keepDiscount !== false}
+                                onChange={(event) => setKeepDiscount(item.key, event.target.checked)}
+                                className="mt-0.5 h-4 w-4 rounded border-emerald-300"
+                              />
+                              <span>
+                                <strong className="font-semibold">Keep the item discount</strong> (−{replacedDiscount.toFixed(2)} {order.currency} each)
+                                <br /><span className="text-emerald-800/80">Untick to charge the full price for the new variant.</span>
+                              </span>
+                            </label>
+                          )}
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </section>
                 )}
@@ -3688,7 +3749,8 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
               </div>
 
               <aside className="h-fit rounded-xl border border-gray-200 bg-white p-4 shadow-sm lg:sticky lg:top-4">
-                <h3 className="text-sm font-semibold text-gray-900">Review changes</h3>
+                <OrderPricingSummary pricing={pricing} error={pricingError} currency={order.currency} />
+                <h3 className="mt-4 border-t border-gray-100 pt-4 text-sm font-semibold text-gray-900">Review changes</h3>
                 <div className="mt-3 space-y-2 text-xs">
                   {itemChanges.length === 0 && additions.length === 0 ? (
                     <div className="rounded-lg bg-gray-50 px-3 py-4 text-center text-gray-500">No item changes yet.</div>
@@ -3701,11 +3763,29 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                         </div>
                       ))}
                       {additions.map((item) => (
-                        <div key={item.id} className="flex items-start justify-between gap-3 rounded-lg bg-emerald-50 px-3 py-2">
+                        <div key={item.key} className="flex items-start justify-between gap-3 rounded-lg bg-emerald-50 px-3 py-2">
                           <span className="min-w-0 truncate text-emerald-900">Add {item.product_title}</span>
                           <span className="shrink-0 font-semibold text-emerald-700">+{item.quantity}</span>
                         </div>
                       ))}
+                      {pricing && (() => {
+                        const estimate = estimateEditedTotal({ pricing, items: originalItems, quantities, additions });
+                        const current = Math.round(Number(pricing.total) * 100);
+                        const delta = estimate - current;
+                        return (
+                          <div className="flex items-baseline justify-between gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2">
+                            <span className="font-semibold text-indigo-900">Estimated new total</span>
+                            <span className="text-right">
+                              <strong className="tabular-nums text-indigo-900">{formatMoney(estimate)} {order.currency}</strong>
+                              {delta !== 0 && (
+                                <span className={`block text-[11px] font-semibold tabular-nums ${delta > 0 ? "text-rose-700" : "text-emerald-700"}`}>
+                                  {delta > 0 ? "+" : "−"}{formatMoney(Math.abs(delta))} vs now
+                                </span>
+                              )}
+                            </span>
+                          </div>
+                        );
+                      })()}
                     </>
                   )}
                 </div>
@@ -3731,7 +3811,7 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                   </label>
                 </div>
                 <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
-                  Shopify recalculates taxes, discounts, and the order balance when these changes are saved.
+                  Shopify recalculates taxes, discounts, and the order balance when these changes are saved. Added products are charged full price unless they replace a discounted item.
                 </div>
                 {saveError && <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{saveError}</div>}
                 <button
@@ -3807,6 +3887,67 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function OrderPricingSummary({ pricing, error, currency }) {
+  if (error) {
+    return <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{error}. Prices below are before discounts.</div>;
+  }
+  if (!pricing) {
+    return <div className="flex items-center gap-2 text-xs text-gray-500"><Spinner className="h-3.5 w-3.5" /> Loading order discounts…</div>;
+  }
+  const discounts = summarizeDiscounts(pricing);
+  const row = "flex items-baseline justify-between gap-3";
+  return (
+    <section>
+      <h3 className="text-sm font-semibold text-gray-900">Order pricing</h3>
+      <div className="mt-2 space-y-1.5 text-xs">
+        <div className={row}><span className="text-gray-600">Items before discounts</span><span className="tabular-nums text-gray-900">{pricing.subtotal_before_discounts}</span></div>
+        {discounts.map((discount) => (
+          <div key={`${discount.appliesTo}|${discount.label}`} className={row}>
+            <span className={discount.appliesTo === "order" ? "text-violet-700" : "text-emerald-700"}>
+              {discount.label}
+              <span className="ml-1 text-[10px] uppercase tracking-wide opacity-70">
+                {discount.appliesTo === "order" ? "order" : discount.appliesTo === "shipping" ? "shipping" : "items"}
+              </span>
+            </span>
+            <span className="tabular-nums text-emerald-700">−{formatMoney(discount.cents)}</span>
+          </div>
+        ))}
+        <div className={row}><span className="text-gray-600">Shipping</span><span className="tabular-nums text-gray-900">{pricing.shipping}</span></div>
+        <div className={`${row} border-t border-gray-100 pt-1.5 text-sm font-bold text-gray-900`}>
+          <span>Total now</span><span className="tabular-nums">{pricing.total} {pricing.currency || currency}</span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// Unit price of an order line, with its discounts once pricing has loaded.
+function LinePrice({ item, line, currency }) {
+  const discounted = line && Number(line.unit_discount) > 0;
+  if (!discounted) {
+    return <div className="font-semibold tabular-nums text-gray-900">{line?.original_unit_price ?? item.unit_price} {currency}</div>;
+  }
+  const free = Number(line.discounted_unit_price) === 0;
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <div className="tabular-nums text-gray-400 line-through">{line.original_unit_price} {currency}</div>
+      <div className={`font-bold tabular-nums ${free ? "text-emerald-700" : "text-gray-900"}`}>
+        {free ? "Free" : `${line.discounted_unit_price} ${currency}`}
+        <span className="ml-1 font-normal text-gray-500">each</span>
+      </div>
+      {line.discounts.map((discount, index) => (
+        <span
+          key={index}
+          className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${discount.applies_to === "order" ? "border-violet-200 bg-violet-50 text-violet-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}
+          title={discount.applies_to === "order" ? "Order discount, spread across items" : "Discount on this item"}
+        >
+          {discount.label} −{discount.per_unit}
+        </span>
+      ))}
     </div>
   );
 }

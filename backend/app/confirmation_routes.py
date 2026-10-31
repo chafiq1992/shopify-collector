@@ -2019,6 +2019,150 @@ query ConfirmationCreatedOrder($id: ID!) {{
 }}
 """
 
+# One order's discounts and prices. Read separately from the queue query so
+# a page of 100 orders doesn't pay for discount allocations nobody opens.
+ORDER_PRICING_GQL = """
+query ConfirmationOrderPricing($id: ID!) {
+  order(id: $id) {
+    id
+    discountCodes
+    currentSubtotalPriceSet { shopMoney { amount currencyCode } }
+    currentTotalDiscountsSet { shopMoney { amount currencyCode } }
+    currentShippingPriceSet { shopMoney { amount currencyCode } }
+    currentTotalPriceSet { shopMoney { amount currencyCode } }
+    discountApplications(first: 50) {
+      nodes {
+        allocationMethod
+        targetSelection
+        targetType
+        value {
+          ... on MoneyV2 { amount }
+          ... on PricingPercentageValue { percentage }
+        }
+        ... on DiscountCodeApplication { code }
+        ... on ManualDiscountApplication { title }
+        ... on AutomaticDiscountApplication { title }
+        ... on ScriptDiscountApplication { title }
+      }
+    }
+    lineItems(first: 100) {
+      nodes {
+        id
+        quantity
+        currentQuantity
+        originalUnitPriceSet { shopMoney { amount } }
+        discountedUnitPriceAfterAllDiscountsSet { shopMoney { amount } }
+        discountAllocations {
+          allocatedAmountSet { shopMoney { amount } }
+          discountApplication { index }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _decimal(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value if value not in (None, "") else "0"))
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
+
+def _money_str(value: Decimal) -> str:
+    return str(value.quantize(Decimal("0.01")))
+
+
+def _order_pricing(node: Dict[str, Any]) -> Dict[str, Any]:
+    """Discounts and prices of one order, in the shape the edit modal shows."""
+    apps = list(((node.get("discountApplications") or {}).get("nodes")) or [])
+    discounts = []
+    for index, app in enumerate(apps):
+        value = app.get("value") or {}
+        if app.get("targetType") == "SHIPPING_LINE":
+            applies_to = "shipping"
+        elif app.get("targetSelection") == "ALL":
+            applies_to = "order"
+        else:
+            applies_to = "item"
+        discounts.append({
+            "index": index,
+            "label": app.get("code") or app.get("title") or "Discount",
+            "is_code": bool(app.get("code")),
+            "applies_to": applies_to,
+            "percentage": value.get("percentage"),
+            "value": value.get("amount"),
+            "amount": Decimal("0"),
+        })
+
+    line_items: Dict[str, Dict[str, Any]] = {}
+    before_discounts = Decimal("0")
+    for line in ((node.get("lineItems") or {}).get("nodes")) or []:
+        current_qty = int(line.get("currentQuantity") or 0)
+        if not line.get("id") or current_qty <= 0:
+            continue
+        ordered_qty = max(1, int(line.get("quantity") or 0))
+        original = _decimal(((line.get("originalUnitPriceSet") or {}).get("shopMoney") or {}).get("amount"))
+        after = ((line.get("discountedUnitPriceAfterAllDiscountsSet") or {}).get("shopMoney") or {}).get("amount")
+        discounted = _decimal(after) if after is not None else original
+        before_discounts += original * current_qty
+        line_discounts = []
+        item_level = Decimal("0")
+        for allocation in line.get("discountAllocations") or []:
+            amount = _decimal(((allocation.get("allocatedAmountSet") or {}).get("shopMoney") or {}).get("amount"))
+            app_index = (allocation.get("discountApplication") or {}).get("index")
+            app = discounts[app_index] if isinstance(app_index, int) and 0 <= app_index < len(discounts) else None
+            # Allocations cover the quantity originally ordered.
+            per_unit = amount / ordered_qty
+            if app:
+                app["amount"] += per_unit * current_qty
+                if app["applies_to"] == "item":
+                    item_level += per_unit
+            line_discounts.append({
+                "label": app["label"] if app else "Discount",
+                "applies_to": app["applies_to"] if app else "item",
+                "per_unit": _money_str(per_unit),
+            })
+        line_items[line["id"]] = {
+            "original_unit_price": _money_str(original),
+            "discounted_unit_price": _money_str(discounted),
+            "unit_discount": _money_str(max(Decimal("0"), original - discounted)),
+            # Only the item's own discounts follow it to a replacement variant;
+            # order-wide discounts are left for Shopify to spread again.
+            "item_unit_discount": _money_str(item_level),
+            "discounts": line_discounts,
+        }
+
+    def money(field: str) -> str:
+        return _money_str(_decimal(((node.get(field) or {}).get("shopMoney") or {}).get("amount")))
+
+    return {
+        "currency": ((node.get("currentTotalPriceSet") or {}).get("shopMoney") or {}).get("currencyCode") or "",
+        "subtotal_before_discounts": _money_str(before_discounts),
+        "total_discounts": money("currentTotalDiscountsSet"),
+        "subtotal": money("currentSubtotalPriceSet"),
+        "shipping": money("currentShippingPriceSet"),
+        "total": money("currentTotalPriceSet"),
+        "discount_codes": list(node.get("discountCodes") or []),
+        "discounts": [{**d, "amount": _money_str(d["amount"])} for d in discounts],
+        "line_items": line_items,
+    }
+
+
+def _carried_discount_percent(unit_discount: Decimal, new_unit_price: Decimal) -> float:
+    """The replaced item's per-unit discount as a percentage of the new price.
+
+    A percentage, unlike a fixed amount, is unambiguous per unit in Shopify's
+    order edit API. The same money comes off each unit, capped at its price.
+    """
+    if unit_discount <= 0 or new_unit_price <= 0:
+        return 0.0
+    if unit_discount >= new_unit_price:
+        return 100.0
+    return round(float(unit_discount / new_unit_price * 100), 6)
+
+
 ORDER_EDIT_BEGIN_GQL = """
 mutation ConfirmationOrderEditBegin($id: ID!) {
   orderEditBegin(id: $id) {
@@ -2068,7 +2212,20 @@ mutation ConfirmationOrderEditAddVariant(
     quantity: $quantity,
     allowDuplicates: true
   ) {
-    calculatedLineItem { id quantity }
+    calculatedLineItem { id quantity originalUnitPriceSet { shopMoney { amount } } }
+    userErrors { field message }
+  }
+}
+"""
+
+ORDER_EDIT_ADD_LINE_DISCOUNT_GQL = """
+mutation ConfirmationOrderEditAddLineItemDiscount(
+  $id: ID!,
+  $lineItemId: ID!,
+  $discount: OrderEditAppliedDiscountInput!
+) {
+  orderEditAddLineItemDiscount(id: $id, lineItemId: $lineItemId, discount: $discount) {
+    addedDiscountStagedChange { id }
     userErrors { field message }
   }
 }
@@ -2110,6 +2267,9 @@ class OrderLineQuantityInput(BaseModel):
 class OrderVariantAdditionInput(BaseModel):
     variant_id: str
     quantity: int = 1
+    # Set when this variant replaces an order line ("Change variant").
+    replaces_line_item_id: Optional[str] = None
+    keep_discount: bool = True
 
 
 class OrderItemsEditBody(BaseModel):
@@ -2800,6 +2960,20 @@ async def create_confirmation_order(
     return {"ok": True, "order": _flatten_order(node), "deduped": False, "audited": True}
 
 
+@router.get("/api/agent/order-pricing")
+async def order_pricing(store: str, order_id: str, _: User = Depends(get_current_user)):
+    order_id = (order_id or "").strip()
+    if not (store or "").strip() or not re.fullmatch(r"gid://shopify/Order/\d+", order_id):
+        raise HTTPException(status_code=422, detail="store and an order id are required")
+    data = await _confirmation_read_graphql(
+        ORDER_PRICING_GQL, {"id": order_id}, store=store.strip(), scope="read_orders",
+    )
+    node = (data or {}).get("order")
+    if not node:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return {"ok": True, **_order_pricing(node)}
+
+
 @router.post("/api/agent/order-items/edit")
 async def edit_order_items(
     body: OrderItemsEditBody,
@@ -2822,6 +2996,9 @@ async def edit_order_items(
         requested_quantities[line_id] = quantity
 
     requested_additions: Dict[str, int] = {}
+    # (variant_id, quantity, replaced line id) added as their own lines so the
+    # replaced item's discount can be staged on exactly that line.
+    replacements: List[Tuple[str, int, str]] = []
     for addition in body.additions or []:
         variant_id = (addition.variant_id or "").strip()
         quantity = int(addition.quantity)
@@ -2829,15 +3006,35 @@ async def edit_order_items(
             raise HTTPException(status_code=400, detail="Every added item needs a variant_id")
         if quantity < 1 or quantity > 999:
             raise HTTPException(status_code=400, detail="Added quantity must be between 1 and 999")
+        replaced = (addition.replaces_line_item_id or "").strip()
+        if replaced and addition.keep_discount:
+            replacements.append((variant_id, quantity, replaced))
+            continue
         requested_additions[variant_id] = min(
             999,
             requested_additions.get(variant_id, 0) + quantity,
         )
 
-    if not requested_quantities and not requested_additions:
+    if not requested_quantities and not requested_additions and not replacements:
         raise HTTPException(status_code=400, detail="No item changes were provided")
 
     from .main import shopify_graphql  # type: ignore
+
+    # The discount to carry is read from Shopify, never taken from the request.
+    carried_discounts: Dict[str, Decimal] = {}
+    if replacements:
+        pricing_data = await shopify_graphql(
+            ORDER_PRICING_GQL, {"id": order_id}, store=store, api_version=CONFIRMATION_API_VERSION,
+        )
+        pricing_lines = _order_pricing((pricing_data or {}).get("order") or {})["line_items"]
+        for _variant_id, _quantity, replaced in replacements:
+            line = pricing_lines.get(replaced)
+            if line is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="An order item changed in Shopify. Refresh the order and try again.",
+                )
+            carried_discounts[replaced] = _decimal(line["item_unit_discount"])
 
     try:
         begin_data = await shopify_graphql(
@@ -2905,6 +3102,28 @@ async def edit_order_items(
             _mutation_payload_or_error(add_data, "orderEditAddVariant")
             changed_count += 1
 
+        for variant_id, quantity, replaced in replacements:
+            add_data = await shopify_graphql(
+                ORDER_EDIT_ADD_VARIANT_GQL,
+                {"id": calculated_id, "variantId": variant_id, "quantity": quantity},
+                store=store,
+            )
+            added = _mutation_payload_or_error(add_data, "orderEditAddVariant").get("calculatedLineItem") or {}
+            changed_count += 1
+            new_price = _decimal(((added.get("originalUnitPriceSet") or {}).get("shopMoney") or {}).get("amount"))
+            percent = _carried_discount_percent(carried_discounts.get(replaced, Decimal("0")), new_price)
+            if percent > 0 and added.get("id"):
+                discount_data = await shopify_graphql(
+                    ORDER_EDIT_ADD_LINE_DISCOUNT_GQL,
+                    {
+                        "id": calculated_id,
+                        "lineItemId": added["id"],
+                        "discount": {"percentValue": percent, "description": "Item discount (kept from replaced item)"},
+                    },
+                    store=store,
+                )
+                _mutation_payload_or_error(discount_data, "orderEditAddLineItemDiscount")
+
         if changed_count == 0:
             raise HTTPException(status_code=400, detail="No item quantities changed")
 
@@ -2937,7 +3156,8 @@ async def edit_order_items(
         action="order_items_edit",
         metadata={
             "changed_lines": changed_count,
-            "added_variants": len(requested_additions),
+            "added_variants": len(requested_additions) + len(replacements),
+            "replacements_keeping_discount": len(replacements),
             "notify_customer": bool(body.notify_customer),
         },
     )
