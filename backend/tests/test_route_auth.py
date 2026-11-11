@@ -6,6 +6,7 @@ SQLite database: a real user row and a real signed token, no overrides.
 import asyncio
 import uuid
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -239,6 +240,47 @@ def test_overrides_secret_in_query_is_not_accepted(client, print_env):
 def test_label_accepts_pc_credentials(client, print_env, enforce):
     _enforce(print_env, enforce)
     assert client.get(LABEL, **_pc()).status_code == 503
+
+
+@pytest.mark.parametrize("envoy_code", [None, "EN-1"])
+@pytest.mark.parametrize("autoprint", [None, "false"])
+def test_delivery_label_forwards_autoprint(client, print_env, envoy_code, autoprint):
+    _enforce(print_env, True)
+    print_env.setattr(main, "DELVERY_BACKEND_URL", "https://delivery.example")
+    label_requests = []
+
+    def upstream(request):
+        path = request.url.path
+        if path == "/admin/envoy-notes/EN-1":
+            return httpx.Response(200, json={"items": [{"orderId": 4242, "orderName": "#1001"}]})
+        label_requests.append((path, request.url.params.get("autoprint")))
+        script = "<script>window.print()</script>" if request.url.params.get("autoprint", "true") == "true" else ""
+        pages = '<div class="label_page">#1001</div>'
+        if path == "/admin/envoy-notes/EN-1/labels":
+            pages += '<div class="label_page">#1002</div>'
+        return httpx.Response(
+            200, text=f"<html><body>{script}{pages}</body></html>",
+            headers={"Content-Type": "text/html"},
+        )
+
+    print_env.setattr(main, "_shared_delivery_http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(upstream)))
+    auth = _pc()
+    if envoy_code:
+        auth["params"]["envoy_code"] = envoy_code
+    if autoprint is not None:
+        auth["params"]["autoprint"] = autoprint
+
+    response = client.get(LABEL, **auth)
+
+    assert response.status_code == 200
+    expected = autoprint or "true"
+    paths = ["/admin/orders/4242/label"]
+    if envoy_code:
+        paths.append("/admin/envoy-notes/EN-1/labels")
+    assert label_requests == [(path, expected) for path in paths]
+    assert ("window.print()" in response.text) == (expected == "true")
+    assert "#1001" in response.text
+    assert "#1002" not in response.text
 
 
 @pytest.mark.parametrize("enforce", [False, True])

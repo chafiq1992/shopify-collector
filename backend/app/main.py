@@ -5440,9 +5440,9 @@ async def delivery_label_proxy(
     )
     if not DELVERY_BACKEND_URL:
         return JSONResponse(status_code=503, content={"detail": "Delivery backend not configured."})
-    params = {"renderer": renderer}
-    if autoprint:
-        params["autoprint"] = "true"
+    # Delivery defaults to auto-printing. Forward false for the headless agent.
+    autoprint_value = "true" if autoprint else "false"
+    params = {"renderer": renderer, "autoprint": autoprint_value}
     if format:
         params["format"] = format
     headers = {}
@@ -5482,9 +5482,7 @@ async def delivery_label_proxy(
                 target_code = str((target or {}).get("code") or "").strip()
                 target_tokens = [t for t in (order_name, target_code, str(order_id).strip()) if t]
                 if target_tokens:
-                    note_params: Dict[str, Any] = {"renderer": "html", "viewer": "false"}
-                    if autoprint:
-                        note_params["autoprint"] = "true"
+                    note_params = {"renderer": "html", "viewer": "false", "autoprint": autoprint_value}
                     if format:
                         note_params["format"] = format
                     note_resp = await client.get(
