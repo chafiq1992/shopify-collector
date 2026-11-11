@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ArrowRightLeft,
   Ban,
@@ -35,6 +36,10 @@ import StorePicker from "../components/StorePicker";
 import OrderLabel from "../components/OrderLabel";
 import ConfirmationCreateOrder from "../components/ConfirmationCreateOrder";
 import ConfirmationProductResults from "../components/ConfirmationProductResults";
+import TagInput from "../components/TagInput";
+import { codDateTags, useOrderTags } from "../lib/orderTags";
+import { customerOrderFields } from "../lib/confirmationOrderForm";
+import { orderDetailsDraft, orderDetailsPatch, orderDetailsIssue } from "../lib/orderEditDetails";
 import useConfirmationProductSearch, { PRODUCT_SEARCH_PLACEHOLDER, searchConfirmationProducts } from "../lib/useConfirmationProductSearch";
 import { useToasts, ToastStack } from "../components/Toast";
 import { AnimatedNumber, useDepartingList, useFlipList } from "../components/Motion";
@@ -214,6 +219,23 @@ const API = {
     if (!res.ok) throw new Error(data.detail || `Could not load order to duplicate (${res.status})`);
     return data;
   },
+  async orderDetails(store, orderId, signal) {
+    const res = await authFetch(`/api/agent/order-details?${new URLSearchParams({ store, order_id: orderId })}`, { signal });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not load order details");
+    return data;
+  },
+  async updateOrderDetails(payload) {
+    const res = await authFetch("/api/agent/order-details/update", {
+      method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = Array.isArray(data.detail) ? data.detail.map((item) => item.msg || "Invalid order details").join("; ") : data.detail;
+      throw new Error(typeof detail === "string" ? detail : `Could not save order details (${res.status})`);
+    }
+    return data;
+  },
   async orderPricing(store, orderId) {
     const res = await authFetch(`/api/agent/order-pricing?${new URLSearchParams({ store, order_id: orderId })}`, { headers: authHeaders() });
     if (!res.ok) {
@@ -230,7 +252,9 @@ const API = {
     });
     if (!res.ok) {
       const js = await res.json().catch(() => ({ detail: "Could not update order items" }));
-      throw new Error(js.detail || `Could not update order items (${res.status})`);
+      const error = new Error(js.detail || `Could not update order items (${res.status})`);
+      error.status = res.status;
+      throw error;
     }
     return res.json();
   },
@@ -489,7 +513,11 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
   const [toasts, pushToast, dismissToast] = useToasts();
 
   // Global Shopify search (orders + customers). Independent of the agent's queue.
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState(() => {
+    // Follow dashboard links use the stable Shopify GID to avoid number collisions.
+    try { return new URLSearchParams(window.location.search).get("q") || ""; }
+    catch { return ""; }
+  });
   const [searchResults, setSearchResults] = useState(null); // { orders, customers, shop_domain, query }
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState(null);
@@ -508,6 +536,9 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
     try {
       const js = await API.search(store, q);
       if (reqId !== searchReqIdRef.current) return;
+      if (/^gid:\/\/shopify\/Order\/\d+$/.test(q) && (js.orders || []).some((order) => order.id === q)) {
+        setExpanded((prev) => new Set([...prev, q]));
+      }
       const created = createdOrderRef.current;
       const matchesCreated = created && [created.name, String(created.number || "")].includes(q);
       setSearchResults(matchesCreated && !(js.orders || []).some((order) => order.id === created.id)
@@ -1570,6 +1601,13 @@ function AgentView({ me, store, setStore, view, onViewChange, chatBadge, initial
         chatBadge={chatBadge}
       />
       <main className={`mx-auto w-full max-w-[1440px] px-3 sm:px-5 lg:px-8 py-4 sm:py-6 space-y-4 sm:space-y-5 ${selected.size > 0 ? "pb-28" : ""}`}>
+        {me.role === "agent" && (
+          <div className="flex justify-end">
+            <button type="button" onClick={() => goto("/verification", store)} className={`${BTN.secondary} h-9`}>
+              Verification
+            </button>
+          </div>
+        )}
         {/* Global Shopify search */}
         <GlobalSearch
           query={searchQuery}
@@ -3277,8 +3315,9 @@ function OrderExpanded({ order, store, shopDomain, onToast, onOrderUpdated, onDu
           order={order}
           store={store}
           onClose={() => setEditOpen(false)}
-          onOrderUpdated={(updatedOrder, message) => {
+          onOrderUpdated={(updatedOrder, message, keepOpen = false) => {
             onOrderUpdated?.(updatedOrder);
+            if (keepOpen) return;
             notify(message || `${order.name || `#${order.number}`} updated`, "success");
             setEditOpen(false);
           }}
@@ -3305,7 +3344,7 @@ function shippingDraftFromOrder(order) {
 }
 
 function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
-  const originalItems = order.line_items || [];
+  const [originalItems, setOriginalItems] = useState(order.line_items || []);
   const [tab, setTab] = useState("items");
   const [quantities, setQuantities] = useState(() => Object.fromEntries(
     originalItems.filter((item) => item.id).map((item) => [item.id, Number(item.quantity || 0)]),
@@ -3317,6 +3356,27 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
   const [notifyCustomer, setNotifyCustomer] = useState(false);
   const [staffNote, setStaffNote] = useState("");
   const [shipping, setShipping] = useState(() => shippingDraftFromOrder(order));
+  const [originalDetails, setOriginalDetails] = useState(null);
+  const [email, setEmail] = useState("");
+  const [note, setNote] = useState("");
+  const [tags, setTags] = useState([]);
+  const [customerId, setCustomerId] = useState(order.customer_id || null);
+  const [customerName, setCustomerName] = useState(order.customer_name || "");
+  const [customerQuery, setCustomerQuery] = useState("");
+  const [customers, setCustomers] = useState([]);
+  const [customerBusy, setCustomerBusy] = useState(false);
+  const [customerError, setCustomerError] = useState("");
+  const [detailsLoading, setDetailsLoading] = useState(true);
+  const [detailsError, setDetailsError] = useState("");
+  const [detailsAttempt, setDetailsAttempt] = useState(0);
+  const [shippingPrice, setShippingPrice] = useState(null);
+  const [partialSave, setPartialSave] = useState("");
+  const [uncertainItems, setUncertainItems] = useState(false);
+  const [savedOrder, setSavedOrder] = useState(null);
+  const submittingRef = useRef(false);
+  const editorRef = useRef(null);
+  const storeTags = useOrderTags(store);
+  const featuredTags = useMemo(() => codDateTags(), []);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [pricing, setPricing] = useState(null);
@@ -3329,16 +3389,68 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
+    const previousFocus = document.activeElement;
     document.body.style.overflow = "hidden";
+    editorRef.current?.focus();
     const onKey = (event) => {
-      if (event.key === "Escape" && !saveBusy) onClose();
+      if (event.defaultPrevented) return;
+      if (event.key === "Escape" && !submittingRef.current) onClose();
+      if (event.key === "Tab") {
+        const controls = [...(editorRef.current?.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]') || [])].filter((element) => !element.matches(":disabled"));
+        const first = controls[0], last = controls[controls.length - 1];
+        if (event.shiftKey && (document.activeElement === first || document.activeElement === editorRef.current)) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && (document.activeElement === last || document.activeElement === editorRef.current)) { event.preventDefault(); first?.focus(); }
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => {
       document.body.style.overflow = previousOverflow;
+      previousFocus?.focus?.();
       window.removeEventListener("keydown", onKey);
     };
-  }, [onClose, saveBusy]);
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setDetailsLoading(true); setDetailsError("");
+    API.orderDetails(store, order.id, controller.signal).then((data) => {
+      if (controller.signal.aborted) return;
+      if (!data.order?.id) throw new Error("Order details are unavailable. Retry before editing.");
+      const draft = orderDetailsDraft(data.order);
+      setOriginalDetails(draft); setShipping(draft.shipping); setEmail(draft.email);
+      setNote(draft.note); setTags(draft.tags); setCustomerId(draft.customerId);
+      setCustomerName(data.order.customer_name || "");
+    }).catch((error) => { if (!controller.signal.aborted) setDetailsError(error.message); })
+      .finally(() => { if (!controller.signal.aborted) setDetailsLoading(false); });
+    return () => controller.abort();
+  }, [store, order.id, detailsAttempt]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setCustomers([]); setCustomerError("");
+    if (saveBusy || customerQuery.replace(/\D/g, "").length < 7) { setCustomerBusy(false); return () => controller.abort(); }
+    setCustomerBusy(true);
+    const timer = setTimeout(() => {
+      API.searchCustomers(store, customerQuery.trim(), { signal: controller.signal })
+        .then((data) => { if (!controller.signal.aborted) setCustomers(data.customers || []); })
+        .catch((error) => { if (!controller.signal.aborted) setCustomerError(error.message || "Customer lookup failed."); })
+        .finally(() => { if (!controller.signal.aborted) setCustomerBusy(false); });
+    }, 300);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [store, customerQuery, saveBusy]);
+
+  function chooseCustomer(customer) {
+    const selected = customerOrderFields(customer);
+    setShipping(selected.shipping); setEmail(selected.email); setCustomerId(selected.customer.id);
+    setCustomerName(selected.customer.name); setCustomerQuery(""); setCustomers([]);
+  }
+
+  const detailsPatch = orderDetailsPatch(originalDetails, { shipping, email, note, tags, customerId });
+  const detailsChanged = Object.keys(detailsPatch).length > 0;
+  const detailsIssue = orderDetailsIssue(detailsPatch);
+  const deliveryFee = shippingPrice === null ? null : parsePrice(shippingPrice, 99999999);
+  const feeChanged = shippingPrice !== null && deliveryFee !== Math.round(Number(pricing?.shipping || 0) * 100);
+  const invalidFee = shippingPrice !== null && deliveryFee === null;
 
   // The queue doesn't carry discounts; read this order's pricing when editing.
   useEffect(() => {
@@ -3367,7 +3479,7 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
     return line && parsePrice(value, Math.round(Number(line.original_unit_price) * 100)) === null;
   }) || additions.some((item) => String(item.unitPrice ?? "").trim() !== ""
     && parsePrice(item.unitPrice, Math.round(Number(item.price) * 100)) === null);
-  const changedUnits = itemChanges.length + additions.length + priceChangeItems.length;
+  const changedUnits = itemChanges.length + additions.length + priceChangeItems.length + (feeChanged ? 1 : 0);
   const replacingItem = originalItems.find((item) => item.id === replaceLineId) || null;
 
   function minimumQuantity(item) {
@@ -3455,14 +3567,18 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
     }
   }
 
-  async function saveItemChanges() {
-    if (changedUnits === 0 || invalidPrice) return;
-    setSaveBusy(true);
-    setSaveError("");
+  async function saveChanges() {
+    if (submittingRef.current || uncertainItems || detailsLoading || detailsError || invalidPrice || invalidFee || (!changedUnits && !detailsChanged)) return;
+    if (detailsIssue) { setTab("shipping"); setSaveError(detailsIssue); return; }
+    submittingRef.current = true;
+    setSaveBusy(true); setSaveError("");
+    let latest = savedOrder;
+    let itemsSaved = false;
     const changedLines = originalItems.filter((item) => (
       itemChanges.some((change) => change.item.id === item.id) || priceChangeItems.includes(item)
     ));
     try {
+      if (changedUnits) {
       const result = await API.editOrderItems({
         store,
         order_id: order.id,
@@ -3480,37 +3596,55 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
             ...(unitPrice !== null ? { unit_price: formatMoney(unitPrice) } : {}),
           };
         }),
+        ...(feeChanged ? { shipping_price: formatMoney(deliveryFee), original_shipping_price: pricing.shipping } : {}),
         restock,
         notify_customer: notifyCustomer,
         staff_note: staffNote.trim() || null,
       });
-      onOrderUpdated(result.order, "Order items updated in Shopify");
+      latest = result.order; itemsSaved = true; setSavedOrder(latest);
+      onOrderUpdated(latest, null, true);
+      // Rebase saved products immediately so retrying remaining details cannot add them twice.
+      const lines = latest.line_items || [];
+      setOriginalItems(lines); setQuantities(Object.fromEntries(lines.filter((item) => item.id).map((item) => [item.id, Number(item.quantity || 0)])));
+      setAdditions([]); setPrices({}); setShippingPrice(null); setStaffNote("");
+      setPricing(null);
+      try { setPricing(await API.orderPricing(store, order.id)); setPricingError(""); }
+      catch (error) { setPricingError(error.message || "Could not reload prices"); }
+      }
+      if (detailsChanged) {
+        const result = await API.updateOrderDetails({ store, order_id: order.id, ...detailsPatch });
+        latest = result.order;
+      }
+      onOrderUpdated(latest, "Order updated in Shopify");
     } catch (error) {
-      setSaveError(error?.message || "Could not update order items");
+      if (itemsSaved) setPartialSave("Products and delivery fee were saved. Your customer, note and tag changes are still here. Retry Save changes to finish them.");
+      else if (changedUnits && (!error.status || error.status >= 500 || error.status === 408)) setUncertainItems(true);
+      setSaveError(error?.message || "Could not save order changes");
     } finally {
-      setSaveBusy(false);
+      submittingRef.current = false; setSaveBusy(false);
     }
   }
 
-  async function saveShipping() {
-    setSaveBusy(true);
-    setSaveError("");
+  async function reloadSavedProducts() {
+    if (submittingRef.current) return;
+    submittingRef.current = true; setSaveBusy(true); setSaveError("");
     try {
-      const result = await API.updateOrderShipping({
-        store,
-        order_id: order.id,
-        shipping_address: shipping,
-      });
-      onOrderUpdated(result.order, "Shipping information updated in Shopify");
-    } catch (error) {
-      setSaveError(error?.message || "Could not update shipping information");
-    } finally {
-      setSaveBusy(false);
-    }
+      const [data, nextPricing] = await Promise.all([API.orderDetails(store, order.id), API.orderPricing(store, order.id)]);
+      if (!data.order?.id) throw new Error("Could not reload the saved order. Try again.");
+      const lines = data.order.line_items || [];
+      setOriginalItems(lines); setQuantities(Object.fromEntries(lines.filter((item) => item.id).map((item) => [item.id, Number(item.quantity || 0)])));
+      setAdditions([]); setPrices({}); setShippingPrice(null); setStaffNote("");
+      setPricing(nextPricing); setPricingError(""); setSavedOrder(data.order);
+      onOrderUpdated(data.order, null, true); setUncertainItems(false);
+      setPartialSave("Products reloaded from Shopify. Review them and reapply any changes still needed. Your customer, note and tag edits are preserved.");
+    } catch (error) { setSaveError(error.message || "Could not reload saved products"); }
+    finally { submittingRef.current = false; setSaveBusy(false); }
   }
 
-  return (
+  return createPortal(
     <div
+      ref={editorRef}
+      tabIndex={-1}
       role="dialog"
       aria-modal="true"
       aria-labelledby="order-edit-title"
@@ -3545,15 +3679,16 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
           </button>
         </header>
 
-        <nav className="flex shrink-0 gap-1 border-b border-gray-200 bg-white px-4 sm:px-6" aria-label="Order edit sections">
+        <nav className="flex shrink-0 gap-1 border-b border-gray-200 bg-white px-2 sm:px-6" aria-label="Order edit sections">
           {[
             { id: "items", label: "Products and quantities", icon: Package },
-            { id: "shipping", label: "Shipping information", icon: MapPin },
+            { id: "shipping", label: "Customer, notes and tags", icon: MapPin },
           ].map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               type="button"
-              onClick={() => { setTab(id); setSaveError(""); }}
+              disabled={saveBusy}
+              onClick={() => setTab(id)}
               className={`relative inline-flex items-center gap-2 px-3 py-3 text-sm font-medium transition ${
                 tab === id ? "text-indigo-700" : "text-gray-600 hover:text-gray-900"
               }`}
@@ -3570,7 +3705,7 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
           ))}
         </nav>
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <fieldset disabled={saveBusy || uncertainItems} className="m-0 min-h-0 min-w-0 flex-1 overflow-y-auto border-0 p-0">
           {tab === "items" ? (
             <div className="grid min-w-0 grid-cols-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_320px] sm:p-6">
               <div className="min-w-0 space-y-4">
@@ -3858,7 +3993,8 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                         </div>
                       ))}
                       {pricing && (() => {
-                        const estimate = estimateEditedTotal({ pricing, items: originalItems, quantities, additions, prices });
+                        const estimate = estimateEditedTotal({ pricing, items: originalItems, quantities, additions, prices })
+                          + (feeChanged && deliveryFee !== null ? deliveryFee - Math.round(Number(pricing.shipping) * 100) : 0);
                         const current = Math.round(Number(pricing.total) * 100);
                         const delta = estimate - current;
                         return (
@@ -3879,6 +4015,12 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                   )}
                 </div>
                 <div className="mt-4 space-y-3 border-t border-gray-100 pt-4">
+                  <label className="block text-xs font-medium text-gray-700">Delivery fee{order.currency ? ` (${order.currency})` : ""}
+                    <input aria-label="Delivery fee" type="text" inputMode="decimal" disabled={!pricing?.shipping_editable} value={shippingPrice ?? pricing?.shipping ?? ""} onChange={(event) => setShippingPrice(event.target.value)} aria-invalid={invalidFee} className="mt-1 h-11 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm disabled:bg-gray-100 disabled:text-gray-500" />
+                  </label>
+                  {pricing?.shipping_edit_error && <p className="text-xs text-amber-800">{pricing.shipping_edit_error}</p>}
+                  {feeChanged && <button type="button" onClick={() => setShippingPrice(null)} className="text-xs font-semibold text-indigo-700">Undo delivery fee change</button>}
+                  {invalidFee && <p role="alert" className="text-xs text-rose-700">Enter a delivery fee from 0 to 999999.99 with at most two decimals.</p>}
                   <label className="flex cursor-pointer items-start gap-2 text-xs text-gray-700">
                     <input type="checkbox" checked={restock} onChange={(event) => setRestock(event.target.checked)} className="mt-0.5 h-4 w-4 rounded border-gray-300" />
                     <span><strong className="font-semibold">Restock removed units</strong><br /><span className="text-gray-500">Return reduced quantities to inventory.</span></span>
@@ -3903,30 +4045,31 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                   Shopify recalculates taxes, discounts, and the order balance when these changes are saved. Added products are charged full price unless you set a price or they replace a discounted item. A new price replaces the item's own discount; order-wide discount codes stay as they are.
                 </div>
                 {invalidPrice && <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">Fix the highlighted price before saving.</div>}
-                {saveError && <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{saveError}</div>}
-                <button
-                  type="button"
-                  onClick={saveItemChanges}
-                  disabled={saveBusy || changedUnits === 0 || invalidPrice}
-                  className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45"
-                >
-                  {saveBusy
-                    ? <><span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" /> Saving to Shopify…</>
-                    : <><Check size={16} /> Save item changes</>}
-                </button>
               </aside>
             </div>
           ) : (
             <div className="grid min-w-0 grid-cols-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_340px] sm:p-6">
-              <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
+              <fieldset disabled={detailsLoading || Boolean(detailsError)} className="min-w-0 rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
+                {detailsLoading && <p role="status" className="mb-4 text-sm text-gray-500">Loading current order details…</p>}
+                <section className="mb-5 border-b border-gray-100 pb-5">
+                  <h3 className="text-sm font-semibold text-gray-900">Shopify customer</h3>
+                  {customerId && <p className="mt-2 text-xs text-gray-600">Linked to <strong>{customerName || customerId}</strong></p>}
+                  <label className="mt-3 block text-xs font-medium text-gray-700">Find customer by phone
+                    <input type="search" inputMode="tel" autoComplete="off" value={customerQuery} onChange={(event) => setCustomerQuery(event.target.value)} placeholder="Enter phone number, e.g. 0612345678" className="mt-1 h-11 w-full rounded-lg border border-gray-300 px-3 text-sm font-normal" />
+                  </label>
+                  {customerBusy && <p role="status" className="mt-2 text-xs text-gray-500">Finding customers…</p>}
+                  {customerError && <p role="alert" className="mt-2 text-xs text-rose-700">{customerError}</p>}
+                  {customers.length > 0 && <div className="mt-3 max-h-60 divide-y overflow-y-auto rounded-lg border" aria-label="Customer search results">{customers.map((customer) => <button type="button" key={customer.id} onClick={() => chooseCustomer(customer)} className="block w-full p-3 text-left hover:bg-indigo-50"><span className="block text-sm font-semibold">{customer.name || [customer.first_name, customer.last_name].filter(Boolean).join(" ") || "Shopify customer"}</span><span className="mt-1 block break-words text-xs text-gray-600">{[customer.phone || customer.address?.phone, customer.email].filter(Boolean).join(" · ")}</span><span className="mt-1 block text-xs font-semibold text-indigo-700">Use customer</span></button>)}</div>}
+                </section>
                 <div className="mb-5">
-                  <h3 className="text-sm font-semibold text-gray-900">Shipping address</h3>
+                  <h3 className="text-sm font-semibold text-gray-900">Customer and delivery</h3>
                   <p className="mt-0.5 text-xs text-gray-500">Update the delivery contact and address exactly as it should appear on the shipment.</p>
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <EditField label="First name" value={shipping.first_name} onChange={(value) => setShipping((current) => ({ ...current, first_name: value }))} />
                   <EditField label="Last name" value={shipping.last_name} onChange={(value) => setShipping((current) => ({ ...current, last_name: value }))} />
                   <EditField label="Phone" value={shipping.phone} onChange={(value) => setShipping((current) => ({ ...current, phone: value }))} placeholder="+212…" />
+                  <EditField label="Email" value={email} onChange={setEmail} type="email" optional />
                   <EditField label="Company" value={shipping.company} onChange={(value) => setShipping((current) => ({ ...current, company: value }))} optional />
                   <div className="sm:col-span-2">
                     <EditField label="Address" value={shipping.address1} onChange={(value) => setShipping((current) => ({ ...current, address1: value }))} placeholder="Street, neighborhood, building…" />
@@ -3939,10 +4082,16 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                   <EditField label="Postal code" value={shipping.zip} onChange={(value) => setShipping((current) => ({ ...current, zip: value }))} optional />
                   <EditField label="Country" value={shipping.country} onChange={(value) => setShipping((current) => ({ ...current, country: value }))} />
                 </div>
-              </section>
+              </fieldset>
 
-              <aside className="h-fit rounded-xl border border-gray-200 bg-white p-4 shadow-sm lg:sticky lg:top-4">
-                <div className="flex items-center gap-2">
+              <aside className="h-fit space-y-4 rounded-xl border border-gray-200 bg-white p-4 shadow-sm lg:sticky lg:top-4">
+                <fieldset disabled={detailsLoading || Boolean(detailsError)} className="min-w-0 space-y-4">
+                  <label className="block text-xs font-medium text-gray-700">Order note <span className="font-normal text-gray-400">Optional</span>
+                    <textarea value={note} onChange={(event) => setNote(event.target.value)} maxLength={5000} rows={5} placeholder="Order and delivery instructions" className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-normal" />
+                  </label>
+                  <TagInput label="Tags" value={tags} onChange={setTags} suggestions={storeTags.tags} featured={featuredTags} loading={storeTags.loading} disabled={saveBusy || detailsLoading || Boolean(detailsError)} hint={storeTags.error ? "Store tags could not load. Type a tag and press Enter to add it." : "Find existing tags or type a new tag and press Enter. Remove a tag with its × button."} />
+                </fieldset>
+                <div className="border-t border-gray-100 pt-4 flex items-center gap-2">
                   <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700"><MapPin size={17} /></div>
                   <div>
                     <h3 className="text-sm font-semibold text-gray-900">Delivery preview</h3>
@@ -3959,26 +4108,27 @@ function OrderEditModal({ order, store, onClose, onOrderUpdated }) {
                   <div className="mt-2 font-mono text-xs">{shipping.phone || "Phone number"}</div>
                 </div>
                 <div className="mt-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-[11px] leading-relaxed text-sky-800">
-                  This changes the shipping address on this order only. It does not overwrite the customer’s saved address.
+                  Customer and delivery edits apply to this order. The customer’s saved profile stays unchanged.
                 </div>
-                {saveError && <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{saveError}</div>}
-                <button
-                  type="button"
-                  onClick={saveShipping}
-                  disabled={saveBusy || !shipping.address1.trim() || !shipping.city.trim() || !shipping.country.trim()}
-                  className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45"
-                >
-                  {saveBusy
-                    ? <><span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" /> Saving to Shopify…</>
-                    : <><Check size={16} /> Save shipping information</>}
-                </button>
               </aside>
             </div>
           )}
-        </div>
+        </fieldset>
+        <footer className="shrink-0 border-t border-gray-200 bg-white px-4 py-3 sm:px-6">
+          {detailsError && <div role="alert" className="mb-2 text-xs text-rose-700">{detailsError} <button type="button" disabled={saveBusy || detailsLoading} onClick={() => setDetailsAttempt((value) => value + 1)} className="font-semibold underline">Retry loading details</button></div>}
+          {partialSave && <p role="status" className="mb-2 text-xs text-amber-800">{partialSave}</p>}
+          {saveError && <p role="alert" className="mb-2 text-xs text-rose-700">{saveError}</p>}
+          {uncertainItems && <p role="alert" className="mb-2 text-xs text-amber-800">The product save could not be confirmed. Reload saved products before retrying to avoid duplicate additions. <button type="button" disabled={saveBusy} onClick={reloadSavedProducts} className="font-semibold underline">Reload saved products</button></p>}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-gray-500">Saves changes from both sections to this order.</p>
+            <button type="button" onClick={saveChanges} disabled={saveBusy || uncertainItems || detailsLoading || Boolean(detailsError) || invalidPrice || invalidFee || (!changedUnits && !detailsChanged)} className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-45 sm:w-auto">
+              {saveBusy ? <><Spinner className="h-4 w-4" /> Saving to Shopify…</> : <><Check size={16} /> Save changes</>}
+            </button>
+          </div>
+        </footer>
       </div>
     </div>
-  );
+  , document.body);
 }
 
 function OrderPricingSummary({ pricing, error, currency }) {
@@ -4080,13 +4230,13 @@ function PriceEditor({ line, value, currency, onChange, onReset }) {
   );
 }
 
-function EditField({ label, value, onChange, placeholder = "", optional = false }) {
+function EditField({ label, value, onChange, placeholder = "", optional = false, type = "text" }) {
   return (
     <label className="block text-xs font-medium text-gray-700">
       <span>{label}</span>
       {optional && <span className="ml-1 font-normal text-gray-400">Optional</span>}
       <input
-        type="text"
+        type={type}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}

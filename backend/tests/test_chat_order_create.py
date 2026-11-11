@@ -173,6 +173,7 @@ class ChatOrderCreateTests(unittest.IsolatedAsyncioTestCase):
     async def test_required_fields_and_products_are_checked_before_shopify(self):
         fake = FakeShopify()
         cases = [
+            dict(first_name=" ", last_name=" "),
             dict(city=" "),
             dict(address1=""),
             dict(phone="12"),
@@ -188,6 +189,23 @@ class ChatOrderCreateTests(unittest.IsolatedAsyncioTestCase):
                     await self.create(fake, **kw)
                 self.assertEqual(ctx.exception.status_code, 422)
         self.assertEqual(fake.calls, [])
+
+    async def test_one_name_and_one_address_are_enough(self):
+        fake = FakeShopify()
+        await self.create(fake, first_name="", last_name="Amal", address2=None)
+        order = fake.creates[0]["variables"]["order"]
+        self.assertEqual(order["shippingAddress"]["lastName"], "Amal")
+        self.assertEqual(order["shippingAddress"]["address1"], "Hay Mohammadi, rue 12")
+
+    async def test_existing_customer_cannot_skip_required_delivery_details(self):
+        fake = FakeShopify()
+        for field in ("phone", "city", "address1"):
+            for value in ("", "   "):
+                with self.subTest(field=field, value=value), self.assertRaises(HTTPException) as ctx:
+                    await self.create(fake, customer_id="gid://shopify/Customer/77", **{field: value})
+                self.assertEqual(ctx.exception.status_code, 422)
+        self.assertEqual(fake.calls, [])
+        self.assertEqual((await self.request_row()).status, "calling")
 
     async def test_deleted_variant_is_reported(self):
         with self.assertRaises(HTTPException) as ctx:

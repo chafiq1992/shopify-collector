@@ -20,6 +20,8 @@ import {
 } from "lucide-react";
 import { authFetch, authHeaders } from "../lib/auth";
 import ConfirmationProductResults from "./ConfirmationProductResults";
+import RequiredCustomerNotice from "./RequiredCustomerNotice";
+import { focusCustomerField, requiredOrderCustomer } from "../lib/requiredOrderCustomer";
 import useConfirmationProductSearch, { PRODUCT_SEARCH_PLACEHOLDER } from "../lib/useConfirmationProductSearch";
 import { isoToDDMMYY, todayDDMMYY, todayISO } from "../lib/confirmationActions";
 import { BTN, CARD, Spinner, initialOf, timeAgo } from "./ConfirmationUi";
@@ -152,9 +154,9 @@ function Field({ label, required = false, error = false, children, hint }) {
   );
 }
 
-function Section({ icon: Icon, title, right, children }) {
+function Section({ icon: Icon, title, right, children, invalid = false, sectionRef }) {
   return (
-    <section className={`${CARD} p-4`}>
+    <section ref={sectionRef} className={`${CARD} p-4 ${invalid ? "ring-2 ring-rose-400 bg-rose-50/30" : ""}`}>
       <div className="mb-3 flex items-center gap-2">
         <Icon className="h-4 w-4 text-slate-400" aria-hidden />
         <h3 className="text-sm font-semibold text-slate-900">{title}</h3>
@@ -207,6 +209,8 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
   const [error, setError] = useState(null);
   const [maybeCreated, setMaybeCreated] = useState(false);
   const [triedSubmit, setTriedSubmit] = useState(false);
+  const [customerNotice, setCustomerNotice] = useState(false);
+  const customerSection = useRef(null);
   const [created, setCreated] = useState(null);
   const [linking, setLinking] = useState(null);
   const [manualRef, setManualRef] = useState("");
@@ -371,12 +375,8 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
   }, [me, tags]);
 
   const problems = [];
-  const missing = {
-    first_name: !form.first_name.trim(),
-    phone: String(form.phone).replace(/\D/g, "").length < 9,
-    city: !form.city.trim(),
-    address1: !form.address1.trim(),
-  };
+  const missing = requiredOrderCustomer(form, 9);
+  const missingCustomer = Object.values(missing).some(Boolean);
   if (missing.first_name) problems.push("customer name");
   if (missing.phone) problems.push("a valid phone");
   if (missing.city) problems.push("city");
@@ -389,7 +389,12 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
   const show = triedSubmit;
 
   async function submit(confirmDuplicate = false) {
+    if (busy) return;
     setTriedSubmit(true);
+    if (missingCustomer) {
+      setCustomerNotice(true);
+      return;
+    }
     if (problems.length) {
       setError(`Still needed: ${problems.join(", ")}.`);
       return;
@@ -462,6 +467,7 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
 
   return (
     <Shell onClose={onClose} busy={busy} title="Create order" subtitle={<>{store} · chat request #{r.id} · cash on delivery</>}>
+      {customerNotice && <RequiredCustomerNotice missing={missing} onCorrect={() => { setCustomerNotice(false); focusCustomerField(customerSection.current, missing); }} />}
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="grid gap-4 p-4 sm:p-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <div className="min-w-0 space-y-4">
@@ -475,6 +481,8 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
             <Section
               icon={UserRound}
               title="Customer"
+              sectionRef={customerSection}
+              invalid={show && missingCustomer}
               right={customer && (
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200">
                   <UserCheck className="h-3.5 w-3.5" aria-hidden /> Shopify customer · {customer.name || "linked"}
@@ -520,20 +528,20 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
               {phoneMatches.loading && <div className="mt-2 flex items-center gap-2 text-xs text-slate-500"><Spinner className="h-3.5 w-3.5" /> Looking for this phone in Shopify…</div>}
 
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                <Field label="First name" required error={show && missing.first_name}>
-                  <input value={form.first_name} onChange={setField("first_name")} className={INPUT} data-testid="order-first-name" />
+                <Field label="First name" hint="first or last name needed" error={show && missing.first_name}>
+                  <input value={form.first_name} onChange={setField("first_name")} className={INPUT} data-testid="order-first-name" data-customer-field="first_name" aria-invalid={show && missing.first_name} />
                 </Field>
                 <Field label="Last name">
-                  <input value={form.last_name} onChange={setField("last_name")} className={INPUT} />
+                  <input value={form.last_name} onChange={setField("last_name")} className={INPUT} aria-invalid={show && missing.first_name} />
                 </Field>
                 <Field label="Phone" required error={show && missing.phone}>
-                  <input value={form.phone} onChange={setField("phone")} inputMode="tel" className={`${INPUT} font-mono`} />
+                  <input value={form.phone} onChange={setField("phone")} type="tel" inputMode="tel" className={`${INPUT} font-mono`} data-customer-field="phone" aria-invalid={show && missing.phone} />
                 </Field>
                 <Field label="Email" hint="optional">
                   <input value={form.email} onChange={setField("email")} type="email" className={INPUT} />
                 </Field>
                 <Field label="City" required error={show && missing.city}>
-                  <input value={form.city} onChange={setField("city")} list="chat-order-cities" className={INPUT} data-testid="order-city" placeholder="e.g. Casablanca" />
+                  <input value={form.city} onChange={setField("city")} list="chat-order-cities" className={INPUT} data-testid="order-city" placeholder="e.g. Casablanca" data-customer-field="city" aria-invalid={show && missing.city} />
                   <datalist id="chat-order-cities">{MOROCCO_CITIES.map((c) => <option key={c} value={c} />)}</datalist>
                 </Field>
                 <Field label="Country">
@@ -541,7 +549,7 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
                 </Field>
                 <div className="sm:col-span-2">
                   <Field label="Address" required error={show && missing.address1}>
-                    <input value={form.address1} onChange={setField("address1")} className={INPUT} data-testid="order-address" placeholder="Street, neighbourhood, building…" />
+                    <input value={form.address1} onChange={setField("address1")} className={INPUT} data-testid="order-address" placeholder="Street, neighbourhood, building…" data-customer-field="address1" aria-invalid={show && missing.address1} />
                   </Field>
                 </div>
                 <div className="sm:col-span-2">

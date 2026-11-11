@@ -28,12 +28,12 @@ import os
 import re
 import time
 from collections import deque
-from datetime import datetime, timedelta, timezone
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from datetime import date, datetime, time as day_time, timedelta, timezone
+from typing import Any, Deque, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth_routes import get_current_user
@@ -1214,46 +1214,146 @@ async def update_chat_label(label_id: int, body: ChatLabelBody, db: AsyncSession
     return {"ok": True, "label": serialize_label(label)}
 
 
+def _reason_period(days, start_date, end_date, yesterday, today):
+    if start_date is None and end_date is None:
+        if yesterday:
+            previous = today - timedelta(days=1)
+            return previous, previous
+        return today - timedelta(days=max(1, min(days, 365)) - 1), today
+    if not start_date or not end_date or start_date > end_date or end_date > today:
+        raise HTTPException(422, "Choose a start and end date in order, through today.")
+    if (end_date - start_date).days >= 365:
+        raise HTTPException(422, "Choose a date range of up to 365 days.")
+    return start_date, end_date
+
+
+def _reason_outcomes():
+    return {status: 0 for status in (*CLOSED_STATUSES, "open")}
+
+
+def _outcome_key(status):
+    return status if status in CLOSED_STATUSES else "open"
+
+
 @router.get("/api/chat-requests/reasons")
 async def chat_request_reasons(
     store: str,
     days: int = 30,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    yesterday: bool = False,
+    date_basis: Literal["created", "closed"] = "created",
+    agent: str = "",
+    outcome: Literal["", "ordered", "lost", "open", "not_interested", "wrong_number", "cancelled"] = "",
+    reason: str = "",
+    q: str = "",
+    detail: bool = False,
+    offset: int = 0,
     db: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
-    """Where customers stop: outcomes of the requests created in the period, by reason label."""
+    """Use the same request cohort for dashboard totals and paginated drill-downs."""
     store_key = _normalize_store(store)
-    days = max(1, min(int(days or 30), 365))
-    since = datetime.now(timezone.utc) - timedelta(days=days)
-    in_period = [ChatRequest.store_key == store_key, ChatRequest.created_at >= since]
-    outcomes = {"ordered": 0, "not_interested": 0, "wrong_number": 0, "open": 0}
-    for status, n in (await db.execute(select(ChatRequest.status, func.count(ChatRequest.id)).where(*in_period).group_by(ChatRequest.status))).all():
-        outcomes[status if status in outcomes else "open"] += int(n or 0)
-    labels = await _store_labels(db, store_key, include_archived=True)
-    by_label: Dict[int, Dict[str, int]] = {}
-    rows = await db.execute(
-        select(ChatRequestLabel.label_id, ChatRequest.status, func.count(ChatRequest.id))
-        .join(ChatRequest, ChatRequest.id == ChatRequestLabel.request_id)
-        .where(*in_period)
-        .group_by(ChatRequestLabel.label_id, ChatRequest.status)
+    zone = _tz()
+    today = datetime.now(zone).date()
+    first, last = _reason_period(days, start_date, end_date, yesterday, today)
+    calendar = [first + timedelta(days=i) for i in range((last - first).days + 1)]
+
+    def utc_midnight(day):
+        return datetime.combine(day, day_time.min, zone).astimezone(timezone.utc)
+
+    closed = ChatRequest.status.in_(CLOSED_STATUSES)
+    clock = ChatRequest.closed_at if date_basis == "closed" else ChatRequest.created_at
+    # A closed request belongs to the person who recorded its outcome. Storefront
+    # orders without a human closer belong to the "No agent" group.
+    actor = case((closed, ChatRequest.closed_by_id), else_=ChatRequest.assigned_to_id)
+    base = [ChatRequest.store_key == store_key, clock >= utc_midnight(first),
+            clock < utc_midnight(last + timedelta(days=1))]
+    if date_basis == "closed":
+        base.append(closed)
+    if outcome:
+        statuses = {"lost": LOST_STATUSES, "open": OPEN_STATUSES}.get(outcome, (outcome,))
+        base.append(ChatRequest.status.in_(statuses))
+    search = _search_clause(q[:255])
+    if search is not None:
+        base.append(search)
+
+    labels_query = select(ChatRequestLabel.label_id).join(ChatLabel, ChatLabel.id == ChatRequestLabel.label_id).where(
+        ChatRequestLabel.request_id == ChatRequest.id, ChatLabel.store_key == store_key,
     )
-    for label_id, status, n in rows.all():
-        counts = by_label.setdefault(label_id, {"ordered": 0, "lost": 0, "open": 0})
-        counts["ordered" if status == "ordered" else "lost" if status in LOST_STATUSES else "open"] += int(n or 0)
-    labelled = select(ChatRequestLabel.request_id)
-    lost_without = int(await db.scalar(select(func.count(ChatRequest.id)).where(
-        *in_period, ChatRequest.status.in_(LOST_STATUSES), ChatRequest.id.not_in(labelled))) or 0)
-    labelled_total = int(await db.scalar(select(func.count(ChatRequest.id)).where(*in_period, ChatRequest.id.in_(labelled))) or 0)
-    result = []
-    for lab in labels:
-        counts = by_label.get(lab.id, {"ordered": 0, "lost": 0, "open": 0})
-        total = sum(counts.values())
-        if lab.archived and not total:
+    has_label = labels_query.exists()
+    if reason == "unlabelled":
+        base.append(~has_label)
+    elif reason:
+        if not re.fullmatch(r"[1-9][0-9]{0,8}", reason):
+            raise HTTPException(422, "Choose a valid reason label.")
+        base.append(labels_query.where(ChatRequestLabel.label_id == int(reason)).exists())
+    filters = list(base)
+    if agent:
+        filters.append(actor.is_(None) if agent == "unassigned" else actor == agent)
+
+    if detail:
+        limit, offset = 30, max(0, offset)
+        total = int(await db.scalar(select(func.count(ChatRequest.id)).where(*filters)) or 0)
+        items = (await db.scalars(select(ChatRequest).where(*filters).order_by(
+            clock.desc(), ChatRequest.id.desc(),
+        ).offset(offset).limit(limit))).all()
+        users = await _users_by_id(db, [uid for row in items for uid in (row.assigned_to_id, row.closed_by_id)])
+        labels = await _labels_for(db, [row.id for row in items])
+        return {"ok": True, "total": total, "offset": offset, "limit": limit,
+                "requests": [serialize_request(row, users, labels.get(row.id)) for row in items]}
+
+    if db.get_bind().dialect.name == "postgresql":
+        bucket = func.date(func.timezone(str(zone), clock))
+    else:
+        # SQLite dev/test databases store UTC timestamps. Use the same local
+        # midnight boundaries, including days affected by clock changes.
+        bucket = case(*[(clock < utc_midnight(day + timedelta(days=1)), day.isoformat()) for day in calendar])
+    grouped = (await db.execute(select(bucket, actor, ChatRequest.status, has_label, func.count(ChatRequest.id))
+                               .where(*base).group_by(bucket, actor, ChatRequest.status, has_label))).all()
+    by_agent = {}
+    daily = {day.isoformat(): _reason_outcomes() for day in calendar}
+    outcomes = _reason_outcomes()
+    labelled_total = lost_without = 0
+    for day, uid, status, labelled, count in grouped:
+        key = _outcome_key(status)
+        by_agent.setdefault(uid, _reason_outcomes())[key] += count
+        if agent and (uid or "unassigned") != agent:
             continue
-        result.append({**serialize_label(lab), **counts, "total": total})
-    result.sort(key=lambda item: (-item["lost"], -item["total"], item["name"]))
-    return {"ok": True, "days": days, "total": sum(outcomes.values()), "outcomes": outcomes,
-            "labels": result, "labelled": labelled_total, "lost_without_label": lost_without}
+        outcomes[key] += count
+        daily[str(day)][key] += count
+        if labelled:
+            labelled_total += count
+        elif status in LOST_STATUSES:
+            lost_without += count
+
+    users = await _users_by_id(db, [uid for uid in by_agent if uid])
+    agents = []
+    for uid, counts in by_agent.items():
+        person = users.get(uid)
+        name = (person.name or person.email.split("@")[0]) if person else ("Former agent" if uid else "No agent")
+        agents.append({"id": uid or "unassigned", "name": name, "outcomes": counts, "total": sum(counts.values())})
+    agents.sort(key=lambda item: (-item["total"], item["name"].casefold(), item["id"]))
+
+    rows = await db.execute(select(ChatRequestLabel.label_id, ChatRequest.status, func.count(ChatRequest.id))
+        .join(ChatRequest, ChatRequest.id == ChatRequestLabel.request_id)
+        .join(ChatLabel, ChatLabel.id == ChatRequestLabel.label_id)
+        .where(*filters, ChatLabel.store_key == store_key)
+        .group_by(ChatRequestLabel.label_id, ChatRequest.status))
+    by_label = {}
+    for label_id, status, count in rows.all():
+        counts = by_label.setdefault(label_id, {"ordered": 0, "lost": 0, "open": 0})
+        counts["lost" if status in LOST_STATUSES else _outcome_key(status)] += count
+    labels = await _store_labels(db, store_key, include_archived=True)
+    result = []
+    for label in labels:
+        counts = by_label.get(label.id, {"ordered": 0, "lost": 0, "open": 0})
+        result.append({**serialize_label(label), **counts, "total": sum(counts.values())})
+    result.sort(key=lambda item: (-item["lost"], -item["total"], item["name"].casefold()))
+    return {"ok": True, "days": len(calendar), "start_date": first.isoformat(), "end_date": last.isoformat(),
+            "today": today.isoformat(), "timezone": str(zone), "total": sum(outcomes.values()), "outcomes": outcomes,
+            "labels": result, "labelled": labelled_total, "lost_without_label": lost_without, "agents": agents,
+            "daily": [{"date": day, **counts, "total": sum(counts.values())} for day, counts in daily.items()]}
 
 
 @router.get("/api/chat-requests/team-stats")

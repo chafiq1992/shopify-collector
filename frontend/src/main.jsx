@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import { loadAuth, saveAuth } from './lib/auth'
 import { readCurrentStore } from './lib/stores'
+import AgentPagePicker, { AGENT_HOME, hasStaffPagePicker, staffPagePaths } from './components/AgentPagePicker'
 
 const CollectorPage = lazy(() => import('./App'))
 const LoginPage = lazy(() => import('./pages/Login'))
@@ -30,6 +31,7 @@ function RouteShell() {
   const [auth, setAuth] = useState(() => loadAuth())
   const [store, setStore] = useState(() => readCurrentStore())
   const [, setRouteTick] = useState(0)
+  const [lookupOpened, setLookupOpened] = useState(false)
 
   useEffect(() => {
     const rerender = () => {
@@ -50,11 +52,10 @@ function RouteShell() {
     setAuth(data)
     try {
       const role = data?.user?.role
-      const isAgent = role === 'agent'
-      if (String(location.pathname || '') === '/login') {
-        history.replaceState(null, '', isAgent ? '/confirmation' : '/')
-      } else if (isAgent && String(location.pathname || '') === '/') {
-        history.replaceState(null, '', '/confirmation')
+      if (hasStaffPagePicker(role)) {
+        history.replaceState(null, '', `${AGENT_HOME}?store=${encodeURIComponent(readCurrentStore())}`)
+      } else if (location.pathname === '/login') {
+        history.replaceState(null, '', '/')
       }
     } catch {}
     setRouteTick((tick) => tick + 1)
@@ -64,15 +65,23 @@ function RouteShell() {
   const isAuthed = !!auth?.access_token
   const userRole = auth?.user?.role
 
-  // Agents can work in Confirmation and Inventory Helper; redirect away from admin-only pages.
+  const hasPages = isAuthed && hasStaffPagePicker(userRole)
+  const staffLookupActive = hasPages && currentPath === '/order-lookup'
+  const redirectStaff = hasPages && !staffPagePaths(userRole).includes(currentPath)
+
   useEffect(() => {
-    if (isAuthed && userRole === 'agent' && !['/confirmation', '/inventory-helper', '/login'].includes(currentPath)) {
+    if (redirectStaff) {
       try {
-        history.replaceState(null, '', '/confirmation')
+        history.replaceState(null, '', `${AGENT_HOME}?store=${encodeURIComponent(readCurrentStore())}`)
         window.dispatchEvent(new PopStateEvent('popstate'))
       } catch {}
     }
-  }, [isAuthed, userRole, currentPath])
+  }, [redirectStaff])
+
+  useEffect(() => {
+    if (!hasPages) setLookupOpened(false)
+    else if (staffLookupActive) setLookupOpened(true)
+  }, [hasPages, staffLookupActive])
 
   let Page = CollectorPage
   let pageProps = {}
@@ -80,8 +89,9 @@ function RouteShell() {
   if (!isAuthed && currentPath !== '/login') {
     Page = LoginPage
     pageProps = { onSuccess: handleLoginSuccess }
-  } else if (isAuthed && userRole === 'agent' && !['/confirmation', '/inventory-helper'].includes(currentPath)) {
-    Page = ConfirmationPage
+  } else if (hasPages && (redirectStaff || currentPath === AGENT_HOME)) {
+    Page = AgentPagePicker
+    pageProps = { role: userRole }
   } else {
     switch (currentPath) {
       case '/login':
@@ -122,6 +132,9 @@ function RouteShell() {
       case '/inventory-helper':
         Page = InventoryHelperPage
         break
+      case '/verification':
+        pageProps = { key: 'verification', verificationOnly: true }
+        break
       case '/':
       default:
         Page = CollectorPage
@@ -130,9 +143,21 @@ function RouteShell() {
   }
 
   return (
-    <Suspense fallback={<PageFallback />}>
-      <Page {...pageProps} />
-    </Suspense>
+    <>
+      {/* Keep pending fulfillment and print jobs active while staff switch pages. */}
+      {hasPages && (staffLookupActive || lookupOpened) && (
+        <div hidden={!staffLookupActive}>
+          <Suspense fallback={<PageFallback />}>
+            <OrderLookupPage showPages active={staffLookupActive} />
+          </Suspense>
+        </div>
+      )}
+      {!staffLookupActive && (
+        <Suspense fallback={<PageFallback />}>
+          <Page {...pageProps} />
+        </Suspense>
+      )}
+    </>
   )
 }
 

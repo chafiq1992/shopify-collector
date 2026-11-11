@@ -13,6 +13,7 @@ from .db import get_session
 from .models import User
 
 router = APIRouter()
+USER_ROLES = ("admin", "collector", "agent", "verificateur")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=True)
@@ -37,7 +38,7 @@ class RegisterBody(BaseModel):
     email: EmailStr
     password: str
     name: Optional[str] = None
-    role: Optional[str] = None  # admin | collector
+    role: Optional[str] = None
 
 
 def hash_password(pw: str) -> str:
@@ -137,7 +138,7 @@ async def register(body: RegisterBody, db: AsyncSession = Depends(get_session), 
     if exists:
         raise HTTPException(status_code=400, detail="email already exists")
 
-    role = body.role if body.role in ("admin", "collector", "agent") else "collector"
+    role = body.role if body.role in USER_ROLES else "collector"
     if is_first_user:
         role = "admin"
 

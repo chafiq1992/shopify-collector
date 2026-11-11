@@ -33,6 +33,40 @@ def _safe_url(url: str) -> str:
     return re.sub(r"://([^:/@]+):[^@]*@", r"://\1:***@", url)
 
 
+async def _migrate_collection_indexes(engine) -> None:
+    """Keep collection unique while allowing a new OUT after an order is found."""
+    from sqlalchemy import text
+
+    indexes = {
+        "uq_order_events_collected": (
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_order_events_collected "
+            "ON order_events (order_gid, store_key) "
+            "WHERE order_gid IS NOT NULL AND action = 'collected'"
+        ),
+        "ix_order_events_collection_lookup": (
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_order_events_collection_lookup "
+            "ON order_events (store_key, order_gid, action, id)"
+        ),
+    }
+    index_status = text("SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(:name)")
+    async with engine.connect() as connection:
+        conn = await connection.execution_options(isolation_level="AUTOCOMMIT")
+        await conn.exec_driver_sql("SET statement_timeout = '90s'")
+        for name, create in indexes.items():
+            valid = await conn.scalar(index_status, {"name": name})
+            if valid is False:
+                # Postgres can leave an invalid index after an interrupted build.
+                await conn.exec_driver_sql(f"DROP INDEX CONCURRENTLY {name}")
+            if not valid:
+                await conn.exec_driver_sql(create)
+            if not await conn.scalar(index_status, {"name": name}):
+                raise RuntimeError(f"Collection index {name} is invalid")
+
+        # This legacy rule prevented every later OUT for the same order. Drop it
+        # only after the replacement has preserved uniqueness for Collected.
+        await conn.exec_driver_sql("DROP INDEX CONCURRENTLY IF EXISTS uq_order_events_collect_out")
+
+
 async def _main() -> int:
     url = (os.environ.get("DATABASE_URL") or "").strip()
     if not url:
@@ -72,6 +106,7 @@ async def _main() -> int:
 
     try:
         await init_db()
+        await _migrate_collection_indexes(engine)
     except Exception as e:
         print(f"✗ schema step failed: {type(e).__name__}: {e}", file=sys.stderr)
         return 1

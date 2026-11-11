@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { clearAuth } from "../lib/auth";
+import { AgentPagesLink } from "./AgentPagePicker";
 import { retrySyncQueueNow } from "../lib/syncQueue";
 import { AnimatedNumber } from "./Motion";
 
@@ -207,6 +208,7 @@ export function TopBar({ me, store, loading, lastLoadedAt, syncState = NO_SYNC, 
               {me?.name && <div className="truncate text-[10px] text-slate-500">{me.email}</div>}
             </div>
           </div>
+          {me?.role === "agent" && <AgentPagesLink />}
           <button
             type="button"
             onClick={() => { clearAuth(); try { location.href = "/login"; } catch {} }}

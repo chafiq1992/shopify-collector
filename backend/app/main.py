@@ -13,12 +13,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
 import httpx
 import hmac, hashlib, base64
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from urllib.parse import quote
 from pydantic import BaseModel, Field
 import random
 from functools import lru_cache
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from io import BytesIO
 import qrcode
 from qrcode.constants import ERROR_CORRECT_M
@@ -31,6 +32,7 @@ HAVE_AUTH_DB = True
 try:
     from .db import get_session, init_db, SessionLocal
     from .models import User, OrderEvent, DailyUserStats, AppSetting, PrintJob, ReturnScan
+    from . import collection_tracking as tracking
     from .auth_routes import router as auth_router, get_current_user, get_current_user_optional, require_admin, hash_password
     from .admin_bootstrap_routes import router as admin_bootstrap_router
     from .shopify_oauth_routes import router as shopify_oauth_router
@@ -1332,6 +1334,9 @@ async def ws_updates(websocket: WebSocket):
 # ---------- Shopify GraphQL helper ----------
 _SHOPIFY_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 _SHOPIFY_HTTP_CLIENT_LOCK = asyncio.Lock()
+_COLLECTION_SHOPIFY_SETTINGS: ContextVar[Optional[Tuple[str, Tuple[str, str, str]]]] = ContextVar(
+    "collection_shopify_settings", default=None
+)
 
 
 async def _get_shopify_http_client() -> httpx.AsyncClient:
@@ -1360,6 +1365,9 @@ async def _shared_shopify_http_client():
 @app.on_event("shutdown")
 async def _close_shopify_http_client():
     global _SHOPIFY_HTTP_CLIENT
+    # Stop shared background work before closing the pool it uses.
+    from .lookup_aux_routes import close_lookup_tasks
+    await close_lookup_tasks()
     client, _SHOPIFY_HTTP_CLIENT = _SHOPIFY_HTTP_CLIENT, None
     if client is not None and not client.is_closed:
         await client.aclose()
@@ -1442,7 +1450,11 @@ async def shopify_graphql(
     such as orderCreate: a timeout or 5xx can arrive after Shopify already
     applied it, so resending would duplicate it. Pass retry_safe=False to
     disable all automatic retries for a durable confirmation-create intent."""
-    domain, access_token, api_key = await resolve_store_settings_effective(store)
+    collection_settings = _COLLECTION_SHOPIFY_SETTINGS.get()
+    if collection_settings and store == collection_settings[0]:
+        domain, access_token, api_key = collection_settings[1]
+    else:
+        domain, access_token, api_key = await resolve_store_settings_effective(store)
     if not domain or not access_token:
         raise HTTPException(status_code=400, detail="Shopify credentials not configured for selected store")
     headers = {
@@ -1523,7 +1535,7 @@ async def shopify_graphql(
 PENDING_PURCHASE_ORDER_TIMEOUT_SECONDS = 3.0
 
 
-async def _enrich_orders_with_inventory(items: List["OrderDTO"], *, store: Optional[str]) -> None:
+async def _enrich_orders_with_inventory(items: List["OrderDTO"], *, store: Optional[str], include_purchase_orders: bool = True) -> None:
     async def pending_purchase_orders():
         if not HAVE_AUTH_DB or not SessionLocal:
             return
@@ -1543,98 +1555,82 @@ async def _enrich_orders_with_inventory(items: List["OrderDTO"], *, store: Optio
         except Exception:
             logger.warning("Pending purchase-order enrichment failed", exc_info=True)
 
-    await asyncio.gather(_enrich_orders_with_on_hand(items, store=store), pending_purchase_orders())
+    if include_purchase_orders:
+        await asyncio.gather(_enrich_orders_with_on_hand(items, store=store), pending_purchase_orders())
+    else:
+        await _enrich_orders_with_on_hand(items, store=store)
+
+
+_INVENTORY_STOCK_FIELDS = """
+    edges { node { quantities(names: ["on_hand", "committed"]) { name quantity } } }
+    pageInfo { hasNextPage endCursor }
+"""
+_INVENTORY_STOCK_QUERY = """
+query InvOnHand($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on InventoryItem {
+      id
+      inventoryLevels(first: 20) { STOCK_FIELDS }
+    }
+  }
+}
+""".replace("STOCK_FIELDS", _INVENTORY_STOCK_FIELDS)
+_INVENTORY_STOCK_PAGE = """
+query InventoryStockPage($id: ID!, $after: String!) {
+  inventoryItem(id: $id) {
+    inventoryLevels(first: 20, after: $after) { STOCK_FIELDS }
+  }
+}
+""".replace("STOCK_FIELDS", _INVENTORY_STOCK_FIELDS)
 
 
 async def _enrich_orders_with_on_hand(items: List["OrderDTO"], *, store: Optional[str]) -> None:
-    """
-    Populate OrderVariant.on_hand_quantity by querying InventoryItem inventoryLevels in batch.
+    """Read both physical and committed units from the same Shopify inventory levels."""
+    by_inventory: Dict[str, list] = {}
+    for order in items:
+        for variant in order.variants:
+            if (variant.status or "").lower() == "unfulfilled" and variant.inventory_item_id:
+                by_inventory.setdefault(variant.inventory_item_id, []).append(variant)
 
-    We intentionally do this as a second query (instead of nesting inventoryLevels inside the Orders query),
-    to keep the Orders query cheap enough to avoid Shopify throttling (which can reduce visible orders).
-    """
-    try:
-        inv_ids: List[str] = []
-        seen: set[str] = set()
-        for o in (items or []):
-            for v in (getattr(o, "variants", None) or []):
-                try:
-                    st = (getattr(v, "status", None) or "").strip().lower()
-                    if st != "unfulfilled":
-                        continue
-                    iid = (getattr(v, "inventory_item_id", None) or "").strip()
-                    if not iid or iid in seen:
-                        continue
-                    seen.add(iid)
-                    inv_ids.append(iid)
-                except Exception:
-                    continue
-        if not inv_ids:
+    inventory_ids = list(by_inventory)
+    for offset in range(0, len(inventory_ids), 25):
+        batch = inventory_ids[offset:offset + 25]
+        try:
+            data = await shopify_graphql(_INVENTORY_STOCK_QUERY, {"ids": batch}, store=store)
+        except HTTPException:
+            # Stock access and throttling must never prevent the order from loading.
             return
-
-        # Shopify GraphQL nodes() supports batching; chunk for safety.
-        CHUNK = 80
-        inv_to_on_hand: Dict[str, int] = {}
-        q = """
-        query InvOnHand($ids: [ID!]!) {
-          nodes(ids: $ids) {
-            ... on InventoryItem {
-              id
-              inventoryLevels(first: 20) {
-                edges {
-                  node {
-                    quantities(names: ["on_hand"]) { name quantity }
-                  }
-                }
-              }
-            }
-          }
-        }
-        """
-        for i in range(0, len(inv_ids), CHUNK):
-            part = inv_ids[i:i+CHUNK]
-            try:
-                data = await shopify_graphql(q, {"ids": part}, store=store)
-            except HTTPException:
-                # Don't break orders listing if inventory scope is missing or if throttled.
-                return
-            nodes = (data or {}).get("nodes") or []
-            for n in nodes:
+        for node in data.get("nodes") or []:
+            inventory_id = node.get("id") if node else None
+            if inventory_id not in by_inventory:
+                continue
+            connection = node.get("inventoryLevels")
+            quantities: Dict[str, int] = {}
+            seen_cursors = set()
+            while connection is not None:
+                for edge in connection.get("edges") or []:
+                    for item in (edge.get("node") or {}).get("quantities") or []:
+                        name, value = item.get("name"), item.get("quantity")
+                        if name in ("on_hand", "committed") and isinstance(value, int):
+                            quantities[name] = quantities.get(name, 0) + value
+                page_info = connection.get("pageInfo") or {}
+                if not page_info.get("hasNextPage"):
+                    for variant in by_inventory[inventory_id]:
+                        variant.on_hand_quantity = quantities.get("on_hand")
+                        variant.committed_quantity = quantities.get("committed")
+                    break
+                cursor = page_info.get("endCursor")
+                if not cursor or cursor in seen_cursors:
+                    break
+                seen_cursors.add(cursor)
                 try:
-                    if not n or not isinstance(n, dict):
-                        continue
-                    iid = (n.get("id") or "").strip()
-                    if not iid:
-                        continue
-                    levels = (n.get("inventoryLevels") or {}).get("edges") or []
-                    total = 0
-                    found = False
-                    for e in levels:
-                        node_lvl = (e or {}).get("node") or {}
-                        quants = node_lvl.get("quantities") or []
-                        for qv in quants:
-                            try:
-                                if (qv or {}).get("name") == "on_hand":
-                                    total += int((qv or {}).get("quantity") or 0)
-                                    found = True
-                            except Exception:
-                                continue
-                    if found:
-                        inv_to_on_hand[iid] = total
-                except Exception:
-                    continue
+                    page = await shopify_graphql(
+                        _INVENTORY_STOCK_PAGE, {"id": inventory_id, "after": cursor}, store=store
+                    )
+                except HTTPException:
+                    break
+                connection = (page.get("inventoryItem") or {}).get("inventoryLevels")
 
-        # Apply mapping
-        for o in (items or []):
-            for v in (getattr(o, "variants", None) or []):
-                try:
-                    iid = (getattr(v, "inventory_item_id", None) or "").strip()
-                    if iid and iid in inv_to_on_hand:
-                        v.on_hand_quantity = int(inv_to_on_hand[iid])
-                except Exception:
-                    continue
-    except Exception:
-        return
 
 # ---------- Schemas ----------
 class OrderVariant(BaseModel):
@@ -1647,6 +1643,8 @@ class OrderVariant(BaseModel):
     title: Optional[str] = None
     available_quantity: Optional[int] = None  # Shopify variant inventoryQuantity (AVAILABLE)
     on_hand_quantity: Optional[int] = None  # Sum of inventory levels quantities(name="on_hand") across locations
+    committed_quantity: Optional[int] = None
+    pending_purchase_order_quantity: Optional[int] = None
     inventory_item_id: Optional[str] = None  # Shopify InventoryItem GID (used to fetch on_hand in batch)
     qty: int
     original_qty: Optional[int] = None
@@ -2472,11 +2470,64 @@ async def health():
         db["ok"] = True
     return {"ok": True, "db": db, "worker_loops": WORKER_LOOPS}
 
+ORDER_NODE_FIELDS = """
+id
+name
+createdAt
+updatedAt
+app { name }
+channelInformation {
+  channelDefinition {
+    subChannelName
+    channelName
+    handle
+  }
+}
+sourceName
+tags
+note
+fulfillments { createdAt status }
+shippingAddress { name city phone address1 address2 zip province country }
+billingAddress { name city phone address1 address2 zip province country }
+customer { displayName }
+currentTotalPriceSet { shopMoney { amount currencyCode } }
+totalPriceSet { shopMoney { amount currencyCode } }
+totalShippingPriceSet { shopMoney { amount currencyCode } }
+totalDiscountsSet { shopMoney { amount currencyCode } }
+displayFinancialStatus
+displayFulfillmentStatus
+returnStatus
+cancelledAt
+lineItems(first: 50) {
+  edges {
+      node {
+        quantity
+        currentQuantity
+        unfulfilledQuantity
+        sku
+        originalUnitPriceSet { shopMoney { amount currencyCode } }
+        variant {
+        id
+        title
+        sku
+        barcode
+        selectedOptions { name value }
+        inventoryQuantity
+        inventoryItem { id }
+        image { url }
+        product { id title featuredImage { url } }
+      }
+    }
+  }
+}
+"""
+
+
 @app.get("/api/orders")
 async def list_orders(
     limit: int = Query(25, ge=1, le=250),
     cursor: Optional[str] = None,
-    status_filter: Optional[str] = Query(None, pattern="^(all|collect|verification|urgent|m3tla)$"),
+    status_filter: Optional[str] = Query(None, pattern="^(all|collect|verification|urgent|m3tla|wrong_items|out)$"),
     tag_filter: Optional[str] = None,
     search: Optional[str] = None,
     cod_date: Optional[str] = Query(None, description="Date for COD tag in format DD/MM/YY"),
@@ -2493,9 +2544,17 @@ async def list_orders(
     fulfillment_to: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD) inclusive end for fulfillment date"),
     financial_status: Optional[str] = Query(None, description="Filter by payment status: paid, pending, or paid_or_pending"),
     aggregate_by: Optional[str] = Query(None, pattern="^(products|cod_date)$", description="Optional server-side aggregation mode"),
+    include_purchase_orders: bool = Query(True, description="Include pending purchase-order badges; lookup loads them separately"),
     debug: bool = Query(False, description="If true, include debug metadata (resolved Shopify query, scan stats)"),
+    include_wrong_item_status: bool = False,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
     _user: User = Depends(get_current_user),  # type: ignore  # returns customer PII: signed-in staff only
 ):
+    if status_filter in ("wrong_items", "out"):
+        return await _list_collection_queue(
+            status_filter, _user, _normalize_store(store), limit, cursor, search, date_from, date_to
+        )
     domain, access_token, _ = await resolve_store_settings_effective(store)
     if not domain or not access_token:
         return JSONResponse({"orders": [], "pageInfo": {"hasNextPage": False}, "error": "Shopify env not configured"}, status_code=200)
@@ -2573,6 +2632,7 @@ async def list_orders(
     # Cache key (includes resolved query) so repeated loads within a short window are instant
     cache_key = _orders_cache_key({
         "path": "/api/orders",
+        "include_purchase_orders": bool(include_purchase_orders),
         "q": q,
         "limit": limit,
         "cursor": cursor,
@@ -2603,6 +2663,8 @@ async def list_orders(
         except Exception:
             pass
     if cached is not None:
+        if status_filter == "verification" or include_wrong_item_status:
+            return await _with_pending_wrong_items(cached, _normalize_store(store))
         return cached
     query = """
     query Orders($first: Int!, $after: String, $query: String, $reverse: Boolean!) {
@@ -2610,62 +2672,14 @@ async def list_orders(
         edges {
           cursor
           node {
-            id
-            name
-            createdAt
-            updatedAt
-            app { name }
-            channelInformation {
-              channelDefinition {
-                subChannelName
-                channelName
-                handle
-              }
-            }
-            sourceName
-            tags
-            note
-            fulfillments { createdAt status }
-            shippingAddress { name city phone address1 address2 zip province country }
-            billingAddress { name city phone address1 address2 zip province country }
-            customer { displayName }
-            currentTotalPriceSet { shopMoney { amount currencyCode } }
-            totalPriceSet { shopMoney { amount currencyCode } }
-            totalShippingPriceSet { shopMoney { amount currencyCode } }
-            totalDiscountsSet { shopMoney { amount currencyCode } }
-            displayFinancialStatus
-            displayFulfillmentStatus
-            returnStatus
-            cancelledAt
-            lineItems(first: 50) {
-              edges {
-                  node {
-                    quantity
-                    currentQuantity
-                    unfulfilledQuantity
-                    sku
-                    originalUnitPriceSet { shopMoney { amount currencyCode } }
-                    variant {
-                    id
-                    title
-                    sku
-                    barcode
-                    selectedOptions { name value }
-                    inventoryQuantity
-                    inventoryItem { id }
-                    image { url }
-                    product { id title featuredImage { url } }
-                  }
-                }
-              }
-            }
+            ORDER_NODE_FIELDS
           }
         }
         pageInfo { hasNextPage }
       }
       ordersCount(query: $query) { count }
     }
-    """
+    """.replace("ORDER_NODE_FIELDS", ORDER_NODE_FIELDS)
     # Default ordering for normal browsing is newest first. For fulfillment-date fallback scanning
     # we will switch to oldest-first to reach the target day quickly.
     variables = {"first": limit, "after": cursor, "query": q or None, "reverse": True}
@@ -2761,6 +2775,7 @@ async def list_orders(
                 # Recompute cache for fallback query
                 cache_key_fb = _orders_cache_key({
                     "path": "/api/orders",
+                    "include_purchase_orders": bool(include_purchase_orders),
                     "q": q,
                     "limit": limit,
                     "cursor": cursor,
@@ -2868,7 +2883,7 @@ async def list_orders(
             pages += 1
         unique_tags = sorted({t for o in matches for t in (o.tags or [])})
         try:
-            await _enrich_orders_with_inventory(matches, store=store)
+            await _enrich_orders_with_inventory(matches, store=store, include_purchase_orders=include_purchase_orders)
         except Exception:
             pass
         resp: Dict[str, Any] = {
@@ -3029,7 +3044,7 @@ async def list_orders(
 
         items = flattened[:limit]
         try:
-            await _enrich_orders_with_inventory(items, store=store)
+            await _enrich_orders_with_inventory(items, store=store, include_purchase_orders=include_purchase_orders)
         except Exception:
             pass
         # Gather unique tags for chips and return with computed page info
@@ -3054,7 +3069,7 @@ async def list_orders(
     unique_tags = sorted({t for o in items for t in (o.tags or [])})
 
     try:
-        await _enrich_orders_with_inventory(items, store=store)
+        await _enrich_orders_with_inventory(items, store=store, include_purchase_orders=include_purchase_orders)
     except Exception:
         pass
 
@@ -3078,6 +3093,8 @@ async def list_orders(
         "nextCursor": next_cursor,
     }
     _orders_cache_set(cache_key, resp)
+    if status_filter == "verification" or include_wrong_item_status:
+        return await _with_pending_wrong_items(resp, _normalize_store(store))
     return resp
 
 class TagPayload(BaseModel):
@@ -3096,17 +3113,26 @@ class OrderActionBody(BaseModel):
     order_number: Optional[str] = None
     store: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    wrong_item_id: Optional[int] = Field(None, gt=0)
+    out_event_id: Optional[int] = Field(None, gt=0)
+    client_action_id: Optional[str] = Field(None, min_length=1, max_length=128)
+    source: Optional[str] = None
 
 
 # ---------- Shared Shopify helpers for tags/notes ----------
-async def _shopify_get_order_tags(order_gid: str, store: Optional[str]) -> List[str]:
+async def _shopify_get_order_state(order_gid: str, store: Optional[str]) -> Dict[str, Any]:
     data = await shopify_graphql(
-        "query CollectorOrderTags($id: ID!) { node(id: $id) { ... on Order { id tags } } }",
+        "query CollectorOrderTags($id: ID!) { node(id: $id) { ... on Order { id tags cancelledAt displayFulfillmentStatus } } }",
         {"id": order_gid}, store=store,
     )
     node = data.get("node")
-    if not node:
+    if not node or not node.get("id"):
         raise HTTPException(status_code=404, detail="Order not found")
+    return node
+
+
+async def _shopify_get_order_tags(order_gid: str, store: Optional[str]) -> List[str]:
+    node = await _shopify_get_order_state(order_gid, store)
     return list(node.get("tags") or [])
 
 
@@ -3114,6 +3140,7 @@ async def _shopify_add_tag(order_gid: str, tag: str, store: Optional[str]):
     mutation = """
     mutation AddTag($id: ID!, $tags: [String!]!) {
       tagsAdd(id: $id, tags: $tags) {
+        node { ... on Order { tags } }
         userErrors { field message }
       }
     }
@@ -3140,7 +3167,7 @@ async def _shopify_remove_tag(order_gid: str, tag: str, store: Optional[str]):
     return data
 
 
-async def _shopify_append_note(order_gid: str, append_text: str, store: Optional[str]):
+async def _shopify_append_note(order_gid: str, append_text: str, store: Optional[str], *, once: bool = False):
     q = """
     query One($id: ID!) {
       node(id: $id) {
@@ -3151,6 +3178,8 @@ async def _shopify_append_note(order_gid: str, append_text: str, store: Optional
     data = await shopify_graphql(q, {"id": order_gid}, store=store)
     node = data["node"]
     current_note = (node or {}).get("note") or ""
+    if once and f"\n{append_text}\n" in f"\n{current_note}\n":
+        return data
     new_note = (current_note + ("\n" if current_note and not current_note.endswith("\n") else "") + append_text).strip()
 
     mutation = """
@@ -3198,6 +3227,7 @@ async def _record_user_action(
     await session.flush()
     # Keep analytics source-of-truth in order_events so action tracking does not depend
     # on daily_user_stats schema migrations.
+    return ev
 
 
 async def _bump_daily_stats(session: AsyncSession, *, user_id: str, store_key: str, action: str):
@@ -3234,6 +3264,100 @@ def _parse_date(date_str: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
     except Exception:
         return None
+
+async def _with_pending_wrong_items(response, store):
+    orders = response.get("orders") or []
+    if not HAVE_AUTH_DB or not orders:
+        return response
+    async with SessionLocal() as session:
+        result = await session.execute(
+            tracking.pending_wrong_items().with_only_columns(OrderEvent.order_gid, OrderEvent.id, OrderEvent.action)
+            .where(OrderEvent.store_key == store, OrderEvent.order_gid.in_([order["id"] for order in orders]))
+        )
+        pending = {
+            order_gid: {"wrong_item_id": report_id, "wrong_item_unassigned": action == "wrong_item_unassigned"}
+            for order_gid, report_id, action in result.all()
+        }
+    return {
+        **response,
+        "orders": [
+            {**order, **pending.get(order["id"], {})}
+            for order in orders
+        ],
+    }
+
+
+COLLECTION_QUEUE_ORDERS = """
+query CollectionQueueOrders($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Order {
+      ORDER_NODE_FIELDS
+    }
+  }
+}
+""".replace("ORDER_NODE_FIELDS", ORDER_NODE_FIELDS)
+
+
+async def _list_collection_queue(status_filter, user, store, limit, cursor, search, date_from, date_to):
+    if not HAVE_AUTH_DB:
+        raise HTTPException(status_code=503, detail="auth/db not configured")
+    try:
+        after = int(cursor) if cursor else None
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid queue cursor")
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=422, detail="Start date must be before or equal to end date")
+
+    is_out = status_filter == "out"
+    statement = tracking.active_out_events() if is_out else tracking.user_wrong_items(user)
+    statement = statement.where(OrderEvent.store_key == store)
+    if search and search.strip().lstrip("#"):
+        statement = statement.where(OrderEvent.order_number.contains(search.strip().lstrip("#"), autoescape=True))
+    if is_out and date_from:
+        statement = statement.where(OrderEvent.created_at >= _parse_date(date_from.isoformat()))
+    if is_out and date_to and date_to != date.max:
+        statement = statement.where(OrderEvent.created_at < _parse_date(date_to.isoformat()) + timedelta(days=1))
+    page = tracking.with_event_user(statement)
+    if after is not None:
+        page = page.where(OrderEvent.id < after)
+    async with SessionLocal() as session:
+        total = await session.scalar(select(func.count()).select_from(statement.subquery()))
+        rows = (await session.execute(page.order_by(OrderEvent.id.desc()).limit(limit + 1))).all()
+
+    items = []
+    metadata = {}
+    for start in range(0, min(limit, len(rows)), 10):
+        chunk = rows[start:min(start + 10, limit)]
+        ids = [event.order_gid for event, *_ in chunk]
+        data = await shopify_graphql(COLLECTION_QUEUE_ORDERS, {"ids": ids}, store=store)
+        nodes = {node["id"]: node for node in data.get("nodes") or [] if node and "id" in node}
+        for event, actor_id, name, email in chunk:
+            node = nodes.get(event.order_gid)
+            if is_out:
+                if not node or not any(tag.lower() == "out" for tag in node.get("tags") or []):
+                    continue
+                metadata[event.order_gid] = {
+                    "out_event_id": event.id,
+                    "out_by": name or email,
+                    "out_by_user_id": actor_id,
+                    "out_at": tracking.utc_iso(event.created_at),
+                }
+            else:
+                metadata[event.order_gid] = {"wrong_item_id": event.id}
+            items.append(map_order_node(node) if node else OrderDTO(id=event.order_gid, number=event.order_number))
+
+    _apply_cached_order_overrides(items, store)
+    if items:
+        await _enrich_orders_with_inventory(items, store=store)
+    has_next = len(rows) > limit
+    return {
+        "orders": [{**order.model_dump(), **metadata[order.id]} for order in items],
+        "pageInfo": {"hasNextPage": has_next},
+        "tags": sorted({tag for order in items for tag in order.tags}),
+        "totalCount": total or 0,
+        "nextCursor": str(rows[limit - 1][0].id) if has_next else None,
+    }
+
 
 def _classify_agent_tag_action(tag: str) -> Optional[str]:
     """Map a tag write to a richer audit-log action name for agent users."""
@@ -3550,112 +3674,263 @@ async def append_note(
 
 
 # ---------- Collector actions with audit logging ----------
+@asynccontextmanager
+async def _collection_shopify_write(session, store, order_gid):
+    # Resolve OAuth before taking a DB lock so concurrent writes don't hold
+    # every pooled connection while waiting for a second credential lookup.
+    settings = await resolve_store_settings_effective(store)
+    token = _COLLECTION_SHOPIFY_SETTINGS.set((store, settings))
+    try:
+        async with tracking.collection_write(session, store, order_gid):
+            yield
+    finally:
+        _COLLECTION_SHOPIFY_SETTINGS.reset(token)
+
+
+async def _collection_changed(action, store, order_gid=None, user_id=None):
+    ORDERS_CACHE.clear()
+    event = {"type": f"order.{action}", "store": store}
+    if action in ("collected", "out"):
+        event.update(id=order_gid, user_id=user_id)
+    await manager.broadcast(event)
+
+
+async def _record_out_found(session, user, store_key, order_gid, out_event):
+    event_data = {
+        "order_number": out_event.order_number,
+        "order_gid": order_gid,
+        "store_key": store_key,
+        "metadata": {
+            "out_event_id": out_event.id, "finder_id": user.id,
+            "finder_name": user.name or user.email, "finder_role": user.role,
+        },
+    }
+    await _record_user_action(
+        session, user_id=user.id, action="found", client_action_id=f"collection-found:{out_event.id}", **event_data
+    )
+    if user.role == "verificateur" and user.id != out_event.user_id:
+        original_role = await session.scalar(select(User.role).where(User.id == out_event.user_id))
+        if original_role == "collector":
+            await _record_user_action(session, user_id=out_event.user_id, action="out_found", **event_data)
+
+
+async def _wrong_item_for_resolution(session, user, store, order_gid, report_id, status):
+    report = await session.scalar(
+        tracking.for_order(tracking.wrong_items(), store, order_gid).where(OrderEvent.id == report_id)
+    )
+    if not report:
+        raise HTTPException(status_code=404, detail="Wrong item report not found")
+    assigned_to_user = report.action == "wrong_item" and report.user_id == user.id
+    if not assigned_to_user and not (report.action == "wrong_item_unassigned" and user.role == "admin"):
+        raise HTTPException(status_code=403, detail="This wrong item report is assigned to another collector")
+    previous_status = (report.event_metadata or {}).get("status", "open")
+    if previous_status not in ("open", status):
+        raise HTTPException(status_code=409, detail="This wrong item report has already been resolved")
+    return report, previous_status == status
+
+
+async def _resolve_wrong_item_as_corrected(session, user, store_key, order_gid, report):
+    tracking.resolve_wrong_item(report, "corrected", user)
+    await _record_user_action(
+        session, user_id=user.id, order_number=report.order_number, order_gid=order_gid,
+        store_key=store_key, action="corrected", metadata={"wrong_item_id": report.id},
+    )
+
+
 if HAVE_AUTH_DB:
+    @app.get("/api/collector/wrong-items/count")
+    async def wrong_item_count(
+        user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_session),
+    ):
+        statement = tracking.user_wrong_items(user).with_only_columns(OrderEvent.store_key, func.count())
+        stores = dict((await session.execute(statement.group_by(OrderEvent.store_key))).all())
+        return {"count": sum(stores.values()), "stores": stores}
+
+
     @app.post("/api/orders/{order_gid:path}/collected")
     async def mark_collected(
         order_gid: str,
         body: OrderActionBody,
-        store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
-        user: User = Depends(get_current_user),  # type: ignore
-        session: AsyncSession = Depends(get_session),  # type: ignore
+        store: Optional[str] = None,
+        user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_session),
     ):
         store_key = _normalize_store(store or body.store)
-        # Idempotency: if already recorded, do not bump counts again.
-        try:
+        async with _collection_shopify_write(session, store_key, order_gid):
             existing = await session.scalar(
-                select(OrderEvent).where(
-                    OrderEvent.order_gid == order_gid,
-                    OrderEvent.store_key == store_key,
-                    OrderEvent.action == "collected",
-                )
+                tracking.for_order(select(OrderEvent), store_key, order_gid)
+                .where(OrderEvent.action == "collected").order_by(OrderEvent.id.desc()).limit(1)
             )
-        except Exception:
-            existing = None
-        try:
-            await _shopify_add_tag(order_gid, "pc", store_key)
-        except HTTPException as e:
-            # surface Shopify errors cleanly
-            raise e
-        if existing:
-            # IMPORTANT: don't touch ORM attributes after rollback/expire (can trigger async IO in sync context).
-            return {"ok": True, "deduped": True}
-        await _record_user_action(
-            session,
-            user_id=user.id,
-            order_number=(body.order_number or "").lstrip("#"),
-            order_gid=order_gid,
-            store_key=store_key,
-            action="collected",
-            metadata=body.metadata,
-        )
-        try:
-            await session.commit()
-        except IntegrityError:
-            # Race: another request inserted the same action concurrently.
-            try:
-                await session.rollback()
-            except Exception:
-                pass
-            return {"ok": True, "deduped": True}
-        await manager.broadcast({"type": "order.collected", "id": order_gid, "store": store_key, "user_id": user.id})
+            active_out = await session.scalar(tracking.for_order(tracking.active_out_events(), store_key, order_gid))
+            tag_result = await _shopify_add_tag(order_gid, "pc", store_key)
+            order_node = ((tag_result or {}).get("tagsAdd") or {}).get("node") or {}
+            out_tag = next((tag for tag in (order_node.get("tags") or []) if tag.lower() == "out"), None)
+            if out_tag or active_out:
+                await _shopify_remove_tag(order_gid, out_tag or "out", store_key)
+            if active_out:
+                await _record_out_found(session, user, store_key, order_gid, active_out)
+            if not existing:
+                await _record_user_action(
+                    session, user_id=user.id, order_number=body.order_number, order_gid=order_gid,
+                    store_key=store_key, action="collected", metadata=body.metadata,
+                )
+            elif not (active_out or out_tag):
+                return {"ok": True, "deduped": True}
+        if active_out or out_tag:
+            await _collection_changed("found", store_key)
+        else:
+            await _collection_changed("collected", store_key, order_gid, user.id)
         return {"ok": True}
-else:
-    @app.post("/api/orders/{order_gid:path}/collected")
-    async def mark_collected_unavailable(order_gid: str):
-        raise HTTPException(status_code=503, detail="auth/db not configured")
 
 
-if HAVE_AUTH_DB:
+    @app.post("/api/orders/{order_gid:path}/wrong-item")
+    async def report_wrong_item(
+        order_gid: str,
+        body: OrderActionBody,
+        store: Optional[str] = None,
+        user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_session),
+    ):
+        in_order_lookup = body.source == "order_lookup"
+        if user.role not in ("admin", "agent", "verificateur") and not (in_order_lookup and user.role == "collector"):
+            raise HTTPException(status_code=403, detail="Verification access required")
+        store_key = _normalize_store(store or body.store)
+        async with _collection_shopify_write(session, store_key, order_gid):
+            existing = await session.scalar(tracking.for_order(tracking.pending_wrong_items(), store_key, order_gid))
+            if existing:
+                return {"ok": True, "deduped": True, "wrong_item_id": existing.id,
+                        "collector_attributed": existing.action == "wrong_item"}
+            order_state = await _shopify_get_order_state(order_gid, store_key)
+            tags = {tag.lower() for tag in order_state.get("tags") or []}
+            if order_state.get("cancelledAt") or order_state.get("displayFulfillmentStatus") == "FULFILLED":
+                raise HTTPException(status_code=409, detail="This order is already fulfilled or cancelled")
+            if not in_order_lookup and ("pc" not in tags or "out" in tags):
+                raise HTTPException(status_code=409, detail="Only collected orders awaiting verification can be reported")
+            collected = await session.scalar(
+                tracking.for_order(select(OrderEvent), store_key, order_gid)
+                .where(OrderEvent.action == "collected").order_by(OrderEvent.id.desc()).limit(1)
+            )
+            report = await _record_user_action(
+                session, user_id=collected.user_id if collected else user.id,
+                order_number=collected.order_number if collected else body.order_number,
+                order_gid=order_gid, store_key=store_key,
+                action="wrong_item" if collected else "wrong_item_unassigned",
+                metadata={"status": "open", "reporter_id": user.id, "reporter_name": user.name or user.email},
+            )
+        await _collection_changed("wrong_item", store_key)
+        return {"ok": True, "wrong_item_id": report.id, "collector_attributed": collected is not None}
+
+
+    @app.post("/api/orders/{order_gid:path}/corrected")
+    async def mark_corrected(
+        order_gid: str,
+        body: OrderActionBody,
+        store: Optional[str] = None,
+        user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_session),
+    ):
+        if not body.wrong_item_id:
+            raise HTTPException(status_code=422, detail="Wrong item report ID is required")
+        store_key = _normalize_store(store or body.store)
+        async with tracking.collection_write(session, store_key, order_gid):
+            report, deduped = await _wrong_item_for_resolution(
+                session, user, store_key, order_gid, body.wrong_item_id, "corrected"
+            )
+            if deduped:
+                return {"ok": True, "deduped": True}
+            await _resolve_wrong_item_as_corrected(session, user, store_key, order_gid, report)
+        await _collection_changed("corrected", store_key)
+        return {"ok": True}
+
+
     @app.post("/api/orders/{order_gid:path}/out")
     async def mark_out(
         order_gid: str,
         body: OrderActionBody,
-        store: Optional[str] = Query(None, description="Select store: 'irrakids' or 'irranova'"),
-        user: User = Depends(get_current_user),  # type: ignore
-        session: AsyncSession = Depends(get_session),  # type: ignore
+        store: Optional[str] = None,
+        user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_session),
     ):
         store_key = _normalize_store(store or body.store)
-        # Idempotency: if already recorded, do not bump counts again.
-        try:
-            existing = await session.scalar(
-                select(OrderEvent).where(
-                    OrderEvent.order_gid == order_gid,
-                    OrderEvent.store_key == store_key,
-                    OrderEvent.action == "out",
+        retry_key = None
+        if body.client_action_id:
+            identity = json.dumps([store_key, order_gid, user.id, body.client_action_id])
+            retry_key = f"collection-out:{hashlib.sha256(identity.encode()).hexdigest()}"
+        async with _collection_shopify_write(session, store_key, order_gid):
+            if retry_key and await session.scalar(select(OrderEvent.id).where(OrderEvent.client_action_id == retry_key)):
+                return {"ok": True, "deduped": True}
+            report = None
+            if body.wrong_item_id:
+                report, deduped = await _wrong_item_for_resolution(
+                    session, user, store_key, order_gid, body.wrong_item_id, "out"
                 )
+                if deduped:
+                    return {"ok": True, "deduped": True}
+            elif await session.scalar(tracking.for_order(tracking.pending_wrong_items(), store_key, order_gid)):
+                raise HTTPException(status_code=409, detail="Resolve this order through the Wrong items list")
+
+            existing = await session.scalar(tracking.for_order(tracking.active_out_events(), store_key, order_gid))
+            if existing:
+                tags = await _shopify_get_order_tags(order_gid, store_key)
+                if not any(tag.lower() == "out" for tag in tags):
+                    existing = None
+            if existing and retry_key and existing.client_action_id:
+                raise HTTPException(status_code=409, detail="This order is already marked Out")
+            note_text = (body.metadata or {}).get("note") or (body.metadata or {}).get("titles")
+            if note_text and not existing:
+                await _shopify_append_note(order_gid, f"OUT: {note_text}", store_key, once=True)
+            await _shopify_add_tag(order_gid, "out", store_key)
+            await _shopify_remove_tag(order_gid, "pc", store_key)
+            if not existing:
+                await _record_user_action(
+                    session, user_id=user.id, order_number=report.order_number if report else body.order_number,
+                    order_gid=order_gid, store_key=store_key, action="out", metadata=body.metadata,
+                    client_action_id=retry_key,
+                )
+            elif retry_key:
+                existing.client_action_id = retry_key
+            if report:
+                tracking.resolve_wrong_item(report, "out", user)
+        await _collection_changed("out", store_key, order_gid, user.id)
+        return {"ok": True, "deduped": existing is not None}
+
+
+    @app.post("/api/orders/{order_gid:path}/found")
+    async def mark_found(
+        order_gid: str,
+        body: OrderActionBody,
+        store: Optional[str] = None,
+        user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_session),
+    ):
+        if not body.out_event_id:
+            raise HTTPException(status_code=422, detail="Out event ID is required")
+        store_key = _normalize_store(store or body.store)
+        async with _collection_shopify_write(session, store_key, order_gid):
+            out_event = await session.scalar(
+                tracking.for_order(select(OrderEvent), store_key, order_gid)
+                .where(OrderEvent.action == "out", OrderEvent.id == body.out_event_id)
             )
-        except Exception:
-            existing = None
-        note_text = None
-        if body.metadata:
-            note_text = body.metadata.get("note") or body.metadata.get("titles")
-        if note_text:
-            await _shopify_append_note(order_gid, f"OUT: {note_text}", store_key)
-        await _shopify_add_tag(order_gid, "out", store_key)
-        if existing:
-            return {"ok": True, "deduped": True}
-        await _record_user_action(
-            session,
-            user_id=user.id,
-            order_number=(body.order_number or "").lstrip("#"),
-            order_gid=order_gid,
-            store_key=store_key,
-            action="out",
-            metadata=body.metadata,
-        )
-        try:
-            await session.commit()
-        except IntegrityError:
-            try:
-                await session.rollback()
-            except Exception:
-                pass
-            return {"ok": True, "deduped": True}
-        await manager.broadcast({"type": "order.out", "id": order_gid, "store": store_key, "user_id": user.id})
+            if not out_event:
+                raise HTTPException(status_code=404, detail="Out event not found")
+            if user.id != out_event.user_id and user.role not in ("collector", "verificateur"):
+                raise HTTPException(status_code=403, detail="Only the original user, a collector, or a Vérificateur can mark Found")
+            retry_key = f"collection-found:{out_event.id}"
+            if await session.scalar(select(OrderEvent.id).where(OrderEvent.client_action_id == retry_key)):
+                return {"ok": True, "deduped": True}
+            active_out = await session.scalar(tracking.for_order(tracking.active_out_events(), store_key, order_gid))
+            if not active_out or active_out.id != out_event.id:
+                raise HTTPException(status_code=409, detail="This Out event is no longer current")
+            await _shopify_add_tag(order_gid, "pc", store_key)
+            await _shopify_remove_tag(order_gid, "out", store_key)
+            await _record_out_found(session, user, store_key, order_gid, out_event)
+        await _collection_changed("found", store_key)
         return {"ok": True}
 else:
+    @app.post("/api/orders/{order_gid:path}/collected")
     @app.post("/api/orders/{order_gid:path}/out")
-    async def mark_out_unavailable(order_gid: str):
+    async def collection_actions_unavailable(order_gid: str):
         raise HTTPException(status_code=503, detail="auth/db not configured")
 
 
@@ -3668,7 +3943,16 @@ class StatsRow(BaseModel):
     collected: int
     out: int
     fulfilled: int = 0
+    wrong_item: int = 0
+    out_found: int = 0
     total: int
+
+
+def _collection_stat_columns():
+    return [
+        func.sum(case((OrderEvent.action == action, 1), else_=0)).label(action)
+        for action in tracking.COLLECTION_ACTIONS
+    ]
 
 
 if HAVE_AUTH_DB:
@@ -3693,14 +3977,12 @@ if HAVE_AUTH_DB:
                 User.name,
                 func.date(OrderEvent.created_at).label("day"),
                 OrderEvent.store_key,
-                func.sum(case((OrderEvent.action == "collected", 1), else_=0)).label("collected"),
-                func.sum(case((OrderEvent.action == "out", 1), else_=0)).label("out"),
-                func.sum(case((OrderEvent.action == "fulfilled", 1), else_=0)).label("fulfilled"),
+                *_collection_stat_columns(),
             )
             .join(OrderEvent, User.id == OrderEvent.user_id)
             .where(
                 User.role == "collector",
-                OrderEvent.action.in_(("collected", "out", "fulfilled")),
+                OrderEvent.action.in_(tracking.COLLECTION_ACTIONS),
                 OrderEvent.created_at >= start_dt,
                 OrderEvent.created_at < end_dt_inclusive,
             )
@@ -3712,11 +3994,9 @@ if HAVE_AUTH_DB:
 
         result = await session.execute(stmt)
         rows = []
-        for uid, email, name, day_val, store_val, collected, out, fulfilled in result.fetchall():
+        for uid, email, name, day_val, store_val, *counts in result.fetchall():
             day_str = day_val.isoformat() if hasattr(day_val, "isoformat") else str(day_val)
-            collected_int = int(collected or 0)
-            out_int = int(out or 0)
-            fulfilled_int = int(fulfilled or 0)
+            metrics = dict(zip(tracking.COLLECTION_ACTIONS, map(int, counts)))
             rows.append(
                 StatsRow(
                     user_id=uid,
@@ -3724,22 +4004,19 @@ if HAVE_AUTH_DB:
                     name=name,
                     day=day_str,
                     store=store_val,
-                    collected=collected_int,
-                    out=out_int,
-                    fulfilled=fulfilled_int,
-                    total=collected_int + out_int + fulfilled_int,
-                ).dict()
+                    **metrics,
+                    total=sum(metrics[action] for action in ("collected", "out", "fulfilled")),
+                ).model_dump()
             )
 
         summary = {}
+        fields = (*tracking.COLLECTION_ACTIONS, "total")
         for r in rows:
             user_key = r["user_id"]
             if user_key not in summary:
-                summary[user_key] = {"email": r["email"], "name": r["name"], "collected": 0, "out": 0, "fulfilled": 0, "total": 0}
-            summary[user_key]["collected"] += r["collected"]
-            summary[user_key]["out"] += r["out"]
-            summary[user_key]["fulfilled"] += int(r.get("fulfilled") or 0)
-            summary[user_key]["total"] += r["total"]
+                summary[user_key] = {"email": r["email"], "name": r["name"], **dict.fromkeys(fields, 0)}
+            for field in fields:
+                summary[user_key][field] += r[field]
 
         return {
             "ok": True,
@@ -3773,9 +4050,7 @@ if HAVE_AUTH_DB:
             select(
                 func.date(OrderEvent.created_at).label("day"),
                 OrderEvent.store_key,
-                func.sum(case((OrderEvent.action == "collected", 1), else_=0)).label("collected"),
-                func.sum(case((OrderEvent.action == "out", 1), else_=0)).label("out"),
-                func.sum(case((OrderEvent.action == "fulfilled", 1), else_=0)).label("fulfilled"),
+                *_collection_stat_columns(),
             )
             .where(
                 OrderEvent.user_id == user.id,
@@ -3790,24 +4065,17 @@ if HAVE_AUTH_DB:
 
         result = await session.execute(stmt)
         rows: List[Dict[str, Any]] = []
-        summary = {"collected": 0, "out": 0, "fulfilled": 0, "total": 0}
-        for day_val, store_val, collected, out, fulfilled in result.fetchall():
-            collected_int = int(collected or 0)
-            out_int = int(out or 0)
-            fulfilled_int = int(fulfilled or 0)
-            total_int = collected_int + out_int + fulfilled_int
+        summary = dict.fromkeys((*tracking.COLLECTION_ACTIONS, "total"), 0)
+        for day_val, store_val, *counts in result.fetchall():
+            metrics = dict(zip(tracking.COLLECTION_ACTIONS, map(int, counts)))
+            metrics["total"] = sum(metrics[action] for action in ("collected", "out", "fulfilled"))
             rows.append({
                 "day": day_val.isoformat() if hasattr(day_val, "isoformat") else str(day_val),
                 "store": store_val,
-                "collected": collected_int,
-                "out": out_int,
-                "fulfilled": fulfilled_int,
-                "total": total_int,
+                **metrics,
             })
-            summary["collected"] += collected_int
-            summary["out"] += out_int
-            summary["fulfilled"] += fulfilled_int
-            summary["total"] += total_int
+            for field in summary:
+                summary[field] += metrics[field]
 
         return {
             "ok": True,
@@ -3865,6 +4133,39 @@ else:
 
 # ---------- Admin: OUT orders details ----------
 if HAVE_AUTH_DB:
+    @app.get("/api/admin/wrong-item-events")
+    async def admin_wrong_item_events(
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        store: Optional[str] = None,
+        admin: User = Depends(require_admin),
+        session: AsyncSession = Depends(get_session),
+    ):
+        now = datetime.now(timezone.utc)
+        start = _parse_date(from_date) or (now - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = _parse_date(to_date) or now
+        statement = tracking.with_event_user(tracking.wrong_items()).where(
+            OrderEvent.created_at >= start, OrderEvent.created_at < end + timedelta(days=1)
+        )
+        if store:
+            statement = statement.where(OrderEvent.store_key == _normalize_store(store))
+        result = await session.execute(statement.order_by(OrderEvent.created_at.desc(), OrderEvent.id.desc()))
+        rows = []
+        for report, uid, name, email in result.all():
+            metadata = report.event_metadata or {}
+            rows.append({
+                "id": report.id,
+                "order_number": report.order_number,
+                "order_gid": report.order_gid,
+                "store": report.store_key,
+                "created_at": tracking.utc_iso(report.created_at),
+                "status": metadata.get("status", "open"),
+                "resolved_at": metadata.get("resolved_at"),
+                "user": {"id": uid, "name": name, "email": email} if report.action == "wrong_item" else None,
+            })
+        return {"ok": True, "rows": rows}
+
+
     @app.get("/api/admin/out-events", response_model=Dict[str, Any])
     async def admin_out_events(
         from_date: Optional[str] = Query(None, description="Inclusive start date (YYYY-MM-DD)"),
@@ -4239,12 +4540,18 @@ if HAVE_AUTH_DB:
             response.headers["Server-Timing"] = ", ".join(f"{n};dur={d:.0f}" for n, d in timings)
 
         store_key = _normalize_store(store)
-        result = await fulfill_order(order_gid=order_gid, body=body, store=store_key)
+        async with _collection_shopify_write(session, store_key, order_gid):
+            pending = await session.scalar(tracking.for_order(tracking.pending_wrong_items(), store_key, order_gid))
+            result = await fulfill_order(order_gid=order_gid, body=body, store=store_key)
+            if pending is not None and (result or {}).get("ok") and result.get("fulfilled") is not False:
+                await _resolve_wrong_item_as_corrected(session, user, store_key, order_gid, pending)
         _lap("shopify")
         if not bool((result or {}).get("ok")):
             return result
         if (result or {}).get("fulfilled") is False:
             return result
+        if pending is not None:
+            await _collection_changed("corrected", store_key)
 
         # Record fulfillment per agent.
         # We intentionally store order_gid as None for this action to avoid
@@ -5663,6 +5970,10 @@ async def _serve_frontend_index_or_404():
         status_code=404,
     )
 
+
+# Small authenticated lookup auxiliaries avoid blocking order display on badges.
+from .lookup_aux_routes import router as lookup_aux_router
+app.include_router(lookup_aux_router)
 
 @app.get("/order-lookup")
 async def _spa_order_lookup():

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_session
 from .models import User
-from .auth_routes import hash_password, require_admin
+from .auth_routes import USER_ROLES, hash_password, require_admin
 
 router = APIRouter()
 
@@ -80,7 +80,7 @@ class AdminCreateUserBody(BaseModel):
     email: EmailStr
     password: str
     name: Optional[str] = None
-    role: Optional[str] = None  # admin | collector
+    role: Optional[str] = None
 
 
 @router.post("/api/admin/users/create")
@@ -93,7 +93,7 @@ async def admin_create_user(
     exists = await db.scalar(select(User).where(User.email == email_norm))
     if exists:
         raise HTTPException(status_code=400, detail="email already exists")
-    role = body.role if body.role in ("admin", "collector", "agent") else "collector"
+    role = body.role if body.role in USER_ROLES else "collector"
     user = User(
         email=email_norm,
         name=(body.name or "").strip() or None,
@@ -202,7 +202,7 @@ async def admin_update_user(
         user.password_hash = hash_password(body.password)
     if body.tags is not None:
         user.agent_tags = _normalize_tag_list(body.tags)
-    if body.role is not None and body.role in ("admin", "collector", "agent"):
+    if body.role in USER_ROLES:
         user.role = body.role
     if body.is_active is not None:
         user.is_active = bool(body.is_active)

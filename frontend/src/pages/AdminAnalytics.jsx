@@ -18,6 +18,67 @@ const INTAKE_LEVELS = [
   { key: "enatt", label: "En attente", next: null },
 ];
 
+const WRONG_ITEM_STATUS = {
+  open: { label: "Open", palette: "bg-amber-100 text-amber-800" },
+  corrected: { label: "Corrected", palette: "bg-green-100 text-green-800" },
+  out: { label: "Out", palette: "bg-red-100 text-red-800" },
+};
+
+const REPORT_TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
+  timeZone: "UTC",
+  dateStyle: "short",
+  timeStyle: "short",
+});
+
+function WrongItemReports({ rows, loading, error }) {
+  return (
+    <section className="mt-6" aria-busy={loading}>
+      <h3 className="text-sm font-semibold text-gray-700 mb-2">Wrong-item reports</h3>
+      {error && <p role="alert" className="mb-2 text-sm text-red-700">{error}</p>}
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm bg-white border border-gray-200 rounded-xl overflow-hidden">
+          <thead className="bg-gray-100 text-left">
+            <tr>
+              <th scope="col" className="px-3 py-2 border-b border-gray-200 whitespace-nowrap">Reported (UTC)</th>
+              <th scope="col" className="px-3 py-2 border-b border-gray-200">Order</th>
+              <th scope="col" className="px-3 py-2 border-b border-gray-200">Collector</th>
+              <th scope="col" className="px-3 py-2 border-b border-gray-200">Store</th>
+              <th scope="col" className="px-3 py-2 border-b border-gray-200">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((report) => {
+              const status = WRONG_ITEM_STATUS[report.status];
+              return (
+                <tr key={report.id} className="border-b last:border-b-0">
+                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{report.created_at ? REPORT_TIME_FORMAT.format(new Date(report.created_at)) : "—"}</td>
+                  <td className="px-3 py-2 font-semibold">{report.order_number ? `#${String(report.order_number).replace(/^#/, "")}` : report.order_gid?.split("/").pop() || "—"}</td>
+                  <td className="px-3 py-2">
+                    <div className="font-medium">{report.user?.name || report.user?.email || report.user?.id || "Unassigned"}</div>
+                    {report.user?.name && <div className="text-xs text-gray-500">{report.user.email}</div>}
+                  </td>
+                  <td className="px-3 py-2">{report.store}</td>
+                  <td className="px-3 py-2">
+                    <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-semibold ${status?.palette || "bg-gray-100 text-gray-700"}`}>
+                      {status?.label || "—"}
+                    </span>
+                    {report.resolved_at && <div className="mt-1 text-xs text-gray-500 whitespace-nowrap">{REPORT_TIME_FORMAT.format(new Date(report.resolved_at))} UTC</div>}
+                  </td>
+                </tr>
+              );
+            })}
+            {rows.length === 0 && (
+              <tr><td colSpan={5} className="px-3 py-4 text-center text-gray-500">
+                {loading ? "Loading wrong-item reports…" : error ? "Reports unavailable." : "No wrong-item reports in this range."}
+              </td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function percentOf(value, total) {
   const n = Number(value || 0);
   const d = Number(total || 0);
@@ -78,6 +139,14 @@ function describeOrderAction(action) {
     return { label: "Fulfilled",   icon: "📮", palette: "bg-blue-100 text-blue-800 border border-blue-200" };
   if (a === "out")
     return { label: "Out",         icon: "↩",  palette: "bg-red-100 text-red-800 border border-red-200" };
+  if (a === "wrong_item" || a === "wrong_item_unassigned")
+    return { label: "Wrong item",  icon: "⚠",  palette: "bg-amber-100 text-amber-800 border border-amber-200" };
+  if (a === "corrected")
+    return { label: "Corrected",   icon: "✓",  palette: "bg-green-100 text-green-800 border border-green-200" };
+  if (a === "out_found")
+    return { label: "Out / Found", icon: "↩",  palette: "bg-violet-100 text-violet-800 border border-violet-200" };
+  if (a === "found")
+    return { label: "Found",       icon: "✓",  palette: "bg-green-100 text-green-800 border border-green-200" };
   return { label: action || "—", icon: "•", palette: "bg-gray-100 text-gray-700 border border-gray-200" };
 }
 
@@ -89,6 +158,9 @@ export default function AdminAnalytics(){
   const [summary, setSummary] = useState({});
   const [outRows, setOutRows] = useState([]);
   const [outLoading, setOutLoading] = useState(false);
+  const [wrongItemRows, setWrongItemRows] = useState([]);
+  const [wrongItemLoading, setWrongItemLoading] = useState(false);
+  const [wrongItemError, setWrongItemError] = useState(null);
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -126,6 +198,7 @@ export default function AdminAnalytics(){
   const [orderSearchError, setOrderSearchError] = useState(null);
   const statsRequestIdRef = useRef(0);
   const outRequestIdRef = useRef(0);
+  const wrongItemRequestIdRef = useRef(0);
   const usersRequestIdRef = useRef(0);
   const orderSearchRequestIdRef = useRef(0);
   const returnStatsRequestIdRef = useRef(0);
@@ -221,6 +294,30 @@ export default function AdminAnalytics(){
       setAdminMsg(e?.message || "Failed to load OUT orders");
     } finally {
       if (requestId === outRequestIdRef.current) setOutLoading(false);
+    }
+  }
+
+  async function loadWrongItemReports() {
+    const requestId = ++wrongItemRequestIdRef.current;
+    setWrongItemRows([]);
+    setWrongItemLoading(true);
+    setWrongItemError(null);
+    try {
+      const params = new URLSearchParams({ from_date: fromDate, to_date: toDate });
+      if (store && store !== "all") params.set("store", store);
+      const res = await authFetch(`/api/admin/wrong-item-events?${params.toString()}`, {
+        headers: authHeaders({ Accept: "application/json" }),
+      });
+      if (!res.ok) {
+        const js = await res.json().catch(() => ({}));
+        throw new Error(js.detail || "Failed to load wrong-item reports");
+      }
+      const js = await res.json();
+      if (requestId === wrongItemRequestIdRef.current) setWrongItemRows(js.rows || []);
+    } catch (e) {
+      if (requestId === wrongItemRequestIdRef.current) setWrongItemError(e?.message || "Failed to load wrong-item reports");
+    } finally {
+      if (requestId === wrongItemRequestIdRef.current) setWrongItemLoading(false);
     }
   }
 
@@ -468,7 +565,10 @@ export default function AdminAnalytics(){
     setActiveTeam(team);
     setAdminMsg(null);
     if (team === "confirmation") loadConfirmationStats();
-    if (team === "collection") load();
+    if (team === "collection") {
+      load();
+      loadWrongItemReports();
+    }
     if (team === "returns") {
       loadReturnStats();
       loadReturnEvents();
@@ -478,7 +578,10 @@ export default function AdminAnalytics(){
 
   function applySelectedRange(){
     if (activeTeam === "confirmation") loadConfirmationStats();
-    if (activeTeam === "collection") load();
+    if (activeTeam === "collection") {
+      load();
+      loadWrongItemReports();
+    }
     if (activeTeam === "returns") {
       loadReturnStats();
       loadReturnEvents();
@@ -575,7 +678,7 @@ export default function AdminAnalytics(){
           <div className="flex gap-1 overflow-x-auto rounded-xl border border-gray-200 bg-gray-100 p-1" role="tablist" aria-label="Analytics team">
             {[
               { key: "confirmation", label: "Confirmation team", hint: "Calls and outcomes" },
-              { key: "collection", label: "Collection team", hint: "Collected, OUT and fulfilled" },
+              { key: "collection", label: "Collection team", hint: "Collection activity and issues" },
               { key: "returns", label: "Returns team", hint: "Return scans" },
               { key: "users", label: "Team setup", hint: "Users, roles and routing" },
             ].map((tab) => {
@@ -615,7 +718,7 @@ export default function AdminAnalytics(){
                   <tr>
                     <th className="px-3 py-2 border-b border-gray-200">Action</th>
                     <th className="px-3 py-2 border-b border-gray-200">Details</th>
-                    <th className="px-3 py-2 border-b border-gray-200">Agent</th>
+                    <th className="px-3 py-2 border-b border-gray-200">Attributed to</th>
                     <th className="px-3 py-2 border-b border-gray-200">Store</th>
                     <th className="px-3 py-2 border-b border-gray-200 whitespace-nowrap">When</th>
                   </tr>
@@ -655,7 +758,13 @@ export default function AdminAnalytics(){
                           {meta.bulk && (
                             <div className="mt-0.5 text-[11px] text-indigo-600 font-medium">bulk action</div>
                           )}
-                          {!meta.tag && !meta.reason && !meta.staff_note && meta.restock === undefined && !meta.bulk && (
+                          {(meta.reporter_name || meta.reporter_id) && (
+                            <div className="mt-0.5">Reported by <span className="font-medium">{meta.reporter_name || meta.reporter_id}</span></div>
+                          )}
+                          {(meta.finder_name || meta.finder_id) && (
+                            <div className="mt-0.5">Found by <span className="font-medium">{meta.finder_name || meta.finder_id}</span></div>
+                          )}
+                          {!meta.tag && !meta.reason && !meta.staff_note && meta.restock === undefined && !meta.bulk && !meta.reporter_name && !meta.reporter_id && !meta.finder_name && !meta.finder_id && (
                             <span className="text-gray-400">—</span>
                           )}
                         </td>
@@ -713,6 +822,7 @@ export default function AdminAnalytics(){
                         <option value="collector">collector</option>
                         <option value="admin">admin</option>
                         <option value="agent">agent (confirmation)</option>
+                        <option value="verificateur">Vérificateur</option>
                       </select>
                     </div>
                     <button type="submit" className="w-full text-sm px-3 py-2 rounded-lg bg-gray-900 text-white font-semibold active:scale-[.98]">Create user</button>
@@ -775,6 +885,7 @@ export default function AdminAnalytics(){
                               <option value="collector">collector</option>
                               <option value="admin">admin</option>
                               <option value="agent">agent</option>
+                              <option value="verificateur">Vérificateur</option>
                             </select>
                           </td>
                           <td className="px-2 py-2 min-w-[220px]">
@@ -794,7 +905,7 @@ export default function AdminAnalytics(){
                             <div className="font-medium">{u.email}</div>
                             <div className="text-xs text-gray-500">{u.name || ""}</div>
                           </td>
-                          <td className="px-2 py-2 text-xs">{u.role}</td>
+                          <td className="px-2 py-2 text-xs">{u.role === "verificateur" ? "Vérificateur" : u.role}</td>
                           <td className="px-2 py-2">
                             {(u.tags || []).length === 0 ? (
                               <span className="text-xs text-gray-400">no tags</span>
@@ -1129,14 +1240,17 @@ export default function AdminAnalytics(){
             <>
             <section className="mb-4">
               <h3 className="text-sm font-semibold text-gray-700 mb-2">Per-user totals</h3>
+              <p className="mb-2 text-xs text-gray-500">Wrong items count on the report date, including resolved reports. Out / Found counts on the date a different verifier finds the item and is attributed to the person who marked it Out.</p>
               <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
                 {Object.entries(summary || {}).map(([uid, row]) => (
                   <div key={uid} className="border border-gray-200 rounded-xl bg-white p-3">
                     <div className="text-sm font-semibold truncate">{row.name || row.email || uid}</div>
                     <div className="text-xs text-gray-500 truncate">{row.email}</div>
-                    <div className="mt-2 flex items-center gap-3 text-sm">
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
                       <span className="px-2 py-0.5 rounded-full bg-green-100 text-green-800 border border-green-200">Collected: {row.collected}</span>
                       <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-800 border border-red-200">Out: {row.out}</span>
+                      <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200">Wrong items: {row.wrong_item || 0}</span>
+                      <span className="px-2 py-0.5 rounded-full bg-violet-100 text-violet-800 border border-violet-200">Out / Found: {row.out_found || 0}</span>
                       <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 border border-blue-200">Fulfilled: {row.fulfilled || 0}</span>
                       <span className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-800 border border-gray-200">Total: {row.total}</span>
                     </div>
@@ -1158,6 +1272,8 @@ export default function AdminAnalytics(){
                       <th className="px-3 py-2 border-b border-gray-200">Store</th>
                       <th className="px-3 py-2 border-b border-gray-200">Collected</th>
                       <th className="px-3 py-2 border-b border-gray-200">Out</th>
+                      <th className="px-3 py-2 border-b border-gray-200 whitespace-nowrap">Wrong items</th>
+                      <th className="px-3 py-2 border-b border-gray-200 whitespace-nowrap">Out / Found</th>
                       <th className="px-3 py-2 border-b border-gray-200">Fulfilled</th>
                       <th className="px-3 py-2 border-b border-gray-200">Total</th>
                     </tr>
@@ -1173,17 +1289,20 @@ export default function AdminAnalytics(){
                         <td className="px-3 py-2">{r.store}</td>
                         <td className="px-3 py-2 text-green-700">{r.collected}</td>
                         <td className="px-3 py-2 text-red-700">{r.out}</td>
+                        <td className="px-3 py-2 text-amber-800">{r.wrong_item || 0}</td>
+                        <td className="px-3 py-2 text-violet-800">{r.out_found || 0}</td>
                         <td className="px-3 py-2 text-blue-700">{r.fulfilled || 0}</td>
                         <td className="px-3 py-2 font-semibold">{r.total}</td>
                       </tr>
                     ))}
                     {(rows || []).length === 0 && (
-                      <tr><td colSpan={7} className="px-3 py-4 text-center text-gray-500">No data</td></tr>
+                      <tr><td colSpan={9} className="px-3 py-4 text-center text-gray-500">No data</td></tr>
                     )}
                   </tbody>
                 </table>
               </div>
             </section>
+            <WrongItemReports rows={wrongItemRows} loading={wrongItemLoading} error={wrongItemError} />
             <section className="mt-6">
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-sm font-semibold text-gray-700">OUT orders (details)</h3>

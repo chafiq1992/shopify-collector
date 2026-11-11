@@ -1,12 +1,14 @@
 import React, { useEffect, useRef, useState, Suspense } from "react";
-import { CheckCircle, PackageSearch, PackageCheck, XCircle, ChevronLeft, ChevronRight, Search, Settings, Boxes, Printer, LogOut, PackageOpen } from "lucide-react";
+import { AlertTriangle, CheckCircle, PackageSearch, PackageCheck, XCircle, ChevronLeft, ChevronRight, Search, Settings, Boxes, Printer, LogOut, PackageOpen } from "lucide-react";
 import { authFetch, authHeaders, loadAuth, clearAuth } from "./lib/auth";
 import { printOrdersLocally } from "./lib/localPrintClient";
 import { enqueueOrdersToRelay, isRelayConfigured } from "./lib/printRelayClient";
 import { getOrCreatePrintRequest, normalizePrintOrders, submitPrintOrders, withPrintLock } from "./lib/printSubmission.js";
 import StorePicker from "./components/StorePicker.jsx";
-import { persistStoreSelection, readCurrentStore } from "./lib/stores";
+import { AgentPagesLink, hasStaffPagePicker } from "./components/AgentPagePicker";
+import { persistStoreSelection, readCurrentStore, titleStore } from "./lib/stores";
 import { DELIVERY_COMPANIES } from "./lib/deliveryCompanies";
+import { applyVariantStock } from "./lib/variantStock.js";
 import './components/collector.css';
 
 const OrderCard = React.lazy(() => import('./components/OrderCard.jsx'));
@@ -20,12 +22,44 @@ const ProfilePickerModal = React.lazy(() => import('./components/ProfilePickerMo
  * @typedef {{ id: string, number: string, customer?: string|null, shipping_city?: string|null, variants: Variant[], note?: string|null, tags: string[], considered_fulfilled?: boolean }} Order
  */
 
+function sessionExpired() {
+  const error = new Error('Session expired. Please login again.');
+  error.permanent = true;
+  error.sessionExpired = true;
+  return error;
+}
+
+async function readCollectionAction(res, fallback) {
+  if (res.status === 401) throw sessionExpired();
+  const data = await res.json().catch(() => ({}));
+  if (res.ok) return data;
+  const error = new Error(typeof data.detail === 'string' ? data.detail : fallback);
+  error.permanent = res.status >= 400 && res.status < 500 && ![408, 429].includes(res.status);
+  throw error;
+}
+
 const API = {
   async getOrders(params = {}, signal) {
     const q = new URLSearchParams(params).toString();
     const res = await authFetch(`/api/orders?${q}`, { headers: authHeaders(), signal });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `Could not load orders (${res.status}). Please retry.`);
+    return data;
+  },
+  async getWrongItemsCount(signal) {
+    const res = await authFetch('/api/collector/wrong-items/count', { headers: authHeaders(), signal });
+    if (!res.ok) throw new Error('Could not load the wrong-item count');
+    return res.json();
+  },
+  async resolveOrderWorkflow(action, order, store, fields = {}) {
+    const qs = new URLSearchParams({ store });
+    const res = await authFetch(`/api/orders/${encodeURIComponent(order.id)}/${action}?${qs}`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ order_number: order.number, store, ...fields }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `Could not update the order (${res.status}). Please retry.`);
     return data;
   },
   async addTag(orderId, tag, store) {
@@ -62,20 +96,16 @@ const API = {
       headers: authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ order_number: orderNumber, store, metadata })
     });
-    if (res.status === 401) throw new Error("Session expired. Please login again.");
-    if (!res.ok) throw new Error("Failed to mark collected");
-    return res.json();
+    return readCollectionAction(res, 'Failed to mark collected');
   },
-  async markOut(orderId, orderNumber, store, metadata = {}) {
+  async markOut(orderId, orderNumber, store, metadata = {}, actionId) {
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/out${qs}`, {
       method: 'POST',
       headers: authHeaders({'Content-Type':'application/json'}),
-      body: JSON.stringify({ order_number: orderNumber, store, metadata })
+      body: JSON.stringify({ order_number: orderNumber, store, metadata, client_action_id: actionId })
     });
-    if (res.status === 401) throw new Error("Session expired. Please login again.");
-    if (!res.ok) throw new Error("Failed to mark out");
-    return res.json();
+    return readCollectionAction(res, 'Failed to mark out');
   },
 };
 
@@ -134,6 +164,16 @@ function savePendingActions(arr){
   try { localStorage.setItem(PENDING_ACTIONS_KEY, JSON.stringify(Array.isArray(arr) ? arr : [])); } catch {}
 }
 
+function pendingActionsForUser(actions, user) {
+  return actions.filter(action => action.userId == null
+    ? ['collector', 'admin'].includes(user?.role)
+    : String(action.userId) === String(user?.id));
+}
+
+function selectedOrdersKey(store, verifierId) {
+  return verifierId ? `orderCollectorSelectedVerifier_${verifierId}_${store}` : `orderCollectorSelected_${store}`;
+}
+
 function codTagSortValue(order, collectPrefix = "cod"){
   try {
     const prefix = String(collectPrefix || "cod").trim().toLowerCase() || "cod";
@@ -176,6 +216,7 @@ async function withRetries(fn, { attempts = 3, baseDelayMs = 350 } = {}){
     try {
       return await fn(i);
     } catch (e){
+      if (e?.permanent) throw e;
       lastErr = e;
       // small backoff + jitter
       const wait = baseDelayMs * Math.pow(1.6, i) + Math.floor(Math.random() * 120);
@@ -220,8 +261,15 @@ function ActionOverlay({ state }){
   );
 }
 
-export default function App(){
+export default function App({ verificationOnly = false }){
   const [auth, setAuth] = useState(() => loadAuth());
+  const userRole = auth?.user?.role;
+  const isVerifier = userRole === 'verificateur';
+  const verifierId = isVerifier ? auth.user.id : null;
+  const showCollectorFilters = !verificationOnly || isVerifier;
+  const isCollectionStaff = userRole === 'collector' || isVerifier;
+  const canReviewWrong = isCollectionStaff || userRole === 'admin';
+  const profileStorageKey = isVerifier ? "orderCollectorVerificationProfile" : "orderCollectorProfile";
   const [agentToday, setAgentToday] = useState({ fulfilledToday: 0, loading: false });
   const [orders, setOrders] = useState([]);
   const [tags, setTags] = useState([]);
@@ -231,7 +279,15 @@ export default function App(){
   const [search, setSearch] = useState("");
   const [productIdFilter, setProductIdFilter] = useState("");
   const [showProductFilter, setShowProductFilter] = useState(false);
-  const [statusFilter, setStatusFilter] = useState("collect"); // collect|verification|urgent|m3tla
+  const [statusFilter, setStatusFilter] = useState(verificationOnly ? "verification" : "collect");
+  const [outFromDate, setOutFromDate] = useState("");
+  const [outToDate, setOutToDate] = useState("");
+  const [wrongItems, setWrongItems] = useState({ count: 0, stores: {} });
+  const [workflowMessage, setWorkflowMessage] = useState(null);
+  const [rejectedActions, setRejectedActions] = useState([]);
+  const workflowBusyRef = useRef(false);
+  const workflowScopeRef = useRef(null);
+  const refreshWrongItemsRef = useRef(() => {});
   // COD date filtering is optional; keep it empty by default so collectors see orders immediately.
   const [codDate, setCodDate] = useState(""); // legacy single date (YYYY-MM-DD)
   const [codFromDate, setCodFromDate] = useState(""); // YYYY-MM-DD
@@ -255,13 +311,14 @@ export default function App(){
   const [actionBusy, setActionBusy] = useState(false);
   const [overlay, setOverlay] = useState({ open: false });
   const overlayTimerRef = useRef(null);
-  const [pendingCount, setPendingCount] = useState(() => loadPendingActions().length);
+  const [pendingCount, setPendingCount] = useState(() => pendingActionsForUser(loadPendingActions(), auth?.user).length);
+  const flushingPendingRef = useRef(false);
   const [store, setStore] = useState(() => {
     return readCurrentStore();
   });
   const [profile, setProfile] = useState(() => {
     try {
-      const raw = localStorage.getItem("orderCollectorProfile");
+      const raw = localStorage.getItem(profileStorageKey);
       return raw ? JSON.parse(raw) : null;
     } catch { return null; }
   });
@@ -279,7 +336,7 @@ export default function App(){
   });
   const [selectedOrderNumbers, setSelectedOrderNumbers] = useState(() => {
     try {
-      const raw = localStorage.getItem(`orderCollectorSelected_${store}`);
+      const raw = localStorage.getItem(selectedOrdersKey(store, verifierId));
       if (raw) { const arr = JSON.parse(raw); if (Array.isArray(arr)) return new Set(arr); }
     } catch {}
     return new Set();
@@ -289,12 +346,19 @@ export default function App(){
   const printRequestRef = useRef(null);
   const [printMsg, setPrintMsg] = useState(null);
   const [reloadCounter, setReloadCounter] = useState(0);
+  const inWrongItems = statusFilter === 'wrong_items';
+  const inOut = statusFilter === 'out';
+  const inWorkflowQueue = inWrongItems || inOut;
+  const usingStockProfile = showCollectorFilters && !inWorkflowQueue && profile?.id === 'stock';
+  const workflowScope = `${store}:${statusFilter}`;
+  workflowScopeRef.current = workflowScope;
   useEffect(()=>{
     try { localStorage.setItem("orderCollectorPreset", JSON.stringify(preset)); } catch {}
   }, [preset]);
   useEffect(()=>{
-    try { localStorage.setItem("orderCollectorProfile", JSON.stringify(profile)); } catch {}
-  }, [profile]);
+    if (!userRole) return;
+    try { localStorage.setItem(profileStorageKey, JSON.stringify(profile)); } catch {}
+  }, [profile, profileStorageKey, userRole]);
   useEffect(()=>{
     try { localStorage.setItem("orderCollectorStockFilter", stockFilter); } catch {}
   }, [stockFilter]);
@@ -306,15 +370,16 @@ export default function App(){
   }, [productSortOldToNew]);
   // Persist selected order numbers to survive page changes / app close
   useEffect(()=>{
+    if (!userRole) return;
     try {
       const arr = Array.from(selectedOrderNumbers);
       if (arr.length > 0) {
-        localStorage.setItem(`orderCollectorSelected_${store}`, JSON.stringify(arr));
+        localStorage.setItem(selectedOrdersKey(store, verifierId), JSON.stringify(arr));
       } else {
-        localStorage.removeItem(`orderCollectorSelected_${store}`);
+        localStorage.removeItem(selectedOrdersKey(store, verifierId));
       }
     } catch {}
-  }, [selectedOrderNumbers, store]);
+  }, [selectedOrderNumbers, store, userRole, verifierId]);
 
   const wsRef = useRef(null);
   const requestIdRef = useRef(0);
@@ -329,6 +394,7 @@ export default function App(){
     clearAuth();
     setAuth(null);
     setAgentToday({ fulfilledToday: 0, loading: false });
+    navigate('/login');
   }
 
   function navigate(path){
@@ -374,6 +440,48 @@ export default function App(){
     return () => { cancelled = true; };
   }, [auth?.access_token, reloadCounter]);
 
+  useEffect(() => {
+    if (!canReviewWrong || !auth?.access_token) return;
+    const controller = new AbortController();
+    let requestId = 0;
+    async function refresh() {
+      if (document.visibilityState === 'hidden') return;
+      const id = ++requestId;
+      try {
+        const data = await API.getWrongItemsCount(controller.signal);
+        if (!controller.signal.aborted && id === requestId) {
+          setWrongItems({ count: Number(data.count || 0), stores: data.stores || {} });
+        }
+      } catch { /* Keep the last known count until the next refresh. */ }
+    }
+    refreshWrongItemsRef.current = refresh;
+    refresh();
+    const timer = setInterval(refresh, 30000);
+    window.addEventListener('focus', refresh);
+    window.addEventListener('online', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      controller.abort();
+      refreshWrongItemsRef.current = () => {};
+      clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('online', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [canReviewWrong, auth?.access_token]);
+
+  useEffect(() => {
+    if (!auth?.access_token) return;
+    const retry = () => { void flushPending(); };
+    window.addEventListener('online', retry);
+    const timer = setInterval(retry, 15000);
+    retry();
+    return () => {
+      window.removeEventListener('online', retry);
+      clearInterval(timer);
+    };
+  }, [auth?.access_token]);
+
   function vibrate(ms = 20){
     try { if (navigator && typeof navigator.vibrate === 'function') navigator.vibrate(ms); } catch {}
   }
@@ -410,6 +518,17 @@ export default function App(){
     } catch { return ""; }
   }
 
+  function workflowQuery() {
+    const [from, to] = [outFromDate, outToDate].filter(Boolean).sort();
+    return {
+      limit: 30,
+      store,
+      status_filter: statusFilter,
+      search: search.trim(),
+      ...(inOut && from ? { date_from: from, date_to: to || from } : {}),
+    };
+  }
+
   async function load({ preserveIndex = false } = {}){
     const reqId = ++requestIdRef.current;
     loadControllerRef.current?.abort();
@@ -425,7 +544,6 @@ export default function App(){
     }
     try {
     const codDatesCSV = computeCodDatesCSV(codFromDate, codToDate);
-    const usingStockProfile = !!(profile && profile.id === 'stock');
     const isGlobalSearch = (!usingStockProfile && !statusFilter && (search || '').trim() && !showProductFilter);
     // Build base query from Stock subfilter, else empty
     const stockBase = usingStockProfile
@@ -441,12 +559,12 @@ export default function App(){
     const baseQuery = (isGlobalSearch ? '' : `${stockBase}${negativeTagQuery}`).trim();
     const isProductMode = !!(productIdFilter || "").trim();
     const applyCodDates = (!usingStockProfile && !isGlobalSearch && (statusFilter === "collect" || statusFilter === "verification" || isProductMode));
-    const isBulkFilter = (!usingStockProfile && ((statusFilter === "collect" || statusFilter === "verification") || isProductMode));
+    const isBulkFilter = (!inWorkflowQueue && !usingStockProfile && ((statusFilter === "collect" || statusFilter === "verification") || isProductMode));
     const perPage = isBulkFilter ? 250 : 30;
 
     // First page
     const effectiveStatusFilter = (usingStockProfile ? "all" : (statusFilter || "all"));
-    let data = await API.getOrders({
+    let data = await API.getOrders(inWorkflowQueue ? workflowQuery() : {
       limit: perPage,
       status_filter: effectiveStatusFilter,
       tag_filter: isGlobalSearch ? "" : (tagFilter || ""),
@@ -515,12 +633,12 @@ export default function App(){
     if (reqId !== requestIdRef.current || controller.signal.aborted) return;
     ords = [...new Map(ords.map(order => [order.id, order])).values()];
     // Client-side exclusion for specific tags when enabled (non-Stock profile)
-    if (!usingStockProfile && excludeStockTags){
+    if (!inWorkflowQueue && !usingStockProfile && excludeStockTags){
       const disallowed = new Set(["btis", "en att b", "en att", "an att b2", "an att b3"]);
       ords = ords.filter(o => !((o.tags || []).some(t => disallowed.has(String(t).toLowerCase()))));
     }
     // Client-side product id filter (matches Shopify GID or trailing numeric id)
-    const pidFilter = (productIdFilter || "").trim();
+    const pidFilter = inWorkflowQueue ? "" : (productIdFilter || "").trim();
     if (pidFilter){
       const isNumeric = /^\d+$/.test(pidFilter);
       const matchesPid = (pid) => {
@@ -535,7 +653,7 @@ export default function App(){
       ords = (ords || []).filter(o => (o.variants || []).some(v => matchesPid(v.product_id)));
     }
     // Optional product sort override: old -> new
-    if (productSortOldToNew && isProductMode){
+    if (!inWorkflowQueue && productSortOldToNew && isProductMode){
       try { ords.sort((a,b) => sortOrdersByCodTagThenCreated(a, b, preset.collectPrefix)); } catch {}
     }
     setOrders(ords);
@@ -576,7 +694,6 @@ export default function App(){
     }
     // Recompute filters to ensure consistency
     const codDatesCSV = computeCodDatesCSV(codFromDate, codToDate);
-    const usingStockProfile = !!(profile && profile.id === 'stock');
     const isGlobalSearch = (!usingStockProfile && !statusFilter && (search || '').trim() && !showProductFilter);
     const stockBase = usingStockProfile
       ? (stockFilter === 'btis'
@@ -594,7 +711,7 @@ export default function App(){
       const isProductMode = !!(productIdFilter || "").trim();
       const applyCodDates = (!usingStockProfile && !isGlobalSearch && (statusFilter === "collect" || statusFilter === "verification" || isProductMode));
       const effectiveStatusFilter = (usingStockProfile ? "all" : (statusFilter || "all"));
-      const data = await API.getOrders({
+      const data = await API.getOrders(inWorkflowQueue ? { ...workflowQuery(), cursor: nextCursor } : {
         limit: perPage,
         cursor: nextCursor,
         status_filter: effectiveStatusFilter,
@@ -617,7 +734,7 @@ export default function App(){
       setOrders(prev => {
         const seen = new Set(prev.map(order => order.id));
         const merged = prev.concat(more.filter(order => !seen.has(order.id)));
-        if (productSortOldToNew && isProductMode){
+        if (!inWorkflowQueue && productSortOldToNew && isProductMode){
           try { merged.sort((a,b) => sortOrdersByCodTagThenCreated(a, b, preset.collectPrefix)); } catch {}
         }
         return merged;
@@ -633,7 +750,7 @@ export default function App(){
   useEffect(() => {
     const t = setTimeout(() => loadRef.current(), 250);
     return () => { clearTimeout(t); loadControllerRef.current?.abort(); ++requestIdRef.current; };
-  }, [statusFilter, tagFilter, codFromDate, codToDate, excludeOut, excludeStockTags, profile, stockFilter, store, reloadCounter, search, auth?.access_token]);
+  }, [statusFilter, tagFilter, codFromDate, codToDate, outFromDate, outToDate, excludeOut, excludeStockTags, profile, stockFilter, store, reloadCounter, search, auth?.access_token]);
 
   // Keep a ref to the latest load() so the WebSocket handler (mounted once)
   // always uses the freshest filter state — otherwise webhook-triggered reloads
@@ -656,13 +773,22 @@ export default function App(){
       wsRef.current = ws;
       ws.onopen = () => {
         reconnectDelay = 1000;
-        if (connectedBefore && document.visibilityState !== 'hidden') loadRef.current({ preserveIndex: true });
+        if (connectedBefore && document.visibilityState !== 'hidden') {
+          refreshWrongItemsRef.current();
+          loadRef.current({ preserveIndex: true });
+        }
         connectedBefore = true;
       };
       ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
+        const workflowEvent = ['order.wrong_item', 'order.corrected', 'order.out', 'order.found'].includes(msg.type);
+        if (workflowEvent) refreshWrongItemsRef.current();
         if (msg.store && msg.store !== liveStoreRef.current) return;
+        if (workflowEvent) {
+          if (document.visibilityState !== 'hidden') loadRef.current({ preserveIndex: true });
+          return;
+        }
         if (msg.type === 'inventory.purchase_orders_changed') {
           inventoryRefreshRef.current();
           return;
@@ -726,6 +852,17 @@ export default function App(){
   const [totalCount, setTotalCount] = useState(0);
   const total = orders.length;
   const current = orders[index] || null;
+  const canReportWrong = statusFilter === 'verification' && !usingStockProfile
+    && ['admin', 'agent', 'verificateur'].includes(userRole)
+    && !current?.tags?.some(tag => tag.toLowerCase() === 'out');
+  const canMarkFound = inOut && current?.out_event_id && (isCollectionStaff || (current.out_by_user_id != null && String(current.out_by_user_id) === String(auth?.user?.id)));
+  const showStandardActions = !inWorkflowQueue && showCollectorFilters;
+  const wrongStoreCount = Number(wrongItems.stores[store] || 0);
+  const storesWithWrongItems = Object.entries(wrongItems.stores).filter(([, count]) => count > 0);
+
+  useEffect(() => {
+    if (inWrongItems) loadRef.current({ preserveIndex: true });
+  }, [wrongStoreCount]);
 
   // Refresh only the visible order's inventory fields. Keep collection, tags and
   // multi-order selections intact when returning to the app or receiving a PO.
@@ -749,7 +886,7 @@ export default function App(){
           ...order,
           variants: order.variants.map(variant => {
             const latest = byId.get(variant.line_item_id || variant.id);
-            return latest ? { ...variant, pending_purchase_orders: latest.pending_purchase_orders || [], on_hand_quantity: latest.on_hand_quantity } : variant;
+            return applyVariantStock(variant, latest);
           }),
         }));
       } catch { /* Keep last confirmed stock information while offline. */ }
@@ -815,6 +952,90 @@ export default function App(){
       if (set.has(variantId)) set.delete(variantId); else set.add(variantId);
       return { ...prev, [orderId]: set };
     });
+  }
+
+  function changeStore(next) {
+    if (next === store) return;
+    vibrate(10);
+    setEditingTag(null);
+    setWorkflowMessage(null);
+    let saved = [];
+    try {
+      const parsed = JSON.parse(localStorage.getItem(selectedOrdersKey(next, verifierId)) || '[]');
+      if (Array.isArray(parsed)) saved = parsed;
+    } catch {}
+    setSelectedOrderNumbers(new Set(saved));
+    setSelectedOutMap({});
+    setOrders([]);
+    setIndex(0);
+    setStore(next);
+  }
+
+  function selectWorkflow(next) {
+    setWorkflowMessage(null);
+    setEditingTag(null);
+    setShowConfirm(null);
+    setShowProductFilter(false);
+    setOrders([]);
+    setIndex(0);
+    setTotalCount(0);
+    setPageInfo({ hasNextPage: false });
+    setNextCursor(null);
+    setLoading(true);
+    setStatusFilter(next);
+  }
+
+  function openWrongItems() {
+    setSearch('');
+    if (!inWrongItems) {
+      selectWorkflow('wrong_items');
+    }
+    if (!wrongStoreCount) {
+      const nextStore = Object.keys(wrongItems.stores).find(key => wrongItems.stores[key] > 0);
+      if (nextStore) changeStore(nextStore);
+    }
+  }
+
+  async function handleWorkflowAction(action) {
+    if (!current || loading || actionBusy || workflowBusyRef.current) return;
+    const order = current;
+    const startingScope = workflowScope;
+    const fields = {};
+    if (inWrongItems) fields.wrong_item_id = order.wrong_item_id;
+    if (action === 'found') fields.out_event_id = order.out_event_id;
+    if (action === 'out') {
+      const selected = selectedOutMap[order.id];
+      const titles = (order.variants || []).filter(v => selected?.has(v.id)).map(v => v.title || v.sku || '').join(', ');
+      fields.metadata = { titles };
+    }
+    workflowBusyRef.current = true;
+    setActionBusy(true);
+    setWorkflowMessage(null);
+    try {
+      const result = await API.resolveOrderWorkflow(action, order, store, fields);
+      if (inWrongItems) refreshWrongItemsRef.current();
+      if (startingScope !== workflowScopeRef.current) return;
+      if (action === 'wrong-item') {
+        setOrders(previous => previous.map(row => row.id === order.id ? { ...row, wrong_item_id: result.wrong_item_id } : row));
+        const message = result.collector_attributed === false
+          ? 'Wrong item reported. No collector was recorded for this order.'
+          : 'Wrong item reported. The collector was notified.';
+        setWorkflowMessage({ text: message });
+      } else {
+        setOrders(previous => previous.filter(row => row.id !== order.id));
+        setIndex(i => Math.min(i, Math.max(0, orders.length - 2)));
+        setTotalCount(n => Math.max(0, n - 1));
+        setSelectedOutMap(previous => ({ ...previous, [order.id]: new Set() }));
+        const message = action === 'corrected' ? 'Wrong item corrected.' : action === 'out' ? 'Order marked OUT.' : 'Order marked found and returned to verification.';
+        setWorkflowMessage({ text: message });
+      }
+      loadRef.current({ preserveIndex: true });
+    } catch (error) {
+      if (startingScope === workflowScopeRef.current) setWorkflowMessage({ error: true, text: error.message });
+    } finally {
+      workflowBusyRef.current = false;
+      setActionBusy(false);
+    }
   }
 
   async function handleMarkCollected(order){
@@ -925,12 +1146,7 @@ export default function App(){
         )}
         <div className="collector-topbar">
           <PackageSearch className="hidden h-5 w-5 shrink-0 sm:block" />
-          <StorePicker value={store} onChange={(next)=>{
-            vibrate(10); setEditingTag(null);
-            let saved = [];
-            try { const parsed = JSON.parse(localStorage.getItem(`orderCollectorSelected_${next}`) || '[]'); if (Array.isArray(parsed)) saved = parsed; } catch {}
-            setSelectedOrderNumbers(new Set(saved)); setSelectedOutMap({}); setOrders([]); setIndex(0); setStore(next);
-          }} className="collector-store" />
+          <StorePicker value={store} onChange={changeStore} className="collector-store" />
           <div className="ml-auto flex items-center gap-2">
             <button aria-label="Open Inventory Helper" title="Inventory Helper" onClick={()=>{ vibrate(10); navigate('/inventory-helper'); }} className="p-1.5 rounded-full hover:bg-gray-100">
               <PackageOpen className="w-4 h-4 text-indigo-600" />
@@ -947,23 +1163,44 @@ export default function App(){
                     Sync {pendingCount}
                   </span>
                 )}
-                <button aria-label="Logout" onClick={()=>{ vibrate(10); handleLogout(); }} className="p-1.5 rounded-full hover:bg-gray-100">
-                  <LogOut className="w-4 h-4 text-gray-700" />
-                </button>
               </div>
             )}
 
-            <button aria-label="Choose profile" onClick={()=>{ vibrate(10); setShowProfilePicker(true); }} className="p-1.5 rounded-full hover:bg-gray-100">
+            {showCollectorFilters && !inWorkflowQueue && <button aria-label="Choose profile" onClick={()=>{ vibrate(10); setShowProfilePicker(true); }} className="p-1.5 rounded-full hover:bg-gray-100">
               <Boxes className={`w-4 h-4 ${profile?.id === 'stock' ? 'text-blue-600' : 'text-gray-700'}`} />
-            </button>
+            </button>}
             <button aria-label="Settings" onClick={()=>{ vibrate(10); setShowSettings(true); }} className="p-1.5 rounded-full hover:bg-gray-100">
               <Settings className="w-4 h-4" />
             </button>
             <PackageCheck className="w-4 h-4 text-gray-600" />
             <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-xs font-medium">{loading ? "…" : totalCount}</span>
+            {hasStaffPagePicker(userRole) && <AgentPagesLink />}
+            {auth?.access_token && (
+              <button type="button" onClick={()=>{ vibrate(10); handleLogout(); }} className="inline-flex min-h-8 shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-gray-200 px-2 text-xs font-semibold text-gray-700 hover:bg-gray-100">
+                <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+                Logout
+              </button>
+            )}
           </div>
         </div>
         <div className="collector-controls">
+          {canReviewWrong && wrongItems.count > 0 && (
+            <div aria-live="polite" className="col-span-full">
+              <button type="button" onClick={openWrongItems} className="flex w-full items-center gap-2 rounded-md border border-amber-300 bg-amber-100 px-2 py-1 text-left text-xs font-semibold text-amber-900 hover:bg-amber-200">
+                <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+                {wrongItems.count} wrong item{wrongItems.count === 1 ? '' : 's'}
+                <span className="ml-auto text-xs font-medium">Review orders</span>
+                <ChevronRight className="h-4 w-4 shrink-0" aria-hidden="true" />
+              </button>
+            </div>
+          )}
+          {inWrongItems && storesWithWrongItems.some(([key]) => key !== store) && (
+            <div className="col-span-full flex gap-1 overflow-x-auto" aria-label="Stores with wrong items">
+              {storesWithWrongItems.map(([key, count]) => (
+                <Chip key={key} label={`${titleStore(key)} (${count})`} active={key === store} onClick={() => changeStore(key)} />
+              ))}
+            </div>
+          )}
           {apiError && (
             <div className="collector-error" role="alert">
               <button type="button" className="collector-error-message" aria-label="Read refresh error" title={apiError} onClick={()=>alert(apiError)}>{apiError}</button>
@@ -975,12 +1212,12 @@ export default function App(){
             <input
               value={search}
               onChange={(e)=>setSearch(e.target.value)}
-              placeholder="Search order # or SKU"
+              placeholder={inWorkflowQueue ? 'Search order #' : 'Search order # or SKU'}
               aria-label="Search orders"
             />
           </div>
           <div className="collector-filters">
-            {profile && profile.id === 'stock' ? (
+            {usingStockProfile ? (
               <>
                 <Chip
                   label="btis"
@@ -995,11 +1232,12 @@ export default function App(){
               </>
             ) : (
               <>
-                <Chip
+                {showCollectorFilters && <Chip
                   label="Collect"
                   active={statusFilter === "collect"}
                   onClick={()=>{
-                    setStatusFilter(prev => prev === "collect" ? null : "collect");
+                    if (inWorkflowQueue) selectWorkflow('collect');
+                    else setStatusFilter(prev => prev === "collect" ? null : "collect");
                     setShowDatePicker(true);
                     try {
                       const now = new Date();
@@ -1015,12 +1253,13 @@ export default function App(){
                     // Force refresh even if filters didn't change
                     setReloadCounter(c => c + 1);
                   }}
-                />
+                />}
                 <Chip
                   label="Verification"
                   active={statusFilter === "verification"}
                   onClick={()=>{ 
-                    setStatusFilter(prev => prev === "verification" ? null : "verification"); 
+                    if (inWorkflowQueue) selectWorkflow('verification');
+                    else if (showCollectorFilters) setStatusFilter(prev => prev === "verification" ? null : "verification");
                     setShowDatePicker(true);
                     try {
                       const now = new Date();
@@ -1034,15 +1273,15 @@ export default function App(){
                     } catch {}
                   }}
                 />
-                <Chip
+                {showCollectorFilters && <><Chip
                   label="Urgent"
                   active={statusFilter === "urgent"}
-                  onClick={()=>{ setStatusFilter(prev => prev === "urgent" ? null : "urgent"); setShowDatePicker(false); }}
+                  onClick={()=>{ if (inWorkflowQueue) selectWorkflow('urgent'); else setStatusFilter(prev => prev === "urgent" ? null : "urgent"); setShowDatePicker(false); }}
                 />
                 <Chip
                   label="m3tla"
                   active={statusFilter === "m3tla"}
-                  onClick={()=>{ setStatusFilter(prev => prev === "m3tla" ? null : "m3tla"); setShowDatePicker(false); }}
+                  onClick={()=>{ if (inWorkflowQueue) selectWorkflow('m3tla'); else setStatusFilter(prev => prev === "m3tla" ? null : "m3tla"); setShowDatePicker(false); }}
                 />
               <Chip
                 label="Product"
@@ -1054,16 +1293,19 @@ export default function App(){
                     if (hadProduct) setProductIdFilter("");
                     setReloadCounter(c => c + 1);
                   } else {
+                    if (inWorkflowQueue) selectWorkflow(null);
                     setShowProductFilter(true);
                   }
                 }}
-              />
+              /></>}
+              {canReviewWrong && <Chip label="Wrong items" active={inWrongItems} onClick={openWrongItems} />}
+              <Chip label="OUT" active={inOut} onClick={() => selectWorkflow(inOut ? (verificationOnly ? 'verification' : null) : 'out')} />
               <Chip
-                label={tagFilter ? `Delivery: ${tagFilter}` : "Delivery"}
-                active={!!tagFilter}
-                onClick={()=>{ setShowDeliveryPicker(true); }}
+                label={tagFilter && !inWorkflowQueue ? `Delivery: ${tagFilter}` : "Delivery"}
+                active={!!tagFilter && !inWorkflowQueue}
+                onClick={()=>{ if (inWorkflowQueue) selectWorkflow(verificationOnly ? 'verification' : null); setShowDeliveryPicker(true); }}
               />
-                <div className="flex items-center gap-1">
+                {!inWorkflowQueue && showCollectorFilters && <div className="flex items-center gap-1">
                   <SmallChip
                     label="Exclude OUT"
                     active={excludeOut}
@@ -1075,26 +1317,26 @@ export default function App(){
                     active={excludeStockTags}
                     onClick={()=> { setExcludeStockTags(v => !v); }}
                   />
-                </div>
+                </div>}
               </>
             )}
           </div>
           {/* Date range bar: compact layout without preview pill */}
-          {(!profile || profile.id !== 'stock') && (
+          {!usingStockProfile && !inWrongItems && (
             <div className="collector-date-bar">
-              <div className="collector-date-label">Date range</div>
+              <div className="collector-date-label">{inOut ? 'OUT date (UTC)' : 'Date range'}</div>
               <div className="collector-date-inputs">
                 <input
                   type="date"
-                  value={codFromDate}
-                  onChange={(e)=>{ setCodFromDate(e.target.value); }}
+                  value={inOut ? outFromDate : codFromDate}
+                  onChange={(e)=>{ (inOut ? setOutFromDate : setCodFromDate)(e.target.value); }}
                   aria-label="From date"
                 />
                 <span className="text-[11px] uppercase tracking-wide text-gray-400">to</span>
                 <input
                   type="date"
-                  value={codToDate}
-                  onChange={(e)=>{ setCodToDate(e.target.value); }}
+                  value={inOut ? outToDate : codToDate}
+                  onChange={(e)=>{ (inOut ? setOutToDate : setCodToDate)(e.target.value); }}
                   aria-label="To date"
                 />
                 <button
@@ -1102,7 +1344,7 @@ export default function App(){
                   onClick={()=>{ vibrate(15); setReloadCounter(c=>c+1); }}
                 >Apply</button>
                 <button
-                  onClick={()=>{ vibrate(15); setCodFromDate(""); setCodToDate(""); setReloadCounter(c=>c+1); }}
+                  onClick={()=>{ vibrate(15); if (inOut) { setOutFromDate(''); setOutToDate(''); } else { setCodFromDate(''); setCodToDate(''); } setReloadCounter(c=>c+1); }}
                 >Clear</button>
               </div>
             </div>
@@ -1138,7 +1380,20 @@ export default function App(){
       </header>
 
       <main className="collector-main">
-        <div className="collector-stage">
+        <div className={`collector-stage${inWorkflowQueue && (orders.length > 0 || (pageInfo.hasNextPage && nextCursor)) ? " grid grid-rows-[auto_minmax(0,1fr)]" : ""}`}>
+        {inWorkflowQueue && (orders.length > 0 || (pageInfo.hasNextPage && nextCursor)) && (
+          <div className="mb-2 flex gap-1.5 overflow-x-auto pb-1" aria-label={inOut ? 'OUT orders' : 'Wrong-item orders'}>
+            {orders.map((order, position) => (
+              <button key={order.id} type="button" aria-current={index === position ? 'true' : undefined} onClick={() => setIndex(position)} className={`shrink-0 rounded-lg border px-2.5 py-1.5 text-left text-xs ${index === position ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'}`}>
+                <span className="block font-semibold">{order.number}</span>
+                {inOut && <span className="block">{order.out_by || 'Unknown collector'}</span>}
+              </button>
+            ))}
+            {pageInfo.hasNextPage && nextCursor && (
+              <button type="button" onClick={loadMore} disabled={loadingMore} className="shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-blue-700 disabled:opacity-50">{loadingMore ? 'Loading…' : 'More orders'}</button>
+            )}
+          </div>
+        )}
         {current ? (
           <div className="collector-order-container">
             <Suspense fallback={<div className="text-center py-10 text-gray-500">Loading…</div>}>
@@ -1146,16 +1401,17 @@ export default function App(){
               key={current.id}
               order={current}
               selectedOut={selectedOutMap[current.id] || new Set()}
-              onToggleVariant={(vid)=>toggleVariantOut(current.id, vid)}
+              onToggleVariant={showStandardActions || (inWrongItems && canReviewWrong) ? vid => toggleVariantOut(current.id, vid) : undefined}
               onMarkCollected={()=>handleMarkCollected(current)}
               onMarkOut={()=>handleMarkOut(current)}
               onPrev={gotoPrev}
               onNext={gotoNext}
               position={index + 1}
               total={total}
-              selectedForPrint={selectedOrderNumbers.has(current.number)}
-              onToggleSelectOrder={()=>toggleOrderSelected(current.number)}
-              onEditTag={(order, tag)=>setEditingTag({ order, tag, store })}
+              selectedForPrint={showStandardActions && selectedOrderNumbers.has(current.number)}
+              onToggleSelectOrder={showStandardActions ? () => toggleOrderSelected(current.number) : undefined}
+              onEditTag={showStandardActions ? (order, tag) => setEditingTag({ order, tag, store }) : undefined}
+              checkingItems={statusFilter === 'verification' || inWorkflowQueue}
               onCopyProductId={async (pid)=>{
                 try {
                   if (!pid) return;
@@ -1175,7 +1431,7 @@ export default function App(){
         ) : (
           <div className="text-center py-24 text-gray-500">
             <PackageCheck className="w-10 h-10 mx-auto mb-3"/>
-            <p>No orders match these filters.</p>
+            <p>{loading ? 'Loading orders…' : inWrongItems && !search.trim() ? 'No pending wrong items for this store.' : 'No orders match these filters.'}</p>
           </div>
         )}
         </div>
@@ -1185,6 +1441,28 @@ export default function App(){
           <button type="button" className="collector-nav" aria-label="Prev order" title="Previous order" onClick={()=>{ vibrate(10); gotoPrev(); }}><ChevronLeft size={26}/></button>
           <div className="collector-footer-center">
             {printMsg && <div className="collector-status" role="status" title={printMsg}>{printMsg}</div>}
+          {rejectedActions.length > 0 && (
+            <div role="alert" className="mb-2 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-900">
+              <div className="max-h-14 min-w-0 flex-1 overflow-y-auto">{rejectedActions.map((message, i) => <p key={i}>{message}</p>)}</div>
+              <button type="button" onClick={() => setRejectedActions([])} className="shrink-0 font-semibold underline">Dismiss</button>
+            </div>
+          )}
+          {workflowMessage && <p role={workflowMessage.error ? 'alert' : 'status'} className={`mb-2 text-xs ${workflowMessage.error ? 'text-red-700' : 'text-emerald-700'}`}>{workflowMessage.text}</p>}
+          {canReportWrong && current && !current.wrong_item_id && (
+            <button type="button" disabled={loading || actionBusy} onClick={() => handleWorkflowAction('wrong-item')} className="mb-2 flex w-full items-center justify-center gap-2 rounded-xl bg-amber-100 px-3 py-1.5 text-sm font-semibold text-amber-900 hover:bg-amber-200 disabled:opacity-60">
+              <AlertTriangle className="h-4 w-4" aria-hidden="true" /> Wrong item
+            </button>
+          )}
+          {inWrongItems && canReviewWrong && current?.wrong_item_id && (
+            <div className="collector-action-row">
+              <button type="button" disabled={loading || actionBusy} onClick={() => handleWorkflowAction('corrected')} className="collector-action-collected"><CheckCircle className="h-4 w-4" aria-hidden="true" /> Corrected</button>
+              <button type="button" disabled={loading || actionBusy} onClick={() => handleWorkflowAction('out')} className="collector-action-out"><XCircle className="h-4 w-4" aria-hidden="true" /> OUT</button>
+            </div>
+          )}
+          {canMarkFound && (
+            <button type="button" disabled={loading || actionBusy} onClick={() => handleWorkflowAction('found')} className="flex w-full items-center justify-center gap-2 rounded-xl bg-green-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-60"><CheckCircle className="h-4 w-4" aria-hidden="true" /> {isCollectionStaff ? "Collected" : "Found"}</button>
+          )}
+            {showStandardActions && <>
             <div className="collector-selection-toolbar">
               <strong className="collector-selection-count" aria-live="polite">Selected <span>{selectedOrderNumbers.size}</span></strong>
               <button type="button" className="collector-clear-selection" disabled={!selectedOrderNumbers.size} onClick={()=>setSelectedOrderNumbers(new Set())}>Clear</button>
@@ -1199,6 +1477,7 @@ export default function App(){
               <button type="button" className="collector-action-collected" disabled={actionBusy} onClick={()=>{ vibrate(10); setShowConfirm('collected'); }}><CheckCircle size={13}/><span>Collected</span></button>
               <button type="button" className="collector-action-out" disabled={actionBusy} onClick={()=>{ vibrate(10); setShowConfirm('out'); }}><XCircle size={13}/><span>OUT</span></button>
             </div>
+            </>}
           </div>
           <button type="button" className="collector-nav" aria-label="Next order" title="Next order" onClick={()=>{ vibrate(10); gotoNext(); }}><ChevronRight size={26}/></button>
         </div>
@@ -1232,7 +1511,7 @@ export default function App(){
                     <p>{`Mark ${targetNumbers.length} order${targetNumbers.length>1?'s':''} as Collected and add tag pc?`}</p>
                   )}
                   {showConfirm === 'out' && (
-                    <p>{`Append selected OUT titles to note and add tag out for ${targetNumbers.length} order${targetNumbers.length>1?'s':''}?`}</p>
+                    <p>{`Append selected OUT titles to note, remove the pc tag and add out for ${targetNumbers.length} order${targetNumbers.length>1?'s':''}?`}</p>
                   )}
                   {showConfirm === 'print' && (
                     <p>{`Print ${targetNumbers.length} order${targetNumbers.length>1?'s':''}?`}</p>
@@ -1357,64 +1636,78 @@ export default function App(){
 
   function queueAction(action){
     const arr = loadPendingActions();
-    const next = arr.concat([action]);
+    if (arr.some(item => item.id === action.id)) return;
+    const next = arr.concat([{ ...action, userId: auth?.user?.id }]);
     savePendingActions(next);
-    setPendingCount(next.length);
+    setPendingCount(pendingActionsForUser(next, auth?.user).length);
   }
 
-  async function flushPending(){
+  function removePendingAction(actionId) {
     const arr = loadPendingActions();
-    if (!arr.length) { setPendingCount(0); return; }
-    let remaining = arr.slice();
-    // Process oldest first, one-by-one (keeps app smooth and avoids request bursts)
-    for (const item of arr){
-      try {
-        if (item.type === "collected"){
-          await withRetries(() => API.markCollected(item.orderId, item.orderNumber, item.store, item.metadata || {}), { attempts: 3 });
-        } else if (item.type === "out"){
-          await withRetries(() => API.markOut(item.orderId, item.orderNumber, item.store, item.metadata || {}), { attempts: 3 });
-        } else {
-          // unknown action type
+    const next = arr.filter(item => item.id !== actionId);
+    if (next.length === arr.length) return;
+    savePendingActions(next);
+    setPendingCount(pendingActionsForUser(next, auth?.user).length);
+  }
+
+  function sendPendingAction(item) {
+    return withRetries(() => {
+      if (loadAuth()?.access_token !== auth?.access_token) throw sessionExpired();
+      if (item.type === 'collected') return API.markCollected(item.orderId, item.orderNumber, item.store, item.metadata || {});
+      if (item.type === 'out') return API.markOut(item.orderId, item.orderNumber, item.store, item.metadata || {}, item.id);
+    });
+  }
+
+  async function flushPending() {
+    if (flushingPendingRef.current || !auth?.access_token) return;
+    const arr = pendingActionsForUser(loadPendingActions(), auth?.user);
+    setPendingCount(arr.length);
+    if (!arr.length) return;
+    flushingPendingRef.current = true;
+    try {
+      for (const item of arr) {
+        if (loadAuth()?.access_token !== auth.access_token) break;
+        try {
+          await sendPendingAction(item);
+          removePendingAction(item.id);
+        } catch (error) {
+          if (!error?.permanent || loadAuth()?.access_token !== auth.access_token) break;
+          setRejectedActions(previous => [...previous, `${item.orderNumber}: ${error.message}`]);
+          removePendingAction(item.id);
         }
-        remaining = remaining.filter(x => x.id !== item.id);
-        savePendingActions(remaining);
-        setPendingCount(remaining.length);
-      } catch {
-        // stop on first failure to avoid hammering when offline
-        break;
       }
+    } finally {
+      flushingPendingRef.current = false;
     }
   }
 
-  // Background sync for pending actions (reliable for flaky mobile networks)
-  useEffect(() => {
-    const onOnline = () => { try { flushPending(); } catch {} };
-    try { window.addEventListener("online", onOnline); } catch {}
-    const t = setInterval(() => { try { flushPending(); } catch {} }, 15000);
-    // initial attempt
-    try { flushPending(); } catch {}
-    return () => {
-      try { window.removeEventListener("online", onOnline); } catch {}
-      try { clearInterval(t); } catch {}
-    };
-  }, [store, auth?.access_token]);
-
   async function runCollected(targetOrders, { source = "single", afterSingle = false } = {}){
     if (!targetOrders || targetOrders.length === 0) return;
+    const rejected = [];
+    let finished = 0;
     setActionBusy(true);
     try {
       const now = Date.now();
       for (const o of targetOrders){ try { recentSelfActionRef.current.set(String(o.id), now); } catch {} }
       // sequential for reliability + nicer UX pacing
       for (const o of targetOrders){
-        await withRetries(() => API.markCollected(o.id, o.number, store, { source }), { attempts: 3 });
+        try {
+          await sendPendingAction({ type: 'collected', orderId: o.id, orderNumber: o.number, store, metadata: { source } });
+        } catch (error) {
+          if (!error.permanent || error.sessionExpired) throw error;
+          rejected.push(`${o.number}: ${error.message}`);
+        }
+        finished += 1;
       }
-      vibrate(20);
-      showOverlay({ open: true, type: "collected", variant: "success", title: "Collected!", subtitle: "Great job — keep going.", confettiKey: Date.now() }, 1050);
-      if (afterSingle) gotoNext();
+      if (rejected.length) setRejectedActions(previous => previous.concat(rejected));
+      if (finished > rejected.length) {
+        vibrate(20);
+        showOverlay({ open: true, type: "collected", variant: "success", title: "Collected!", subtitle: "Great job — keep going.", confettiKey: Date.now() }, 1050);
+        if (afterSingle) gotoNext();
+      }
     } catch (e){
       // If auth expired, do not queue: force re-login
-      if (String(e?.message || "").toLowerCase().includes("session expired")) {
+      if (e?.sessionExpired) {
         try { setAuth(null); } catch {}
         showOverlay({ open: true, type: "collected", variant: "danger", title: "Login required", subtitle: "Your session expired — please login again." }, 1200);
         setApiError("Session expired. Please login again.");
@@ -1422,12 +1715,13 @@ export default function App(){
       }
       // If offline/flaky, queue and keep user moving (backend is idempotent)
       try {
-        for (const o of targetOrders){
+        for (const o of targetOrders.slice(finished)){
           queueAction({ id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, type: "collected", orderId: o.id, orderNumber: o.number, store, metadata: { source }, ts: Date.now() });
         }
       } catch {}
       showOverlay({ open: true, type: "collected", variant: "info", title: "Saved — syncing…", subtitle: "We’ll send it when connection is stable." }, 1100);
-      setApiError(e?.message || "Failed to mark collected");
+      if (rejected.length) setRejectedActions(previous => previous.concat(rejected));
+      setApiError(e?.message || 'Failed to mark collected');
       if (afterSingle) gotoNext();
     } finally {
       setActionBusy(false);
@@ -1437,32 +1731,48 @@ export default function App(){
 
   async function runOut(items, { afterSingle = false } = {}){
     if (!items || items.length === 0) return;
+    const existing = pendingActionsForUser(loadPendingActions(), auth?.user);
+    const actions = items.map(({ order, titles }) => existing.find(action => action.type === 'out' && action.store === store && action.orderId === order.id) || {
+      id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      type: 'out', orderId: order.id, orderNumber: order.number, store, metadata: { titles }, ts: Date.now(),
+    });
+    const rejected = [];
+    let finished = 0;
     setActionBusy(true);
     try {
       const now = Date.now();
       for (const it of items){ try { recentSelfActionRef.current.set(String(it.order.id), now); } catch {} }
-      for (const it of items){
-        await withRetries(() => API.markOut(it.order.id, it.order.number, store, { titles: it.titles }), { attempts: 3 });
-        setSelectedOutMap(prev => ({ ...prev, [it.order.id]: new Set() }));
+      for (const action of actions){
+        try {
+          await sendPendingAction(action);
+          setSelectedOutMap(prev => ({ ...prev, [action.orderId]: new Set() }));
+        } catch (error) {
+          if (!error.permanent || error.sessionExpired) throw error;
+          rejected.push(`${action.orderNumber}: ${error.message}`);
+        }
+        finished += 1;
+        removePendingAction(action.id);
       }
-      vibrate(30);
-      showOverlay({ open: true, type: "out", variant: "danger", title: "Marked OUT", subtitle: "Noted and tagged." }, 900);
-      if (afterSingle) gotoNext();
+      if (rejected.length) setRejectedActions(previous => previous.concat(rejected));
+      if (finished > rejected.length) {
+        vibrate(30);
+        showOverlay({ open: true, type: "out", variant: "danger", title: "Marked OUT", subtitle: "Noted and tagged." }, 900);
+        if (afterSingle) gotoNext();
+      }
     } catch (e){
       // If auth expired, do not queue: force re-login
-      if (String(e?.message || "").toLowerCase().includes("session expired")) {
+      if (e?.sessionExpired) {
         try { setAuth(null); } catch {}
         showOverlay({ open: true, type: "out", variant: "danger", title: "Login required", subtitle: "Your session expired — please login again." }, 1200);
         setApiError("Session expired. Please login again.");
         return;
       }
       try {
-        for (const it of items){
-          queueAction({ id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, type: "out", orderId: it.order.id, orderNumber: it.order.number, store, metadata: { titles: it.titles }, ts: Date.now() });
-        }
+        for (const action of actions.slice(finished)) queueAction(action);
       } catch {}
       showOverlay({ open: true, type: "out", variant: "info", title: "Saved — syncing…", subtitle: "We’ll send it when connection is stable." }, 1100);
-      setApiError(e?.message || "Failed to mark out");
+      if (rejected.length) setRejectedActions(previous => previous.concat(rejected));
+      setApiError(e?.message || 'Failed to mark out');
       if (afterSingle) gotoNext();
     } finally {
       setActionBusy(false);

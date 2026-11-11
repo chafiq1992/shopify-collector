@@ -111,7 +111,7 @@ async def test_unopened_receipt_matches_second_product_paginates_and_reuses_cach
     await enrich(db, [second], graphql)
     await enrich(db, [second], graphql)
     assert len(calls) == 2
-    assert second.pending_purchase_orders == [{"id": row.id, "number": "PO-1", "status": "new"}]
+    assert second.pending_purchase_orders == [{"id": row.id, "number": "PO-1", "status": "new", "quantity": 4}]
     # Badge hydration must leave the receiving preview/counting data untouched.
     assert row.shopify_details_loaded is False
     assert len(row.line_items) == 1

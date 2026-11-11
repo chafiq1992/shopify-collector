@@ -235,7 +235,7 @@ def build_queue_query(tags: List[str]) -> Optional[str]:
 
 
 def build_catchall_query(exclude_tags: Optional[List[str]] = None) -> str:
-    """Build a Shopify search query for an "untagged" agent — every open, unshipped order
+    """Build a Shopify search query for an "untagged" agent â€” every open, unshipped order
     that doesn't carry any OTHER agent's tag (so two agents never see the same order).
     Cancelled orders are already excluded by `status:open`; cod-dated ones are dropped
     by the Python post-filter (Shopify's tag wildcards don't match multi-word tags)."""
@@ -285,10 +285,10 @@ async def _other_agents_all_tags(db: AsyncSession, exclude_user_id: Optional[str
 async def query_for_user(db: AsyncSession, user: User) -> Optional[str]:
     """Return the Shopify search query an agent's queue should use.
 
-    - Tags assigned             → positive OR-of-tags query
-    - No tags but role=="agent" → catch-all: open + unshipped + no cod + none of the
+    - Tags assigned             â†’ positive OR-of-tags query
+    - No tags but role=="agent" â†’ catch-all: open + unshipped + no cod + none of the
                                   OTHER active agents' tags
-    - Otherwise                 → None (their queue is intentionally empty)
+    - Otherwise                 â†’ None (their queue is intentionally empty)
     """
     tags = list(user.agent_tags or [])
     if tags:
@@ -342,10 +342,10 @@ def _confirmation_actor_predicate():
 def apply_level_filter(q: str, level: Optional[str]) -> str:
     """Narrow an agent's queue query by call-attempt level.
 
-    n1/n2/n3/n4 → only orders carrying that exact attempt tag.
-    nowtp       → orders carrying any of nowtp1/nowtp2/nowtp3/nowtp4.
-    enatt       → orders carrying any of enatt1/enatt2/enatt3/enatt4.
-    new         → orders with none of n1/n2/n3/n4/nowtp*/enatt* (not yet handled).
+    n1/n2/n3/n4 â†’ only orders carrying that exact attempt tag.
+    nowtp       â†’ orders carrying any of nowtp1/nowtp2/nowtp3/nowtp4.
+    enatt       â†’ orders carrying any of enatt1/enatt2/enatt3/enatt4.
+    new         â†’ orders with none of n1/n2/n3/n4/nowtp*/enatt* (not yet handled).
     """
     if not q or not level:
         return q
@@ -525,7 +525,7 @@ async def _fetch_nodes_by_id(store: str, gids: List[str], fields: str) -> List[D
     return out
 
 
-# (key=(user_id, store, base_query)) → (timestamp_seconds, breakdown_dict). One full
+# (key=(user_id, store, base_query)) â†’ (timestamp_seconds, breakdown_dict). One full
 # pagination scan produces the total count AND the per-level (n1/n2/n3/n4/new) counts;
 # the queue endpoint and team-stats both read from this cache so the 15-second polling
 # and the per-level filter pills don't trigger fresh scans.
@@ -707,7 +707,7 @@ def invalidate_breakdown_cache_for_user(user_id: str, store: Optional[str] = Non
 
 def invalidate_all_breakdown_caches() -> int:
     """Wipe every breakdown cache entry (used when a tag change might affect any agent's
-    counts — e.g. when a confirmation tag is added that takes an order out of every
+    counts â€” e.g. when a confirmation tag is added that takes an order out of every
     queue at once)."""
     global _BREAKDOWN_CACHE_GENERATION, _TEAM_STATS_CACHE
     n = len(_BREAKDOWN_CACHE)
@@ -727,6 +727,7 @@ legacyResourceId
 name
 createdAt
 cancelledAt
+email
 tags
 note
 customAttributes { key value }
@@ -871,6 +872,7 @@ def _flatten_order(node: Dict[str, Any]) -> Dict[str, Any]:
         "customer_id": (cust.get("id") or ""),
         "customer_phone": (cust.get("phone") or ""),
         "customer_email": (cust.get("email") or ""),
+        "email": node.get("email") or "",
         "created_at": node.get("createdAt"),
         "cancelled_at": node.get("cancelledAt"),
         "tags": list(node.get("tags") or []),
@@ -940,7 +942,7 @@ async def agent_queue(
 
     # Iteratively pull Shopify pages, dropping cod-tagged orders, until we have a full
     # page_size of actionable orders to return. This keeps every page the agent sees at
-    # the requested size — Shopify's tag-wildcard exclusion is unreliable for multi-word
+    # the requested size â€” Shopify's tag-wildcard exclusion is unreliable for multi-word
     # tags like "cod 18/05/26", so we filter in Python here and just keep pulling.
     orders: List[Dict[str, Any]] = []
     next_cursor: Optional[str] = None
@@ -982,7 +984,7 @@ async def agent_queue(
         if filled:
             break
 
-        # Burned through this batch without filling — continue from the last edge.
+        # Burned through this batch without filling â€” continue from the last edge.
         if not page_info.get("hasNextPage"):
             next_cursor = None
             break
@@ -1013,8 +1015,8 @@ async def agent_queue(
                 )
 
     # Compute the per-level breakdown ONCE on page 1 (or use a fresh cache hit on follow-up
-    # pages). The breakdown is derived from `base_q` — i.e. the agent's full tag-criteria
-    # query WITHOUT any active level filter — so the N1/N2/N3/N4/New pills always show
+    # pages). The breakdown is derived from `base_q` â€” i.e. the agent's full tag-criteria
+    # query WITHOUT any active level filter â€” so the N1/N2/N3/N4/New pills always show
     # the same totals regardless of which pill is currently selected.
     if cursor is None:
         try:
@@ -1945,7 +1947,7 @@ async def confirmation_order_duplicate_template(store: str, order_id: str, _: Us
     for line in lines:
         quantity = line.get("quantity")
         if not isinstance(quantity, int) or isinstance(quantity, bool) or not 1 <= quantity <= 999:
-            raise HTTPException(422, f"Source item {line.get('title') or 'Untitled'} has a quantity outside 1–999. Nothing was copied; create its items manually.")
+            raise HTTPException(422, f"Source item {line.get('title') or 'Untitled'} has a quantity outside 1â€“999. Nothing was copied; create its items manually.")
         variant = line.get("variant") or {}
         product = variant.get("product") or {}
         reason = ""
@@ -2029,6 +2031,10 @@ query ConfirmationOrderPricing($id: ID!) {
     currentSubtotalPriceSet { shopMoney { amount currencyCode } }
     currentTotalDiscountsSet { shopMoney { amount currencyCode } }
     currentShippingPriceSet { shopMoney { amount currencyCode } }
+    shippingLines(first: 100) {
+      nodes { id title isRemoved originalPriceSet { shopMoney { amount currencyCode } } discountedPriceSet { shopMoney { amount } } }
+      pageInfo { hasNextPage }
+    }
     currentTotalPriceSet { shopMoney { amount currencyCode } }
     discountApplications(first: 50) {
       nodes {
@@ -2162,11 +2168,42 @@ def _order_pricing(node: Dict[str, Any]) -> Dict[str, Any]:
         "total_discounts": money("currentTotalDiscountsSet"),
         "subtotal": money("currentSubtotalPriceSet"),
         "shipping": money("currentShippingPriceSet"),
+        **_shipping_edit_state(node),
         "total": money("currentTotalPriceSet"),
         "discount_codes": list(node.get("discountCodes") or []),
         "discounts": [{**d, "amount": _money_str(d["amount"])} for d in discounts],
         "line_items": line_items,
     }
+
+
+
+def _shipping_edit_state(node: Dict[str, Any]) -> Dict[str, Any]:
+    connection = node.get("shippingLines")
+    error = ""
+    lines = []
+    if not isinstance(connection, dict) or (connection.get("pageInfo") or {}).get("hasNextPage"):
+        error = "Shipping lines could not be fully loaded. Reload the editor before changing the delivery fee."
+    else:
+        lines = [line for line in connection.get("nodes") or [] if not line.get("isRemoved")]
+        if len(lines) > 1:
+            error = "This order has multiple shipping lines. Change its delivery fee in Shopify."
+        elif any(app.get("targetType") == "SHIPPING_LINE" for app in (node.get("discountApplications") or {}).get("nodes") or []):
+            error = "This order has a shipping discount. Change its delivery fee in Shopify to preserve the discount."
+        elif any(_money(line.get("originalPriceSet"))["amount"] != _money(line.get("discountedPriceSet"))["amount"]
+                 and _decimal(_money(line.get("originalPriceSet"))["amount"]) != _decimal(_money(line.get("discountedPriceSet"))["amount"])
+                 for line in lines):
+            error = "This order has a shipping discount. Change its delivery fee in Shopify to preserve the discount."
+    return {"shipping_editable": not bool(error), "shipping_edit_error": error}
+
+
+def _parse_shipping_price(value: str) -> Decimal:
+    try:
+        price = Decimal(str(value))
+        if not price.is_finite() or price < 0 or price > Decimal("999999.99") or price.as_tuple().exponent < -2:
+            raise ValueError()
+        return price.quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        raise HTTPException(422, "Delivery fee must be a non-negative amount with at most 2 decimals")
 
 
 def _parse_unit_price(value: Optional[str]) -> Optional[Decimal]:
@@ -2196,6 +2233,7 @@ mutation ConfirmationOrderEditBegin($id: ID!) {
   orderEditBegin(id: $id) {
     calculatedOrder {
       id
+      shippingLines { id title stagedStatus price { shopMoney { amount currencyCode } } }
       lineItems(first: 100) {
         nodes {
           id
@@ -2294,6 +2332,46 @@ mutation ConfirmationOrderEditCommit(
 }}
 """
 
+
+ORDER_EDIT_REMOVE_SHIPPING_GQL = """
+mutation ConfirmationOrderEditRemoveShipping($id: ID!, $shippingLineId: ID!) {
+  orderEditRemoveShippingLine(id: $id, shippingLineId: $shippingLineId) {
+    calculatedOrder { id }
+    userErrors { field message }
+  }
+}
+"""
+
+ORDER_EDIT_ADD_SHIPPING_GQL = """
+mutation ConfirmationOrderEditAddShipping($id: ID!, $shippingLine: OrderEditAddShippingLineInput!) {
+  orderEditAddShippingLine(id: $id, shippingLine: $shippingLine) {
+    calculatedOrder { id }
+    userErrors { field message }
+  }
+}
+"""
+
+ORDER_DETAILS_TAG_ADD_GQL = """
+mutation ConfirmationOrderDetailsTagAdd($id: ID!, $tags: [String!]!) {
+  tagsAdd(id: $id, tags: $tags) { node { id } userErrors { field message } }
+}
+"""
+
+ORDER_DETAILS_TAG_REMOVE_GQL = """
+mutation ConfirmationOrderDetailsTagRemove($id: ID!, $tags: [String!]!) {
+  tagsRemove(id: $id, tags: $tags) { node { id } userErrors { field message } }
+}
+"""
+
+ORDER_CUSTOMER_SET_GQL = """
+mutation ConfirmationOrderCustomerSet($orderId: ID!, $customerId: ID!) {
+  orderCustomerSet(orderId: $orderId, customerId: $customerId) {
+    order { id }
+    userErrors { field message }
+  }
+}
+"""
+
 ORDER_SHIPPING_UPDATE_GQL = f"""
 mutation ConfirmationOrderShippingUpdate($input: OrderInput!) {{
   orderUpdate(input: $input) {{
@@ -2329,6 +2407,8 @@ class OrderItemsEditBody(BaseModel):
     restock: bool = True
     notify_customer: bool = False
     staff_note: Optional[str] = None
+    shipping_price: Optional[str] = Field(default=None, max_length=32)
+    original_shipping_price: Optional[str] = Field(default=None, max_length=32)
 
 
 class OrderShippingAddressInput(BaseModel):
@@ -2348,6 +2428,18 @@ class OrderShippingEditBody(BaseModel):
     store: str
     order_id: str
     shipping_address: OrderShippingAddressInput
+
+
+class OrderDetailsEditBody(BaseModel):
+    store: str = Field(min_length=1, max_length=255)
+    order_id: str = Field(pattern=r"^gid://shopify/Order/\d+$", max_length=128)
+    shipping_address: Optional[OrderShippingAddressInput] = None
+    email: Optional[EmailStr] = None
+    note: Optional[str] = Field(default=None, max_length=5000)
+    original_note: Optional[str] = Field(default=None, max_length=5000)
+    tags_added: List[str] = Field(default_factory=list, max_length=50)
+    tags_removed: List[str] = Field(default_factory=list, max_length=250)
+    customer_id: Optional[str] = Field(default=None, pattern=r"^gid://shopify/Customer/\d+$", max_length=128)
 
 
 class NewOrderVariantInput(BaseModel):
@@ -3073,7 +3165,14 @@ async def edit_order_items(
             requested_additions.get(variant_id, 0) + quantity,
         )
 
-    if not requested_quantities and not requested_additions and not separate_additions:
+    shipping_price = _parse_shipping_price(body.shipping_price) if body.shipping_price is not None else None
+    original_shipping_price = None
+    if shipping_price is not None:
+        if body.original_shipping_price is None:
+            raise HTTPException(422, "Reload the delivery fee before saving it")
+        original_shipping_price = _parse_shipping_price(body.original_shipping_price)
+
+    if not requested_quantities and not requested_additions and not separate_additions and shipping_price is None:
         raise HTTPException(status_code=400, detail="No item changes were provided")
 
     from .main import shopify_graphql  # type: ignore
@@ -3086,11 +3185,22 @@ async def edit_order_items(
     # never taken from the request.
     carried_discounts: Dict[str, Decimal] = {}
     carried = [a["replaces"] for a in separate_additions if a["replaces"] and a["unit_price"] is None]
-    if carried or requested_prices:
+    shipping_node = None
+    if carried or requested_prices or shipping_price is not None:
         pricing_data = await shopify_graphql(
             ORDER_PRICING_GQL, {"id": order_id}, store=store, api_version=CONFIRMATION_API_VERSION,
         )
-        pricing_lines = _order_pricing((pricing_data or {}).get("order") or {})["line_items"]
+        pricing_node = (pricing_data or {}).get("order")
+        if not pricing_node:
+            raise HTTPException(404, "Order not found")
+        pricing = _order_pricing(pricing_node)
+        pricing_lines = pricing["line_items"]
+        if shipping_price is not None:
+            if not pricing["shipping_editable"]:
+                raise HTTPException(409, pricing["shipping_edit_error"])
+            if original_shipping_price != _decimal(pricing["shipping"]):
+                raise HTTPException(409, "The delivery fee changed in Shopify. Refresh the order and try again.")
+            shipping_node = pricing_node
         for replaced in carried:
             line = pricing_lines.get(replaced)
             if line is None:
@@ -3173,6 +3283,38 @@ async def edit_order_items(
             _mutation_payload_or_error(discount_data, "orderEditAddLineItemDiscount")
 
         changed_count = 0
+        if shipping_price is not None and shipping_price != original_shipping_price:
+            # Shopify only updates newly added shipping lines, so replace the
+            # existing line inside the same uncommitted edit session.
+            calculated_shipping = calculated_order.get("shippingLines")
+            if not isinstance(calculated_shipping, list):
+                raise HTTPException(502, "Shopify did not load shipping lines for this edit")
+            active = [line for line in calculated_shipping if line.get("stagedStatus") != "REMOVED"]
+            source_lines = [line for line in (shipping_node.get("shippingLines") or {}).get("nodes") or [] if not line.get("isRemoved")]
+            if len(active) != len(source_lines) or len(active) > 1:
+                raise HTTPException(409, "Shipping lines changed in Shopify. Refresh the order and try again.")
+            if active and (not active[0].get("id") or _decimal(_money(active[0].get("price"))["amount"]) != original_shipping_price):
+                raise HTTPException(409, "The delivery fee changed in Shopify. Refresh the order and try again.")
+            if active:
+                removed = await shopify_graphql(
+                    ORDER_EDIT_REMOVE_SHIPPING_GQL,
+                    {"id": calculated_id, "shippingLineId": active[0]["id"]},
+                    store=store, api_version=CONFIRMATION_API_VERSION,
+                )
+                payload = _mutation_payload_or_error(removed, "orderEditRemoveShippingLine")
+                if not (payload.get("calculatedOrder") or {}).get("id"):
+                    raise HTTPException(502, "Shopify did not confirm the shipping line removal")
+            added = await shopify_graphql(
+                ORDER_EDIT_ADD_SHIPPING_GQL,
+                {"id": calculated_id, "shippingLine": {
+                    "title": (source_lines[0].get("title") if source_lines else "Delivery") or "Delivery",
+                    "price": {"amount": _money_str(shipping_price), "currencyCode": pricing["currency"]},
+                }}, store=store, api_version=CONFIRMATION_API_VERSION, retry_safe=False,
+            )
+            payload = _mutation_payload_or_error(added, "orderEditAddShippingLine")
+            if not (payload.get("calculatedOrder") or {}).get("id"):
+                raise HTTPException(502, "Shopify did not confirm the new delivery fee")
+            changed_count += 1
         for requested_line_id, quantity in requested_quantities.items():
             mapped = calculated_line(requested_line_id)
             if quantity == mapped["quantity"]:
@@ -3283,6 +3425,7 @@ async def edit_order_items(
                 a["variant_id"]: _money_str(a["unit_price"]) for a in separate_additions if a["unit_price"] is not None
             },
             "notify_customer": bool(body.notify_customer),
+            "shipping_price": _money_str(shipping_price) if shipping_price is not None else None,
         },
     )
     return {
@@ -3290,6 +3433,145 @@ async def edit_order_items(
         "order": flattened,
         "success_messages": committed.get("successMessages") or [],
     }
+
+
+@router.get("/api/agent/order-details")
+async def order_details(store: str, order_id: str, _: User = Depends(get_current_user)):
+    store = (store or "").strip()
+    if not store or not re.fullmatch(r"gid://shopify/Order/\d+", order_id or ""):
+        raise HTTPException(422, "store and an order id are required")
+    data = await _confirmation_read_graphql(
+        ORDER_CREATE_LOOKUP_GQL, {"id": order_id}, store=store, scope="read_orders",
+    )
+    node = (data or {}).get("order")
+    if not node:
+        raise HTTPException(404, "Order not found")
+    flattened = _flatten_order(node)
+    await _attach_line_item_stock(store, [flattened])
+    return {"ok": True, "order": flattened}
+
+
+@router.post("/api/agent/order-details/update")
+async def update_order_details(
+    body: OrderDetailsEditBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    from .main import shopify_graphql  # type: ignore
+
+    store = body.store.strip()
+    if not store:
+        raise HTTPException(422, "Store is required")
+    fields = body.model_fields_set
+    added_tags = _order_tags_from_input(body.tags_added)
+    # Existing legacy tags can be longer than today's input limit; removing
+    # them must remain possible without relaxing validation of new tags.
+    removed_tags = _normalize_tags(body.tags_removed)
+    if any(len(tag) > 255 or "," in tag for tag in removed_tags):
+        raise HTTPException(422, "Choose valid individual tags to remove")
+    if _lower_tags(added_tags) & _lower_tags(removed_tags):
+        raise HTTPException(422, "A tag cannot be both added and removed")
+    order_input = {"id": body.order_id}
+    if "email" in fields:
+        order_input["email"] = str(body.email) if body.email else None
+    if "note" in fields:
+        if "original_note" not in fields:
+            raise HTTPException(422, "Reload the order note before saving it")
+        order_input["note"] = body.note or ""
+    if body.shipping_address is not None:
+        source = body.shipping_address
+        address = {key: str(getattr(source, attr) or "").strip() for key, attr in {
+            "firstName": "first_name", "lastName": "last_name", "company": "company", "phone": "phone",
+            "address1": "address1", "address2": "address2", "city": "city", "province": "province",
+            "zip": "zip", "country": "country",
+        }.items()}
+        if not (address["firstName"] or address["lastName"]):
+            raise HTTPException(422, "Customer name is required")
+        for key, label in [("phone", "Phone"), ("address1", "Street address"), ("city", "City"), ("country", "Country")]:
+            if not address[key]:
+                raise HTTPException(422, f"{label} is required")
+        if any(len(value) > 255 for value in address.values()):
+            raise HTTPException(422, "Address fields must be at most 255 characters")
+        if not 7 <= len(re.sub(r"\D", "", address["phone"])) <= 15:
+            raise HTTPException(422, "Enter a valid customer phone number")
+        order_input["shippingAddress"] = address
+    if len(order_input) == 1 and not added_tags and not removed_tags and not body.customer_id:
+        raise HTTPException(422, "No order detail changes were provided")
+
+    live = await _confirmation_read_graphql(
+        ORDER_CREATE_LOOKUP_GQL, {"id": body.order_id}, store=store, scope="read_orders",
+    )
+    node = (live or {}).get("order")
+    if not node:
+        raise HTTPException(404, "Order not found")
+    if "note" in fields:
+        current = node.get("note") or ""
+        if current != (body.original_note or "") and current != order_input["note"]:
+            raise HTTPException(409, "The order note changed in Shopify. Reopen the editor to load the latest note before saving.")
+        if current == order_input["note"]:
+            order_input.pop("note")
+    if body.customer_id and (node.get("customer") or {}).get("id") != body.customer_id:
+        customer = await _confirmation_read_graphql(
+            CONFIRMATION_CUSTOMER_ASSOCIATION_GQL, {"id": body.customer_id}, store=store, scope="read_customers",
+        )
+        if ((customer or {}).get("customer") or {}).get("id") != body.customer_id:
+            raise HTTPException(422, "The selected customer is unavailable in this store. Search and select the customer again.")
+    saved = []
+    try:
+        if body.customer_id and (node.get("customer") or {}).get("id") != body.customer_id:
+            result = await shopify_graphql(
+                ORDER_CUSTOMER_SET_GQL, {"orderId": body.order_id, "customerId": body.customer_id},
+                store=store, api_version=CONFIRMATION_API_VERSION,
+            )
+            payload = _mutation_payload_or_error(result, "orderCustomerSet")
+            if not (payload.get("order") or {}).get("id"):
+                raise HTTPException(502, "Shopify did not confirm the customer change. Reopen the editor to check whether it saved.")
+            saved.append("customer")
+        if len(order_input) > 1:
+            result = await shopify_graphql(
+                ORDER_SHIPPING_UPDATE_GQL, {"input": order_input}, store=store, api_version=CONFIRMATION_API_VERSION, retry_safe=False,
+            )
+            payload = _mutation_payload_or_error(result, "orderUpdate")
+            if not (payload.get("order") or {}).get("id"):
+                raise HTTPException(502, "Shopify returned no updated order. Reopen the editor to check whether it saved.")
+            saved.append("contact, address or note")
+        # Individual operations preserve every unrelated concurrently added tag.
+        for tags, query, payload_key in [
+            (removed_tags, ORDER_DETAILS_TAG_REMOVE_GQL, "tagsRemove"),
+            (added_tags, ORDER_DETAILS_TAG_ADD_GQL, "tagsAdd"),
+        ]:
+            if tags:
+                result = await shopify_graphql(query, {"id": body.order_id, "tags": tags}, store=store, api_version=CONFIRMATION_API_VERSION)
+                payload = _mutation_payload_or_error(result, payload_key)
+                if not (payload.get("node") or {}).get("id"):
+                    raise HTTPException(502, "Shopify did not confirm the tag change. Reopen the editor to check whether it saved.")
+                saved.append("tags")
+                if payload_key == "tagsAdd":
+                    note_recent_tag_add(store, body.order_id, tags)
+        latest = await _confirmation_read_graphql(
+            ORDER_CREATE_LOOKUP_GQL, {"id": body.order_id}, store=store, scope="read_orders",
+        )
+        node = (latest or {}).get("order")
+        if not node:
+            raise HTTPException(502, "Shopify returned no order after saving")
+    except Exception as exc:
+        if saved:
+            reason = str(getattr(exc, "detail", "") or "Shopify could not complete the update")
+            raise HTTPException(409, f"Some order details were saved ({', '.join(dict.fromkeys(saved))}). {reason} Reopen the editor to review the saved order before retrying.") from exc
+        if isinstance(exc, HTTPException):
+            _raise_clear_order_edit_error(exc)
+        raise
+    finally:
+        if saved:
+            invalidate_all_breakdown_caches()
+    flattened = _flatten_order(node)
+    await _attach_line_item_stock(store, [flattened])
+    await _audit_confirmation_order_change(
+        db, user=user, store=store, order_id=body.order_id, action="order_details_edit",
+        metadata={"fields": sorted(fields - {"store", "order_id", "original_note"}),
+                  "tags_added": added_tags, "tags_removed": removed_tags},
+    )
+    return {"ok": True, "order": flattened}
 
 
 @router.post("/api/agent/order-shipping/update")
@@ -3465,7 +3747,7 @@ async def cancel_order(
 class BulkTagBody(BaseModel):
     tag: str
     store: str
-    scope: Optional[str] = None     # "all" → apply to every order in the agent's queue
+    scope: Optional[str] = None     # "all" â†’ apply to every order in the agent's queue
     level: Optional[str] = None     # narrows scope=="all" by n1/n2/n3/new
     order_ids: Optional[List[str]] = None  # used when scope != "all"
 
@@ -3682,15 +3964,15 @@ async def build_pull_query(
 ) -> PullPlan:
     """Build the Shopify search query for a pull into ``user``'s queue.
 
-    ``user`` is the order's future owner — normally the puller, or the agent an
+    ``user`` is the order's future owner â€” normally the puller, or the agent an
     admin is assigning to.
 
     ``include_assigned`` only affects "new": without it the pool is orders no
-    other active agent owns. The level pools (n1…n4, nowtp, enatt) already reach
+    other active agent owns. The level pools (n1â€¦n4, nowtp, enatt) already reach
     into other agents' queues by design.
 
     ``source_tags`` narrows the pool to orders carrying one of those tags (one
-    specific agent's orders — implies ``include_assigned``). ``source_unassigned``
+    specific agent's orders â€” implies ``include_assigned``). ``source_unassigned``
     narrows it to orders carrying nobody else's tag at all.
     """
     lv = (level or _PULL_LEVEL_NEW).lower().strip()
@@ -3709,14 +3991,14 @@ async def build_pull_query(
     if lv == _PULL_LEVEL_NEW:
         # Unassigned pool: no other agent tag, no own tag. With include_assigned
         # (or a source agent) the other-agent exclusions drop away, so the pool
-        # becomes "anything not already mine" — including orders sitting in
+        # becomes "anything not already mine" â€” including orders sitting in
         # someone else's queue, which execute re-assigns by stripping their tag.
         if not (include_assigned or source_tags or source_unassigned):
             for t in other_active:
                 parts.append(f"-tag:{_escape_tag(t)}")
             forbid |= _lower_tags(other_active)
     else:
-        # Level-scoped pool. We do NOT exclude other agents' tags here — the
+        # Level-scoped pool. We do NOT exclude other agents' tags here â€” the
         # whole point is to be able to pull n1/n2/... orders that currently sit
         # in another agent's queue.
         group = _level_tag_group(lv)
@@ -3859,7 +4141,7 @@ async def _tag_owners(db: AsyncSession, exclude_user_id: Optional[str]) -> Tuple
 
 
 async def _resolve_pull_owner(db: AsyncSession, user: User, target_agent_id: Optional[str]) -> User:
-    """Whose queue the pull fills: the caller's, or — for admins — another agent's."""
+    """Whose queue the pull fills: the caller's, or â€” for admins â€” another agent's."""
     tid = (target_agent_id or "").strip()
     if not tid or tid == user.id:
         return user
@@ -3918,7 +4200,7 @@ async def pull_preview(
     db: AsyncSession = Depends(get_session),
 ):
     """Count how many orders could be pulled right now under the given filters,
-    plus who currently owns them. Cheap to call — used to populate the pull
+    plus who currently owns them. Cheap to call â€” used to populate the pull
     modal as the agent edits the filters."""
     store = (body.store or "").strip()
     if not store:
@@ -4004,8 +4286,8 @@ async def pull_execute(
     For every order pulled we:
       - Add the owner's tag (defaults to the first of their assigned tags;
         ``agent_tag`` body field can override, but must be one the owner has).
-      - Remove every OTHER agent's tag that's currently on the order — active or
-        not. That's what makes the assignment exclusive — Laila's "laila" tag,
+      - Remove every OTHER agent's tag that's currently on the order â€” active or
+        not. That's what makes the assignment exclusive â€” Laila's "laila" tag,
         ndcon's "ndcon" tag, etc. all come off so the order shows up only in the
         owner's queue, and an order never carries two agent tags at once.
     """
@@ -4079,7 +4361,7 @@ async def pull_execute(
     async def _claim_one(item: Dict[str, Any]) -> Optional[Tuple[str, List[str], List[str]]]:
         """Tag one order for the owner and take every other agent's tag off it.
 
-        Returns ``(order_gid, removed, stuck)`` — ``stuck`` being other agents'
+        Returns ``(order_gid, removed, stuck)`` â€” ``stuck`` being other agents'
         tags Shopify refused to remove, which would leave the order double-owned.
         """
         async with sem:

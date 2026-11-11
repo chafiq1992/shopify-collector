@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import StorePicker from "../components/StorePicker.jsx";
 import { authFetch, authHeaders, loadAuth } from "../lib/auth";
+import { AGENT_HOME, AgentLogoutButton, AgentPagesLink, hasStaffPagePicker } from "../components/AgentPagePicker";
 import { formatInventoryOperation, groupInventoryColors, groupInventoryItems, inventoryReview } from "../lib/inventoryHelper";
 import { persistStoreSelection, readCurrentStore } from "../lib/stores";
 
@@ -364,6 +365,7 @@ function PrivatePhoto({ photo, onDelete, canDelete }) {
 export default function InventoryHelper() {
   const auth = loadAuth();
   const isAdmin = auth?.user?.role === "admin";
+  const showPages = hasStaffPagePicker(auth?.user?.role);
   const [store, setStore] = useState(() => readCurrentStore());
   const [receipts, setReceipts] = useState([]);
   const [historyReceipts, setHistoryReceipts] = useState([]);
@@ -696,8 +698,8 @@ export default function InventoryHelper() {
   return (
     <div className="min-h-screen bg-[#f6f7f9] text-slate-950">
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 pt-[env(safe-area-inset-top)] backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-3 sm:px-6">
-          <button type="button" onClick={() => go(auth?.user?.role === "agent" ? "/confirmation" : "/")} className="rounded-xl border border-slate-200 p-2 text-slate-600 hover:bg-slate-50" aria-label="Back">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-2 px-4 py-3 sm:gap-3 sm:px-6">
+          <button type="button" onClick={() => go(showPages ? AGENT_HOME : "/")} className="rounded-xl border border-slate-200 p-2 text-slate-600 hover:bg-slate-50" aria-label="Back">
             <ArrowLeft className="h-4 w-4" />
           </button>
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600 text-white"><PackageOpen className="h-5 w-5" /></div>
@@ -708,6 +710,7 @@ export default function InventoryHelper() {
           <div className="ml-auto flex items-center gap-2">
             <StorePicker value={store} onChange={setStore} allowCustom />
             <button type="button" onClick={refreshCurrent} className="rounded-xl border border-slate-200 p-2.5 text-slate-600 hover:bg-slate-50" aria-label="Refresh"><RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} /></button>
+            {showPages && <><AgentPagesLink /><AgentLogoutButton /></>}
           </div>
         </div>
       </header>

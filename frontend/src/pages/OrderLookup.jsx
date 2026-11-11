@@ -1,9 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
 import { authFetch, authHeaders, clearAuth } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
+import { AgentPagesLink } from "../components/AgentPagePicker";
 import { persistStoreSelection, readCurrentStore, titleStore } from "../lib/stores";
 import { applyFulfillmentQuantities, expandOrderUnits, isRemovedOrderVariant } from "../lib/orderUnits";
+import { subscribeToPurchaseOrderChanges } from "../lib/variantStock.js";
+import VariantStockRow from "../components/VariantStockRow.jsx";
 import { unsentAgeLabel, unsentReasonLabel } from "../lib/unsentDelivery";
+import { applyPurchaseOrderBadges, badgeVariantInputs, createPurchaseOrderWatcher } from "../lib/purchaseOrderBadges";
 
 const loadDeliveryLabelPopup = () => import("../components/DeliveryLabelPopup");
 const DeliveryLabelPopup = lazy(loadDeliveryLabelPopup);
@@ -25,17 +29,6 @@ function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
-function PendingPurchaseOrderBadge({ variant }) {
-  const purchaseOrders = asArray(variant?.pending_purchase_orders);
-  if (!purchaseOrders.length) return null;
-  return (
-    <span className="absolute left-2 top-2 inline-flex max-w-[calc(100%-1rem)] items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50/95 px-2 py-1 text-xs font-semibold text-amber-900 shadow-sm" title={`Pending purchase order: ${purchaseOrders.map((po) => po.number || po.id).join(", ")}`}>
-      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-4 w-4 shrink-0"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9m-4-16.2 8 4.5"/></svg>
-      <span className="truncate">Pending PO</span>
-    </span>
-  );
-}
-
 function normalizeOrderShape(value) {
   if (!value || typeof value !== "object") return null;
   return {
@@ -51,12 +44,25 @@ const API = {
       limit: "1",
       search: String(number || "").trim(),
       store: (store || "").trim(),
+      include_wrong_item_status: "true",
+      include_purchase_orders: "false",
     }).toString();
     const res = await authFetch(`/api/orders?${params}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(`Failed to fetch order (${res.status})`);
     const js = await res.json();
     const list = asArray(js?.orders);
     return list.length ? normalizeOrderShape(list[0]) : null;
+  },
+  async reportWrongItem(order, store) {
+    const params = new URLSearchParams({ store });
+    const response = await authFetch(`/api/orders/${encodeURIComponent(order.id)}/wrong-item?${params}`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ order_number: order.number, source: "order_lookup" }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.detail || "Could not report the wrong item.");
+    return result;
   },
   async addTag(orderId, tag, store){
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
@@ -92,7 +98,10 @@ const API = {
       headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ order_number: String(orderNumber || "").replace(/^#/, "") || null }),
     });
-    if (!res.ok) throw new Error("Failed to fulfill order");
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.detail || "Failed to fulfill order");
+    }
     return res.json();
   },
   async fulfillWithSelection(orderId, store, lineItemsByFulfillmentOrder, orderNumber){
@@ -102,13 +111,27 @@ const API = {
       headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ lineItemsByFulfillmentOrder, order_number: String(orderNumber || "").replace(/^#/, "") || null }),
     });
-    if (!res.ok) throw new Error("Failed to fulfill order");
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.detail || "Failed to fulfill order");
+    }
     return res.json();
   },
   async getFulfillmentOrders(orderId, store){
     const qs = store ? `?store=${encodeURIComponent(store)}` : "";
     const res = await authFetch(`/api/orders/${encodeURIComponent(orderId)}/fulfillment-orders${qs}`, { headers: authHeaders() });
     if (!res.ok) throw new Error("Failed to fetch fulfillment orders");
+    return res.json();
+  },
+  async fetchPurchaseOrderBadges(variants, store, signal){
+    const params = new URLSearchParams({ store: (store || "").trim() });
+    const res = await authFetch(`/api/order-purchase-orders?${params}`, {
+      method: "POST",
+      signal,
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ variants: badgeVariantInputs(asArray(variants)) }),
+    });
+    if (!res.ok) throw new Error("Failed to fetch purchase-order status");
     return res.json();
   },
   async fetchRecentTags(store){
@@ -119,11 +142,9 @@ const API = {
     if (cached?.promise) return cached.promise;
     const request = (async () => {
     const params = new URLSearchParams({
-      limit: "50",
-      status_filter: "all",
       store: (store || "").trim(),
     }).toString();
-    const res = await authFetch(`/api/orders?${params}`, { headers: authHeaders() });
+    const res = await authFetch(`/api/order-tags?${params}`, { headers: authHeaders() });
     if (!res.ok) throw new Error("Failed to fetch tags");
     const js = await res.json();
       const tags = asArray(js?.tags);
@@ -323,7 +344,7 @@ function buildFulfilledQueueOrder(baseOrder, foData) {
   };
 }
 
-export default function OrderLookup(){
+export default function OrderLookup({ showPages = false, active = true }){
   const [store, setStore] = useState(() => {
     return readCurrentStore();
   });
@@ -338,40 +359,32 @@ export default function OrderLookup(){
     } catch { return ""; }
   });
   const [order, setOrder] = useState(null);
-  // Refresh PO markers independently so background inventory updates do not reset
+  const [wrongItemRequests, setWrongItemRequests] = useState(() => new Set());
+  const [wrongItemError, setWrongItemError] = useState(null);
+  const wrongItemSubmitting = useRef(new Set());
+  const [purchaseOrderState, setPurchaseOrderState] = useState("loading");
+  // Refresh variant stock independently so inventory updates do not reset
   // the current guide, tags, address edits, or fulfillment selection.
   useEffect(() => {
-    if (!order?.id || !order?.number) return;
-    let cancelled = false;
-    let refreshing = false;
+    if (!order?.id) return;
     const orderId = order.id;
-    const refreshPurchaseOrders = async () => {
-      if (cancelled || refreshing || document.visibilityState === "hidden") return;
-      refreshing = true;
-      try {
-        const fresh = await API.searchOneByNumber(order.number, store);
-        if (cancelled || fresh?.id !== orderId) return;
-        const pendingByVariant = new Map(fresh.variants.map((variant) => [variant.id, asArray(variant.pending_purchase_orders)]));
-        setOrder((current) => current?.id !== orderId ? current : {
-          ...current,
-          variants: current.variants.map((variant) => ({ ...variant, pending_purchase_orders: pendingByVariant.get(variant.id) || [] })),
-        });
-      } catch {
-        // Retain the last known badges during a transient connection failure.
-      } finally {
-        refreshing = false;
-      }
-    };
-    const timer = window.setInterval(refreshPurchaseOrders, 60000);
+    const watcher = createPurchaseOrderWatcher({
+      fetchBadges: (signal) => API.fetchPurchaseOrderBadges(order.variants, store, signal),
+      onResult: (badges, stock) => setOrder((current) => current?.id !== orderId ? current : applyPurchaseOrderBadges(current, badges, stock)),
+      onState: setPurchaseOrderState,
+      isVisible: () => document.visibilityState !== "hidden",
+    });
+    const refreshPurchaseOrders = watcher.refresh;
+    const unsubscribePurchaseOrders = subscribeToPurchaseOrderChanges(store, refreshPurchaseOrders);
     window.addEventListener("focus", refreshPurchaseOrders);
     document.addEventListener("visibilitychange", refreshPurchaseOrders);
     return () => {
-      cancelled = true;
-      window.clearInterval(timer);
+      watcher.stop();
+      unsubscribePurchaseOrders();
       window.removeEventListener("focus", refreshPurchaseOrders);
       document.removeEventListener("visibilitychange", refreshPurchaseOrders);
     };
-  }, [order?.id, order?.number, store]);
+  }, [order?.id, store]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [newTag, setNewTag] = useState("");
@@ -397,6 +410,7 @@ export default function OrderLookup(){
   const [printQueueFlight, setPrintQueueFlight] = useState(null);
   const [queuePulse, setQueuePulse] = useState(false);
   const [labelQueueItems, setLabelQueueItems] = useState([]);
+  const [mobileQueueOpen, setMobileQueueOpen] = useState(false);
   const labelQueuePollItemsRef = useRef([]);
   const printQueuePollItemsRef = useRef([]);
 
@@ -406,6 +420,9 @@ export default function OrderLookup(){
   const guideAnimatingRef = useRef(false);
   const guideUnlockTimerRef = useRef(null);
   const searchTokenRef = useRef(0);
+  useEffect(() => {
+    if (query.trim() && searchTokenRef.current === 0) void doSearch(query);
+  }, []);
   const printQueueRef = useRef(null);
   const queuePulseTimerRef = useRef(null);
   const queueFlightTimerRef = useRef(null);
@@ -577,6 +594,7 @@ export default function OrderLookup(){
 
   const resetLookupForNextOrder = useCallback((nextMessage = null) => {
     searchTokenRef.current += 1;
+    setWrongItemError(null);
     setShowDeliveryPopup(false);
     setQuery("");
     setOrder(null);
@@ -594,7 +612,7 @@ export default function OrderLookup(){
     setBadgeSubStep(0);
     setCompanyConfirm(null);
     setFulfillConfirm(false);
-    try {
+    if (location.pathname === "/order-lookup") try {
       const params = new URLSearchParams(location.search);
       params.delete("q");
       history.replaceState(null, "", `${location.pathname}?${params.toString()}`);
@@ -606,6 +624,14 @@ export default function OrderLookup(){
       try { setTimeout(() => setMessage(null), 2200); } catch {}
     }
   }, []);
+
+  const handleStoreChange = useCallback((nextStore) => {
+    if (nextStore === store) return;
+    // Invalidate searches immediately, before a response for the old store can
+    // enter the newly selected screen or start a badge request there.
+    resetLookupForNextOrder();
+    setStore(nextStore);
+  }, [store, resetLookupForNextOrder]);
 
   const handlePrintedQueued = useCallback((payload = {}) => {
     const orderNumber = String(payload.orderNumber || order?.number || "").replace(/^#/, "").trim();
@@ -761,6 +787,7 @@ export default function OrderLookup(){
     return queueId;
   }, [store]);
   async function doSearch(number){
+    setWrongItemError(null);
     const token = searchTokenRef.current + 1;
     searchTokenRef.current = token;
     const n = String(number || query || "").trim().replace(/^#/, "");
@@ -826,7 +853,7 @@ export default function OrderLookup(){
           })(),
         ]);
       }
-      try {
+      if (location.pathname === "/order-lookup") try {
         const params = new URLSearchParams(location.search);
         params.set("q", n);
         history.replaceState(null, "", `${location.pathname}?${params.toString()}`);
@@ -852,7 +879,8 @@ export default function OrderLookup(){
     if (itemStore && itemStore !== store) {
       // doSearch reads the store from this render; search once it has switched.
       pendingUnsentOpenRef.current = number;
-      setStore(itemStore);
+      handleStoreChange(itemStore);
+      setQuery(number);
       return;
     }
     doSearch(number).then((found) => { if (found) setShowDeliveryPopup(true); });
@@ -1091,7 +1119,7 @@ export default function OrderLookup(){
 
   function isGuideTypingTarget(target) {
     const tag = target?.tagName?.toLowerCase();
-    return tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable;
+    return tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable || Boolean(target?.closest?.("a, button"));
   }
 
   useEffect(() => {
@@ -1114,16 +1142,16 @@ export default function OrderLookup(){
   }, [guideActive, order, guideSteps]);
 
   useEffect(() => {
-    if (!guideActive) return;
+    if (!active || !guideActive) return;
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => {
       document.body.style.overflow = prevOverflow;
     };
-  }, [guideActive]);
+  }, [active, guideActive]);
 
   useEffect(() => {
-    if (!guideActive || !guideSteps.length) return;
+    if (!active || !guideActive || !guideSteps.length) return;
 
     let wheelDelta = 0;
     let touchStartY = null;
@@ -1189,7 +1217,7 @@ export default function OrderLookup(){
       window.removeEventListener('touchmove', onTouchMove);
       window.removeEventListener('touchend', onTouchEnd);
     };
-  }, [guideActive, guideSteps, guideStepIndex]);
+  }, [active, guideActive, guideSteps, guideStepIndex]);
 
   useEffect(() => {
     if (!guideActive) { setBadgeSubStep(0); return; }
@@ -1301,6 +1329,55 @@ export default function OrderLookup(){
     if (item?.statusKey === "waiting_partner" || item?.phase === "company_select") return 1;
     return 0;
   };
+
+  const wrongItemKey = order?.id ? JSON.stringify([store, order.id]) : null;
+  const wrongItemBusy = wrongItemRequests.has(wrongItemKey);
+  const wrongItemPending = Boolean(order?.wrong_item_id);
+  const canReportWrongItem = order && !isOrderCancelled
+    && String(order.fulfillment_status || "").toUpperCase() !== "FULFILLED";
+
+  async function reportWrongItem() {
+    if (!canReportWrongItem || wrongItemPending || fulfillBusy || !wrongItemKey || wrongItemSubmitting.current.has(wrongItemKey)) return;
+    const target = order;
+    const searchToken = searchTokenRef.current;
+    wrongItemSubmitting.current.add(wrongItemKey);
+    setWrongItemRequests(new Set(wrongItemSubmitting.current));
+    setWrongItemError(null);
+    try {
+      const result = await API.reportWrongItem(target, store);
+      if (searchTokenRef.current !== searchToken) return;
+      setOrder(current => current?.id === target.id ? {
+        ...current,
+        wrong_item_id: result.wrong_item_id,
+        wrong_item_unassigned: result.collector_attributed === false,
+      } : current);
+    } catch (err) {
+      if (searchTokenRef.current === searchToken) setWrongItemError(err.message);
+    } finally {
+      wrongItemSubmitting.current.delete(wrongItemKey);
+      setWrongItemRequests(new Set(wrongItemSubmitting.current));
+    }
+  }
+
+  function renderWrongItemAction() {
+    if (wrongItemPending) {
+      return (
+        <span role="status" className="rounded-xl border border-amber-300 bg-amber-100 px-3 py-2 text-xs font-semibold text-amber-950">
+          {order.wrong_item_unassigned ? "Wrong item reported · Unassigned" : "Wrong item reported"}
+        </span>
+      );
+    }
+    if (!canReportWrongItem) return null;
+    return (
+      <div className="flex flex-col items-start gap-1">
+        <button type="button" onClick={reportWrongItem} disabled={wrongItemBusy || fulfillBusy}
+          className="min-h-10 rounded-xl border border-amber-300 bg-amber-100 px-3 py-2 text-sm font-semibold text-amber-950 hover:bg-amber-200 disabled:opacity-60">
+          {wrongItemBusy ? "Reporting…" : "Wrong item"}
+        </button>
+        {wrongItemError && <span role="alert" className="rounded bg-red-50 px-2 py-1 text-xs text-red-800">{wrongItemError}</span>}
+      </div>
+    );
+  }
 
   function renderGuideFrame({ title, subtitle, children }) {
     return (
@@ -1490,7 +1567,7 @@ export default function OrderLookup(){
             ) : (
               <div className="w-full h-72 bg-gray-100 border-b border-gray-200" />
             )}
-            <PendingPurchaseOrderBadge variant={item} />
+            <VariantStockRow variant={item} className="absolute left-2 top-2 max-w-[calc(100%-1rem)]" />
             </div>
             <div className="px-4 pt-4 flex flex-wrap items-center gap-2">
               <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow' : ''}`}>
@@ -1763,10 +1840,10 @@ export default function OrderLookup(){
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <button
                 onClick={() => {
-                  if (fulfillBusy || isOrderFulfilled || isOrderCancelled) return;
+                  if (fulfillBusy || isOrderFulfilled || isOrderCancelled || wrongItemBusy) return;
                   setFulfillConfirm(true);
                 }}
-                disabled={fulfillBusy || isOrderFulfilled || isOrderCancelled}
+                disabled={fulfillBusy || isOrderFulfilled || isOrderCancelled || wrongItemBusy}
                 className={`rounded-2xl border p-4 text-left transition active:scale-[.98] ${
                   isOrderCancelled
                     ? 'border-red-300 bg-red-50 text-red-700 cursor-not-allowed'
@@ -1807,19 +1884,19 @@ export default function OrderLookup(){
   }
 
   return (
-    <div className={`min-h-screen w-full bg-gray-50 text-gray-900 transition-all ${labelQueueItems.length > 0 ? 'pr-[340px]' : ''}`}>
+    <div className={`min-h-screen w-full bg-gray-50 text-gray-900 transition-all ${labelQueueItems.length > 0 ? 'lg:pr-[340px]' : ''}`}>
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur border-b border-gray-200">
-        <div className="max-w-3xl mx-auto px-4 py-2 flex items-center gap-2">
+        <div className="max-w-3xl mx-auto px-4 py-2 flex flex-wrap items-center gap-2">
           <button
             onClick={()=>{ try { history.back(); } catch {} }}
             className="px-3 py-1.5 rounded-lg text-sm border border-gray-300 hover:bg-gray-100"
           >Back</button>
-          <button
+          {!showPages && <button
             onClick={()=>{ try { location.href = `/my-analytics?store=${encodeURIComponent(store)}`; } catch {} }}
             className="px-3 py-1.5 rounded-lg text-sm border border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
-          >My Analytics</button>
-          <StorePicker value={store} onChange={setStore} className="ml-2" />
-          <div className="flex-1 flex items-center gap-2 bg-gray-100 rounded-xl px-3 py-1 ml-2">
+          >My Analytics</button>}
+          <StorePicker value={store} onChange={handleStoreChange} className="ml-2" />
+          <div className="flex min-w-0 basis-full items-center gap-2 bg-gray-100 rounded-xl px-3 py-1 sm:ml-2 sm:flex-1">
             <span className="text-gray-500 text-xs">#</span>
             <input
               ref={inputRef}
@@ -1929,6 +2006,12 @@ export default function OrderLookup(){
                 {printQueue.length}
               </span>
             </div>
+            {labelQueueItems.length > 0 && (
+              <button type="button" onClick={() => setMobileQueueOpen(true)} className="rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs font-semibold text-indigo-700 lg:hidden">
+                Fulfilled Queue ({labelQueueItems.length})
+              </button>
+            )}
+            {showPages && <AgentPagesLink />}
             <button
               onClick={handleLogout}
               className="px-3 py-1.5 rounded-lg text-sm border border-gray-300 hover:bg-gray-100"
@@ -1960,6 +2043,11 @@ export default function OrderLookup(){
           }`}>
 
             {/* Guide controls bar */}
+            {purchaseOrderState !== "ready" && (
+              <div role="status" className={`px-4 pt-3 text-xs ${purchaseOrderState === "unavailable" ? "text-amber-700" : "text-gray-500"}`}>
+                {purchaseOrderState === "unavailable" ? "Variant stock unavailable. Retrying…" : "Checking variant stock…"}
+              </div>
+            )}
             <div className="px-4 pt-3 flex items-center justify-between">
               <button
                 onClick={toggleGuide}
@@ -2168,7 +2256,7 @@ export default function OrderLookup(){
                             ) : (
                               <div className="w-full h-60 rounded-md bg-gray-100 border-b border-gray-200" />
                             )}
-                            <PendingPurchaseOrderBadge variant={v} />
+                            <VariantStockRow variant={v} className="absolute left-2 top-2 max-w-[calc(100%-1rem)]" />
                             </div>
                             <div className="px-3 pt-2 flex flex-wrap items-center gap-2">
                               <span className={`inline-flex items-center px-3 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-200 text-sm font-bold transition-all duration-300 ${isItemActive && badgeSubStep >= 1 ? 'guide-badge-glow' : ''}`}>
@@ -2470,6 +2558,7 @@ export default function OrderLookup(){
                 <div className="hidden sm:block rounded-2xl border border-white/10 bg-white/10 px-3 py-2 text-xs text-blue-50/90">
                   Scroll, swipe, or use arrow keys
                 </div>
+                {renderWrongItemAction()}
                 <button
                   onClick={toggleGuide}
                   className="rounded-2xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/20"
@@ -2583,6 +2672,11 @@ export default function OrderLookup(){
             </div>
             <div className="text-sm text-gray-600 text-center mb-5">
               Are you sure you want to mark these items as fulfilled?
+              {wrongItemPending && (
+                <p className="mt-2 rounded-lg bg-amber-50 p-2 text-amber-950">
+                  Confirm after correcting the item. The report will be marked corrected when fulfillment succeeds.
+                </p>
+              )}
               {foData.selectedLineItemIds.size > 0 && (
                 <div className="mt-2 font-semibold text-gray-800">
                   {foData.selectedLineItemIds.size} item(s) selected
@@ -2597,7 +2691,7 @@ export default function OrderLookup(){
               <button
                 onClick={() => {
                   setFulfillConfirm(false);
-                  if (!order || isOrderFulfilled) return;
+                  if (!order || isOrderFulfilled || wrongItemBusy) return;
                   if (fulfillBusy) {
                     setError(`Order #${order.number || "—"} is already being fulfilled — see the side queue.`);
                     return;
@@ -2656,10 +2750,11 @@ export default function OrderLookup(){
               <div className="flex gap-2">
                 <button
                   onClick={()=>{
-                    if (fulfillBusy || isOrderFulfilled || isOrderCancelled) return;
+                    if (fulfillBusy || isOrderFulfilled || isOrderCancelled || wrongItemBusy) return;
                     setFulfillConfirm(true);
                   }}
-                  className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-sm active:scale-[.98] shadow-sm ${
+                  disabled={fulfillBusy || isOrderFulfilled || isOrderCancelled || wrongItemBusy}
+                  className={`flex-1 disabled:opacity-60 flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-sm active:scale-[.98] shadow-sm ${
                     isOrderCancelled
                       ? 'bg-red-500 text-white cursor-not-allowed'
                       : isOrderFulfilled
@@ -2669,6 +2764,7 @@ export default function OrderLookup(){
                 >
                   <span className="font-semibold">{isOrderCancelled ? 'Cancelled' : isOrderFulfilled ? 'Fulfilled' : (fulfillBusy ? 'Fulfilling…' : 'Fulfill')}</span>
                 </button>
+                {!guideActive && renderWrongItemAction()}
                 <button
                   onClick={() => setShowDeliveryPopup(true)}
                   className="px-4 py-2 rounded-xl text-sm font-semibold bg-indigo-600 text-white hover:bg-indigo-700 active:scale-[.98] shadow-sm flex items-center gap-1.5"
@@ -2685,7 +2781,7 @@ export default function OrderLookup(){
 
       {/* Fulfilled Queue Side Panel */}
       {labelQueueItems.length > 0 && (
-        <div className="fixed right-0 top-0 z-50 h-full w-[340px] border-l border-gray-200 bg-white/95 backdrop-blur-sm shadow-xl flex flex-col">
+        <div className={`fixed right-0 top-0 z-50 h-full w-full max-w-[340px] flex-col border-l border-gray-200 bg-white/95 shadow-xl backdrop-blur-sm lg:flex ${mobileQueueOpen ? "flex" : "hidden"}`}>
           {/* Panel Header */}
           <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3 flex-shrink-0 bg-gradient-to-r from-indigo-50 to-white">
             <div>
@@ -2714,6 +2810,9 @@ export default function OrderLookup(){
                 })()}
               </div>
             </div>
+            <button type="button" onClick={() => setMobileQueueOpen(false)} className="rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs font-semibold lg:hidden">
+              Close queue
+            </button>
           </div>
 
           {/* Queue Items */}

@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Archive,
   ArrowRightLeft,
   Ban,
   BarChart3,
@@ -46,6 +45,7 @@ import {
 } from "../components/ConfirmationUi";
 import { copyToClipboard, moroccoInternational } from "../lib/confirmationActions";
 import ChatCreateOrderModal from "../components/ChatCreateOrderModal";
+import ChatReasonsDashboard from "../components/ChatReasonsDashboard";
 
 // Chat confirmation: customers who asked for a chat on the storefront leave a phone
 // number instead of opening WhatsApp, and agents call them back from here. Works
@@ -154,9 +154,6 @@ const CHAT_API = {
     return jsonOrThrow(await authFetch(`/api/chat-labels/${encodeURIComponent(id)}`, {
       method: "PATCH", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(patch),
     }), "Could not update the label");
-  },
-  async reasons(store, days) {
-    return jsonOrThrow(await authFetch(`/api/chat-requests/reasons?${new URLSearchParams({ store, days: String(days) })}`, { headers: authHeaders() }), "Failed to load reasons");
   },
   async teamStats(store) {
     const qs = new URLSearchParams({ store });
@@ -276,6 +273,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   // Label pill filter (a label id), combined with the level pills.
   const [labelFilter, setLabelFilter] = useState(null);
   const [canManageLabels, setCanManageLabels] = useState(false);
+  const [reportRevision, setReportRevision] = useState(0);
   const [subView, setSubView] = useState(() => { try { return localStorage.getItem(SUBVIEW_STORAGE_KEY) === "reasons" ? "reasons" : "queue"; } catch { return "queue"; } });
   // Get-more / move dialog: `{ mode, includeAssigned }`, null = closed.
   const [pullMode, setPullMode] = useState(null);
@@ -384,7 +382,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
     };
   }, [load, loadTeam]);
 
-  const refreshAll = useCallback(() => { load(); loadTeam(); onWaitingChanged?.(); }, [load, loadTeam, onWaitingChanged]);
+  const refreshAll = useCallback(() => { load(); loadTeam(); setReportRevision((n) => n + 1); onWaitingChanged?.(); }, [load, loadTeam, onWaitingChanged]);
 
 
   useEffect(() => {
@@ -991,7 +989,7 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
           </div>
           {debouncedQuery && (
             <div className="mt-2 px-1 text-[11px] text-slate-500">
-              Searching every chat request in this store ({SCOPES.find((s) => s.key === scope)?.label.toLowerCase()}, {activeLevel.label.toLowerCase()}).
+              {subView === "reasons" ? "Search also filters the analytics and matching requests." : `Searching chat requests in this store (${SCOPES.find((s) => s.key === scope)?.label.toLowerCase()}, ${activeLevel.label.toLowerCase()}).`}
             </div>
           )}
         </section>
@@ -1010,17 +1008,28 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
         </div>
 
         {subView === "reasons" ? (
-          <ReasonsView
+          <ChatReasonsDashboard
+            key={store}
             store={store}
+            query={debouncedQuery}
+            revision={reportRevision}
             labels={labels}
             canManage={canManageLabels}
-            onLabelsChanged={loadLabels}
-            pushToast={pushToast}
-            onOpenRequest={(r) => {
+            onClearSearch={() => setQuery("")}
+            onLabelUpdate={async (label, patch) => {
+              try {
+                await CHAT_API.updateLabel(label.id, patch);
+                await loadLabels();
+              } catch (error) {
+                pushToast(error.message || "Could not update the label", "error", 5000);
+              }
+            }}
+            onOpenRequest={(request) => {
               setSubView("queue");
               setScope("all");
-              setLevel(r.status === "ordered" ? "ordered" : CLOSED.has(r.status) ? "closed" : "");
-              setQuery(`#${r.id}`);
+              setLevel("any");
+              setLabelFilter(null);
+              setQuery(`#${request.id}`);
             }}
           />
         ) : (<>
@@ -1957,187 +1966,6 @@ function RequestPopup({ request: r, labels, me, isAdmin, busy, onClose, onCreate
           </button>
         </div>
       </div>
-    </div>
-  );
-}
-
-const REASON_PERIODS = [7, 30, 90];
-const REASON_STATUS = [
-  { key: "any", label: "All" },
-  { key: "lost", label: "Lost" },
-  { key: "ordered", label: "Ordered" },
-  { key: "", label: "Still open" },
-];
-
-function percent(part, whole) {
-  return whole ? `${Math.round((100 * part) / whole)}%` : "—";
-}
-
-function ReasonsView({ store, labels, canManage, onLabelsChanged, pushToast, onOpenRequest }) {
-  const [days, setDays] = useState(30);
-  const [report, setReport] = useState(null);
-  const [error, setError] = useState(null);
-  const [selected, setSelected] = useState(null);
-  const [status, setStatus] = useState("any");
-  const [rows, setRows] = useState({ requests: [], total: 0 });
-  const [rowsLoading, setRowsLoading] = useState(false);
-  const [managing, setManaging] = useState(false);
-
-  const load = useCallback(async () => {
-    setError(null);
-    try { setReport(await CHAT_API.reasons(store, days)); } catch (e) { setError(e?.message || "Failed to load reasons"); }
-  }, [store, days]);
-  useEffect(() => { load(); }, [load, labels]);
-  useEffect(() => { setSelected(null); }, [store]);
-
-  useEffect(() => {
-    if (!selected) { setRows({ requests: [], total: 0 }); return; }
-    let alive = true;
-    setRowsLoading(true);
-    CHAT_API.list(store, { scope: "all", level: status, label: selected.id, offset: 0 })
-      .then((js) => { if (alive) setRows({ requests: js.requests || [], total: js.total || 0 }); })
-      .catch((e) => pushToast(e?.message || "Failed to load requests", "error", 5000))
-      .finally(() => { if (alive) setRowsLoading(false); });
-    return () => { alive = false; };
-  }, [store, selected, status, pushToast]);
-
-  async function updateLabel(label, patch) {
-    try {
-      await CHAT_API.updateLabel(label.id, patch);
-      onLabelsChanged();
-    } catch (e) {
-      pushToast(e?.message || "Could not update the label", "error", 5000);
-    }
-  }
-
-  const o = report?.outcomes || {};
-  const lost = Number(o.not_interested || 0) + Number(o.wrong_number || 0);
-  const maxTotal = Math.max(1, ...(report?.labels || []).map((l) => l.total));
-  return (
-    <div className="space-y-4">
-      <section className={`${CARD} p-4 sm:p-5`}>
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="min-w-0">
-            <h2 className="text-base font-semibold text-slate-900">Why customers don’t order</h2>
-            <p className="text-xs text-slate-500">Requests created in the last {days} days, by the reasons agents labelled after the call.</p>
-          </div>
-          <div className="ml-auto flex items-center gap-1 rounded-xl bg-slate-100 p-1">
-            {REASON_PERIODS.map((d) => (
-              <button key={d} type="button" onClick={() => setDays(d)} aria-pressed={days === d}
-                className={`h-7 rounded-lg px-2.5 text-xs font-semibold transition ${days === d ? "bg-white text-slate-900 shadow-sm ring-1 ring-slate-900/5" : "text-slate-600 hover:text-slate-900"}`}>{d} days</button>
-            ))}
-          </div>
-        </div>
-        {error && <div className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-800 ring-1 ring-inset ring-rose-200">{error}</div>}
-        <div className="mt-4 grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
-          <KpiCard icon={Inbox} tone="indigo" label="Requests" value={Number(report?.total || 0)} loading={!report} />
-          <KpiCard icon={ShoppingBag} tone="emerald" label="Ordered" value={Number(o.ordered || 0)} hint={`${percent(o.ordered || 0, report?.total)} of requests`} loading={!report} />
-          <KpiCard icon={Ban} tone="rose" label="Lost" value={lost} hint={`${o.not_interested || 0} not interested · ${o.wrong_number || 0} wrong number`} loading={!report} />
-          <KpiCard icon={Tag} tone="amber" label="Lost without a reason" value={Number(report?.lost_without_label || 0)} hint="label them to see why" loading={!report} />
-        </div>
-      </section>
-
-      <section className={`${CARD} p-4 sm:p-5`}>
-        <div className="flex flex-wrap items-center gap-2">
-          <h3 className="text-sm font-semibold text-slate-900">Reasons</h3>
-          <span className="text-xs text-slate-500">most lost customers first · tap a reason to see its requests</span>
-          {canManage && (
-            <button type="button" onClick={() => setManaging((m) => !m)} className={`${BTN.secondary} ml-auto h-8 text-xs`}>
-              <Tag className="h-3.5 w-3.5" aria-hidden /> {managing ? "Done" : "Manage labels"}
-            </button>
-          )}
-        </div>
-        <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-slate-500">
-          <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-rose-500" />Lost</span>
-          <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-amber-400" />Still open</span>
-          <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-emerald-500" />Ordered</span>
-        </div>
-        <ul className="mt-3 space-y-1.5">
-          {(report?.labels || []).map((l) => {
-            const tone = TONES[l.color] || TONES.slate;
-            const active = selected?.id === l.id;
-            return (
-              <li key={l.id}>
-                <button
-                  type="button"
-                  onClick={() => setSelected(active ? null : l)}
-                  aria-pressed={active}
-                  className={`grid w-full grid-cols-[minmax(0,9rem)_1fr_auto] sm:grid-cols-[minmax(0,12rem)_1fr_10rem] items-center gap-3 rounded-xl px-2.5 py-2 text-left transition ${active ? "bg-indigo-50 ring-1 ring-inset ring-indigo-200" : "hover:bg-slate-50"}`}
-                >
-                  <span className={`inline-flex min-w-0 items-center gap-1.5 justify-self-start rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${tone.soft}`}>
-                    <span className={`h-2 w-2 shrink-0 rounded-full ${tone.dot}`} /><span className="truncate">{l.name}</span>
-                    {l.archived && <Archive className="h-3 w-3 shrink-0" aria-label="archived" />}
-                  </span>
-                  <span className="flex h-6 overflow-hidden rounded-lg bg-slate-100" style={{ width: `${Math.max(4, (100 * l.total) / maxTotal)}%` }} title={`${l.lost} lost · ${l.open} open · ${l.ordered} ordered`}>
-                    {l.lost > 0 && <span className="h-full bg-rose-500 transition-all" style={{ width: `${(100 * l.lost) / l.total}%` }} />}
-                    {l.open > 0 && <span className="h-full bg-amber-400 transition-all" style={{ width: `${(100 * l.open) / l.total}%` }} />}
-                    {l.ordered > 0 && <span className="h-full bg-emerald-500 transition-all" style={{ width: `${(100 * l.ordered) / l.total}%` }} />}
-                  </span>
-                  <span className="text-right text-xs tabular-nums text-slate-600">
-                    <span className="font-semibold text-slate-900">{l.total}</span> · <span className="text-rose-700">{l.lost} lost</span>
-                    <span className="hidden sm:inline"> · {percent(l.ordered, l.total)} ordered</span>
-                  </span>
-                </button>
-                {managing && (
-                  <div className="mt-1 flex flex-wrap items-center gap-2 px-2.5 pb-1">
-                    <input defaultValue={l.name} maxLength={60} aria-label={`Rename ${l.name}`}
-                      onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== l.name) updateLabel(l, { name: v }); }}
-                      className="h-7 w-40 rounded-lg border-0 px-2 text-xs ring-1 ring-inset ring-slate-200 focus:ring-2 focus:ring-indigo-500" />
-                    <div className="flex gap-1">
-                      {Object.keys(TONES).map((c) => (
-                        <button key={c} type="button" onClick={() => updateLabel(l, { color: c })} aria-label={`Color ${c}`} aria-pressed={l.color === c}
-                          className={`h-5 w-5 rounded-full ${TONES[c].dot} ${l.color === c ? "ring-2 ring-offset-1 ring-slate-900" : ""}`} />
-                      ))}
-                    </div>
-                    <button type="button" onClick={() => updateLabel(l, { archived: !l.archived })} className={`${BTN.ghost} h-7 text-xs`}>
-                      <Archive className="h-3.5 w-3.5" aria-hidden /> {l.archived ? "Restore" : "Archive"}
-                    </button>
-                  </div>
-                )}
-              </li>
-            );
-          })}
-          {report && !(report.labels || []).length && <li className="px-2.5 py-4 text-sm text-slate-500">No labels yet.</li>}
-        </ul>
-        {report && report.total > 0 && (
-          <p className="mt-3 text-xs text-slate-500">{report.labelled} of {report.total} requests have at least one reason.</p>
-        )}
-      </section>
-
-      {selected && (
-        <section className={`${CARD} overflow-hidden`}>
-          <div className="flex flex-wrap items-center gap-2 px-4 pt-4 sm:px-5">
-            <h3 className="text-sm font-semibold text-slate-900">Requests labelled “{selected.name}”</h3>
-            <span className="text-xs text-slate-500">{rows.total}</span>
-            <div className="ml-auto flex items-center gap-1 rounded-xl bg-slate-100 p-1">
-              {REASON_STATUS.map((s) => (
-                <button key={s.key || "open"} type="button" onClick={() => setStatus(s.key)} aria-pressed={status === s.key}
-                  className={`h-7 rounded-lg px-2.5 text-xs font-semibold transition ${status === s.key ? "bg-white text-slate-900 shadow-sm ring-1 ring-slate-900/5" : "text-slate-600 hover:text-slate-900"}`}>{s.label}</button>
-              ))}
-            </div>
-          </div>
-          <div className="mt-3 divide-y divide-slate-100 border-t border-slate-100">
-            {rowsLoading && <div className="px-5 py-6 text-center"><Spinner className="h-5 w-5 text-indigo-500" /></div>}
-            {!rowsLoading && rows.requests.map((r) => {
-              const outcome = OUTCOMES[r.status];
-              return (
-                <button key={r.id} type="button" onClick={() => onOpenRequest(r)} className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-left hover:bg-slate-50 sm:px-5">
-                  <span className="font-semibold text-slate-900">#{r.id}</span>
-                  <span className="min-w-0 flex-1 truncate text-sm text-slate-800">{r.customer_name || prettyPhone(r.phone)}<span className="ml-2 text-xs text-slate-500">{r.product_title || ""}</span></span>
-                  <span className="flex flex-wrap gap-1">
-                    {(r.labels || []).map((l) => (
-                      <span key={l.id} className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${(TONES[l.color] || TONES.slate).soft}`}>{l.name}</span>
-                    ))}
-                  </span>
-                  <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset ${(TONES[outcome?.tone] || TONES.amber).soft}`}>{outcome ? outcome.label : "Open"}</span>
-                  <span className="text-[11px] text-slate-400">{timeAgo(r.closed_at || r.created_at)}</span>
-                </button>
-              );
-            })}
-            {!rowsLoading && rows.requests.length === 0 && <div className="px-5 py-6 text-center text-sm text-slate-500">No request with this label here.</div>}
-          </div>
-        </section>
-      )}
     </div>
   );
 }

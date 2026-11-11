@@ -1,6 +1,8 @@
 import unittest
 import os
+from datetime import date, datetime, timezone
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -21,7 +23,7 @@ from backend.app.chat_request_routes import (
     pull_chat_requests,
 )
 from backend.app.db import Base
-from backend.app.models import ChatLabel, ChatRequest, ChatRequestEvent, User
+from backend.app.models import ChatLabel, ChatRequest, ChatRequestEvent, ChatRequestLabel, User
 
 
 class _FakeClient:
@@ -60,6 +62,60 @@ class ChatRequestTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self._known_patch.stop()
         await self.engine.dispose()
+
+    async def test_reason_analytics_share_calendar_agent_outcome_and_label_filters(self):
+        def utc(day, hour, minute=0):
+            return datetime(2025, 11, day, hour, minute, tzinfo=timezone.utc)
+
+        async with self.sessions() as db:
+            labels = await routes._store_labels(db, "irrakids")
+            price = next(label for label in labels if label.key == "price")
+            later = next(label for label in labels if label.key == "later")
+            later.archived = True
+            db.add_all([
+                ChatRequest(id=1, store_key="irrakids", phone="+212611111111", created_at=utc(4, 23),
+                            status="cancelled", assigned_to_id=self.other.id, closed_by_id=self.agent.id, closed_at=utc(5, 9)),
+                ChatRequest(id=2, store_key="irrakids", phone="+212622222222", created_at=utc(5, 22, 59),
+                            status="calling", assigned_to_id=self.agent.id, product_title="Blue jacket"),
+                ChatRequest(id=3, store_key="irrakids", phone="+212633333333", created_at=utc(5, 23),
+                            status="new", assigned_to_id=self.agent.id),
+                ChatRequest(id=4, store_key="irrakids", phone="+212644444444", created_at=utc(4, 22, 59),
+                            status="ordered", assigned_to_id=self.agent.id, closed_at=utc(5, 10)),
+                ChatRequest(id=5, store_key="irranova", phone="+212655555555", created_at=utc(5, 12),
+                            status="wrong_number", closed_by_id=self.agent.id, closed_at=utc(5, 14)),
+            ])
+            await db.flush()
+            db.add_all([ChatRequestLabel(request_id=2, label_id=price.id), ChatRequestLabel(request_id=2, label_id=later.id)])
+            await db.commit()
+            options = dict(store="irrakids", start_date=date(2025, 11, 5), end_date=date(2025, 11, 5), db=db, user=self.agent)
+            with patch.object(routes, "_tz", return_value=ZoneInfo("Africa/Casablanca")):
+                report = await routes.chat_request_reasons(**options, agent=self.agent.id)
+                self.assertEqual(report["total"], 2)
+                self.assertEqual(report["outcomes"], dict(ordered=0, not_interested=0, wrong_number=0, cancelled=1, open=1))
+                self.assertEqual(report["daily"][0]["total"], 2)
+                self.assertEqual((report["labelled"], report["lost_without_label"]), (1, 1))
+                self.assertEqual(sum(label["total"] for label in report["labels"]), 2)
+
+                lost = dict(options, agent=self.agent.id, outcome="lost", reason="unlabelled")
+                lost_report = await routes.chat_request_reasons(**lost)
+                detail = await routes.chat_request_reasons(**lost, detail=True)
+                self.assertEqual(lost_report["total"], detail["total"])
+                self.assertEqual([item["id"] for item in detail["requests"]], [1])
+                tagged = await routes.chat_request_reasons(**options, reason=str(later.id), q="jacket", detail=True)
+                self.assertEqual([item["id"] for item in tagged["requests"]], [2])
+
+                closed = await routes.chat_request_reasons(**options, date_basis="closed")
+                self.assertEqual((closed["total"], closed["outcomes"]["ordered"], closed["outcomes"]["open"]), (2, 1, 0))
+                self.assertEqual({agent["id"]: agent["total"] for agent in closed["agents"]}, {self.agent.id: 1, "unassigned": 1})
+
+    def test_reason_period_uses_local_calendar_days_and_validates_custom_dates(self):
+        today = date(2026, 11, 7)
+        self.assertEqual(routes._reason_period(7, None, None, False, today), (date(2026, 11, 1), today))
+        self.assertEqual(routes._reason_period(7, None, None, True, today), (date(2026, 11, 6), date(2026, 11, 6)))
+        with self.assertRaises(HTTPException):
+            routes._reason_period(7, today, date(2026, 11, 8), False, today)
+        with self.assertRaises(HTTPException):
+            routes._reason_period(7, date(2025, 11, 7), today, False, today)
 
     async def _intake(self, **kw):
         payload = {"store": "irrakids", "phone": "0612345678", **kw}
@@ -492,7 +548,7 @@ async def test_labels_on_requests_filter_the_queue_and_explain_lost_customers(se
     self.assertEqual(sorted(r["id"] for r in lost["requests"]), [one, four])
     async with self.sessions() as db:
         report = await routes.chat_request_reasons(store="irrakids", days=30, db=db, user=self.agent)
-    self.assertEqual(report["outcomes"], {"ordered": 1, "not_interested": 1, "wrong_number": 1, "open": 1})
+    self.assertEqual(report["outcomes"], {"ordered": 1, "not_interested": 1, "wrong_number": 1, "cancelled": 0, "open": 1})
     rows = {r["key"]: r for r in report["labels"]}
     self.assertEqual({k: rows["price"][k] for k in ("total", "ordered", "lost", "open")}, {"total": 2, "ordered": 1, "lost": 1, "open": 0})
     self.assertEqual(rows["no_answer"]["open"], 1)

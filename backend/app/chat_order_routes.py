@@ -347,7 +347,7 @@ class ChatOrderLine(BaseModel):
 
 class ChatCreateOrderBody(BaseModel):
     customer_id: Optional[str] = None
-    first_name: str
+    first_name: str = ""
     last_name: Optional[str] = None
     phone: str
     email: Optional[str] = None
@@ -440,7 +440,7 @@ async def chat_create_order(
     address2 = _clean(body.address2, 255)
     city = _clean(body.city, 100)
     phone = normalize_phone(body.phone)
-    missing = [label for label, value in (("name", first_name), ("phone", phone), ("city", city), ("address", address1)) if not value]
+    missing = [label for label, value in (("name", first_name or last_name), ("phone", phone), ("city", city), ("address", address1)) if not value]
     if missing:
         raise HTTPException(status_code=422, detail=f"missing or invalid: {', '.join(missing)}")
     country = (body.country_code or "MA").strip().upper()

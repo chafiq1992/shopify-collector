@@ -1,14 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Minus, Package, Plus, Search, Trash2, X } from "lucide-react";
 import ConfirmationProductResults from "./ConfirmationProductResults";
+import RequiredCustomerNotice from "./RequiredCustomerNotice";
+import { focusCustomerField, requiredOrderCustomer } from "../lib/requiredOrderCustomer";
 import TagInput from "./TagInput";
 import useConfirmationProductSearch, { PRODUCT_SEARCH_PLACEHOLDER } from "../lib/useConfirmationProductSearch";
 import { cartKey, createOrderPayload, customerOrderFields, initialOrderForm, orderCartIssue } from "../lib/confirmationOrderForm";
 import { codDateTags, useOrderTags } from "../lib/orderTags";
 
-function Field({ label, optional = false, ...props }) {
+function Field({ label, optional = false, required = !optional, error = false, ...props }) {
   return <label className="block text-xs font-medium text-gray-700">{label}{optional && <span className="ml-1 font-normal text-gray-400">Optional</span>}
-    <input {...props} required={!optional} className="mt-1 h-11 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm font-normal outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 disabled:bg-gray-100" />
+    <input {...props} required={required} aria-invalid={error} className={`mt-1 h-11 w-full rounded-lg border bg-white px-3 text-sm font-normal outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 disabled:bg-gray-100 ${error ? "border-rose-500 ring-2 ring-rose-200" : "border-gray-300"}`} />
+    {error && <span className="mt-1 block text-xs text-rose-700">{label === "First name" ? "Enter a first or last name." : `Enter ${label.toLowerCase() === "phone" ? "a valid phone number" : label.toLowerCase()}.`}</span>}
   </label>;
 }
 
@@ -47,6 +50,10 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(pending ? "A previous creation request needs checking. Retry to recover its order before starting a new one." : "");
   const [retryOnly, setRetryOnly] = useState(Boolean(pending));
+  const [triedCustomer, setTriedCustomer] = useState(false);
+  const [customerNotice, setCustomerNotice] = useState(false);
+  const missingCustomerFields = requiredOrderCustomer(shipping);
+  const missingCustomer = Object.values(missingCustomerFields).some(Boolean);
   const submittingRef = useRef(false);
   const submissionRef = useRef(pending?.payload || null);
   const dialogRef = useRef(null);
@@ -136,6 +143,10 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
   async function submit(event) {
     event.preventDefault();
     if (submittingRef.current || blockedSeed || (!retryOnly && cartIssue)) return;
+    if (!retryOnly && missingCustomer) {
+      setTriedCustomer(true); setCustomerNotice(true);
+      return;
+    }
     submittingRef.current = true; setBusy(true); setError("");
     if (!submissionRef.current) {
       submissionRef.current = createOrderPayload({ store, actionId: globalThis.crypto?.randomUUID?.() || `order-${Date.now()}-${Math.random().toString(36).slice(2)}`, shipping, email, note, shippingPrice, items, customer, tags });
@@ -161,12 +172,13 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
 
   return <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/45 p-2 backdrop-blur-[2px] sm:p-4" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="create-order-title" className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-gray-50 shadow-2xl">
+      {customerNotice && <RequiredCustomerNotice missing={missingCustomerFields} onCorrect={() => { setCustomerNotice(false); focusCustomerField(dialogRef.current, missingCustomerFields); }} />}
       <header className="flex items-center gap-3 border-b border-gray-200 bg-white px-4 py-3 sm:px-6">
         <Package className="text-indigo-600" size={24} aria-hidden />
         <div><h2 id="create-order-title" className="text-base font-semibold">{initialOrderId && !pending ? "Duplicate order" : "New order"}</h2><p className="text-xs text-gray-500">{store} · Cash on delivery · Assigned to you</p></div>
         <button type="button" onClick={onClose} disabled={busy} aria-label="Close new order" className="ml-auto rounded-lg border border-gray-200 p-2 disabled:opacity-50"><X size={18} /></button>
       </header>
-      <form onSubmit={submit} onKeyDown={(event) => { if (event.key === "Enter" && event.target.tagName === "INPUT") event.preventDefault(); }} className="overflow-y-auto p-4 sm:p-6">
+      <form onSubmit={submit} onInvalid={(event) => { if (!retryOnly && missingCustomer) { event.preventDefault(); setTriedCustomer(true); setCustomerNotice(true); } }} onKeyDown={(event) => { if (event.key === "Enter" && event.target.tagName === "INPUT") event.preventDefault(); }} className="overflow-y-auto p-4 sm:p-6">
         {seedLoading && <p role="status" className="mb-4 rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-800">Loading the source customer and current product information…</p>}
         {seedError && <div role="alert" className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">{seedError}<button type="button" onClick={() => setSeedAttempt((value) => value + 1)} className="ml-2 font-semibold underline">Retry source order</button></div>}
         {source && !pending && <div className="mb-4 rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-xs leading-relaxed text-indigo-900"><p className="font-semibold">Based on {source.name || "the selected order"}</p><p className="mt-1">Review every product and quantity. Prices use the current catalog. Payment status, tags, discounts and notes from the source are not copied.</p>{source.warnings?.length > 0 && <ul className="mt-2 list-disc space-y-1 pl-4">{source.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}</div>}
@@ -183,17 +195,18 @@ function ConfirmationCreateOrderForm({ store, actorId, searchProducts, searchCus
                 {customers.length > 0 && <div className="mt-3 max-h-72 divide-y divide-gray-100 overflow-y-auto rounded-xl border border-gray-200" aria-label="Customer search results">{customers.map((match) => <button type="button" key={match.id} disabled={locked} onClick={() => chooseCustomer(match)} className="block w-full p-3 text-left hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500"><span className="block text-sm font-semibold">{match.name || [match.first_name, match.last_name].filter(Boolean).join(" ") || "Shopify customer"}</span><span className="mt-1 block break-words text-xs text-gray-600">{[match.phone || match.address?.phone, match.email].filter(Boolean).join(" · ")}</span><span className="mt-1 block break-words text-xs text-gray-500">{[match.address?.address1, match.address?.city, match.address?.country].filter(Boolean).join(", ")}</span><span className="mt-1 block text-xs font-semibold text-indigo-700">Use customer{match.orders_count != null ? ` · ${match.orders_count} previous orders` : ""}</span></button>)}</div>}
               </>}
             </section>
-            <section className="rounded-xl border border-gray-200 bg-white p-4">
+            <section className={`rounded-xl border bg-white p-4 ${triedCustomer && missingCustomer ? "border-rose-400 ring-2 ring-rose-200" : "border-gray-200"}`}>
               <h3 className="text-sm font-semibold">Customer and delivery</h3>
+              <p className="mt-1 text-xs text-gray-500">Required: one customer name (first or last), phone, shipping address and city.</p>
               <fieldset disabled={locked} className="mt-3 grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
-                <Field label="First name" autoComplete="given-name" value={shipping.first_name} onChange={(e) => setShipping({ ...shipping, first_name: e.target.value })} />
+                <Field label="First name" required={false} error={triedCustomer && missingCustomerFields.first_name} data-customer-field="first_name" autoComplete="given-name" value={shipping.first_name} onChange={(e) => setShipping({ ...shipping, first_name: e.target.value })} />
                 <Field label="Last name" optional autoComplete="family-name" value={shipping.last_name} onChange={(e) => setShipping({ ...shipping, last_name: e.target.value })} />
-                <Field label="Phone" type="tel" autoComplete="tel" placeholder="0612345678" value={shipping.phone} onChange={(e) => setShipping({ ...shipping, phone: e.target.value })} />
+                <Field label="Phone" error={triedCustomer && missingCustomerFields.phone} data-customer-field="phone" type="tel" autoComplete="tel" placeholder="0612345678" value={shipping.phone} onChange={(e) => setShipping({ ...shipping, phone: e.target.value })} />
                 <Field label="Email" optional type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} />
                 <div className="sm:col-span-2"><Field label="Company" optional autoComplete="organization" value={shipping.company} onChange={(e) => setShipping({ ...shipping, company: e.target.value })} /></div>
-                <div className="sm:col-span-2"><Field label="Delivery address" autoComplete="address-line1" value={shipping.address1} onChange={(e) => setShipping({ ...shipping, address1: e.target.value })} /></div>
+                <div className="sm:col-span-2"><Field label="Delivery address" error={triedCustomer && missingCustomerFields.address1} data-customer-field="address1" autoComplete="address-line1" value={shipping.address1} onChange={(e) => setShipping({ ...shipping, address1: e.target.value })} /></div>
                 <div className="sm:col-span-2"><Field label="Apartment / delivery details" optional autoComplete="address-line2" value={shipping.address2} onChange={(e) => setShipping({ ...shipping, address2: e.target.value })} /></div>
-                <Field label="City" autoComplete="address-level2" value={shipping.city} onChange={(e) => setShipping({ ...shipping, city: e.target.value })} />
+                <Field label="City" error={triedCustomer && missingCustomerFields.city} data-customer-field="city" autoComplete="address-level2" value={shipping.city} onChange={(e) => setShipping({ ...shipping, city: e.target.value })} />
                 <Field label="Country" autoComplete="country-name" value={shipping.country} onChange={(e) => setShipping({ ...shipping, country: e.target.value })} />
                 <Field label="Province / region" optional autoComplete="address-level1" value={shipping.province} onChange={(e) => setShipping({ ...shipping, province: e.target.value })} />
                 <Field label="Postal code" optional autoComplete="postal-code" value={shipping.zip} onChange={(e) => setShipping({ ...shipping, zip: e.target.value })} />

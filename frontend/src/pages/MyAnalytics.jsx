@@ -16,7 +16,7 @@ export default function MyAnalytics(){
     return readCurrentStore({ allowAll: true, fallback: "all" });
   });
   const [user, setUser] = useState(null);
-  const [summary, setSummary] = useState({ collected: 0, out: 0, fulfilled: 0, total: 0 });
+  const [summary, setSummary] = useState({});
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -42,7 +42,7 @@ export default function MyAnalytics(){
       const js = await res.json();
       if (requestId !== requestIdRef.current) return;
       setUser(js.user || null);
-      setSummary(js.summary || { collected: 0, out: 0, fulfilled: 0, total: 0 });
+      setSummary(js.summary || {});
       setRows(js.rows || []);
     } catch (e) {
       if (requestId !== requestIdRef.current) return;
@@ -96,7 +96,7 @@ export default function MyAnalytics(){
           <div className="text-gray-600">Loading…</div>
         ) : (
           <>
-            <section className="mb-4 grid sm:grid-cols-2 md:grid-cols-4 gap-3">
+            <section className="mb-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
               <div className="border border-green-200 rounded-xl bg-white p-3">
                 <div className="text-xs text-gray-500">Collected</div>
                 <div className="text-2xl font-semibold text-green-700">{summary.collected || 0}</div>
@@ -104,6 +104,14 @@ export default function MyAnalytics(){
               <div className="border border-red-200 rounded-xl bg-white p-3">
                 <div className="text-xs text-gray-500">Out</div>
                 <div className="text-2xl font-semibold text-red-700">{summary.out || 0}</div>
+              </div>
+              <div className="border border-amber-200 rounded-xl bg-white p-3">
+                <div className="text-xs text-gray-500">Wrong items</div>
+                <div className="text-2xl font-semibold text-amber-800">{summary.wrong_item || 0}</div>
+              </div>
+              <div className="border border-violet-200 rounded-xl bg-white p-3">
+                <div className="text-xs text-gray-500">Out / Found</div>
+                <div className="text-2xl font-semibold text-violet-800">{summary.out_found || 0}</div>
               </div>
               <div className="border border-blue-200 rounded-xl bg-white p-3">
                 <div className="text-xs text-gray-500">Fulfilled</div>
@@ -125,6 +133,8 @@ export default function MyAnalytics(){
                       <th className="px-3 py-2 border-b border-gray-200">Store</th>
                       <th className="px-3 py-2 border-b border-gray-200">Collected</th>
                       <th className="px-3 py-2 border-b border-gray-200">Out</th>
+                      <th className="px-3 py-2 border-b border-gray-200 whitespace-nowrap">Wrong items</th>
+                      <th className="px-3 py-2 border-b border-gray-200 whitespace-nowrap">Out / Found</th>
                       <th className="px-3 py-2 border-b border-gray-200">Fulfilled</th>
                       <th className="px-3 py-2 border-b border-gray-200">Total</th>
                     </tr>
@@ -136,12 +146,14 @@ export default function MyAnalytics(){
                         <td className="px-3 py-2">{r.store}</td>
                         <td className="px-3 py-2 text-green-700">{r.collected}</td>
                         <td className="px-3 py-2 text-red-700">{r.out}</td>
+                        <td className="px-3 py-2 text-amber-800">{r.wrong_item || 0}</td>
+                        <td className="px-3 py-2 text-violet-800">{r.out_found || 0}</td>
                         <td className="px-3 py-2 text-blue-700">{r.fulfilled || 0}</td>
                         <td className="px-3 py-2 font-semibold">{r.total}</td>
                       </tr>
                     ))}
                     {(rows || []).length === 0 && (
-                      <tr><td colSpan={6} className="px-3 py-4 text-center text-gray-500">No data in this range.</td></tr>
+                      <tr><td colSpan={8} className="px-3 py-4 text-center text-gray-500">No data in this range.</td></tr>
                     )}
                   </tbody>
                 </table>
