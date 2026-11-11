@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
-import { authFetch, authHeaders, clearAuth } from "../lib/auth";
+import { authFetch, authHeaders, clearAuth, loadAuth } from "../lib/auth";
 import StorePicker from "../components/StorePicker";
 import { AgentPagesLink } from "../components/AgentPagePicker";
 import { persistStoreSelection, readCurrentStore, titleStore } from "../lib/stores";
@@ -8,9 +8,35 @@ import { subscribeToPurchaseOrderChanges } from "../lib/variantStock.js";
 import VariantStockRow from "../components/VariantStockRow.jsx";
 import { unsentAgeLabel, unsentReasonLabel } from "../lib/unsentDelivery";
 import { applyPurchaseOrderBadges, badgeVariantInputs, createPurchaseOrderWatcher } from "../lib/purchaseOrderBadges";
+import { createPrintRequestId, enqueueDeliveryLabel } from "../lib/printSubmission.js";
 
 const loadDeliveryLabelPopup = () => import("../components/DeliveryLabelPopup");
 const DeliveryLabelPopup = lazy(loadDeliveryLabelPopup);
+
+function PrintJobStatus({ job, unavailable, onRetry, onDismiss }) {
+  if (!job) return null;
+  if (job.status !== "failed" && job.status !== "not_found") {
+    return (
+      <p className="mt-1 text-[11px] text-blue-700" role="status">
+        {unavailable ? "Print status unavailable. Checking again…" :
+          job.status === "inflight" ? "Printer agent is processing the label…" : "Waiting for printer agent…"}
+      </p>
+    );
+  }
+  return (
+    <div className="mt-1 space-y-1 rounded-lg border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-700" role="status">
+      <p>{job.error || (job.status === "failed" ? "Label could not be confirmed. Check the printer before retrying." : "Print job could not be found. Check the printer before retrying.")}</p>
+      <div className="flex gap-2">
+        <button type="button" disabled={job.retrying || !job.request} onClick={() => onRetry(job)} className="rounded bg-red-700 px-2 py-1 font-semibold text-white disabled:opacity-50">
+          {job.retrying ? "Sending…" : "Retry label"}
+        </button>
+        <button type="button" disabled={job.retrying} onClick={() => onDismiss(job.jobId)} className="px-2 font-semibold disabled:opacity-50">
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function fulfillNotCompletedMessage(reason) {
   if (reason === "no_remaining") return "Nothing to fulfill — order may be cancelled or already fulfilled.";
@@ -406,13 +432,25 @@ export default function OrderLookup({ showPages = false, active = true }){
 
   const [fulfillConfirm, setFulfillConfirm] = useState(false);
   const [showDeliveryPopup, setShowDeliveryPopup] = useState(false);
-  const [printQueue, setPrintQueue] = useState([]);
+  const [printQueueStorageKey] = useState(() => {
+    const userId = loadAuth()?.user?.id;
+    return userId ? `collector-delivery-prints:${userId}` : null;
+  });
+  const [printQueue, setPrintQueue] = useState(() => {
+    if (!printQueueStorageKey) return [];
+    try {
+      const jobs = JSON.parse(sessionStorage.getItem(printQueueStorageKey) || "[]");
+      return Array.isArray(jobs) ? jobs.filter(job => typeof job?.jobId === "string") : [];
+    } catch {
+      return [];
+    }
+  });
+  const [printStatusUnavailable, setPrintStatusUnavailable] = useState(false);
   const [printQueueFlight, setPrintQueueFlight] = useState(null);
   const [queuePulse, setQueuePulse] = useState(false);
   const [labelQueueItems, setLabelQueueItems] = useState([]);
   const [mobileQueueOpen, setMobileQueueOpen] = useState(false);
-  const labelQueuePollItemsRef = useRef([]);
-  const printQueuePollItemsRef = useRef([]);
+  const printRetries = useRef(new Map());
 
   const inputRef = useRef(null);
   const sectionRefs = useRef({});
@@ -426,26 +464,19 @@ export default function OrderLookup({ showPages = false, active = true }){
   const printQueueRef = useRef(null);
   const queuePulseTimerRef = useRef(null);
   const queueFlightTimerRef = useRef(null);
-  const labelQueuePollKey = useMemo(
-    () => labelQueueItems
-      .filter((item) => item?.jobId)
-      .map((item) => `${item.queueId}:${item.jobId}`)
-      .sort()
-      .join("|"),
-    [labelQueueItems]
-  );
   const printQueuePollKey = useMemo(
     () => printQueue
-      .filter((item) => item?.jobId)
-      .map((item) => `${item.id}:${item.jobId}`)
+      .filter((item) => item.status !== "failed" && item.status !== "not_found")
+      .map((item) => item.jobId)
       .sort()
       .join("|"),
     [printQueue]
   );
+  const printQueueById = useMemo(() => new Map(printQueue.map(item => [item.jobId, item])), [printQueue]);
   const activeLabelQueueItems = useMemo(() => {
     return [...labelQueueItems]
       // The label flow starts only once Shopify has accepted the fulfillment.
-      .filter((item) => item && item.statusKey !== "printed" && (!item.fulfillState || item.fulfillState === "done"))
+      .filter((item) => !item.jobId && (!item.fulfillState || item.fulfillState === "done"))
       .sort((a, b) => Number(a?.createdAt || 0) - Number(b?.createdAt || 0));
   }, [labelQueueItems]);
   const registerSection = useCallback((key) => (el) => {
@@ -466,66 +497,56 @@ export default function OrderLookup({ showPages = false, active = true }){
     try { if (queueFlightTimerRef.current) clearTimeout(queueFlightTimerRef.current); } catch {}
   }, []);
   useEffect(() => {
-    labelQueuePollItemsRef.current = labelQueueItems.filter((item) => item?.jobId);
-  }, [labelQueueItems]);
+    if (!printQueueStorageKey) return;
+    try {
+      sessionStorage.setItem(printQueueStorageKey, JSON.stringify(printQueue.map(
+        ({ jobId, orderNumber, request, status }) => ({ jobId, orderNumber, request, status }),
+      )));
+    } catch {}
+  }, [printQueueStorageKey, printQueue]);
   useEffect(() => {
-    if (!labelQueuePollKey) return;
-    let cancelled = false;
-    const pollQueue = async () => {
-      const items = labelQueuePollItemsRef.current;
-      if (!items.length) return;
-      await Promise.all(items.map(async (item) => {
-        try {
-          const res = await authFetch(`/api/print-job-status?job_id=${encodeURIComponent(item.jobId)}`, {
-            headers: authHeaders({ "Accept": "application/json" }),
-          });
-          if (!res.ok) return;
-          const js = await res.json();
-          if (cancelled) return;
-          if (String(js?.status || "").toLowerCase() === "done") {
-            setLabelQueueItems(prev => prev.filter(entry => entry.queueId !== item.queueId));
-          }
-        } catch {}
-      }));
-    };
-    pollQueue();
-    const timer = setInterval(pollQueue, 2000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [labelQueuePollKey]);
-  useEffect(() => {
-    printQueuePollItemsRef.current = printQueue.filter((item) => item?.jobId);
-  }, [printQueue]);
-  useEffect(() => {
-    if (!printQueuePollKey) return;
-    let cancelled = false;
-    const timers = [];
-
-    async function pollQueue() {
-      const items = printQueuePollItemsRef.current;
-      if (!items.length) return;
-      await Promise.all(items.map(async (item) => {
-        try {
-          const res = await authFetch(`/api/print-job-status?job_id=${encodeURIComponent(item.jobId)}`, {
-            headers: authHeaders({ "Accept": "application/json" }),
-          });
-          if (!res.ok) return;
-          const js = await res.json();
-          if (cancelled) return;
-          if (String(js?.status || "").toLowerCase() === "done") {
-            setPrintQueue(prev => prev.filter(entry => entry.id !== item.id));
-          }
-        } catch {}
-      }));
+    if (!printQueuePollKey) {
+      setPrintStatusUnavailable(false);
+      return;
     }
-
-    pollQueue();
-    timers.push(setInterval(pollQueue, 2000));
+    const ids = printQueuePollKey.split("|");
+    const controller = new AbortController();
+    let timer;
+    async function pollQueue() {
+      let nextPoll = 2000;
+      try {
+        const statuses = {};
+        for (let start = 0; start < ids.length; start += 50) {
+          const params = new URLSearchParams(ids.slice(start, start + 50).map(id => ["job_ids", id]));
+          const res = await authFetch(`/api/print-job-statuses?${params}`, {
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(6000)]),
+          });
+          if (!res.ok) throw new Error("Print status unavailable");
+          Object.assign(statuses, (await res.json()).statuses);
+        }
+        if (controller.signal.aborted) return;
+        setPrintStatusUnavailable(false);
+        setPrintQueue(prev => {
+          if (!prev.some(item => statuses[item.jobId] && statuses[item.jobId] !== item.status)) return prev;
+          return prev.filter(item => statuses[item.jobId] !== "done").map(item => {
+            const status = statuses[item.jobId];
+            return status && status !== item.status ? { ...item, status } : item;
+          });
+        });
+        setLabelQueueItems(prev => prev.some(item => statuses[item.jobId] === "done")
+          ? prev.filter(item => statuses[item.jobId] !== "done") : prev);
+      } catch {
+        if (controller.signal.aborted) return;
+        setPrintStatusUnavailable(true);
+        nextPoll = 5000;
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(pollQueue, nextPoll);
+      }
+    }
+    void pollQueue();
     return () => {
-      cancelled = true;
-      timers.forEach((timer) => clearInterval(timer));
+      controller.abort();
+      clearTimeout(timer);
     };
   }, [printQueuePollKey]);
 
@@ -636,12 +657,12 @@ export default function OrderLookup({ showPages = false, active = true }){
   const handlePrintedQueued = useCallback((payload = {}) => {
     const orderNumber = String(payload.orderNumber || order?.number || "").replace(/^#/, "").trim();
     const queueItem = {
-      id: payload.jobId || `queued-${Date.now()}`,
-      jobId: payload.jobId || null,
+      jobId: payload.jobId,
       orderNumber,
-      queuedAt: Date.now(),
+      request: payload.request,
+      status: "pending",
     };
-    setPrintQueue(prev => [queueItem, ...prev].slice(0, 6));
+    setPrintQueue(prev => prev.some(item => item.jobId === queueItem.jobId) ? prev : [queueItem, ...prev]);
     setQueuePulse(true);
     try { if (queuePulseTimerRef.current) clearTimeout(queuePulseTimerRef.current); } catch {}
     queuePulseTimerRef.current = setTimeout(() => setQueuePulse(false), 1200);
@@ -661,13 +682,17 @@ export default function OrderLookup({ showPages = false, active = true }){
       queueFlightTimerRef.current = setTimeout(() => setPrintQueueFlight(null), 760);
     }
 
-    resetLookupForNextOrder(orderNumber
-      ? `Order #${orderNumber} added to print queue. Type order or next order.`
-      : "Added to print queue. Type order or next order.");
-  }, [order?.number, resetLookupForNextOrder]);
+  }, [order?.number]);
+  const foregroundPrintLookupToken = searchTokenRef.current;
+  const handleForegroundPrintQueued = (payload) => {
+    handlePrintedQueued(payload);
+    if (searchTokenRef.current === foregroundPrintLookupToken) {
+      resetLookupForNextOrder(`Order #${payload.orderNumber} added to the print queue.`);
+    }
+  };
   const handleQueueItemStateChange = useCallback((queueId, nextState) => {
     setLabelQueueItems(prev => prev.map((item) => (
-      item.queueId === queueId
+      item.queueId === queueId && !item.jobId
         ? {
             ...item,
             statusKey: nextState?.statusKey || item.statusKey,
@@ -687,7 +712,6 @@ export default function OrderLookup({ showPages = false, active = true }){
             allCityOptions: nextState?.allCityOptions || item.allCityOptions || [],
             globalCities: nextState?.globalCities || item.globalCities || [],
             partnerSendState: nextState?.partnerSendState || item.partnerSendState || {},
-            printStatus: nextState?.printStatus || item.printStatus || null,
             sendActionLabel: nextState?.sendActionLabel || item.sendActionLabel || "",
             actions: nextState?.actions || item.actions || null,
           }
@@ -700,14 +724,45 @@ export default function OrderLookup({ showPages = false, active = true }){
       item.queueId === queueId
         ? {
             ...item,
-            jobId: payload.jobId || item.jobId || null,
-            statusKey: "printed",
-            statusLabel: "Printed",
+            jobId: payload.jobId,
+            statusKey: "print_queued",
+            statusLabel: "Queued to print",
+            actions: null,
+            busy: false,
+            error: "",
             open: false,
           }
         : item
     )));
   }, [handlePrintedQueued]);
+  const dismissPrintJob = (jobId) => {
+    printRetries.current.delete(jobId);
+    setPrintQueue(prev => prev.filter(item => item.jobId !== jobId));
+    setLabelQueueItems(prev => prev.filter(item => item.jobId !== jobId));
+  };
+  const retryPrintJob = async (item) => {
+    let retry = printRetries.current.get(item.jobId);
+    if (retry?.inFlight) return;
+    if (!retry) {
+      retry = { requestId: createPrintRequestId(), inFlight: false };
+      printRetries.current.set(item.jobId, retry);
+    }
+    retry.inFlight = true;
+    setPrintQueue(prev => prev.map(entry => entry.jobId === item.jobId ? { ...entry, retrying: true, error: "" } : entry));
+    try {
+      const result = await enqueueDeliveryLabel(item.request, retry.requestId, authFetch);
+      printRetries.current.delete(item.jobId);
+      setPrintQueue(prev => prev.map(entry => entry.jobId === item.jobId ? {
+        ...entry, jobId: result.job_id, status: "pending", retrying: false, error: "",
+      } : entry));
+      setLabelQueueItems(prev => prev.map(entry => entry.jobId === item.jobId ? { ...entry, jobId: result.job_id } : entry));
+    } catch (error) {
+      retry.inFlight = false;
+      setPrintQueue(prev => prev.map(entry => entry.jobId === item.jobId ? {
+        ...entry, retrying: false, error: error.message,
+      } : entry));
+    }
+  };
   const pendingFulfillOrderIds = useMemo(() => new Set(
     labelQueueItems
       .filter((item) => item?.fulfillState === "pending")
@@ -783,7 +838,7 @@ export default function OrderLookup({ showPages = false, active = true }){
         ...extra,
       },
       ...prev,
-    ].slice(0, 12));
+    ]);
     return queueId;
   }, [store]);
   async function doSearch(number){
@@ -1316,7 +1371,7 @@ export default function OrderLookup({ showPages = false, active = true }){
   const activeCompany = order ? getActiveCompanyTag() : null;
   const currentGuideStep = guideSteps[guideStepIndex] || null;
   const queueStatusClass = (statusKey) => {
-    if (statusKey === "printed") return "bg-green-100 text-green-800 border border-green-200";
+    if (statusKey === "print_queued") return "bg-blue-100 text-blue-800 border border-blue-200";
     if (statusKey === "ready_to_print") return "bg-indigo-100 text-indigo-800 border border-indigo-200";
     if (statusKey === "waiting_partner") return "bg-amber-100 text-amber-800 border border-amber-200";
     if (statusKey === "information_error") return "bg-red-100 text-red-800 border border-red-200";
@@ -1324,7 +1379,7 @@ export default function OrderLookup({ showPages = false, active = true }){
     return "bg-gray-100 text-gray-700 border border-gray-200";
   };
   const queueStepIndex = (item) => {
-    if (item?.statusKey === "printed" || item?.phase === "done") return 3;
+    if (item?.jobId || item?.phase === "done") return 3;
     if (item?.statusKey === "ready_to_print" || item?.phase === "ready_print") return 2;
     if (item?.statusKey === "waiting_partner" || item?.phase === "company_select") return 1;
     return 0;
@@ -2023,6 +2078,12 @@ export default function OrderLookup({ showPages = false, active = true }){
       </header>
 
       <main className={`max-w-3xl mx-auto px-4 py-4 ${guideActive && order ? 'pb-[120vh]' : 'pb-[80vh]'}`}>
+        {printQueue.filter(job => !labelQueueItems.some(item => item.jobId === job.jobId)).map(job => (
+          <div key={job.jobId} className="mb-2 rounded-lg border border-indigo-100 bg-white px-3 py-2">
+            <div className="text-xs font-semibold">Delivery label #{job.orderNumber}</div>
+            <PrintJobStatus job={job} unavailable={printStatusUnavailable} onRetry={retryPrintJob} onDismiss={dismissPrintJob} />
+          </div>
+        ))}
         {loading && (
           <div className="text-gray-600">Loading…</div>
         )}
@@ -2818,15 +2879,16 @@ export default function OrderLookup({ showPages = false, active = true }){
           {/* Queue Items */}
           <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
             {labelQueueItems.map((item) => {
-              const isError = item.statusKey === "information_error";
+              const printJob = printQueueById.get(item.jobId);
+              const printFailed = printJob?.status === "failed" || printJob?.status === "not_found";
+              const isError = item.statusKey === "information_error" || printFailed;
               const isWaiting = item.statusKey === "waiting_partner";
               const isReadyPrint = item.statusKey === "ready_to_print";
-              const isPrinted = item.statusKey === "printed";
               const showCompanyControls = isWaiting || isReadyPrint;
               const showCityError = isError && item.phase === "fix_errors";
               const partnerOk = item.partnerSendState?.ok === true;
               const showSendBtn = showCompanyControls && item.envoyCode && !partnerOk;
-              const showPrintBtn = (isReadyPrint || isPrinted) && item.actions;
+              const showPrintBtn = isReadyPrint && item.actions;
 
               const itemStoreKey = String(item.store || store || "").trim().toLowerCase();
               const isIrranova = itemStoreKey === 'irranova';
@@ -2843,7 +2905,6 @@ export default function OrderLookup({ showPages = false, active = true }){
                     isError ? 'border-red-300 bg-red-50/60' :
                     isWaiting ? 'border-amber-200 bg-amber-50/50' :
                     isReadyPrint ? 'border-green-200 bg-green-50/50' :
-                    isPrinted ? 'border-green-300 bg-green-50/70' :
                     'border-gray-200 bg-gray-50/50'
                   }`}
                 >
@@ -2860,8 +2921,8 @@ export default function OrderLookup({ showPages = false, active = true }){
                         {item.companyName || item.order?.customer || "Preparing…"}
                       </div>
                     </div>
-                    <span className={`flex-shrink-0 inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${queueStatusClass(item.statusKey)}`}>
-                      {item.statusLabel}
+                    <span className={`flex-shrink-0 inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${queueStatusClass(printFailed ? "information_error" : item.statusKey)}`}>
+                      {printFailed ? "Print needs attention" : item.statusLabel}
                     </span>
                   </div>
 
@@ -2888,7 +2949,7 @@ export default function OrderLookup({ showPages = false, active = true }){
                   <div className="mt-2 flex items-center gap-1">
                     {["creating", "company_select", "ready_print", "done"].map((step, i) => {
                       const currentIdx = queueStepIndex(item);
-                      const isDone = i < currentIdx || item.phase === "done";
+                      const isDone = i < currentIdx;
                       const isActive = i === currentIdx;
                       return (
                         <React.Fragment key={step}>
@@ -3028,18 +3089,10 @@ export default function OrderLookup({ showPages = false, active = true }){
                           <><span className="text-sm">🖨</span> Print Label</>
                         )}
                       </button>
-                      {item.printStatus === "success" && (
-                        <div className="text-[10px] text-green-700 mt-1 text-center font-semibold">✓ Sent to printer</div>
-                      )}
                     </div>
                   )}
 
-                  {/* Printed done state */}
-                  {isPrinted && !showPrintBtn && (
-                    <div className="mt-2 text-[10px] text-green-700 font-semibold flex items-center gap-1">
-                      <span>✓</span> Label printed
-                    </div>
-                  )}
+                  <PrintJobStatus job={printJob} unavailable={printStatusUnavailable} onRetry={retryPrintJob} onDismiss={dismissPrintJob} />
                 </div>
               );
             })}
@@ -3060,7 +3113,7 @@ export default function OrderLookup({ showPages = false, active = true }){
               store={store}
               open={true}
               onClose={() => setShowDeliveryPopup(false)}
-              onQueued={handlePrintedQueued}
+              onQueued={handleForegroundPrintQueued}
             />
           </Suspense>
         </DeliveryPopupBoundary>

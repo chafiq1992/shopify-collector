@@ -7,6 +7,30 @@ export function createPrintRequestId() {
   return `print-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+export async function enqueueDeliveryLabel(request, requestId, fetchFn = fetch) {
+  const apiKey = globalThis.localStorage?.getItem("relayApiKey") || globalThis.localStorage?.getItem("relay_api_key");
+  const headers = { "Content-Type": "application/json", ...(apiKey ? { "x-api-key": apiKey } : {}) };
+  const body = JSON.stringify({ ...request, request_id: requestId });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetchFn("/api/enqueue-label", {
+        method: "POST", headers, body, signal: AbortSignal.timeout(12000),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        const error = new Error(responseError(data, response));
+        error.status = response.status;
+        throw error;
+      }
+      if (data?.ok !== true || !data.job_id) throw new Error("Missing print queue receipt");
+      return data;
+    } catch (error) {
+      if (error.status && error.status < 500) throw error;
+      if (attempt === 1) throw new Error("Could not confirm the print request. Retry to check or submit the same request.");
+    }
+  }
+}
+
 export function getOrCreatePrintRequest(pending, store, orders) {
   const signature = JSON.stringify([store, [...orders].sort()]);
   if (pending.current?.signature !== signature) {

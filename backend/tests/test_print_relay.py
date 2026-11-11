@@ -277,6 +277,38 @@ def test_ready_label_is_queued_with_the_current_envoy(queue, monkeypatch):
     assert [(job.payload["delivery_order_id"], job.payload["envoy_code"]) for job in jobs] == [("4242", "EN-2")]
 
 
+def test_back_to_back_labels_have_independent_receipts_and_retry(queue, monkeypatch):
+    monkeypatch.setattr(main, "DEFAULT_PC_ID", "test-pc")
+    _label_readiness(monkeypatch, {"ok": True, "envoyCode": "EN-2"})
+
+    async def submit(order_id, request_id):
+        body = main.EnqueueLabelBody(delivery_order_id=order_id, store="irrakids", request_id=request_id)
+        return await main.enqueue_label(body, x_api_key=main.RELAY_API_KEY, authorization=None)
+
+    async def statuses(*ids):
+        result = await main.print_job_statuses(list(ids), x_api_key=main.RELAY_API_KEY, authorization=None)
+        return result["statuses"]
+
+    async def scenario():
+        first, second = await asyncio.gather(submit("4242", "first-click"), submit("4243", "second-click"))
+        first_id, second_id = first["job_id"], second["job_id"]
+        jobs = {job["job_id"]: job for job in (await pull())["jobs"]}
+        assert set(jobs) == {first_id, second_id}
+        await main.ack(main.AckBody(pc_id="test-pc", secret="secret", job_id=first_id, lease_attempt=jobs[first_id]["lease_attempt"]))
+        assert await statuses(first_id, second_id, "missing") == {first_id: "done", second_id: "inflight", "missing": "not_found"}
+
+        await main.nack(main.AckBody(pc_id="test-pc", secret="secret", job_id=second_id, lease_attempt=jobs[second_id]["lease_attempt"], retry=False))
+        assert (await submit("4243", "second-click"))["status"] == "failed"
+        retry = await submit("4243", "confirmed-retry")
+        retry_id = retry["job_id"]
+        assert retry_id != second_id
+        assert (await submit("4243", "confirmed-retry"))["job_id"] == retry_id
+        assert [job["job_id"] for job in (await pull())["jobs"]] == [retry_id]
+        assert await statuses(first_id, second_id, retry_id) == {first_id: "done", second_id: "failed", retry_id: "inflight"}
+
+    run(scenario())
+
+
 def test_memory_queue_keeps_completion_receipt(monkeypatch):
     monkeypatch.setattr(main, "SessionLocal", None)
     monkeypatch.setattr(main, "JOB_STORE", {})

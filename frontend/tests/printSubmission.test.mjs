@@ -1,8 +1,28 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getOrCreatePrintRequest, normalizePrintOrders, sendLocalOrders, sendRelayOrders, submitPrintOrders, withPrintLock } from "../src/lib/printSubmission.js";
+import { enqueueDeliveryLabel, getOrCreatePrintRequest, normalizePrintOrders, sendLocalOrders, sendRelayOrders, submitPrintOrders, withPrintLock } from "../src/lib/printSubmission.js";
 
 const receipt = () => Response.json({ ok: true, job_id: "job-1", queued: 1 });
+
+test("delivery labels recover a lost response with the same request ID", async () => {
+  const calls = [];
+  const result = await enqueueDeliveryLabel({ delivery_order_id: "4242" }, "same-click", async (url, options) => {
+    calls.push([url, JSON.parse(options.body)]);
+    if (calls.length === 1) throw new TypeError("Lost response");
+    return receipt();
+  });
+  assert.equal(result.job_id, "job-1");
+  assert.deepEqual(calls, Array(2).fill(["/api/enqueue-label", { delivery_order_id: "4242", request_id: "same-click" }]));
+});
+
+test("delivery labels surface a company refusal without submitting again", async () => {
+  let calls = 0;
+  await assert.rejects(enqueueDeliveryLabel({ delivery_order_id: "4242" }, "same-click", async () => {
+    calls++;
+    return Response.json({ detail: "Company changed" }, { status: 409 });
+  }), /Company changed/);
+  assert.equal(calls, 1);
+});
 
 test("one relay job reports all 30 selected orders and never calls local printing", async () => {
   const orders = Array.from({ length: 30 }, (_, index) => String(index + 100));

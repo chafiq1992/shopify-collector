@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authFetch, authHeaders } from "../lib/auth";
+import { createPrintRequestId, enqueueDeliveryLabel } from "../lib/printSubmission.js";
 import {
   companyStepActionLabel,
   confirmationOutdated,
   envoyNeedsNoPartnerSend,
-  isAssignedEnvoyCompany,
   noPartnerApiSendState,
 } from "../lib/directEnvoyPrint";
 import { parseExplicitDeliveryOrderId } from "../lib/deliveryOrderReference";
@@ -312,6 +312,8 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
   const logEndRef = useRef(null);
   const initRan = useRef(false);
   const printButtonRef = useRef(null);
+  const printInFlight = useRef(false);
+  const pendingPrint = useRef(null);
   const recoveryInFlightRef = useRef(false);
   // The fulfill request already created the delivery order and attached its
   // envoy note server-side. Use it once; Retry runs the full browser flow.
@@ -853,6 +855,13 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
       populateEditFromOrder();
       const ready = preparedRef.current;
       preparedRef.current = null;
+      if (!warmOnly && ready?.reason === "queue_row_error" && Number(ready.merchantId) === Number(mid)) {
+        const row = normalizeDeliveryQueueRow(ready.queueRow);
+        if (row?.hasError) {
+          await resumeQueueRow(mid, row, { warmOnly: false });
+          return;
+        }
+      }
       if (
         !warmOnly && ready?.ok && ready.deliveryOrderId && ready.envoyCode &&
         (!ready.merchantId || Number(ready.merchantId) === Number(mid))
@@ -1201,103 +1210,57 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
     }
   }
 
-  async function enqueueLabelToRelay(dlvOrderId, storeName, envoyLabelCode) {
-    const apiKey = localStorage.getItem("relayApiKey") || localStorage.getItem("relay_api_key") || "";
-    const res = await authFetch("/api/enqueue-label", {
-      method: "POST",
-      headers: {
-        ...authHeaders({ "Content-Type": "application/json" }),
-        ...(apiKey ? { "x-api-key": apiKey } : {}),
-      },
-      body: JSON.stringify({
-        delivery_order_id: String(dlvOrderId),
-        store: storeName || null,
-        envoy_code: envoyLabelCode || null,
-      }),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      let detail = text;
-      try { const j = JSON.parse(text); detail = j.detail || text; } catch {}
-      const err = new Error(detail || `Enqueue failed (${res.status})`);
-      err.status = res.status;
-      throw err;
-    }
-    return res.json();
-  }
-
-  async function handlePrint(oid, envoyCodeOverride = "") {
-    const id = oid || deliveryOrderId;
-    if (!id) return;
-    let validatedEnvoyCode = envoyCodeOverride || envoyCode;
-    if (!validatedEnvoyCode) {
+  async function handlePrint() {
+    if (!deliveryOrderId || printInFlight.current) return;
+    if (!envoyCode || !selectedCompany?.id) {
       setError("Assign an envoy note before printing.");
       setPhase("company_select");
       return;
     }
-    // A label is printed only once the order has landed in its envoy company:
-    // the partner accepted it, or the company has no partner API at all.
-    if (partnerSendState.ok !== true) {
+    if (partnerSendState.ok !== true || confirmationOutdated(partnerSendState, { companyId, cityName })) {
       setError("Send to partner must succeed before printing.");
       setPhase("company_select");
       return;
     }
-    try {
-      const assigned = await fetchAssignedEnvoyForOrder(id);
-      if (!isAssignedEnvoyCompany(assigned)) {
-        throw new Error("This order is still Unassigned. Choose its envoy company before printing.");
-      }
-      const activeEnvoyCode = assigned.code || validatedEnvoyCode;
-      const envDet = await dlvApi(`admin/envoy-notes/${encodeURIComponent(activeEnvoyCode)}`);
-      assertSelectedCompanyMatchesEnvoy(assigned);
-      assertEnvoyItemMatchesOrder(getEnvoyItemForOrder(envDet, id));
-      validatedEnvoyCode = activeEnvoyCode;
-      if (activeEnvoyCode !== envoyCode) setEnvoyCode(activeEnvoyCode);
-    } catch (gateErr) {
-      setError(gateErr?.message || "Envoy validation failed before printing.");
-      setPhase("company_select");
-      return;
+    const request = {
+      delivery_order_id: String(deliveryOrderId),
+      store: store || null,
+      envoy_code: envoyCode,
+      order_number: orderNum || null,
+      company: selectedCompany.short || selectedCompany.name,
+    };
+    const signature = JSON.stringify(request);
+    if (pendingPrint.current?.signature !== signature) {
+      pendingPrint.current = { signature, requestId: createPrintRequestId() };
     }
-    const sourceRect = printButtonRef.current?.getBoundingClientRect
-      ? (() => {
-          const rect = printButtonRef.current.getBoundingClientRect();
-          return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-        })()
-      : null;
+    const sourceRect = printButtonRef.current?.getBoundingClientRect() || null;
 
+    printInFlight.current = true;
     setBusy(true);
+    setError(null);
     setPrintStatus(null);
     let queuedPayload = null;
     try {
       addLog("Sending label to print relay...");
-      const result = await enqueueLabelToRelay(id, store, validatedEnvoyCode);
-      addLog(`Queued! Job: ${result.job_id || "ok"} — printer agent will pick it up.`);
+      const result = await enqueueDeliveryLabel(request, pendingPrint.current.requestId, authFetch);
+      pendingPrint.current = null;
+      addLog(`Print queue receipt: ${result.job_id}`);
       setPrintStatus("success");
       setPhase("done");
       queuedPayload = {
         orderNumber: orderNum,
-        jobId: result.job_id || null,
+        jobId: result.job_id,
+        request,
         sourceRect,
       };
     } catch (e) {
+      setError(e.message || "Could not queue the label.");
       if (e?.status === 400 || e?.status === 409) {
-        // The server refused: the order has not landed in its envoy company.
-        // Never route around that by opening the label in the browser.
-        addLog(`Label refused: ${e.message}`);
-        setError(e.message || "This order is not ready to print.");
-        setPhase("company_select");
-        refreshPartnerSendState(validatedEnvoyCode, id).catch(() => {});
-        return;
+        pendingPrint.current = null;
+        refreshPartnerSendState(envoyCode, deliveryOrderId).catch(() => {});
       }
-      addLog(`Relay failed: ${e.message} — opening in browser instead.`);
-      try {
-        await openLabelWindow(id, validatedEnvoyCode);
-      } catch (openErr) {
-        addLog(`Could not open the label: ${openErr?.message || openErr}`);
-      }
-      setPrintStatus("fallback");
-      setPhase("done");
     } finally {
+      printInFlight.current = false;
       setBusy(false);
     }
     if (queuedPayload && typeof onQueued === "function") {
@@ -1403,7 +1366,6 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
   const sendActionLabel = companyStepActionLabel(selectedCompany, partnerSendState);
   const confirmsOnly = sendActionLabel === "Confirm Envoy & City";
   const queueState = useMemo(() => {
-    if (printStatus === "success") return { statusKey: "printed", statusLabel: "Printed" };
     if (phase === "fix_errors" || phase === "manual" || phase === "error") {
       return { statusKey: "information_error", statusLabel: "Information error" };
     }
@@ -1415,11 +1377,11 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
           : (confirmsOnly ? "Confirm envoy & city" : "Waiting to send to partner"),
       };
     }
-    if ((phase === "ready_print" || (phase === "done" && printStatus !== "fallback")) && envoyCode && companyId && partnerSendState.ok === true) {
+    if ((phase === "ready_print" || phase === "done") && envoyCode && companyId && partnerSendState.ok === true) {
       return { statusKey: "ready_to_print", statusLabel: "Ready to print" };
     }
     return { statusKey: "preparing", statusLabel: "Preparing" };
-  }, [phase, printStatus, envoyCode, companyId, partnerSendState.ok, confirmsOnly]);
+  }, [phase, envoyCode, companyId, partnerSendState.ok, confirmsOnly]);
   // A confirmed no-API envoy (Marrakech) keeps its company and city editable,
   // so the parcel can still be moved to a carrier before its label prints. A
   // carrier that already accepted the parcel is not offered again: re-sending
@@ -1748,11 +1710,6 @@ export default function DeliveryLabelPopup({ order, store, open = false, autoRun
                 {printStatus === "success" && (
                   <div className="text-xs text-green-700 mt-1 text-center font-semibold">
                     Sent to printer agent. The order is queued and you can move to the next lookup.
-                  </div>
-                )}
-                {printStatus === "fallback" && (
-                  <div className="text-xs text-amber-700 mt-1 text-center">
-                    Relay unavailable — label opened in browser. Use Ctrl+P to print.
                   </div>
                 )}
                 <button

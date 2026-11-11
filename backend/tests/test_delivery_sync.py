@@ -148,7 +148,10 @@ class PrepareDeliveryLabelTests(unittest.IsolatedAsyncioTestCase):
         calls = []
         rows = [{"id": 55, "orderName": "#167979", "status": "ERROR (city)", "hasError": True, "errorType": "city"}]
         result = await self._run(_label_routes(rows), calls)
-        self.assertEqual(result, {"ok": False, "reason": "queue_row_error", "queueRowId": 55})
+        self.assertEqual(result, {
+            "ok": False, "reason": "queue_row_error", "queueRowId": 55,
+            "merchantId": 7, "queueRow": rows[0],
+        })
         self.assertEqual(len(calls), 1)
 
     async def test_unresolved_city_id_is_an_error_row(self):
@@ -188,14 +191,23 @@ def _note(company, partner_id, sent_ok, sent_msg=None, order_id=4242):
 
 
 class LabelReadinessTests(unittest.IsolatedAsyncioTestCase):
-    async def _check(self, routes, envoy_code="EN-1"):
+    async def _check(self, routes, envoy_code="EN-1", **expected):
         return await check_label_readiness(
             delivery_url="https://delivery.example",
             admin_token="test-token",
             delivery_order_id="4242",
             envoy_code=envoy_code,
             client_factory=lambda **kwargs: _RoutedClient(routes, [], **kwargs),
+            **expected,
         )
+
+    async def test_print_validation_checks_shopify_order_and_selected_company(self):
+        envoy = _Response({"code": "EN-1", "company": "Carrier", "companyShort": "CAR"})
+        note = _Response({"partnerId": 24, "items": [{"orderId": 4242, "orderName": "#1002", "sentOk": True}]})
+        routes = _envoy_routes(envoy, note)
+        self.assertEqual((await self._check(routes, expected_company="Other"))["reason"], "company_mismatch")
+        self.assertEqual((await self._check(routes, order_number="1001"))["reason"], "order_mismatch")
+        self.assertTrue((await self._check(routes, order_number="1002", expected_company="CAR"))["ok"])
 
     async def test_partner_company_must_accept_the_order(self):
         envoy = _Response({"code": "EN-1", "company": "glog", "companyShort": "GLOG"})

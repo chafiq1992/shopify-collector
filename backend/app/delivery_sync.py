@@ -190,7 +190,10 @@ async def prepare_delivery_label(
             if row is None:
                 return {"ok": False, "reason": "not_in_queue"}
             if _queue_row_has_error(row):
-                return {"ok": False, "reason": "queue_row_error", "queueRowId": row.get("id")}
+                return {
+                    "ok": False, "reason": "queue_row_error", "queueRowId": row.get("id"),
+                    "merchantId": merchant_id, "queueRow": row,
+                }
             row_id = int(row.get("id") or 0)
 
             note = await client.post(
@@ -259,6 +262,8 @@ async def check_label_readiness(
     admin_token: str,
     delivery_order_id: Any,
     envoy_code: str | None = None,
+    order_number: str | None = None,
+    expected_company: str | None = None,
     client_factory: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Decide whether a delivery label may be printed.
@@ -305,6 +310,9 @@ async def check_label_readiness(
                 )
             if not _company_assigned(company, envoy.get("companyShort")):
                 return _not_ready(409, "unassigned", "This order is still Unassigned. Choose its envoy company before printing.")
+            expected = (expected_company or "").strip().lower()
+            if expected and expected not in {company.lower(), str(envoy.get("companyShort") or "").strip().lower()}:
+                return _not_ready(409, "company_mismatch", f"This order is assigned to {company}. Reopen it before printing.")
 
             detail = await client.get(f"{base_url}/admin/envoy-notes/{quote(code, safe='')}", headers=headers)
             if detail.status_code >= 400:
@@ -319,6 +327,10 @@ async def check_label_readiness(
             )
             if item is None:
                 return _not_ready(409, "not_in_note", f"Envoy {code} no longer contains this order. Reopen it before printing.")
+            item_order = _normalize_order_name(item.get("orderName") or item.get("order_name"))
+            expected_order = _normalize_order_name(order_number)
+            if item_order and expected_order and item_order != expected_order:
+                return _not_ready(409, "order_mismatch", "The delivery order does not match this Shopify order. Reopen it before printing.")
             partner_api = bool(note.get("partnerId"))
             if partner_api and item.get("sentOk") is not True:
                 reason = str(item.get("sentMsg") or "").strip()[:200]

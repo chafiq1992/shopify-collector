@@ -391,11 +391,14 @@ async def _enqueue_job(pc_id: str, payload: dict, dedup_key: str = "") -> dict:
                     ))
                 if dedup_key:
                     cutoff = datetime.now(timezone.utc) - timedelta(seconds=_DEDUP_WINDOW_SEC)
+                    recent = PrintJob.created_at >= cutoff
+                    if payload.get("type") == "label":
+                        recent = recent & (PrintJob.status != "failed")
                     existing = existing or await session.scalar(
                         select(PrintJob).where(
                             PrintJob.dedup_key == dedup_key,
                             PrintJob.pc_id == pc_id,
-                            or_(PrintJob.status.in_(["pending", "inflight"]), PrintJob.created_at >= cutoff),
+                            or_(PrintJob.status.in_(["pending", "inflight"]), recent),
                         ).limit(1)
                     )
                 if existing:
@@ -450,7 +453,9 @@ async def _enqueue_job(pc_id: str, payload: dict, dedup_key: str = "") -> dict:
             existing = store_q.get(existing["payload"]["duplicate_of"])
         if not existing and dedup_key:
             existing = next((j for j in store_q.values() if j.get("dedup_key") == dedup_key and (
-                j["status"] in ("pending", "inflight") or now - j.get("created_at", 0) < _DEDUP_WINDOW_SEC
+                j["status"] in ("pending", "inflight")
+                or (now - j.get("created_at", 0) < _DEDUP_WINDOW_SEC
+                    and (payload.get("type") != "label" or j["status"] != "failed"))
             )), None)
         count = sum(j["status"] in ("pending", "inflight") for j in store_q.values())
         if existing:
@@ -544,6 +549,9 @@ class EnqueueLabelBody(BaseModel):
     delivery_order_id: str
     store: Optional[str] = None
     envoy_code: Optional[str] = None
+    request_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    order_number: Optional[str] = Field(default=None, max_length=64)
+    company: Optional[str] = Field(default=None, max_length=128)
 
 class AckBody(BaseModel):
     pc_id: str
@@ -989,7 +997,10 @@ async def renew(b: AckBody):
         job["leased_at"] = time.time()
         return {"ok": True, "renewed": True}
 
-async def _require_label_ready(delivery_order_id: str, envoy_code: Optional[str]) -> dict:
+async def _require_label_ready(
+    delivery_order_id: str, envoy_code: Optional[str], *,
+    order_number: Optional[str] = None, company: Optional[str] = None,
+) -> dict:
     """Refuse a label until its order has landed in its envoy company.
 
     Checked on the server because both ways a label leaves this app (the
@@ -1003,6 +1014,8 @@ async def _require_label_ready(delivery_order_id: str, envoy_code: Optional[str]
         admin_token=DELVERY_ADMIN_TOKEN,
         delivery_order_id=delivery_order_id,
         envoy_code=envoy_code,
+        order_number=order_number,
+        expected_company=company,
         client_factory=_shared_delivery_http_client,
     )
     if not ready.get("ok"):
@@ -1021,20 +1034,69 @@ async def enqueue_label(
 ):
     if not _has_relay_access(x_api_key, authorization):
         raise HTTPException(status_code=401, detail="unauthorized")
-    import time as _t, uuid as _uuid
-    jid = str(_uuid.uuid4())
     dlv_id = str(body.delivery_order_id).strip()
-    ready = await _require_label_ready(dlv_id, body.envoy_code)
+    ready = await _require_label_ready(
+        dlv_id, body.envoy_code, order_number=body.order_number, company=body.company,
+    )
+    store = (body.store or "").strip() or None
     payload = {
-        "job_id": jid,
-        "ts": int(_t.time()),
+        "job_id": _print_job_id(DEFAULT_PC_ID, body.request_id),
+        "ts": int(_time_mod.time()),
         "type": "label",
         "delivery_order_id": dlv_id,
-        "store": (body.store or "").strip() or None,
+        "store": store,
         "envoy_code": ready.get("envoyCode") or (body.envoy_code or "").strip() or None,
     }
-    dk = _dedup_key_for_label(dlv_id, body.store)
+    dk = _dedup_key_for_label(dlv_id, store)
     return await _enqueue_job(DEFAULT_PC_ID, payload, dk)
+
+
+@app.get("/api/print-job-statuses")
+async def print_job_statuses(
+    job_ids: List[str] = Query(..., min_length=1, max_length=50),
+    x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    if not _has_relay_access(x_api_key, authorization):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    if any(not job_id or len(job_id) > 64 for job_id in job_ids):
+        raise HTTPException(status_code=422, detail="Invalid print job ID")
+
+    def statuses(rows: dict) -> dict:
+        result = {}
+        for job_id in job_ids:
+            row = rows.get(job_id)
+            if row and row["status"] == "alias":
+                row = rows.get((row["payload"] or {}).get("duplicate_of"))
+            result[job_id] = _public_job_status(row["status"]) if row else "not_found"
+        return {"statuses": result}
+
+    if SessionLocal is not None and PrintJob is not None:
+        async def load(session, ids):
+            found = await session.execute(
+                select(PrintJob.job_id, PrintJob.status, PrintJob.payload).where(
+                    PrintJob.pc_id == DEFAULT_PC_ID, PrintJob.job_id.in_(ids),
+                )
+            )
+            return {row.job_id: row._mapping for row in found}
+
+        try:
+            async with SessionLocal() as session:
+                rows = await load(session, job_ids)
+                aliases = {
+                    (row["payload"] or {}).get("duplicate_of")
+                    for row in rows.values() if row["status"] == "alias"
+                }
+                missing = aliases.difference(rows, {None})
+                if missing:
+                    rows.update(await load(session, missing))
+                return statuses(rows)
+        except Exception as exc:
+            logger.exception("[PRINT_RELAY] DB print-job-statuses failed")
+            raise HTTPException(status_code=503, detail="Print status unavailable") from exc
+
+    async with _JOB_LOCK:
+        return statuses(JOB_STORE.get(DEFAULT_PC_ID, {}))
 
 
 def _public_job_status(status: Optional[str]) -> str:
