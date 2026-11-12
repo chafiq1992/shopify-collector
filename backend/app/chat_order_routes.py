@@ -317,11 +317,89 @@ async def chat_product_options(
 
 # ---------- Create the order ----------
 
+CUSTOMER_BY_PHONE_GQL = """
+query ChatOrderCustomerByPhone($identifier: CustomerIdentifierInput!) {
+  customerByIdentifier(identifier: $identifier) { id }
+}
+"""
+
+CUSTOMER_CREATE_GQL = """
+mutation ChatOrderCustomerCreate($input: CustomerInput!) {
+  customerCreate(input: $input) {
+    customer { id }
+    userErrors { field message }
+  }
+}
+"""
+
+
+async def _order_customer_by_phone(phone: str, *, store: str) -> Optional[str]:
+    try:
+        data = await _shopify(
+            CUSTOMER_BY_PHONE_GQL, {"identifier": {"phoneNumber": phone}},
+            store=store, api_version=CONFIRMATION_API_VERSION,
+        )
+    except HTTPException as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail="Could not look up this phone in Shopify. Check the store connection or try again.",
+        ) from error
+    if not data or "customerByIdentifier" not in data:
+        raise HTTPException(status_code=422, detail="Shopify did not confirm the customer lookup. Try again.")
+    customer = data["customerByIdentifier"]
+    if customer is None:
+        return None
+    if not customer.get("id"):
+        raise HTTPException(status_code=422, detail="Shopify returned a customer without an ID. Try again.")
+    return customer["id"]
+
+
+async def _resolve_order_customer(
+    phone: str, first_name: str, last_name: Optional[str], email: Optional[str],
+    selected_id: Optional[str], *, store: str,
+) -> str:
+    customer_id = await _order_customer_by_phone(phone, store=store)
+    if selected_id and selected_id != customer_id:
+        raise HTTPException(
+            status_code=422,
+            detail="The selected Shopify customer doesn't match this phone. Check the number or unlink the selected customer.",
+        )
+    if customer_id:
+        return customer_id
+
+    customer_input = {"phone": phone, "firstName": first_name, "lastName": last_name or ""}
+    if email:
+        customer_input["email"] = email
+    try:
+        data = await _shopify(
+            CUSTOMER_CREATE_GQL, {"input": customer_input}, store=store,
+            api_version=CONFIRMATION_API_VERSION, retry_transient=False, retry_safe=False,
+        )
+    except HTTPException as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail="Shopify did not confirm customer creation. No order was sent. Try again to check for the customer by phone.",
+        ) from error
+
+    payload = (data or {}).get("customerCreate") or {}
+    customer_id = (payload.get("customer") or {}).get("id")
+    if customer_id:
+        return customer_id
+    # A separate chat may have just created this phone. Shopify enforces
+    # uniqueness; reuse the exact match instead of creating a second profile.
+    customer_id = await _order_customer_by_phone(phone, store=store)
+    if customer_id:
+        return customer_id
+    errors = "; ".join(e["message"] for e in (payload.get("userErrors") or []) if e.get("message"))
+    detail = f"Shopify refused the customer: {errors}" if errors else "Shopify did not return a customer ID. Try again."
+    raise HTTPException(status_code=422, detail=detail)
+
+
 ORDER_VARIANTS_GQL = """
 query ChatOrderVariants($ids: [ID!]!) {
   shop { currencyCode }
   nodes(ids: $ids) {
-    ... on ProductVariant { id title price product { title } }
+    ... on ProductVariant { id price inventoryItem { requiresShipping } }
   }
 }
 """
@@ -329,7 +407,11 @@ query ChatOrderVariants($ids: [ID!]!) {
 ORDER_CREATE_GQL = """
 mutation ChatOrderCreate($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
   orderCreate(order: $order, options: $options) {
-    order { id name legacyResourceId }
+    order {
+      id name legacyResourceId requiresShipping
+      customer { id }
+      shippingAddress { firstName lastName address1 city phone countryCodeV2 }
+    }
     userErrors { field message }
   }
 }
@@ -398,9 +480,13 @@ def _is_unknown_outcome(error: HTTPException) -> bool:
     detail = str(getattr(error, "detail", "") or "")
     if error.status_code in (400, 401, 403, 404, 422, 429):
         return False
-    # GraphQL-level errors are returned before the mutation runs, and a 4xx
-    # HTTP answer means Shopify refused the request outright.
-    return not (detail.startswith("Shopify GraphQL errors") or "Client error '4" in detail)
+    if "Client error '4" in detail:
+        return False
+    if detail.startswith("Shopify GraphQL errors"):
+        # Validation errors have no execution path. Errors resolving a field
+        # in the response can happen after the order was already written.
+        return bool(re.search(r"['\"]path['\"]\s*:", detail))
+    return True
 
 
 def _discount(body: "ChatCreateOrderBody") -> Tuple[Optional[str], Decimal, str]:
@@ -450,7 +536,7 @@ async def chat_create_order(
     if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         raise HTTPException(status_code=422, detail="invalid email")
     customer_id = (body.customer_id or "").strip() or None
-    if customer_id and not customer_id.startswith("gid://shopify/Customer/"):
+    if customer_id and not re.fullmatch(r"gid://shopify/Customer/\d+", customer_id):
         raise HTTPException(status_code=422, detail="invalid customer")
 
     lines: Dict[str, int] = {}
@@ -487,18 +573,26 @@ async def chat_create_order(
 
     from .main import shopify_graphql  # type: ignore
 
-    data = await _shopify(ORDER_VARIANTS_GQL, {"ids": list(lines)}, store=r.store_key)
+    data = await _shopify(
+        ORDER_VARIANTS_GQL, {"ids": list(lines)}, store=r.store_key, api_version=CONFIRMATION_API_VERSION,
+    )
     currency = (((data or {}).get("shop") or {}).get("currencyCode")) or "MAD"
     variants = {n.get("id"): n for n in ((data or {}).get("nodes") or []) if n and n.get("id")}
     gone = [vid for vid in lines if vid not in variants]
     if gone:
         raise HTTPException(status_code=422, detail="a product in this order no longer exists in Shopify — remove it and pick again")
+    shipping_flags = {vid: (variants[vid].get("inventoryItem") or {}).get("requiresShipping") for vid in lines}
+    if any(not isinstance(flag, bool) for flag in shipping_flags.values()):
+        raise HTTPException(status_code=422, detail="Shopify did not confirm which products require shipping. Try again.")
+    if not any(shipping_flags.values()):
+        raise HTTPException(status_code=422, detail="Add a product that requires shipping to create a delivery order.")
     subtotal = sum(Decimal(str(variants[vid].get("price") or "0")) * qty for vid, qty in lines.items())
     if discount_kind == "amount" and discount_value > subtotal:
         raise HTTPException(status_code=422, detail="the discount is larger than the products total")
     discount_amount = (
         (subtotal * discount_value / 100).quantize(Decimal("0.01")) if discount_kind == "percentage" else discount_value
     )
+    customer_id = await _resolve_order_customer(phone, first_name, last_name, email, customer_id, store=r.store_key)
 
     def money(amount: Any) -> Dict[str, Any]:
         return {"shopMoney": {"amount": str(amount), "currencyCode": currency}}
@@ -518,9 +612,13 @@ async def chat_create_order(
         # Cash on delivery: nothing is paid yet.
         "financialStatus": "PENDING",
         "lineItems": [
-            {"variantId": vid, "quantity": qty, "priceSet": money(variants[vid].get("price") or "0")}
+            {
+                "variantId": vid, "quantity": qty, "requiresShipping": shipping_flags[vid],
+                "priceSet": money(variants[vid].get("price") or "0"),
+            }
             for vid, qty in lines.items()
         ],
+        "customer": {"toAssociate": {"id": customer_id}},
         "shippingAddress": address,
         "billingAddress": address,
         "phone": phone,
@@ -531,13 +629,6 @@ async def chat_create_order(
         order["note"] = note
     if email:
         order["email"] = email
-    if customer_id:
-        order["customer"] = {"toAssociate": {"id": customer_id}}
-    else:
-        upsert: Dict[str, Any] = {"firstName": first_name, "lastName": last_name or "", "phone": phone}
-        if email:
-            upsert["email"] = email
-        order["customer"] = {"toUpsert": upsert}
     if shipping_price > 0 or (body.shipping_title or "").strip():
         order["shippingLines"] = [{
             "title": _clean(body.shipping_title, 100) or "Livraison",
@@ -559,24 +650,19 @@ async def chat_create_order(
         try:
             result = await shopify_graphql(
                 ORDER_CREATE_GQL, {"order": order_input, "options": options}, store=r.store_key, retry_transient=False,
+                api_version=CONFIRMATION_API_VERSION,
             )
         except HTTPException as error:
             return {}, str(error.detail), _is_unknown_outcome(error)
         payload = (result or {}).get("orderCreate") or {}
         errors = [e.get("message") for e in (payload.get("userErrors") or []) if e.get("message")]
         created_order = payload.get("order") or {}
-        if errors or not created_order.get("id"):
-            return {}, "; ".join(errors) or "Shopify did not create the order", False
-        return created_order, None, False
+        if created_order.get("id"):
+            return created_order, None, False
+        return {}, "; ".join(errors) or "Shopify did not confirm the order", not errors
 
     client_action_id = (body.client_action_id or "").strip()[:128] or None
     created, refusal, unknown = await send(order)
-    if refusal and not unknown and "toUpsert" in order.get("customer", {}) and re.search(r"customer", refusal, re.I):
-        # Shopify refused (so made nothing) because of the new-customer part, e.g. the
-        # app may not create customers. The order matters more: send it without that.
-        logger.warning("chat order %s: retrying without the customer upsert after: %s", r.id, refusal)
-        retry = {k: v for k, v in order.items() if k != "customer"}
-        created, refusal, unknown = await send(retry)
 
     if not created:
         logger.warning("chat order %s not created (unknown=%s): %s", r.id, unknown, refusal)
@@ -594,6 +680,26 @@ async def chat_create_order(
             })
         raise HTTPException(status_code=422, detail=f"Shopify refused the order: {refusal}")
 
+    # Once Shopify returns an ID, keep it even if the response is incomplete.
+    # The agent must fix that order rather than creating a duplicate.
+    issues = []
+    if (created.get("customer") or {}).get("id") != customer_id:
+        issues.append("linked customer")
+    saved_address = created.get("shippingAddress") or {}
+    if (
+        not created.get("requiresShipping")
+        or not (_clean(saved_address.get("firstName"), 100) or _clean(saved_address.get("lastName"), 100))
+        or not _clean(saved_address.get("address1"), 255)
+        or not _clean(saved_address.get("city"), 100)
+        or normalize_phone(saved_address.get("phone") or "") != phone
+        or saved_address.get("countryCodeV2") != country
+    ):
+        issues.append("shipping details")
+    warning = None
+    if issues:
+        logger.warning("chat order %s (%s): Shopify did not confirm %s", r.id, created["id"], ", ".join(issues))
+        warning = f"Shopify did not confirm the {' and '.join(issues)}. Open this order in Shopify and correct it before shipping."
+
     now = datetime.now(timezone.utc)
     name = created.get("name") or ""
     r.status = "ordered"
@@ -610,6 +716,7 @@ async def chat_create_order(
             "order_ref": r.order_ref,
             "order_id": created.get("id"),
             "created": True,
+            **({"verification_issues": issues} if issues else {}),
             "total": str(subtotal - discount_amount + shipping_price),
             "discount": str(discount_amount) if discount_kind else None,
             "currency": currency,
@@ -629,6 +736,7 @@ async def chat_create_order(
             "name": name,
             "legacy_id": legacy,
             "admin_url": f"https://{domain}/admin/orders/{legacy}" if domain and legacy else None,
+            "warning": warning,
         },
         "request": serialize_request(r, users, (await _labels_for(db, [r.id]))[r.id]),
     }

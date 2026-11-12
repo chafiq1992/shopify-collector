@@ -301,7 +301,7 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
       ...f,
       first_name: a.first_name || c.first_name || f.first_name,
       last_name: a.last_name || c.last_name || f.last_name,
-      phone: f.phone || localPhone(a.phone || c.phone),
+      phone: f.phone || localPhone(c.phone || a.phone),
       email: c.email || f.email,
       city: a.city || f.city,
       address1: a.address1 || f.address1,
@@ -453,8 +453,11 @@ export default function ChatCreateOrderModal({ request: r, store, shopDomain, me
     return (
       <Shell onClose={onClose} busy={false} title="Order created" subtitle={`${store} · chat request #${r.id}`}>
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-100 text-emerald-600"><Check className="h-7 w-7" aria-hidden /></div>
+          {created.warning
+            ? <div className="flex h-14 w-14 items-center justify-center rounded-full bg-amber-100 text-amber-700"><TriangleAlert className="h-7 w-7" aria-hidden /></div>
+            : <div className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-100 text-emerald-600"><Check className="h-7 w-7" aria-hidden /></div>}
           <div className="text-lg font-bold text-slate-900">Order {created.name} created</div>
+          {created.warning && <p role="alert" className="max-w-md rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-900">{created.warning}</p>}
           <div className="text-sm text-slate-500">Cash on delivery · the chat request is closed as ordered.</div>
           <div className="mt-2 flex gap-2">
             {url && <a href={url} target="_blank" rel="noopener noreferrer" className={`${BTN.secondary} h-10`}><ExternalLink className="h-4 w-4" aria-hidden /> Open in Shopify</a>}

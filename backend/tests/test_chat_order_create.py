@@ -24,27 +24,36 @@ from backend.app.models import ChatRequest, ChatRequestEvent, User
 
 V1 = "gid://shopify/ProductVariant/111"
 V2 = "gid://shopify/ProductVariant/222"
+C1 = "gid://shopify/Customer/77"
 
 
 class FakeShopify:
     """Stands in for main.shopify_graphql and records every call."""
 
-    def __init__(self, create_result=None, create_error=None, variant_ids=(V1, V2)):
+    def __init__(self, create_result=None, create_error=None, variant_ids=(V1, V2),
+                 customer_matches=(None,), customer_create_result=None, nonshipping=()):
         self.calls = []
-        self.create_result = create_result or {
-            "orderCreate": {"order": {"id": "gid://shopify/Order/9", "name": "#1001", "legacyResourceId": "9"}, "userErrors": []}
-        }
+        self.create_result = create_result
         self.create_error = create_error
         self.variant_ids = variant_ids
+        self.customer_matches = iter(customer_matches)
+        self.customer_create_result = customer_create_result
+        self.nonshipping = nonshipping
 
-    async def __call__(self, query, variables, *, store, api_version=None, retry_transient=True):
-        self.calls.append({"query": query, "variables": variables, "store": store, "retry_transient": retry_transient})
+    async def __call__(self, query, variables, *, store, api_version=None, retry_transient=True, retry_safe=True):
+        self.calls.append({"query": query, "variables": variables, "store": store,
+                           "retry_transient": retry_transient, "retry_safe": retry_safe})
+        if "ChatOrderCustomerByPhone" in query:
+            match = next(self.customer_matches, None)
+            return {"customerByIdentifier": {"id": match} if match else None}
+        if "ChatOrderCustomerCreate" in query:
+            return self.customer_create_result or {"customerCreate": {"customer": {"id": C1}, "userErrors": []}}
         if "ChatOrderVariants" in query:
             prices = {V1: "299.99", V2: "150.00"}
             return {
                 "shop": {"currencyCode": "MAD"},
                 "nodes": [
-                    {"id": vid, "title": "Brown / 12-18 months", "price": prices[vid], "product": {"title": "Puffer"}}
+                    {"id": vid, "price": prices[vid], "inventoryItem": {"requiresShipping": vid not in self.nonshipping}}
                     if vid in self.variant_ids else None
                     for vid in variables["ids"]
                 ],
@@ -52,12 +61,22 @@ class FakeShopify:
         if "ChatOrderCreate" in query:
             if self.create_error:
                 raise self.create_error
-            return self.create_result
+            order = variables["order"]
+            address = order["shippingAddress"]
+            return self.create_result or {"orderCreate": {"order": {
+                "id": "gid://shopify/Order/9", "name": "#1001", "legacyResourceId": "9",
+                "customer": order["customer"]["toAssociate"], "requiresShipping": True,
+                "shippingAddress": {**address, "countryCodeV2": address["countryCode"]},
+            }, "userErrors": []}}
         raise AssertionError(f"unexpected query {query[:40]}")
 
     @property
     def creates(self):
         return [c for c in self.calls if "ChatOrderCreate" in c["query"]]
+
+    @property
+    def customer_creates(self):
+        return [c for c in self.calls if "ChatOrderCustomerCreate" in c["query"]]
 
 
 async def _no_domain(store):
@@ -120,6 +139,7 @@ class ChatOrderCreateTests(unittest.IsolatedAsyncioTestCase):
             shipping_price="30", tags=["cod 03/10/26", "COD 03/10/26", "vip, gold"],
         )
         self.assertEqual(res["order"]["name"], "#1001")
+        self.assertIsNone(res["order"]["warning"])
         self.assertEqual(res["request"]["status"], "ordered")
         self.assertEqual(res["request"]["order_ref"], "#1001")
 
@@ -135,11 +155,23 @@ class ChatOrderCreateTests(unittest.IsolatedAsyncioTestCase):
             [(V1, 2, "299.99"), (V2, 2, "150.00")],
         )
         self.assertEqual(order["shippingAddress"]["city"], "Casablanca")
+        self.assertEqual(order["shippingAddress"]["address1"], "Hay Mohammadi, rue 12")
+        self.assertEqual(order["shippingAddress"]["phone"], "+212648831323")
         self.assertEqual(order["shippingAddress"]["countryCode"], "MA")
+        self.assertTrue(all(li["requiresShipping"] for li in order["lineItems"]))
         self.assertEqual(order["tags"], ["cod 03/10/26", "vip gold"])
         self.assertEqual(order["note"], "Call before delivery")
         self.assertEqual(order["shippingLines"][0]["priceSet"]["shopMoney"]["amount"], "30.00")
-        self.assertEqual(order["customer"], {"toUpsert": {"firstName": "Rabi3a", "lastName": "Ben Ali", "phone": "+212648831323"}})
+        lookup = next(c for c in fake.calls if "ChatOrderCustomerByPhone" in c["query"])
+        self.assertEqual(lookup["variables"], {"identifier": {"phoneNumber": "+212648831323"}})
+        (customer_create,) = fake.customer_creates
+        self.assertEqual(customer_create["variables"]["input"], {
+            "firstName": "Rabi3a", "lastName": "Ben Ali", "phone": "+212648831323",
+        })
+        self.assertFalse(customer_create["retry_transient"])
+        self.assertFalse(customer_create["retry_safe"])
+        self.assertEqual({c["store"] for c in fake.calls}, {"irrakids"})
+        self.assertEqual(order["customer"], {"toAssociate": {"id": C1}})
         self.assertEqual(call["variables"]["options"]["inventoryBehaviour"], "DECREMENT_OBEYING_POLICY")
 
         ordered = [e for e in await self.events() if e.action == "ordered"]
@@ -148,11 +180,51 @@ class ChatOrderCreateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ordered[0].detail["total"], "929.98")
 
     async def test_existing_customer_is_associated_and_free_shipping_has_no_line(self):
-        fake = FakeShopify()
-        await self.create(fake, customer_id="gid://shopify/Customer/77")
+        fake = FakeShopify(customer_matches=(C1,))
+        await self.create(fake, phone="00212 648 831 323")
         order = fake.creates[0]["variables"]["order"]
-        self.assertEqual(order["customer"], {"toAssociate": {"id": "gid://shopify/Customer/77"}})
+        self.assertEqual(order["customer"], {"toAssociate": {"id": C1}})
+        self.assertEqual(fake.customer_creates, [])
         self.assertNotIn("shippingLines", order)
+
+    async def test_selected_customer_must_match_the_entered_phone(self):
+        fake = FakeShopify(customer_matches=(C1,))
+        with self.assertRaises(HTTPException) as ctx:
+            await self.create(fake, customer_id="gid://shopify/Customer/78")
+        self.assertIn("doesn't match this phone", ctx.exception.detail)
+        self.assertEqual(fake.customer_creates, [])
+        self.assertEqual(fake.creates, [])
+
+    async def test_uses_customer_created_by_a_concurrent_request(self):
+        fake = FakeShopify(customer_matches=(None, C1), customer_create_result={"customerCreate": {
+            "customer": None, "userErrors": [{"field": ["phone"], "message": "Phone has already been taken"}],
+        }})
+        await self.create(fake)
+        self.assertEqual(len(fake.customer_creates), 1)
+        (call,) = fake.creates
+        self.assertEqual(call["variables"]["order"]["customer"], {"toAssociate": {"id": C1}})
+
+    async def test_cannot_create_a_delivery_order_without_a_shippable_line(self):
+        fake = FakeShopify(nonshipping=(V1,))
+        with self.assertRaises(HTTPException) as ctx:
+            await self.create(fake)
+        self.assertIn("requires shipping", ctx.exception.detail)
+        self.assertEqual(fake.customer_creates, [])
+        self.assertEqual(fake.creates, [])
+
+    async def test_shopify_returns_an_order_id_but_missing_delivery_details(self):
+        fake = FakeShopify(create_result={"orderCreate": {"order": {
+            "id": "gid://shopify/Order/9", "name": "#1001", "legacyResourceId": "9",
+            "customer": None, "shippingAddress": None, "requiresShipping": False,
+        }, "userErrors": []}})
+        result = await self.create(fake)
+        self.assertIn("linked customer and shipping details", result["order"]["warning"])
+        self.assertEqual((await self.request_row()).order_ref, "#1001")
+        self.assertEqual((await self.events())[-1].detail["verification_issues"], ["linked customer", "shipping details"])
+        with self.assertRaises(HTTPException) as ctx:
+            await self.create(fake)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(len(fake.creates), 1)
 
     async def test_a_second_create_is_refused_once_ordered(self):
         await self.create(FakeShopify())
@@ -259,6 +331,20 @@ class ChatOrderCreateTests(unittest.IsolatedAsyncioTestCase):
         await self.create(FakeShopify())
         self.assertEqual((await self.request_row()).status, "ordered")
 
+    async def test_graphql_error_reading_back_shipping_does_not_allow_a_blind_retry(self):
+        bad = FakeShopify(create_error=HTTPException(
+            status_code=502, detail="Shopify GraphQL errors: [{'message': 'Failed to read address', "
+            "'path': ['orderCreate', 'order', 'shippingAddress']}]",
+        ))
+        with self.assertRaises(HTTPException) as ctx:
+            await self.create(bad)
+        self.assertEqual(ctx.exception.detail["code"], "maybe_created")
+        retry = FakeShopify()
+        with self.assertRaises(HTTPException) as ctx:
+            await self.create(retry)
+        self.assertEqual(ctx.exception.detail["code"], "maybe_created")
+        self.assertEqual(retry.calls, [])
+
     async def test_shopify_4xx_is_a_clear_refusal(self):
         denied = FakeShopify(create_error=HTTPException(
             status_code=502, detail="Shopify request failed: Client error '403 Forbidden' for url 'https://x'"))
@@ -280,24 +366,34 @@ class ChatOrderCreateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status_code, 422)
         self.assertIn("Throttled?", ctx.exception.detail)
 
-    async def test_customer_refusal_retries_once_without_the_customer(self):
+    async def test_customer_creation_refusal_sends_no_order_and_keeps_the_chat_open(self):
         class NoCustomers(FakeShopify):
             async def __call__(self, query, variables, **kw):
-                if "ChatOrderCreate" in query and "customer" in variables["order"]:
-                    self.calls.append({"query": query, "variables": variables, "retry_transient": kw.get("retry_transient")})
+                if "ChatOrderCustomerCreate" in query:
                     raise HTTPException(status_code=502, detail="Shopify GraphQL errors: [{'message': 'Access denied for customer field. Required access: write_customers'}]")
                 return await super().__call__(query, variables, **kw)
 
         fake = NoCustomers()
-        res = await self.create(fake)
-        self.assertEqual(res["order"]["name"], "#1001")
-        self.assertEqual(len(fake.creates), 2)
-        self.assertIn("customer", fake.creates[0]["variables"]["order"])
-        self.assertNotIn("customer", fake.creates[1]["variables"]["order"])
-        self.assertTrue(all(c["retry_transient"] is False for c in fake.creates))
+        with self.assertRaises(HTTPException) as ctx:
+            await self.create(fake)
+        self.assertIn("No order was sent", ctx.exception.detail)
+        self.assertEqual(fake.creates, [])
+        self.assertEqual((await self.request_row()).status, "calling")
+
+    async def test_order_customer_refusal_never_retries_without_the_customer(self):
+        refused = FakeShopify(create_result={"orderCreate": {"order": None, "userErrors": [
+            {"message": "Customer is blocked"},
+        ]}})
+        with self.assertRaises(HTTPException) as ctx:
+            await self.create(refused)
+        self.assertIn("Customer is blocked", ctx.exception.detail)
+        self.assertEqual(len(refused.creates), 1)
+        self.assertEqual((await self.request_row()).status, "calling")
 
     async def test_linked_customer_refusal_is_not_retried(self):
-        refused = FakeShopify(create_result={"orderCreate": {"order": None, "userErrors": [{"message": "Customer is blocked"}]}})
+        refused = FakeShopify(customer_matches=(C1,), create_result={
+            "orderCreate": {"order": None, "userErrors": [{"message": "Customer is blocked"}]},
+        })
         with self.assertRaises(HTTPException):
             await self.create(refused, customer_id="gid://shopify/Customer/77")
         self.assertEqual(len(refused.creates), 1)

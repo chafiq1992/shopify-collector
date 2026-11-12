@@ -474,7 +474,11 @@ export default function ChatConfirmationView({ me, store, setStore, view, onView
   // The order was created in Shopify and the request closed as ordered.
   function onOrderCreated(js) {
     applyUpdated(js.request);
-    pushToast(`Order ${js.order?.name || ""} created in Shopify`, "success", 5000);
+    if (js.order?.warning) {
+      pushToast(`Order ${js.order.name}: ${js.order.warning}`, "warn", 8000);
+    } else {
+      pushToast(`Order ${js.order?.name || ""} created in Shopify`, "success", 5000);
+    }
     load();
     loadTeam();
     onWaitingChanged?.();
