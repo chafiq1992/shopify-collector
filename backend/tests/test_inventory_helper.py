@@ -6,7 +6,13 @@ os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 from datetime import date
 
 import pytest
+from fastapi import FastAPI, HTTPException
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from backend.app import inventory_helper_routes as helper
+from backend.app.db import Base
+from backend.app.models import InventoryReceipt, User
 from backend.app.inventory_helper_routes import (
     InventoryCountLineItemInput,
     InventoryFinalizeUpdate,
@@ -444,7 +450,7 @@ def test_sync_plan_removes_two_previously_received_units_when_agent_counts_zero(
 
     assert receives == {}
     assert merged[0]["actual_quantity"] == 0
-    assert merged[0]["inventory_applied_quantity"] == 0
+    assert merged[0]["inventory_applied_quantity"] == 2
     assert adjustments == [
         {
             "inventory_item_id": "inventory-red-21",
@@ -512,3 +518,119 @@ async def test_inventory_adjustment_reports_shopify_before_and_after(monkeypatch
             "after_quantity": 1,
         }
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "missing_location", "inactive_variant", "shopify_unavailable", "count_only"])
+async def test_receiving_count_and_completion_survive_shopify_sync_errors(monkeypatch, failure):
+    from backend.app import main
+
+    item_id = "gid://shopify/InventoryItem/3"
+    transfer = {
+        "destination": {
+            "location": None if failure == "missing_location" else {"id": "gid://shopify/Location/8"},
+        },
+        "lineItems": {"nodes": [{
+            "id": "line-1", "title": "Platform clogs", "totalQuantity": 2,
+            "inventoryItem": {"id": item_id, "variant": {"title": "Beige / 38"}},
+        }]},
+        "shipments": {"nodes": [{
+            "id": "shipment-1", "status": "IN_TRANSIT",
+            "lineItems": {"nodes": [{
+                "id": "shipment-line-1", "acceptedQuantity": 0, "unreceivedQuantity": 1,
+                "inventoryItem": {"id": item_id},
+            }]},
+        }]},
+    }
+    writes = []
+
+    async def shopify(query, variables, **kwargs):
+        assert kwargs["store"] == "irranova"
+        if "InventoryHelperTransferById" in query:
+            if failure == "shopify_unavailable":
+                raise HTTPException(502, "Shopify API unavailable")
+            return {"inventoryTransfer": transfer}
+        if "InventoryHelperReceiveShipment" in query:
+            writes.append(("receive", variables["lineItems"][0]["quantity"]))
+            return {"inventoryShipmentReceive": {"userErrors": []}}
+        if "InventoryHelperAdjust" in query:
+            writes.append(("adjust", variables["input"]["changes"][0]["delta"]))
+            return {"inventoryAdjustQuantities": {"userErrors": []}}
+        assert "InventoryHelperLevels" in query
+        return {"nodes": [{
+            "id": item_id,
+            "inventoryLevel": None if failure == "inactive_variant" else {
+                "quantities": [{"name": "available", "quantity": 2}],
+            },
+        }]}
+
+    monkeypatch.setattr(main, "shopify_graphql", shopify)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    agent = User(id="agent", email="agent@example.test", password_hash="unused")
+
+    async def session():
+        async with sessions() as db:
+            yield db
+
+    app = FastAPI()
+    app.include_router(helper.router)
+    app.dependency_overrides[helper.get_session] = session
+    app.dependency_overrides[helper.get_current_user] = lambda: agent
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as db:
+            db.add(agent)
+            db.add(InventoryReceipt(
+                id=1, store_key="irranova", order_number="PO-1",
+                shopify_order_gid="gid://shopify/InventoryTransfer/1",
+                shopify_details_loaded=True, created_by_id=agent.id, ordered_crates=1,
+                expected_items=2, line_items=_line_items_from_shopify(transfer),
+            ))
+            await db.commit()
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            path = "/api/inventory-helper/receipts"
+            count = {"actual_crates": 1, "total_items_received": 2, "line_items": []}
+            invalid = await client.patch(f"{path}/1/count", json=count)
+            assert invalid.status_code == 400
+            assert writes == []
+
+            count["line_items"] = [{"id": "line-1", "actual_quantity": 2}]
+            count["sync_inventory"] = failure != "count_only"
+            saved = await client.patch(f"{path}/1/count", json=count)
+            assert saved.status_code == 200
+            pending = saved.json()
+            assert pending["status"] == "pending"
+            assert pending["line_items"][0]["actual_quantity"] == 2
+            assert pending["reported_items_received"] == 2
+            warning = pending["inventory_sync_warning"]
+
+            if failure is None:
+                assert warning is None
+                assert writes == [("receive", 1), ("adjust", 1)]
+                assert pending["line_items"][0]["inventory_applied_quantity"] == 2
+            elif failure == "inactive_variant":
+                assert "not active at the transfer destination" in warning
+                assert writes == [("receive", 1)]
+                assert pending["line_items"][0]["inventory_applied_quantity"] == 1
+                assert pending["line_items"][0]["shopify_received_quantity"] == 1
+            else:
+                assert writes == []
+                assert pending["line_items"][0]["inventory_applied_quantity"] == 0
+                if failure == "missing_location":
+                    assert "Platform clogs (Beige / 38) is not stocked" in warning
+                elif failure == "count_only":
+                    assert "Shopify inventory was not updated" in warning
+                else:
+                    assert "Shopify did not confirm" in warning
+
+            finalized = await client.patch(f"{path}/1/complete", json={"outcome": "complete"})
+            assert finalized.status_code == 200
+            assert finalized.json()["status"] == "complete"
+            history = (await client.get(f"{path}?store=irranova")).json()
+            assert history["receipts"] == []
+            assert history["history"][0]["inventory_sync_warning"] == warning
+    finally:
+        await engine.dispose()

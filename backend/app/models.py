@@ -172,6 +172,7 @@ class InventoryReceipt(Base):
     actual_items = Column(Integer, nullable=True)
     reported_items_received = Column(Integer, nullable=True)
     agent_note = Column(Text, nullable=True)
+    inventory_sync_warning = Column(Text, nullable=True)
     status = Column(String(24), nullable=False, default="new", index=True)
     created_by_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     counted_by_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)

@@ -206,7 +206,7 @@ function CountReviewSheet({ open, receipt, items, actualCrates, totalItemsReceiv
         <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-slate-300 sm:hidden" />
         <div className="flex items-start gap-3">
           <div className="rounded-xl bg-indigo-50 p-2.5 text-indigo-700"><Check className="h-5 w-5" /></div>
-          <div className="min-w-0 flex-1"><div className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Final check</div><h3 className="break-words text-xl font-black">Apply {receipt.order_number} to Shopify?</h3><p className="mt-1 text-sm text-slate-500">Review the count once. This action changes live inventory.</p></div>
+          <div className="min-w-0 flex-1"><h3 className="break-words text-xl font-black">Save the count for {receipt.order_number}?</h3><p className="mt-1 text-sm text-slate-500">Inventory Helper will also try to apply the changes to Shopify.</p></div>
           <button type="button" disabled={busy} onClick={onClose} className="rounded-xl border border-slate-200 p-2.5 text-slate-500 disabled:opacity-50" aria-label="Close review"><X className="h-5 w-5" /></button>
         </div>
 
@@ -236,7 +236,10 @@ function CountReviewSheet({ open, receipt, items, actualCrates, totalItemsReceiv
           </div>
         )}
 
-        <div className="mt-5 grid grid-cols-2 gap-2"><button type="button" disabled={busy} onClick={onClose} className="h-12 rounded-xl border border-slate-300 text-sm font-black disabled:opacity-50">Go back</button><button type="button" disabled={busy} onClick={onConfirm} className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-3 text-sm font-black text-white disabled:opacity-50">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Apply to Shopify</button></div>
+        <div className="mt-5 grid grid-cols-2 gap-2">
+          <button type="button" disabled={busy} onClick={onClose} className="h-12 rounded-xl border border-slate-300 text-sm font-black disabled:opacity-50">Go back</button>
+          <button type="button" disabled={busy} onClick={onConfirm} className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-3 text-sm font-black text-white disabled:opacity-50">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Save count</button>
+        </div>
       </div>
     </div>
   );
@@ -567,7 +570,7 @@ export default function InventoryHelper() {
 
   function reviewCount(event) {
     event.preventDefault();
-    if (!selected || !agentItems.length || !countHasChanges) return;
+    if (!selected || !countHasChanges) return;
     if (actualCrates === "") {
       setError("Enter the number of crates received before reviewing the count.");
       return;
@@ -602,11 +605,13 @@ export default function InventoryHelper() {
       setLastSyncOperations(operations);
       setShowCountReview(false);
       const operationText = operations.map(formatInventoryOperation);
-      setNotice(
-        operations.length
-          ? `Count saved as pending. ${operationText.join("; ")}.`
-          : "Count saved as pending. No Shopify quantity change was needed.",
-      );
+      if (saved.inventory_sync_warning) {
+        setNotice("Count saved as pending with a Shopify inventory warning.");
+      } else {
+        setNotice(operations.length
+          ? `Count saved as pending. ${operationText.join(". ")}.`
+          : "Count saved as pending. No Shopify quantity change was needed.");
+      }
     } catch (err) {
       showApiError(err);
     } finally {
@@ -799,6 +804,11 @@ export default function InventoryHelper() {
                         <button key={receipt.id} type="button" onClick={() => openReceipt(receipt.id)} className={`min-w-0 rounded-2xl border p-2.5 text-left shadow-sm transition active:scale-[0.98] ${tone.row}`}>
                           <div className="flex min-w-0 items-start gap-2">{image ? <img src={image} alt="" className="h-9 w-9 shrink-0 rounded-lg border border-slate-200 object-cover" /> : <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/80"><Boxes className="h-4 w-4 text-slate-400" /></div>}<div className="min-w-0"><div className="truncate text-sm font-black">{receipt.order_number}</div><div className="text-[10px] font-semibold text-slate-500">{receipt.actual_crates ?? 0} / {receipt.ordered_crates} crates</div></div></div>
                           <span className={`mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-black ${tone.badge}`}><Icon className="h-3 w-3" />{tone.label}</span>
+                          {receipt.inventory_sync_warning && (
+                            <span className="mt-1 flex items-center gap-1 text-[10px] font-bold text-amber-800">
+                              <AlertTriangle className="h-3 w-3 shrink-0" /> Shopify inventory warning
+                            </span>
+                          )}
                           <div className="mt-2 grid grid-cols-2 gap-1 text-center"><div className="rounded-lg bg-white/75 px-1 py-1"><div className="text-[8px] uppercase text-slate-500">Items</div><div className="text-sm font-black">{receipt.reported_items_received ?? receipt.actual_items ?? "—"}</div></div><div className="rounded-lg bg-white/75 px-1 py-1"><div className="text-[8px] uppercase text-slate-500">Crates</div><div className="text-sm font-black">{receipt.actual_crates ?? "—"}</div></div></div>
                         </button>
                       );
@@ -902,10 +912,19 @@ export default function InventoryHelper() {
                     </details>}
 
                     {!!lastSyncOperations.length && <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3"><div className="text-xs font-black uppercase tracking-wide text-emerald-800">Verified Shopify result</div>{lastSyncOperations.map((operation, index) => <div key={index} className="mt-1 text-xs font-bold text-emerald-950">{formatInventoryOperation(operation)}</div>)}</div>}
-                    {!isFinalized && <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">You will review every inventory change before it is applied to Shopify.</div>}
-                    {!isFinalized && <button disabled={countBusy || !agentItems.length || !countHasChanges || agentTotalItems === "" || actualCrates === ""} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-black text-white shadow-sm disabled:bg-slate-300 disabled:text-slate-600"><Check className="h-4 w-4" />{countHasChanges ? "Review & update Shopify inventory" : "Inventory count saved"}</button>}
+                    {selected.inventory_sync_warning && (
+                      <div role="status" className="flex gap-2 rounded-2xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                        <div className="min-w-0 break-words">
+                          <div className="font-black">Shopify inventory needs attention</div>
+                          <p>{selected.inventory_sync_warning}</p>
+                          {!isFinalized && <p className="mt-1 font-semibold">The count is saved. You can still mark this purchase order complete.</p>}
+                        </div>
+                      </div>
+                    )}
+                    {!isFinalized && <button disabled={countBusy || !countHasChanges || agentTotalItems === "" || actualCrates === ""} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-black text-white shadow-sm disabled:bg-slate-300 disabled:text-slate-600"><Check className="h-4 w-4" />{countHasChanges ? "Review & save receiving count" : "Receiving count saved"}</button>}
                     {!isFinalized && selected.actual_items != null && <div className="space-y-2">
-                      {countHasChanges && <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-center text-xs font-bold text-slate-600">Save the inventory changes before choosing the final status.</div>}
+                      {countHasChanges && <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-center text-xs font-bold text-slate-600">Save the receiving count before choosing the final status.</div>}
                       <div className="grid grid-cols-2 gap-2">
                         <button type="button" onClick={() => finalizeReceipt("complete")} disabled={countBusy || countHasChanges} className="inline-flex min-h-12 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-2 py-3 text-xs font-black text-white shadow-sm active:scale-[0.98] disabled:bg-slate-300 disabled:text-slate-600 sm:text-sm"><CheckCircle2 className="h-5 w-5 shrink-0" />Mark complete</button>
                         <button type="button" onClick={() => finalizeReceipt("incomplete")} disabled={countBusy || countHasChanges} className="inline-flex min-h-12 items-center justify-center gap-1.5 rounded-xl bg-amber-500 px-2 py-3 text-xs font-black text-amber-950 shadow-sm active:scale-[0.98] disabled:bg-slate-300 disabled:text-slate-600 sm:text-sm"><AlertTriangle className="h-5 w-5 shrink-0" />Mark incomplete</button>

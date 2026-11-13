@@ -146,7 +146,7 @@ async def test_receipt_completion_clears_indicator_cache_and_notifies_after_comm
         id=1, store_key="irrakids", shopify_order_gid="transfer", status="pending", actual_items=2,
         actual_crates=1, reported_items_received=2, ordered_crates=1,
     )
-    async def loaded(*_args):
+    async def loaded(*_args, **_kwargs):
         return row
     async def commit():
         events.append("committed")

@@ -3,6 +3,7 @@
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 import json
+import logging
 import os
 import re
 from typing import Any, Literal, Optional
@@ -21,6 +22,7 @@ from .models import InventoryReceipt, InventoryReceiptPhoto, User
 
 
 router = APIRouter(prefix="/api/inventory-helper", tags=["inventory-helper"])
+logger = logging.getLogger(__name__)
 
 _MAX_PHOTOS = 4
 _MAX_PHOTO_BYTES = 6 * 1024 * 1024
@@ -284,6 +286,7 @@ def _serialize(row: InventoryReceipt) -> dict[str, Any]:
         "actual_items": row.actual_items,
         "reported_items_received": row.reported_items_received,
         "agent_note": row.agent_note or "",
+        "inventory_sync_warning": row.inventory_sync_warning,
         "status": row.status,
         "count_result": _status(
             row.ordered_crates,
@@ -517,8 +520,10 @@ def _user_error_message(payload: dict[str, Any], operation: str) -> Optional[str
     return f"Shopify could not {operation}: {messages}"
 
 
-async def _loaded_receipt(db: AsyncSession, receipt_id: int) -> InventoryReceipt:
-    row = await db.scalar(
+async def _loaded_receipt(
+    db: AsyncSession, receipt_id: int, *, for_update: bool = False
+) -> InventoryReceipt:
+    stmt = (
         select(InventoryReceipt)
         .options(
             selectinload(InventoryReceipt.created_by),
@@ -527,6 +532,9 @@ async def _loaded_receipt(db: AsyncSession, receipt_id: int) -> InventoryReceipt
         )
         .where(InventoryReceipt.id == receipt_id)
     )
+    if for_update:
+        stmt = stmt.with_for_update()
+    row = await db.scalar(stmt)
     if not row:
         raise HTTPException(status_code=404, detail="inventory record not found")
     return row
@@ -574,7 +582,7 @@ async def _shopify_transfer_by_id(store_key: str, transfer_id: str, *, detailed:
     return transfer
 
 
-def _translate_shopify_access_error(exc: HTTPException) -> None:
+def _shopify_access_error(exc: HTTPException) -> HTTPException:
     detail = str(exc.detail)
     upper = detail.upper()
     if exc.status_code == 502 and any(
@@ -586,11 +594,15 @@ def _translate_shopify_access_error(exc: HTTPException) -> None:
             "INVENTORYSHIPMENT",
         )
     ):
-        raise HTTPException(
+        return HTTPException(
             status_code=403,
             detail="Reconnect this Shopify store to grant Inventory Helper transfer, shipment, and inventory permissions.",
-        ) from exc
-    raise exc
+        )
+    return exc
+
+
+def _translate_shopify_access_error(exc: HTTPException) -> None:
+    raise _shopify_access_error(exc)
 
 
 def _merge_admin_items(
@@ -614,7 +626,7 @@ def _build_inventory_sync_plan(
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], list[dict[str, Any]]]:
     desired_by_id = {item.id: item.actual_quantity for item in submitted_items}
     stored_by_id = {str(item.get("id")): item for item in stored_items}
-    if not desired_by_id or set(desired_by_id) != set(stored_by_id):
+    if set(desired_by_id) != set(stored_by_id):
         raise HTTPException(status_code=400, detail="Enter a received quantity for every variant")
 
     authoritative_items = {
@@ -635,12 +647,6 @@ def _build_inventory_sync_plan(
         authoritative = authoritative_items[line_id]
         inventory_item_id = str(authoritative.get("inventory_item_id") or "")
         location_id = str(authoritative.get("destination_location_id") or "")
-        if not inventory_item_id or not location_id:
-            raise HTTPException(
-                status_code=409,
-                detail=f"{authoritative.get('title') or 'A variant'} is not stocked at a Shopify destination location.",
-            )
-
         desired = int(desired_by_id[line_id])
         received_now = int(
             ((shipment_state.get(inventory_item_id) or {}).get("accepted_quantity")) or 0
@@ -655,6 +661,15 @@ def _build_inventory_sync_plan(
         # the newly accepted shipment quantity here and won't apply it twice.
         applied_before = stored_applied + max(0, received_now - received_before)
         remaining_delta = desired - applied_before
+
+        if remaining_delta and (not inventory_item_id or not location_id):
+            title = authoritative.get("title") or "A variant"
+            variant = authoritative.get("variant_title")
+            label = f"{title} ({variant})" if variant and variant != "Default Title" else title
+            raise HTTPException(
+                status_code=409,
+                detail=f"{label} is not stocked at a Shopify destination location.",
+            )
 
         if remaining_delta > 0:
             for shipment_line in (shipment_state.get(inventory_item_id) or {}).get("lines", []):
@@ -671,6 +686,7 @@ def _build_inventory_sync_plan(
                     {
                         "status": shipment_line.get("shipment_status"),
                         "line_items": [],
+                        "receipt_line_ids": [],
                     },
                 )
                 group["line_items"].append(
@@ -680,6 +696,7 @@ def _build_inventory_sync_plan(
                         "reason": "ACCEPTED",
                     }
                 )
+                group["receipt_line_ids"].append(line_id)
                 remaining_delta -= quantity
 
         if remaining_delta:
@@ -696,10 +713,12 @@ def _build_inventory_sync_plan(
             **authoritative,
             "ordered_quantity": int(stored.get("ordered_quantity") or 0),
             "actual_quantity": desired,
-            "shopify_received_quantity": received_now + max(0, desired - applied_before - remaining_delta),
-            "inventory_applied_quantity": desired,
-            "inventory_synced_at": datetime.now(timezone.utc).isoformat(),
+            "shopify_received_quantity": received_now if inventory_item_id else received_before,
+            "inventory_applied_quantity": applied_before,
+            "inventory_synced_at": stored.get("inventory_synced_at"),
         }
+        if stored.get("last_inventory_change"):
+            next_item["last_inventory_change"] = stored["last_inventory_change"]
         merged.append(next_item)
 
     return merged, receive_groups, adjustments
@@ -710,10 +729,11 @@ async def _receive_inventory_shipments(
     receipt_id: int,
     receive_groups: dict[str, dict[str, Any]],
     transition: str,
-) -> list[dict[str, Any]]:
+    items_by_line_id: dict[str, dict[str, Any]],
+    operations: list[dict[str, Any]],
+) -> None:
     from .main import shopify_graphql
 
-    operations: list[dict[str, Any]] = []
     for shipment_id, group in receive_groups.items():
         if group.get("status") == "DRAFT":
             data = await shopify_graphql(
@@ -740,6 +760,12 @@ async def _receive_inventory_shipments(
         error = _user_error_message(data.get("inventoryShipmentReceive") or {}, "receive the shipment")
         if error:
             raise HTTPException(status_code=409, detail=error)
+        for line_id, received in zip(group["receipt_line_ids"], line_items):
+            item = items_by_line_id[line_id]
+            quantity = int(received["quantity"])
+            item["shopify_received_quantity"] += quantity
+            item["inventory_applied_quantity"] += quantity
+            item["inventory_synced_at"] = datetime.now(timezone.utc).isoformat()
         operations.append(
             {
                 "type": "shipment_receive",
@@ -747,7 +773,6 @@ async def _receive_inventory_shipments(
                 "shipment_id": shipment_id,
             }
         )
-    return operations
 
 
 async def _adjust_inventory_quantities(
@@ -836,12 +861,17 @@ async def _adjust_inventory_quantities(
     # can move available stock again immediately, so expose both the expected
     # post-adjustment value and Shopify's latest value without treating that
     # later movement as a failed mutation.
-    verify_data = await shopify_graphql(
-        _INVENTORY_LEVELS_QUERY,
-        {"ids": ids, "locationId": location_id},
-        store=store_key,
-        api_version=_TRANSFER_API_VERSION,
-    )
+    try:
+        verify_data = await shopify_graphql(
+            _INVENTORY_LEVELS_QUERY,
+            {"ids": ids, "locationId": location_id},
+            store=store_key,
+            api_version=_TRANSFER_API_VERSION,
+        )
+    except HTTPException as exc:
+        # A failed read-back must not turn a confirmed write into a pending delta.
+        logger.warning("Could not read back Shopify inventory for receipt %s (HTTP %s)", receipt_id, exc.status_code)
+        verify_data = {}
     latest_by_id: dict[str, int] = {}
     for node in verify_data.get("nodes") or []:
         if not node:
@@ -1245,7 +1275,7 @@ async def update_receipt_admin(
     db: AsyncSession = Depends(get_session),
     _: User = Depends(require_admin),
 ):
-    row = await _loaded_receipt(db, receipt_id)
+    row = await _loaded_receipt(db, receipt_id, for_update=True)
     _ensure_receipt_open(row)
     if not row.shopify_details_loaded:
         raise HTTPException(status_code=409, detail="Open this purchase order to load every Shopify variant first")
@@ -1267,49 +1297,72 @@ async def update_receipt_count(
     db: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
-    row = await _loaded_receipt(db, receipt_id)
+    row = await _loaded_receipt(db, receipt_id, for_update=True)
     _ensure_receipt_open(row)
     if not row.shopify_details_loaded:
         raise HTTPException(status_code=409, detail="Open this purchase order to load every Shopify variant first")
     stored_items = list(row.line_items or [])
-    if not body.line_items:
+    submitted = {item.id: item.actual_quantity for item in body.line_items}
+    if len(submitted) != len(body.line_items) or set(submitted) != {
+        str(item["id"]) for item in stored_items
+    }:
         raise HTTPException(status_code=400, detail="Enter the received quantity for every variant")
 
-    try:
-        transfer = await _shopify_transfer_by_id(row.store_key, row.shopify_order_gid, detailed=True)
-        merged_items, receive_groups, adjustments = _build_inventory_sync_plan(
-            stored_items,
-            body.line_items,
-            transfer,
-        )
-        transition = _stable_key(
-            row.store_key,
-            row.id,
-            [
-                {
-                    "id": item.get("id"),
-                    "from": stored.get("inventory_applied_quantity"),
-                    "to": item.get("actual_quantity"),
-                }
-                for item, stored in zip(merged_items, stored_items)
-            ],
-        )
-        operations: list[dict[str, Any]] = []
-        if body.sync_inventory:
-            operations.extend(
+    merged_items = [
+        {**item, "actual_quantity": submitted[str(item["id"])]}
+        for item in stored_items
+    ]
+    operations: list[dict[str, Any]] = []
+    sync_warning = row.inventory_sync_warning
+    if body.sync_inventory:
+        try:
+            transfer = await _shopify_transfer_by_id(row.store_key, row.shopify_order_gid, detailed=True)
+            merged_items, receive_groups, adjustments = _build_inventory_sync_plan(
+                stored_items,
+                body.line_items,
+                transfer,
+            )
+            transition = _stable_key(
+                row.store_key,
+                row.id,
+                [
+                    {
+                        "id": item.get("id"),
+                        "from": stored.get("inventory_applied_quantity"),
+                        "to": item.get("actual_quantity"),
+                    }
+                    for item, stored in zip(merged_items, stored_items)
+                ],
+            )
+            items_by_line_id = {str(item["id"]): item for item in merged_items}
+            if receive_groups:
                 await _receive_inventory_shipments(
                     row.store_key,
                     row.id,
                     receive_groups,
                     transition,
+                    items_by_line_id,
+                    operations,
                 )
-            )
+            # A failed adjustment can be retried after the received shipment
+            # was saved. Key it from the quantities after that shipment.
+            adjusted_ids = {entry["inventory_item_id"] for entry in adjustments}
+            adjustment_transition = _stable_key([
+                {
+                    "id": item["id"],
+                    "from": item["inventory_applied_quantity"],
+                    "to": item["actual_quantity"],
+                    "last_adjustment": (item.get("last_inventory_change") or {}).get("synced_at"),
+                }
+                for item in merged_items
+                if item.get("inventory_item_id") in adjusted_ids
+            ])
             operations.extend(
                 await _adjust_inventory_quantities(
                     row.store_key,
                     row.id,
                     adjustments,
-                    transition,
+                    adjustment_transition,
                 )
             )
             adjustment_by_item = {
@@ -1320,6 +1373,8 @@ async def update_receipt_count(
             for item in merged_items:
                 audit = adjustment_by_item.get(str(item.get("inventory_item_id")))
                 if audit:
+                    item["inventory_applied_quantity"] += audit["delta"]
+                    item["inventory_synced_at"] = datetime.now(timezone.utc).isoformat()
                     item["last_inventory_change"] = {
                         "delta": audit["delta"],
                         "before_quantity": audit["before_quantity"],
@@ -1327,14 +1382,22 @@ async def update_receipt_count(
                         "after_quantity": audit["after_quantity"],
                         "synced_at": item.get("inventory_synced_at"),
                     }
-        else:
-            for merged, stored in zip(merged_items, stored_items):
-                merged["inventory_applied_quantity"] = int(
-                    stored.get("inventory_applied_quantity") or 0
+            sync_warning = None
+        except HTTPException as exc:
+            error = _shopify_access_error(exc)
+            if error.status_code >= 500:
+                logger.warning(
+                    "Shopify sync could not be confirmed for receipt %s (HTTP %s)",
+                    row.id, error.status_code,
                 )
-                merged["inventory_synced_at"] = stored.get("inventory_synced_at")
-    except HTTPException as exc:
-        _translate_shopify_access_error(exc)
+                sync_warning = "Shopify did not confirm the inventory update."
+            else:
+                sync_warning = str(error.detail)
+    elif not sync_warning and any(
+        item["actual_quantity"] != int(item.get("inventory_applied_quantity") or 0)
+        for item in merged_items
+    ):
+        sync_warning = "Shopify inventory was not updated for this count."
 
     actual_items = sum(int(item.get("actual_quantity") or 0) for item in merged_items)
     row.line_items = merged_items
@@ -1342,6 +1405,7 @@ async def update_receipt_count(
     row.actual_items = actual_items
     row.reported_items_received = body.total_items_received
     row.agent_note = (body.agent_note or "").strip() or None
+    row.inventory_sync_warning = sync_warning
     row.counted_by_id = user.id
     row.counted_at = datetime.now(timezone.utc)
     row.finalized_at = None
@@ -1362,7 +1426,7 @@ async def complete_receipt(
     db: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
-    row = await _loaded_receipt(db, receipt_id)
+    row = await _loaded_receipt(db, receipt_id, for_update=True)
     if row.actual_items is None or row.actual_crates is None:
         raise HTTPException(status_code=409, detail="Save the receiving count before choosing the final status")
     if row.reported_items_received is None:
@@ -1387,7 +1451,7 @@ async def reopen_receipt(
     db: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
-    row = await _loaded_receipt(db, receipt_id)
+    row = await _loaded_receipt(db, receipt_id, for_update=True)
     if row.status not in {"complete", "incomplete"}:
         raise HTTPException(status_code=409, detail="This purchase order is already in the receiving queue")
     row.status = "pending"

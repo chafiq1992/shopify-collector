@@ -132,6 +132,16 @@ async def init_db():
         # Inventory Helper automatic Shopify sync and received-history fields.
         # Tags are retained as the source for the ordered-crate number, while
         # finalized_at groups completed/incomplete receipts by receiving day.
+        if is_sqlite_engine:
+            columns = await conn.exec_driver_sql("PRAGMA table_info(inventory_receipts)")
+            if "inventory_sync_warning" not in {column[1] for column in columns}:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE inventory_receipts ADD COLUMN inventory_sync_warning TEXT"
+                )
+        else:
+            await conn.exec_driver_sql(
+                "ALTER TABLE inventory_receipts ADD COLUMN IF NOT EXISTS inventory_sync_warning TEXT"
+            )
         try:
             if is_sqlite_engine:
                 await conn.exec_driver_sql(
